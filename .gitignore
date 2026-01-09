@@ -45,3 +45,4 @@ Thumbs.db
 
 # Misc
 .DS_Store
+.cursor/
