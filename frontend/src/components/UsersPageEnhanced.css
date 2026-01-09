@@ -1,0 +1,245 @@
+/* Users Page - Enhanced Modern Design */
+
+/* Page Animation */
+.users-page {
+    animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Enhanced Back Button */
+.users-page .back-button {
+    background: var(--gradient-primary) !important;
+    border: none !important;
+    box-shadow: var(--shadow-sm) !important;
+    font-weight: 600 !important;
+    transition: all var(--transition-base) !important;
+}
+
+.users-page .back-button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: var(--shadow-md) !important;
+}
+
+/* Enhanced Headers */
+.users-page h1,
+.users-page h2,
+.users-page h3 {
+    color: var(--color-primary) !important;
+    font-weight: 700 !important;
+}
+
+/* Enhanced Panel */
+.users-page .panel {
+    border: 2px solid var(--color-border) !important;
+    box-shadow: var(--shadow-lg) !important;
+    border-radius: var(--radius-xl) !important;
+}
+
+.users-page .panel-header {
+    padding-bottom: var(--spacing-md);
+    border-bottom: 2px solid var(--color-border);
+    margin-bottom: var(--spacing-md);
+}
+
+.users-page .panel-header h2 {
+    color: var(--color-primary) !important;
+    font-weight: 700 !important;
+}
+
+/* Enhanced Filter Section */
+.users-page .filter-section {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.02) 0%, rgba(255, 210, 63, 0.02) 100%);
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--spacing-md) var(--spacing-lg);
+    margin-bottom: var(--spacing-lg);
+}
+
+.users-page .filter-section select {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 0.5rem 0.75rem !important;
+    transition: all var(--transition-base) !important;
+}
+
+.users-page .filter-section select:focus {
+    border-color: var(--color-primary) !important;
+    box-shadow: 0 0 0 3px var(--color-primary-soft) !important;
+    outline: none !important;
+}
+
+/* Enhanced Buttons */
+.users-page .primary-button {
+    background: var(--gradient-primary) !important;
+    border: none !important;
+    box-shadow: var(--shadow-primary) !important;
+    font-weight: 700 !important;
+    padding: 0.75rem 1.5rem !important;
+    transition: all var(--transition-base) !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+}
+
+.users-page .primary-button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: var(--shadow-glow) !important;
+}
+
+.users-page .secondary-button {
+    border: 2px solid var(--color-border) !important;
+    background: white !important;
+    color: var(--color-text) !important;
+    font-weight: 600 !important;
+    padding: 0.5rem 1rem !important;
+    transition: all var(--transition-base) !important;
+}
+
+.users-page .secondary-button:hover {
+    border-color: var(--color-primary) !important;
+    background: var(--color-primary-soft) !important;
+    color: var(--color-primary-dark) !important;
+    transform: translateY(-1px);
+}
+
+/* Enhanced Table */
+.users-page .simple-table {
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    border: 2px solid var(--color-border);
+}
+
+.users-page .simple-table thead {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.08) 0%, rgba(255, 210, 63, 0.08) 100%) !important;
+    border-bottom: 2px solid var(--color-primary) !important;
+}
+
+.users-page .simple-table th {
+    color: var(--color-text) !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+    font-size: 0.75rem !important;
+    padding: 1rem !important;
+}
+
+.users-page .simple-table tbody tr {
+    transition: all var(--transition-base);
+    border-bottom: 1px solid var(--color-border);
+}
+
+.users-page .simple-table tbody tr:hover {
+    background: var(--color-primary-soft) !important;
+    transform: scale(1.001);
+}
+
+.users-page .simple-table td {
+    padding: 1rem !important;
+}
+
+/* Enhanced Chip/Badge */
+.users-page .chip {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.1) 0%, rgba(255, 210, 63, 0.1) 100%) !important;
+    color: var(--color-primary) !important;
+    border: 2px solid var(--color-primary-soft) !important;
+    padding: 0.375rem 0.875rem !important;
+    border-radius: var(--radius-full) !important;
+    font-weight: 700 !important;
+    font-size: 0.75rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+}
+
+.users-page .chip.status-active,
+.users-page .chip.status-enabled {
+    background: var(--gradient-secondary) !important;
+    color: white !important;
+    border: none !important;
+    box-shadow: var(--shadow-sm) !important;
+}
+
+.users-page .chip.status-inactive,
+.users-page .chip.status-disabled {
+    background: linear-gradient(135deg, #9ca3af 0%, #d1d5db 100%) !important;
+    color: white !important;
+    border: none !important;
+    box-shadow: var(--shadow-sm) !important;
+}
+
+/* Enhanced Form */
+.users-page .form-grid label {
+    font-weight: 600 !important;
+    color: var(--color-text) !important;
+}
+
+.users-page .form-grid input,
+.users-page .form-grid select {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 0.75rem 1rem !important;
+    transition: all var(--transition-base) !important;
+}
+
+.users-page .form-grid input:focus,
+.users-page .form-grid select:focus {
+    border-color: var(--color-primary) !important;
+    box-shadow: 0 0 0 3px var(--color-primary-soft) !important;
+    outline: none !important;
+}
+
+/* Enhanced Modal */
+.users-page .modal {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-xl) !important;
+    box-shadow: var(--shadow-2xl) !important;
+}
+
+.users-page .modal-header {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.05) 0%, rgba(255, 210, 63, 0.05) 100%) !important;
+    border-bottom: 2px solid var(--color-border) !important;
+    padding: var(--spacing-lg) !important;
+}
+
+.users-page .modal-header h3 {
+    color: var(--color-primary) !important;
+    font-weight: 700 !important;
+}
+
+.users-page .modal-footer {
+    background: var(--color-surface);
+    border-top: 2px solid var(--color-border) !important;
+}
+
+/* Enhanced Empty State */
+.users-page .empty-state {
+    background: var(--color-surface) !important;
+    border: 2px dashed var(--color-border) !important;
+    border-radius: var(--radius-lg) !important;
+    color: var(--color-text-muted) !important;
+    padding: var(--spacing-xl) !important;
+}
+
+/* Enhanced Icon Buttons */
+.users-page .icon-button {
+    border: 2px solid var(--color-border) !important;
+    background: white !important;
+    transition: all var(--transition-base) !important;
+    padding: 0.5rem !important;
+    border-radius: var(--radius-md);
+}
+
+.users-page .icon-button:hover {
+    border-color: var(--color-primary) !important;
+    background: var(--color-primary-soft) !important;
+    transform: scale(1.1);
+}

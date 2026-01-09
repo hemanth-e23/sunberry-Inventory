@@ -1,0 +1,380 @@
+/* Approvals Page - Enhanced Modern Design */
+
+/* Page Animation */
+.approvals-page {
+    animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Enhanced Back Button */
+.approvals-page .back-button {
+    background: var(--gradient-primary) !important;
+    border: none !important;
+    box-shadow: var(--shadow-sm) !important;
+    font-weight: 600 !important;
+    transition: all var(--transition-base) !important;
+}
+
+.approvals-page .back-button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: var(--shadow-md) !important;
+}
+
+/* Enhanced Summary Dashboard Cards */
+.approvals-page .stat-card {
+    border: 2px solid var(--color-border) !important;
+    box-shadow: var(--shadow-md) !important;
+    transition: all var(--transition-base) !important;
+    position: relative;
+    overflow: hidden;
+}
+
+.approvals-page .stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4px;
+    height: 100%;
+    transition: all var(--transition-base);
+}
+
+.approvals-page .stat-card:hover {
+    transform: translateY(-4px) !important;
+    box-shadow: var(--shadow-lg) !important;
+}
+
+.approvals-page .stat-card-pending::before {
+    background: var(--gradient-primary);
+}
+
+.approvals-page .stat-card-urgent::before {
+    background: linear-gradient(180deg, #ef4444 0%, #f87171 100%);
+}
+
+.approvals-page .stat-card-today::before {
+    background: var(--gradient-secondary);
+}
+
+.approvals-page .stat-card-approved::before {
+    background: linear-gradient(180deg, #3b82f6 0%, #60a5fa 100%);
+}
+
+.approvals-page .stat-value {
+    background: var(--gradient-primary);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 800 !important;
+}
+
+/* Enhanced Filter Bar */
+.approvals-page .filter-bar {
+    border: 2px solid var(--color-border) !important;
+    box-shadow: var(--shadow-md) !important;
+    background: white !important;
+}
+
+.approvals-page .search-input,
+.approvals-page .filter-select {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 0.75rem 1rem !important;
+    transition: all var(--transition-base) !important;
+}
+
+.approvals-page .search-input:focus,
+.approvals-page .filter-select:focus {
+    border-color: var(--color-primary) !important;
+    box-shadow: 0 0 0 3px var(--color-primary-soft) !important;
+}
+
+.approvals-page .filter-select:hover {
+    border-color: #cbd5e1 !important;
+}
+
+/* Enhanced Panels */
+.approvals-page .panel {
+    border: 2px solid var(--color-border) !important;
+    box-shadow: var(--shadow-lg) !important;
+    border-radius: var(--radius-xl) !important;
+}
+
+.approvals-page .panel-header.horizontal {
+    padding-bottom: var(--spacing-md);
+    border-bottom: 2px solid var(--color-border);
+    margin-bottom: var(--spacing-md) !important;
+}
+
+.approvals-page .panel-header h3,
+.approvals-page .panel-header h2 {
+    color: var(--color-primary) !important;
+    font-weight: 700 !important;
+}
+
+/* Enhanced Approval Cards */
+.approvals-page .approval-card {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-lg) !important;
+    box-shadow: var(--shadow-sm) !important;
+    transition: all var(--transition-base) !important;
+    background: white !important;
+}
+
+.approvals-page .approval-card:hover {
+    transform: translateY(-4px) !important;
+    box-shadow: var(--shadow-md) !important;
+    border-color: var(--color-primary) !important;
+}
+
+.approvals-page .approval-card.backlog {
+    border-left: 4px solid #f97316 !important;
+    background: linear-gradient(135deg, rgba(249, 115, 22, 0.05) 0%, rgba(251, 146, 60, 0.05) 100%) !important;
+}
+
+.approvals-page .approval-card h3 {
+    color: var(--color-text) !important;
+    font-weight: 700 !important;
+}
+
+/* Enhanced Badges */
+.approvals-page .badge,
+.approvals-page .priority-badge {
+    padding: 0.375rem 0.875rem !important;
+    border-radius: var(--radius-full) !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.05em !important;
+    font-size: 0.75rem !important;
+    box-shadow: var(--shadow-sm) !important;
+}
+
+.approvals-page .badge {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.1) 0%, rgba(255, 210, 63, 0.1) 100%) !important;
+    color: var(--color-primary) !important;
+    border: 2px solid var(--color-primary-soft) !important;
+}
+
+.approvals-page .priority-badge {
+    background: linear-gradient(135deg, #ef4444 0%, #f87171 100%) !important;
+    color: white !important;
+}
+
+/* Enhanced Buttons */
+.approvals-page .primary-button {
+    background: var(--gradient-primary) !important;
+    border: none !important;
+    box-shadow: var(--shadow-primary) !important;
+    font-weight: 700 !important;
+    padding: 0.75rem 1.5rem !important;
+    transition: all var(--transition-base) !important;
+}
+
+.approvals-page .primary-button:hover:not(:disabled) {
+    transform: translateY(-2px) !important;
+    box-shadow: var(--shadow-glow) !important;
+}
+
+.approvals-page .secondary-button {
+    border: 2px solid var(--color-border) !important;
+    background: white !important;
+    color: var(--color-text) !important;
+    font-weight: 600 !important;
+    padding: 0.75rem 1.5rem !important;
+    transition: all var(--transition-base) !important;
+}
+
+.approvals-page .secondary-button:hover {
+    border-color: var(--color-primary) !important;
+    background: var(--color-primary-soft) !important;
+    color: var(--color-primary-dark) !important;
+    transform: translateY(-2px);
+}
+
+.approvals-page .secondary-button.danger {
+    color: #dc2626 !important;
+    border-color: #fca5a5 !important;
+}
+
+.approvals-page .secondary-button.danger:hover {
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.1) 0%, rgba(252, 165, 165, 0.1) 100%) !important;
+    border-color: #ef4444 !important;
+}
+
+/* Enhanced Table */
+.approvals-page .simple-table {
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    border: 2px solid var(--color-border);
+}
+
+.approvals-page .simple-table thead {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.08) 0%, rgba(255, 210, 63, 0.08) 100%) !important;
+    border-bottom: 2px solid var(--color-primary) !important;
+}
+
+.approvals-page .simple-table th {
+    color: var(--color-text) !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+    font-size: 0.75rem !important;
+    padding: 1rem !important;
+}
+
+.approvals-page .simple-table tbody tr {
+    transition: all var(--transition-base);
+    border-bottom: 1px solid var(--color-border);
+}
+
+.approvals-page .simple-table tbody tr:hover {
+    background: var(--color-primary-soft) !important;
+    transform: scale(1.001);
+}
+
+/* Enhanced Drawer */
+.approvals-page .drawer-content {
+    box-shadow: var(--shadow-2xl) !important;
+    border-left: 2px solid var(--color-border) !important;
+}
+
+.approvals-page .drawer-header {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.05) 0%, rgba(255, 210, 63, 0.05) 100%) !important;
+    border-bottom: 2px solid var(--color-border) !important;
+}
+
+.approvals-page .drawer-header h3 {
+    color: var(--color-primary) !important;
+    font-weight: 700 !important;
+}
+
+.approvals-page .drawer-footer {
+    background: var(--color-surface);
+    border-top: 2px solid var(--color-border) !important;
+}
+
+/* Enhanced Form Inputs in Drawer */
+.approvals-page .form-grid input,
+.approvals-page .form-grid select,
+.approvals-page .form-grid textarea {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 0.75rem 1rem !important;
+    transition: all var(--transition-base) !important;
+}
+
+.approvals-page .form-grid input:focus,
+.approvals-page .form-grid select:focus,
+.approvals-page .form-grid textarea:focus {
+    border-color: var(--color-primary) !important;
+    box-shadow: 0 0 0 3px var(--color-primary-soft) !important;
+    outline: none !important;
+}
+
+.approvals-page .form-grid label {
+    font-weight: 600 !important;
+    color: var(--color-text) !important;
+}
+
+/* Enhanced Modal */
+.approvals-page .modal {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-xl) !important;
+    box-shadow: var(--shadow-2xl) !important;
+}
+
+.approvals-page .modal h3 {
+    color: var(--color-primary) !important;
+    font-weight: 700 !important;
+    padding-bottom: var(--spacing-sm);
+    border-bottom: 2px solid var(--color-border);
+}
+
+/* Enhanced Info Sections */
+.approvals-page .info-section {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.02) 0%, rgba(255, 210, 63, 0.02) 100%) !important;
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-lg) !important;
+}
+
+.approvals-page .info-section h4 {
+    color: var(--color-primary) !important;
+    font-weight: 700 !important;
+}
+
+.approvals-page .info-item label {
+    color: var(--color-text-muted) !important;
+    font-weight: 600 !important;
+}
+
+.approvals-page .info-value {
+    color: var(--color-text) !important;
+    font-weight: 600 !important;
+}
+
+/* Enhanced Empty State */
+.approvals-page .empty-state {
+    border: 2px dashed var(--color-border) !important;
+    background: var(--color-surface) !important;
+    color: var(--color-text-muted) !important;
+    padding: var(--spacing-xl) !important;
+    border-radius: var(--radius-lg) !important;
+}
+
+/* Enhanced Link Button */
+.approvals-page .link-button {
+    color: var(--color-primary) !important;
+    font-weight: 600 !important;
+    transition: all var(--transition-base);
+}
+
+.approvals-page .link-button:hover {
+    color: var(--color-primary-dark) !important;
+    text-decoration: underline !important;
+}
+
+/* Enhanced Summary Grid */
+.approvals-page .summary-grid dt {
+    color: var(--color-text-muted) !important;
+    font-weight: 600 !important;
+}
+
+.approvals-page .summary-grid dd {
+    color: var(--color-text) !important;
+    font-weight: 700 !important;
+}
+
+/* Enhanced Form Group */
+.approvals-page .form-group label {
+    color: var(--color-text) !important;
+    font-weight: 600 !important;
+}
+
+.approvals-page .form-group textarea {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    transition: all var(--transition-base) !important;
+}
+
+.approvals-page .form-group textarea:focus {
+    border-color: var(--color-primary) !important;
+    box-shadow: 0 0 0 3px var(--color-primary-soft) !important;
+}
+
+/* Enhanced Change List */
+.approvals-page .change-list li {
+    background: var(--color-surface);
+    padding: var(--spacing-sm);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border);
+}

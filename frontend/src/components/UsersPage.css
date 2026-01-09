@@ -1,0 +1,12 @@
+/* UsersPage-specific styles */
+/* Most styles are now in Shared.css */
+
+.users-page {
+  /* Page-specific overrides or additions can go here */
+}
+
+/* Role badge styling */
+.chip[data-role] {
+  font-weight: 600;
+  text-transform: capitalize;
+}

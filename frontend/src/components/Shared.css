@@ -1,0 +1,410 @@
+/* Page Container */
+.products-page,
+.master-data-page,
+.inventory-page,
+.reports-page,
+.users-page,
+.approvals-page,
+.cycle-counting-page,
+.receipt-page {
+    padding: var(--spacing-md) var(--spacing-lg);
+    max-width: 100%;
+    margin: 0 auto;
+    min-height: calc(100vh - 80px);
+}
+
+/* On large screens, just adjust padding */
+@media (min-width: 1440px) {
+
+    .products-page,
+    .master-data-page,
+    .inventory-page,
+    .reports-page,
+    .users-page,
+    .approvals-page,
+    .cycle-counting-page,
+    .receipt-page {
+        padding: var(--spacing-lg) var(--spacing-xl);
+        max-width: 100%;
+    }
+}
+
+/* Page Content - Global full-width */
+.page-content {
+    max-width: 100% !important;
+    width: 100%;
+}
+
+/* Page Header */
+.page-header {
+    margin-bottom: var(--spacing-2xl);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--spacing-md);
+}
+
+.page-title {
+    font-family: var(--font-heading);
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--color-text);
+    margin: 0;
+}
+
+.page-subtitle {
+    font-size: 1rem;
+    color: var(--color-text-muted);
+    margin-top: var(--spacing-sm);
+}
+
+/* Back Button */
+.back-button {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    padding: 0.625rem 1.25rem;
+    background: transparent;
+    border: 2px solid var(--color-border);
+    color: var(--color-text);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: all var(--transition-base);
+    box-shadow: none;
+}
+
+.back-button:hover {
+    background: var(--color-primary-soft);
+    border-color: var(--color-primary);
+    color: var(--color-primary-dark);
+    transform: translateX(-4px);
+}
+
+/* Panel/Card Container */
+.panel {
+    background: var(--color-surface);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-md);
+    margin-bottom: var(--spacing-xl);
+    overflow: hidden;
+    border: 1px solid var(--color-border);
+}
+
+.panel-header {
+    padding: var(--spacing-xl);
+    border-bottom: 2px solid var(--color-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--spacing-md);
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.02) 0%, rgba(255, 210, 63, 0.02) 100%);
+}
+
+.panel-header h2,
+.panel-header h3 {
+    font-family: var(--font-heading);
+    font-weight: 700;
+    margin: 0;
+    color: var(--color-text);
+}
+
+.panel-header h2 {
+    font-size: 1.75rem;
+}
+
+.panel-header h3 {
+    font-size: 1.5rem;
+}
+
+.panel-title {
+    display: flex;
+    align-items: baseline;
+    gap: var(--spacing-md);
+}
+
+.panel-title .muted {
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+    font-weight: 400;
+}
+
+.panel-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-md);
+    flex-wrap: wrap;
+}
+
+/* Table Styling */
+.table-wrapper {
+    overflow-x: auto;
+    padding: var(--spacing-xl);
+}
+
+.simple-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.simple-table thead {
+    background: var(--color-canvas);
+}
+
+.simple-table th {
+    padding: var(--spacing-md);
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 2px solid var(--color-border);
+}
+
+.simple-table tbody tr {
+    transition: all var(--transition-base);
+    border-bottom: 1px solid var(--color-border);
+}
+
+.simple-table tbody tr:hover {
+    background: var(--color-primary-soft);
+}
+
+.simple-table tbody tr:last-child {
+    border-bottom: none;
+}
+
+.simple-table td {
+    padding: var(--spacing-md);
+    font-size: 0.9375rem;
+    color: var(--color-text);
+}
+
+/* Forms */
+.simple-form {
+    padding: var(--spacing-xl);
+    background: var(--color-canvas);
+    border-radius: var(--radius-lg);
+    margin: var(--spacing-xl);
+}
+
+.form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: var(--spacing-lg);
+}
+
+.form-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+}
+
+.form-grid label span {
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: var(--color-text);
+}
+
+.form-grid .full-width {
+    grid-column: 1 / -1;
+}
+
+.form-grid input,
+.form-grid select,
+.form-grid textarea {
+    padding: 0.75rem 1rem;
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-md);
+    font-size: 0.9375rem;
+    transition: all var(--transition-base);
+    background: var(--color-surface);
+}
+
+.form-grid input:focus,
+.form-grid select:focus,
+.form-grid textarea:focus {
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-primary-soft);
+}
+
+.form-actions {
+    display: flex;
+    gap: var(--spacing-md);
+    margin-top: var(--spacing-lg);
+}
+
+.primary-button,
+.secondary-button {
+    padding: 0.75rem 1.5rem;
+    border-radius: var(--radius-md);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--transition-base);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+.primary-button {
+    background: var(--gradient-primary);
+    color: white;
+    border: none;
+    box-shadow: var(--shadow-primary);
+}
+
+.primary-button:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-glow);
+}
+
+.secondary-button {
+    background: var(--color-surface);
+    color: var(--color-text);
+    border: 2px solid var(--color-border);
+    box-shadow: none;
+}
+
+.secondary-button:hover {
+    background: var(--color-primary-soft);
+    border-color: var(--color-primary);
+    color: var(--color-primary-dark);
+}
+
+/* Status Chips/Badges */
+.chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.25rem 0.75rem;
+    border-radius: var(--radius-full);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.chip.status-active {
+    background: var(--color-success-soft);
+    color: var(--color-success-dark);
+}
+
+.chip.status-inactive,
+.chip.status-disabled {
+    background: var(--color-text-light);
+    color: var(--color-surface);
+}
+
+/* Row Actions */
+.row-actions {
+    display: flex;
+    gap: var(--spacing-sm);
+    align-items: center;
+}
+
+.row-actions button {
+    padding: 0.5rem 0.875rem;
+    font-size: 0.8125rem;
+    background: transparent;
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    box-shadow: none;
+}
+
+.row-actions button:hover {
+    background: var(--color-primary-soft);
+    border-color: var(--color-primary);
+    color: var(--color-primary-dark);
+}
+
+/* Required Field Indicator */
+.required {
+    color: var(--color-danger);
+    margin-left: 2px;
+}
+
+/* Muted Text */
+.muted {
+    color: var(--color-text-muted);
+}
+
+.small {
+    font-size: 0.875rem;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+
+    .products-page,
+    .master-data-page,
+    .inventory-page,
+    .reports-page,
+    .users-page,
+    .approvals-page,
+    .cycle-counting-page,
+    .receipt-page {
+        padding: var(--spacing-lg) var(--spacing-md);
+    }
+
+    .panel-header {
+        padding: var(--spacing-lg);
+    }
+
+    .table-wrapper {
+        padding: var(--spacing-md);
+    }
+
+    .simple-form {
+        padding: var(--spacing-lg);
+        margin: var(--spacing-md);
+    }
+
+    .form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .page-title {
+        font-size: 1.5rem;
+    }
+
+    .panel-header h2 {
+        font-size: 1.5rem;
+    }
+
+    .panel-header h3 {
+        font-size: 1.25rem;
+    }
+}
+
+@media (max-width: 480px) {
+    .page-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .form-actions {
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .form-actions button {
+        width: 100%;
+    }
+
+    .row-actions {
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .row-actions button {
+        width: 100%;
+    }
+}

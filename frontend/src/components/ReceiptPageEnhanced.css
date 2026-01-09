@@ -1,0 +1,374 @@
+/* Receipt Page - Enhanced Modern Design */
+
+/* Modern Receipt Page Enhancements */
+.receipt-page {
+    animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Enhanced Panel Headers */
+.receipt-page .panel-header {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.05) 0%, rgba(255, 210, 63, 0.05) 100%);
+    position: relative;
+    padding: var(--spacing-lg) !important;
+    border-bottom: 2px solid var(--color-border) !important;
+    margin: 0 !important;
+}
+
+.receipt-page .panel-header::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--gradient-primary);
+}
+
+.receipt-page .panel-header h2,
+.receipt-page .panel-header h3 {
+    color: var(--color-primary) !important;
+    font-weight: 700 !important;
+    font-size: 1.5rem !important;
+    margin: 0 !important;
+}
+
+.receipt-page .panel-header p {
+    color: var(--color-text-muted) !important;
+    margin: 0.5rem 0 0 0 !important;
+}
+
+/* Enhanced Panels */
+.receipt-page .panel {
+    border: 2px solid var(--color-border) !important;
+    box-shadow: var(--shadow-md) !important;
+    border-radius: var(--radius-lg) !important;
+    /* overflow: hidden removed to allow dropdowns to display */
+}
+
+/* Form Grid Improvements */
+.receipt-page .form-grid {
+    gap: var(--spacing-lg) !important;
+    padding: var(--spacing-xl);
+}
+
+/* Enhanced Form Labels */
+.receipt-page .form-grid label {
+    font-weight: 600 !important;
+    color: var(--color-text) !important;
+    font-size: 0.875rem !important;
+    letter-spacing: 0.01em !important;
+}
+
+.receipt-page .form-grid label .required {
+    color: var(--color-error) !important;
+    font-weight: 700 !important;
+}
+
+/* Form Section Dividers */
+.receipt-page .form-grid>label:nth-child(1),
+.receipt-page .form-grid>label:nth-child(4),
+.receipt-page .form-grid>label:nth-child(7) {
+    position: relative;
+    padding-top: var(--spacing-lg);
+}
+
+.receipt-page .form-grid>label:nth-child(1)::before,
+.receipt-page .form-grid>label:nth-child(4)::before,
+.receipt-page .form-grid>label:nth-child(7)::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--color-border);
+    opacity: 0.5;
+}
+
+/* Enhanced Buttons */
+.receipt-page .primary-button {
+    background: var(--gradient-primary) !important;
+    border: none !important;
+    color: white !important;
+    padding: 0.875rem 2rem !important;
+    font-weight: 700 !important;
+    font-size: 1rem !important;
+    border-radius: var(--radius-md) !important;
+    box-shadow: var(--shadow-primary) !important;
+    transition: all var(--transition-base) !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+}
+
+.receipt-page .primary-button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: var(--shadow-glow) !important;
+}
+
+.receipt-page .primary-button:active {
+    transform: translateY(0) !important;
+}
+
+.receipt-page .secondary-button {
+    border: 2px solid var(--color-border) !important;
+    background: white !important;
+    color: var(--color-text) !important;
+    padding: 0.875rem 2rem !important;
+    font-weight: 600 !important;
+    font-size: 1rem !important;
+    border-radius: var(--radius-md) !important;
+    transition: all var(--transition-base) !important;
+}
+
+.receipt-page .secondary-button:hover {
+    border-color: var(--color-primary) !important;
+    background: var(--color-primary-soft) !important;
+    color: var(--color-primary-dark) !important;
+    transform: translateY(-2px);
+}
+
+.receipt-page .back-button {
+    background: var(--gradient-primary) !important;
+    border: none !important;
+    box-shadow: var(--shadow-sm) !important;
+    font-weight: 600 !important;
+    transition: all var(--transition-base) !important;
+}
+
+.receipt-page .back-button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: var(--shadow-md) !important;
+}
+
+/* Enhanced Form Inputs */
+.receipt-page input,
+.receipt-page select,
+.receipt-page textarea {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 0.75rem 1rem !important;
+    transition: all var(--transition-base) !important;
+    font-size: 0.9375rem !important;
+    background: white !important;
+}
+
+.receipt-page input:hover,
+.receipt-page select:hover,
+.receipt-page textarea:hover {
+    border-color: #cbd5e1 !important;
+}
+
+.receipt-page input:focus,
+.receipt-page select:focus,
+.receipt-page textarea:focus {
+    border-color: var(--color-primary) !important;
+    box-shadow: 0 0 0 3px var(--color-primary-soft) !important;
+    outline: none !important;
+}
+
+/* Disabled inputs */
+.receipt-page input:disabled,
+.receipt-page select:disabled {
+    background: var(--color-surface) !important;
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Enhanced Manual Allocation Cards */
+.receipt-page .manual-allocation-entry {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-lg) !important;
+    box-shadow: var(--shadow-sm) !important;
+    transition: all var(--transition-base) !important;
+    background: white !important;
+    position: relative;
+    overflow: visible;
+    /* Changed from hidden to allow dropdowns to display */
+}
+
+.receipt-page .manual-allocation-entry::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4px;
+    height: 100%;
+    background: var(--gradient-primary);
+}
+
+.receipt-page .manual-allocation-entry:hover {
+    border-color: var(--color-primary) !important;
+    box-shadow: var(--shadow-md) !important;
+    transform: translateY(-2px);
+}
+
+/* Enhanced Status Chips */
+.receipt-page .chip {
+    padding: 0.375rem 0.875rem !important;
+    border-radius: var(--radius-full) !important;
+    font-weight: 700 !important;
+    font-size: 0.75rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+}
+
+.receipt-page .chip.status-active {
+    background: var(--gradient-secondary) !important;
+    color: white !important;
+    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.3) !important;
+}
+
+/* Enhanced Modal */
+.receipt-page .modal {
+    border-radius: var(--radius-xl) !important;
+    box-shadow: var(--shadow-2xl) !important;
+}
+
+.receipt-page .modal-header h3 {
+    color: var(--color-primary) !important;
+    font-weight: 700 !important;
+}
+
+/* Enhanced Alerts */
+.receipt-page .alert.success {
+    background: linear-gradient(135deg, rgba(76, 175, 80, 0.1) 0%, rgba(129, 199, 132, 0.1) 100%) !important;
+    border-left: 4px solid var(--color-success) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 1rem 1.25rem !important;
+    font-weight: 600 !important;
+}
+
+.receipt-page .alert.error {
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.1) 0%, rgba(252, 165, 165, 0.1) 100%) !important;
+    border-left: 4px solid var(--color-error) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 1rem 1.25rem !important;
+    font-weight: 600 !important;
+}
+
+/* Combobox Enhancement */
+.receipt-page .combobox-list {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    box-shadow: var(--shadow-lg) !important;
+}
+
+.receipt-page .combobox-list li.active,
+.receipt-page .combobox-list li:hover {
+    background: var(--color-primary-soft) !important;
+    color: var(--color-primary-dark) !important;
+    font-weight: 600 !important;
+}
+
+/* Allocation Panel Enhancement */
+.receipt-page .manual-allocation-panel {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.03) 0%, rgba(255, 210, 63, 0.03) 100%) !important;
+    border: 2px solid var(--color-border) !important;
+    border-left: 4px solid var(--color-primary) !important;
+    border-radius: var(--radius-lg) !important;
+}
+
+/* Table Enhancement */
+.receipt-page .simple-table {
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    border: 2px solid var(--color-border);
+}
+
+.receipt-page .simple-table thead {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.08) 0%, rgba(255, 210, 63, 0.08) 100%) !important;
+    border-bottom: 2px solid var(--color-primary) !important;
+}
+
+.receipt-page .simple-table th {
+    color: var(--color-text) !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+    font-size: 0.75rem !important;
+    padding: 1rem !important;
+}
+
+.receipt-page .simple-table tbody tr {
+    transition: all var(--transition-base);
+    border-bottom: 1px solid var(--color-border);
+}
+
+.receipt-page .simple-table tbody tr:hover {
+    background: var(--color-primary-soft) !important;
+    transform: scale(1.002);
+}
+
+.receipt-page .simple-table tbody td {
+    padding: 1rem !important;
+}
+
+/* Form Actions */
+.receipt-page .form-actions {
+    padding: var(--spacing-lg) var(--spacing-xl);
+    background: var(--color-surface);
+    border-top: 2px solid var(--color-border);
+    margin: 0;
+}
+
+/* Unit Label Enhancement */
+.receipt-page .unit-label {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.05) 0%, rgba(255, 210, 63, 0.05) 100%) !important;
+    border: 2px solid var(--color-border) !important;
+    font-weight: 700 !important;
+    color: var(--color-text) !important;
+}
+
+/* Hold Toggle Enhancement */
+.receipt-page .hold-toggle {
+    border: 2px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    background: white !important;
+    transition: all var(--transition-base);
+}
+
+.receipt-page .hold-toggle:hover {
+    border-color: var(--color-primary);
+    background: var(--color-primary-soft) !important;
+}
+
+/* Form Hint Enhancement */
+.receipt-page .form-hint {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.05) 0%, rgba(255, 210, 63, 0.05) 100%) !important;
+    border-left: 4px solid var(--color-primary) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 1rem 1.25rem !important;
+    font-weight: 600 !important;
+}
+
+/* Allocation Header Enhancement */
+.receipt-page .allocation-header {
+    border-bottom: 2px solid var(--color-border) !important;
+}
+
+.receipt-page .allocation-label {
+    color: var(--color-primary) !important;
+    font-weight: 700 !important;
+}
+
+/* Remove Allocation Button */
+.receipt-page .remove-allocation-btn {
+    transition: all var(--transition-base) !important;
+    border-radius: var(--radius-md) !important;
+}
+
+.receipt-page .remove-allocation-btn:hover {
+    transform: scale(1.1) !important;
+}

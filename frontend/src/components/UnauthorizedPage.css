@@ -1,0 +1,150 @@
+/* UnauthorizedPage.css */
+
+.unauthorized-page {
+  width: 100%;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.unauthorized-container {
+  width: 100%;
+  max-width: 500px;
+}
+
+.unauthorized-content {
+  background: white;
+  border-radius: 12px;
+  padding: 40px;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.1);
+  border: 1px solid #e2e8f0;
+  text-align: center;
+}
+
+.error-icon {
+  margin-bottom: 24px;
+  display: flex;
+  justify-content: center;
+}
+
+.error-icon svg {
+  opacity: 0.8;
+}
+
+.unauthorized-content h1 {
+  margin: 0 0 16px 0;
+  font-size: 28px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.error-message {
+  margin: 0 0 24px 0;
+  font-size: 16px;
+  color: #64748b;
+  line-height: 1.6;
+}
+
+.user-info {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 24px;
+  text-align: left;
+}
+
+.user-info p {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  color: #374151;
+}
+
+.user-info p:last-child {
+  margin-bottom: 0;
+}
+
+.user-info strong {
+  color: #1e293b;
+  font-weight: 600;
+}
+
+.action-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.primary-button {
+  background: #6366f1;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 12px 24px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.primary-button:hover {
+  background: #4f46e5;
+}
+
+.secondary-button {
+  background: #f1f5f9;
+  color: #374151;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 12px 24px;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.secondary-button:hover {
+  background: #e2e8f0;
+  border-color: #9ca3af;
+}
+
+.help-text {
+  border-top: 1px solid #e2e8f0;
+  padding-top: 20px;
+}
+
+.help-text p {
+  margin: 0;
+  font-size: 14px;
+  color: #64748b;
+  line-height: 1.5;
+}
+
+@media (max-width: 600px) {
+  .unauthorized-content {
+    padding: 24px;
+  }
+  
+  .unauthorized-content h1 {
+    font-size: 24px;
+  }
+  
+  .error-message {
+    font-size: 14px;
+  }
+  
+  .action-buttons {
+    gap: 8px;
+  }
+  
+  .primary-button,
+  .secondary-button {
+    padding: 10px 20px;
+    font-size: 14px;
+  }
+}

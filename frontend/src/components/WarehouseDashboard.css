@@ -1,0 +1,370 @@
+/* Modern Warehouse Dashboard - Matching Design System */
+
+.warehouse-page {
+  padding: var(--spacing-md) var(--spacing-lg);
+  max-width: 100%;
+  margin: 0 auto;
+  width: 100%;
+}
+
+@media (min-width: 1440px) {
+  .warehouse-page {
+    padding: var(--spacing-lg) var(--spacing-xl);
+  }
+}
+
+/* Header */
+.warehouse-header {
+  margin-bottom: var(--spacing-md);
+}
+
+.warehouse-header h1 {
+  font-family: var(--font-heading);
+  font-size: 2.5rem;
+  font-weight: 800;
+  margin-bottom: var(--spacing-sm);
+  background: var(--gradient-text);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.warehouse-header p {
+  font-size: 1rem;
+  color: var(--color-text-muted);
+}
+
+/* Metrics Section */
+.warehouse-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--spacing-lg);
+  margin-bottom: var(--spacing-2xl);
+}
+
+.warehouse-metric-card {
+  display: flex;
+  gap: var(--spacing-lg);
+  align-items: flex-start;
+}
+
+.metric-icon-wrapper {
+  flex-shrink: 0;
+  width: 60px;
+  height: 60px;
+  border-radius: var(--radius-lg);
+  background: var(--gradient-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  box-shadow: var(--shadow-primary);
+}
+
+.metric-icon-wrapper.secondary {
+  background: var(--gradient-secondary);
+  box-shadow: 0 10px 25px -5px rgba(76, 175, 80, 0.3);
+}
+
+.metric-content {
+  flex: 1;
+}
+
+.metric-label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--spacing-sm);
+}
+
+.metric-value-section {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-md);
+}
+
+.metric-value {
+  font-size: 2.5rem;
+  font-weight: 700;
+  font-family: var(--font-heading);
+  line-height: 1;
+  color: var(--color-text);
+}
+
+.metric-value.status-ok {
+  color: var(--color-success);
+}
+
+.metric-value.status-warning {
+  color: var(--color-warning);
+}
+
+.metric-value.status-critical {
+  color: var(--color-danger);
+}
+
+.metric-unit {
+  font-size: 1rem;
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+
+/* Progress Bar */
+.progress-bar {
+  width: 100%;
+  height: 10px;
+  background: var(--color-border);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  margin-bottom: var(--spacing-md);
+}
+
+.progress-bar__fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  transition: width var(--transition-slow);
+}
+
+.progress-bar__fill.status-ok {
+  background: var(--gradient-secondary);
+}
+
+.progress-bar__fill.status-warning {
+  background: linear-gradient(135deg, var(--color-warning), var(--color-warning-dark));
+}
+
+.progress-bar__fill.status-critical {
+  background: linear-gradient(135deg, var(--color-danger), var(--color-danger-dark));
+}
+
+/* Metric Breakdown */
+.metric-breakdown {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-md);
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
+
+.metric-breakdown li {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.metric-breakdown strong {
+  color: var(--color-text);
+  font-weight: 700;
+}
+
+.metric-subtext {
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+/* Quick Actions Grid */
+.warehouse-quick-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--spacing-lg);
+  margin-bottom: var(--spacing-2xl);
+}
+
+/* Action Buttons */
+.action-button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-lg);
+  padding: var(--spacing-lg);
+  background: white;
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: all var(--transition-base);
+  text-align: left;
+  box-shadow: var(--shadow-sm);
+}
+
+.action-button:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+  border-color: var(--color-primary);
+}
+
+.action-button.primary {
+  background: var(--gradient-primary);
+  border-color: transparent;
+  color: white;
+}
+
+.action-button.primary .action-content h3,
+.action-button.primary .action-content p {
+  color: white;
+}
+
+.action-button.primary:hover {
+  box-shadow: var(--shadow-glow);
+}
+
+.action-button.warning {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+
+.action-icon {
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  background: var(--color-primary-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-primary);
+  transition: all var(--transition-base);
+}
+
+.action-button.primary .action-icon {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+.action-button.warning .action-icon {
+  background: var(--color-warning);
+  color: white;
+}
+
+.action-button:hover .action-icon {
+  transform: scale(1.1);
+}
+
+.action-content {
+  flex: 1;
+}
+
+.action-content h3 {
+  margin: 0 0 var(--spacing-xs) 0;
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.action-content p {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+.notification-badge {
+  position: absolute;
+  top: var(--spacing-sm);
+  right: var(--spacing-sm);
+  background: var(--color-danger);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-full);
+  min-width: 24px;
+  text-align: center;
+}
+
+/* Helpful Reminders */
+.warehouse-reminders {
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-xl);
+  border: 2px solid var(--color-border);
+}
+
+.warehouse-reminders h2 {
+  margin: 0 0 var(--spacing-lg) 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.warehouse-reminders ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.warehouse-reminders li {
+  position: relative;
+  padding-left: var(--spacing-xl);
+  font-size: 0.9375rem;
+  color: var(--color-text-muted);
+  line-height: 1.6;
+}
+
+.warehouse-reminders li::before {
+  content: '•';
+  position: absolute;
+  left: var(--spacing-md);
+  color: var(--color-primary);
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+/* Responsive Design */
+@media (max-width: 1024px) {
+  .warehouse-quick-actions {
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .warehouse-page {
+    padding: var(--spacing-lg) var(--spacing-md);
+  }
+
+  .warehouse-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .warehouse-quick-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .warehouse-header h1 {
+    font-size: 2rem;
+  }
+
+  .metric-value {
+    font-size: 2rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .warehouse-page {
+    padding: var(--spacing-md) var(--spacing-sm);
+  }
+
+  .warehouse-metric-card {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+
+  .warehouse-header h1 {
+    font-size: 1.75rem;
+  }
+
+  .action-button {
+    flex-direction: column;
+    text-align: center;
+  }
+}
