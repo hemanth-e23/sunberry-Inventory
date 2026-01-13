@@ -2,8 +2,8 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import axios from 'axios';
 import { useAutoLogout } from '../hooks/useAutoLogout';
 
-// Dynamic API URL - use current hostname for network access
-const API_BASE_URL = `http://${window.location.hostname}:8000/api`;
+// API URL - use relative path, nginx will proxy to backend
+const API_BASE_URL = '/api';
 
 const AuthContext = createContext();
 

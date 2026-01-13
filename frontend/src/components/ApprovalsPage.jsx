@@ -8,7 +8,7 @@ import axios from "axios";
 import "./ApprovalsPage.css";
 import "./ApprovalsPageEnhanced.css";
 
-const API_BASE_URL = `http://${window.location.hostname}:8000/api`;
+const API_BASE_URL = '/api';
 
 const STATUS_PENDING = new Set(["recorded", "reviewed"]);
 

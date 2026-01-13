@@ -6,7 +6,7 @@ import { getDashboardPath } from '../App';
 import axios from 'axios';
 import './StagingOverview.css';
 
-const API_BASE_URL = `http://${window.location.hostname}:8000/api`;
+const API_BASE_URL = '/api';
 
 const StagingOverview = () => {
   const navigate = useNavigate();

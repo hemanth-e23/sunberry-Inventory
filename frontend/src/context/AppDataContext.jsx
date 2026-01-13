@@ -394,8 +394,8 @@ const initialAdjustments = [];
 
 const AppDataContext = createContext(null);
 
-// Dynamic API URL - use current hostname for network access
-const API_BASE_URL = `http://${window.location.hostname}:8000/api`;
+// API URL - use relative path, nginx will proxy to backend
+const API_BASE_URL = '/api';
 
 // Helper function to get auth headers
 const getAuthHeaders = async (waitForAuth = false, maxWaitTime = 10000) => {

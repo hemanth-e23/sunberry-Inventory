@@ -8,7 +8,7 @@ import axios from 'axios';
 import './InventoryActionsPage.css';
 import './InventoryActionsPageEnhanced.css';
 
-const API_BASE_URL = `http://${window.location.hostname}:8000/api`;
+const API_BASE_URL = '/api';
 
 const TAB_OPTIONS = ['transfers', 'staging', 'holds', 'adjustments', 'shipout'];
 
