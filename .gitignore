@@ -58,6 +58,8 @@ backend/htmlcov/
 
 # Documentation files
 *.md
+!NETWORK_ACCESS.md
+!DEPLOYMENT_WINDOWS.md
 
 # Config files with sensitive data (if already tracked, use: git rm --cached backend/app/config.py)
 backend/app/config.py
