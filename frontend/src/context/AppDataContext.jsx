@@ -2482,7 +2482,7 @@ export const AppDataProvider = ({ children }) => {
           return {
             success: false,
             error: 'network_error',
-            message: 'Cannot connect to server. Please check if the backend is running on http://localhost:8000'
+            message: 'Cannot connect to server. Please check if the backend is running.'
           };
         }
         return {
