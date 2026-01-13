@@ -24,7 +24,7 @@ export const sanitizeForDisplay = (text) => {
 };
 
 export const validateLotNumber = (lotNumber, existingLotNumbers = []) => {
-  if (!lotNumber || typeof lotNumber !== 'string') {
+  if (lotNumber === null || lotNumber === undefined || typeof lotNumber !== 'string') {
     return { valid: false, error: 'Lot number is required' };
   }
   

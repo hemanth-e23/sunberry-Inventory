@@ -709,13 +709,6 @@ export const AppDataProvider = ({ children }) => {
         subLocations: subLocResponse.data
           .filter(sub => sub.location_id === loc.id)
           .map(sub => {
-            // Debug: Log if rows are missing
-            if (!sub.rows || sub.rows.length === 0) {
-              console.log(`Sub-location ${sub.name} (${sub.id}) has no rows in API response`);
-            } else {
-              console.log(`Sub-location ${sub.name} (${sub.id}) has ${sub.rows.length} rows`);
-            }
-            
             return {
               id: sub.id,
               name: sub.name,

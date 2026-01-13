@@ -219,7 +219,7 @@ class InventoryTransfer(Base):
     quantity = Column(Float, nullable=False)
     unit = Column(String(20), default="cases")
     reason = Column(Text)
-    transfer_type = Column(String(50), default="warehouse-transfer")  # warehouse-transfer, shipped-out
+    transfer_type = Column(String(50), default="warehouse-transfer")  # warehouse-transfer, shipped-out, staging
     order_number = Column(String(100), nullable=True)  # For shipped-out transfers
     source_breakdown = Column(JSON, nullable=True)  # Track source allocations
     destination_breakdown = Column(JSON, nullable=True)  # Track destination allocations
@@ -301,3 +301,43 @@ class CycleCount(Base):
     location = relationship("Location", backref="cycle_counts")
     category = relationship("Category", backref="cycle_counts")
     performer = relationship("User", foreign_keys=[performed_by_id], backref="performed_cycle_counts")
+
+class StagingItem(Base):
+    __tablename__ = "staging_items"
+    
+    id = Column(String(50), primary_key=True)
+    transfer_id = Column(String(50), ForeignKey("inventory_transfers.id"))
+    receipt_id = Column(String(50), ForeignKey("receipts.id"))
+    product_id = Column(String(50), ForeignKey("products.id"))
+    
+    # Quantities
+    quantity_staged = Column(Float, nullable=False)  # How much went to staging
+    quantity_used = Column(Float, default=0)  # How much was used for production
+    quantity_returned = Column(Float, default=0)  # How much was returned to warehouse
+    
+    # Pallet tracking for rack space management
+    pallets_staged = Column(Float, nullable=True)  # How many pallets staged (for rack space calculation)
+    pallets_used = Column(Float, default=0)  # How many pallets used (frees up rack space)
+    pallets_returned = Column(Float, default=0)  # How many pallets returned (frees up staging rack space)
+    
+    # Storage row tracking
+    original_storage_row_id = Column(String(50), ForeignKey("storage_rows.id"), nullable=True)  # Original rack/row before staging (to free when used/returned)
+    staging_storage_row_id = Column(String(50), ForeignKey("storage_rows.id"), nullable=True)  # Which rack/row in staging location (if staging uses rows)
+    
+    # Status tracking
+    status = Column(String(20), default="staged")  # staged, partially_used, used, returned, partially_returned
+    
+    # Optional grouping for future API integration
+    staging_batch_id = Column(String(50), nullable=True)  # Groups items staged together
+    
+    # Timestamps
+    staged_at = Column(DateTime(timezone=True), server_default=func.now())
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    returned_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Relationships
+    transfer = relationship("InventoryTransfer", backref="staging_items")
+    receipt = relationship("Receipt", backref="staging_items")
+    product = relationship("Product", backref="staging_items")
+    original_storage_row = relationship("StorageRow", foreign_keys=[original_storage_row_id], backref="staging_items_from")
+    staging_storage_row = relationship("StorageRow", foreign_keys=[staging_storage_row_id], backref="staging_items_at")

@@ -5,17 +5,20 @@ from sqlalchemy import func, and_
 from datetime import datetime
 import json
 import uuid
+import copy
 
 from app.database import get_db
 from app.models import (
     Receipt, InventoryTransfer, InventoryAdjustment, InventoryHoldAction,
-    StorageArea, StorageRow, Location, SubLocation, User, Category, CycleCount
+    StorageArea, StorageRow, Location, SubLocation, User, Category, CycleCount, StagingItem, Product
 )
 from app.schemas import (
     InventoryTransfer as InventoryTransferSchema, InventoryTransferCreate, InventoryTransferUpdate,
     InventoryAdjustment as InventoryAdjustmentSchema, InventoryAdjustmentCreate, InventoryAdjustmentUpdate,
     InventoryHoldAction as InventoryHoldActionSchema, InventoryHoldActionCreate, InventoryHoldActionUpdate,
-    CycleCount as CycleCountSchema, CycleCountCreate
+    CycleCount as CycleCountSchema, CycleCountCreate,
+    StagingItem as StagingItemSchema, StagingItemCreate, StagingItemUpdate,
+    StagingLotSuggestion, CreateStagingRequest, MarkStagingUsedRequest, ReturnStagingRequest
 )
 from app.utils.auth import get_current_active_user, require_role
 
@@ -77,7 +80,6 @@ async def create_transfer(
             detail="Order number is required for shipped-out transfers"
         )
     
-    import uuid
     transfer_dict = transfer_data.dict()
     transfer_id = f"transfer-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
     
@@ -253,7 +255,6 @@ async def approve_transfer(
                     allocation_data = receipt.allocation
                 
                 if allocation_data.get("success") and allocation_data.get("plan"):
-                    import copy
                     allocation_data = copy.deepcopy(allocation_data)
                     plan = allocation_data["plan"]
                     
@@ -935,3 +936,579 @@ async def get_capacity_summary(
         "total_available": total_capacity - total_occupied,
         "overall_utilization": overall_utilization
     }
+
+# Staging endpoints
+@router.get("/staging/suggest-lots", response_model=List[StagingLotSuggestion])
+async def suggest_lots_for_staging(
+    product_id: str,
+    quantity: float,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Suggest lots for staging based on expiry date (FEFO - First Expiry First Out)"""
+    # Get all approved receipts for this product that are available (not on hold)
+    receipts = db.query(Receipt).filter(
+        Receipt.product_id == product_id,
+        Receipt.status == "approved",
+        Receipt.quantity > 0,
+        Receipt.hold == False  # Exclude items on hold
+    ).order_by(Receipt.expiration_date.asc().nullslast()).all()
+    
+    suggestions = []
+    
+    for receipt in receipts:
+        # Get all staging items for this receipt
+        staged_items = db.query(StagingItem).filter(
+            StagingItem.receipt_id == receipt.id
+        ).all()
+        
+        # Calculate how much is currently still in staging (not used, not returned)
+        # Only count active staging items (not fully used/returned)
+        quantity_still_in_staging = sum(
+            item.quantity_staged - item.quantity_used - item.quantity_returned 
+            for item in staged_items
+            if item.status in ["staged", "partially_used", "partially_returned"]
+        )
+        
+        # Calculate total that was staged (including used/returned)
+        total_staged = sum(item.quantity_staged for item in staged_items)
+        
+        # Calculate total that was used (already deducted from receipt.quantity via adjustments)
+        total_used = sum(item.quantity_used for item in staged_items)
+        
+        # Calculate total that was returned (moved back to warehouse via transfers)
+        total_returned = sum(item.quantity_returned for item in staged_items)
+        
+        # Available quantity calculation:
+        # receipt.quantity = current quantity (may have been reduced by usage)
+        # We need to add back what was used (since it was deducted), and subtract what's still in staging
+        # But actually, receipt.quantity already reflects the current state after usage
+        # So: available = receipt.quantity - quantity_still_in_staging
+        # However, if items were returned, they're back in the original location, so receipt.quantity should include them
+        # The simplest approach: receipt.quantity is the current quantity at the receipt's location
+        # Available to stage = receipt.quantity - what's still in staging
+        available_quantity = receipt.quantity - quantity_still_in_staging
+        
+        # Use a small epsilon to handle floating point precision issues
+        # Only include if there's meaningful available quantity (> 0.01 to account for rounding)
+        if available_quantity > 0.01:
+            # Get location info
+            location_name = None
+            sub_location_name = None
+            if receipt.location_id:
+                location = db.query(Location).filter(Location.id == receipt.location_id).first()
+                location_name = location.name if location else None
+            if receipt.sub_location_id:
+                sub_location = db.query(SubLocation).filter(SubLocation.id == receipt.sub_location_id).first()
+                sub_location_name = sub_location.name if sub_location else None
+            
+            # Get unit from receipt or product
+            unit = receipt.unit or "cases"
+            if not unit or unit == "cases":
+                product = db.query(Product).filter(Product.id == receipt.product_id).first()
+                if product and product.quantity_uom:
+                    unit = product.quantity_uom
+            
+            suggestions.append({
+                "receipt_id": receipt.id,
+                "lot_number": receipt.lot_number or "",
+                "location_id": receipt.location_id,
+                "location_name": location_name,
+                "sub_location_id": receipt.sub_location_id,
+                "sub_location_name": sub_location_name,
+                "expiration_date": receipt.expiration_date,
+                "available_quantity": available_quantity,
+                "unit": unit
+            })
+    
+    # Return ALL available lots (sorted by expiry), not just enough to meet quantity
+    # This allows user to see and choose from all options
+    return suggestions
+
+@router.post("/staging/transfer")
+async def create_staging_transfer(
+    staging_data: CreateStagingRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Create staging transfer for multiple products"""
+    staging_batch_id = f"staging-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+    created_transfers = []
+    created_staging_items = []
+    
+    for item_request in staging_data.items:
+        # Handle multiple lots per product
+        if not item_request.lots or len(item_request.lots) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No lots specified for product {item_request.product_id}"
+            )
+        
+        # Validate total quantity matches
+        total_lot_quantity = sum(lot.quantity for lot in item_request.lots)
+        if abs(total_lot_quantity - item_request.quantity_needed) > 0.01:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Total lot quantities ({total_lot_quantity}) must match requested quantity ({item_request.quantity_needed})"
+            )
+        
+        # Process each lot
+        for lot_request in item_request.lots:
+            receipt = db.query(Receipt).filter(Receipt.id == lot_request.receipt_id).first()
+            if not receipt:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Receipt {lot_request.receipt_id} not found"
+                )
+            
+            # Verify receipt belongs to the product
+            if receipt.product_id != item_request.product_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Receipt {lot_request.receipt_id} does not belong to product {item_request.product_id}"
+                )
+            
+            # Check available quantity
+            staged_items = db.query(StagingItem).filter(
+                StagingItem.receipt_id == receipt.id,
+                StagingItem.status.in_(["staged", "partially_used", "partially_returned"])
+            ).all()
+            
+            quantity_still_in_staging = sum(
+                item.quantity_staged - item.quantity_used - item.quantity_returned 
+                for item in staged_items
+                if item.status in ["staged", "partially_used", "partially_returned"]
+            )
+            available_quantity = receipt.quantity - quantity_still_in_staging
+            
+            if lot_request.quantity > available_quantity:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Insufficient quantity for lot {receipt.lot_number}. Available: {available_quantity}, Requested: {lot_request.quantity}"
+                )
+            
+            # Get unit from receipt or product
+            unit = receipt.unit or "cases"
+            if not unit or unit == "cases":
+                product = db.query(Product).filter(Product.id == receipt.product_id).first()
+                if product and product.quantity_uom:
+                    unit = product.quantity_uom
+            
+            # Create transfer
+            transfer_id = f"transfer-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+            transfer = InventoryTransfer(
+                id=transfer_id,
+                receipt_id=receipt.id,
+                from_location_id=receipt.location_id,
+                from_sub_location_id=receipt.sub_location_id,
+                to_location_id=staging_data.staging_location_id,
+                to_sub_location_id=staging_data.staging_sub_location_id,
+                quantity=lot_request.quantity,
+                unit=unit,
+                reason="Staging for production",
+                transfer_type="staging",
+                requested_by=str(current_user.id),
+                status="completed"  # Staging transfers are auto-completed (no approval needed)
+            )
+            
+            db.add(transfer)
+            db.flush()  # Get transfer ID
+            
+            # Calculate pallets staged proportionally from receipt
+            # Store this for later use when marking as used or returning
+            pallets_staged = None
+            if receipt.pallets and receipt.pallets > 0 and receipt.quantity > 0:
+                # Calculate proportionally: (quantity_staged / receipt.quantity) * receipt.pallets
+                pallets_staged = (lot_request.quantity / receipt.quantity) * receipt.pallets
+            
+            # Store original storage_row_id for tracking which rack space to free when used/returned
+            original_storage_row_id = receipt.storage_row_id
+            
+            # Update receipt location to staging location (physical move)
+            receipt.location_id = staging_data.staging_location_id
+            receipt.sub_location_id = staging_data.staging_sub_location_id
+            # Note: We keep receipt.storage_row_id for now, but store original in StagingItem for freeing space later
+            
+            # Find or set staging storage row (if staging location uses storage rows)
+            staging_storage_row_id = None
+            if staging_data.staging_sub_location_id:
+                # Check if staging sub-location has storage rows
+                staging_rows = db.query(StorageRow).filter(
+                    StorageRow.sub_location_id == staging_data.staging_sub_location_id
+                ).all()
+                # For now, we don't auto-allocate staging rows - they can be assigned manually later
+                # staging_storage_row_id will be set to None, meaning items are in staging location but not in a specific row
+            
+            # Create staging item with pallet tracking
+            staging_item_id = f"staging-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+            staging_item = StagingItem(
+                id=staging_item_id,
+                transfer_id=transfer.id,
+                receipt_id=receipt.id,
+                product_id=item_request.product_id,
+                quantity_staged=lot_request.quantity,
+                pallets_staged=pallets_staged,
+                original_storage_row_id=original_storage_row_id,  # Store original row to free space when used/returned
+                staging_storage_row_id=staging_storage_row_id,  # Will be set if staging location has rows
+                staging_batch_id=staging_batch_id
+            )
+            
+            # Reserve pallets in staging location's storage row (if staging row is specified)
+            if staging_storage_row_id and pallets_staged:
+                staging_row = db.query(StorageRow).filter(StorageRow.id == staging_storage_row_id).first()
+                if staging_row:
+                    staging_row.occupied_pallets = (staging_row.occupied_pallets or 0) + pallets_staged
+                    if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
+                        cases_to_reserve = pallets_staged * receipt.cases_per_pallet
+                        staging_row.occupied_cases = (staging_row.occupied_cases or 0) + cases_to_reserve
+                    if not staging_row.product_id:
+                        staging_row.product_id = item_request.product_id
+            
+            db.add(staging_item)
+            created_transfers.append(transfer)
+            created_staging_items.append(staging_item)
+    
+    db.commit()
+    
+    return {
+        "staging_batch_id": staging_batch_id,
+        "transfers": [{"id": t.id, "receipt_id": t.receipt_id, "quantity": t.quantity} for t in created_transfers],
+        "staging_items": [{"id": s.id, "receipt_id": s.receipt_id, "quantity_staged": s.quantity_staged} for s in created_staging_items]
+    }
+
+@router.get("/staging/items")
+async def get_staging_items(
+    status_filter: Optional[str] = None,
+    product_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Get all staging items with receipt information"""
+    try:
+        query = db.query(StagingItem)
+        
+        if status_filter:
+            query = query.filter(StagingItem.status == status_filter)
+        else:
+            # Default: show only active staging items (not fully used or returned)
+            query = query.filter(StagingItem.status.in_(["staged", "partially_used", "partially_returned"]))
+        
+        if product_id:
+            query = query.filter(StagingItem.product_id == product_id)
+        
+        staging_items = query.order_by(StagingItem.staged_at.desc()).all()
+        
+        # Include receipt data in response
+        result = []
+        for item in staging_items:
+            try:
+                receipt = db.query(Receipt).filter(Receipt.id == item.receipt_id).first()
+                
+                item_dict = {
+                    "id": item.id,
+                    "transfer_id": item.transfer_id,
+                    "receipt_id": item.receipt_id,
+                    "product_id": item.product_id,
+                    "quantity_staged": item.quantity_staged,
+                    "quantity_used": item.quantity_used or 0,
+                    "quantity_returned": item.quantity_returned or 0,
+                    "status": item.status,
+                    "staging_batch_id": getattr(item, 'staging_batch_id', None),
+                    "staged_at": item.staged_at.isoformat() if item.staged_at else None,
+                    "used_at": item.used_at.isoformat() if item.used_at else None,
+                    "returned_at": item.returned_at.isoformat() if item.returned_at else None,
+                    "receipt": {
+                        "id": receipt.id if receipt else None,
+                        "lot_number": receipt.lot_number if receipt else None,
+                        "location_id": receipt.location_id if receipt else None,
+                        "sub_location_id": receipt.sub_location_id if receipt else None,
+                        "unit": getattr(receipt, 'unit', None) or "cases",
+                        "pallets": getattr(receipt, 'pallets', None),
+                        "cases_per_pallet": getattr(receipt, 'cases_per_pallet', None)
+                    } if receipt else None,
+                    "pallets_staged": getattr(item, 'pallets_staged', None),
+                    "pallets_used": getattr(item, 'pallets_used', 0) or 0,
+                    "pallets_returned": getattr(item, 'pallets_returned', 0) or 0,
+                    "original_storage_row_id": getattr(item, 'original_storage_row_id', None),
+                    "staging_storage_row_id": getattr(item, 'staging_storage_row_id', None)
+                }
+                result.append(item_dict)
+            except Exception as e:
+                # Log error for this item but continue processing others
+                print(f"Error processing staging item {item.id}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        return result
+    except Exception as e:
+        print(f"Error in get_staging_items: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching staging items: {str(e)}"
+        )
+
+@router.post("/staging/{staging_item_id}/mark-used")
+async def mark_staging_used(
+    staging_item_id: str,
+    request: MarkStagingUsedRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Mark staged item as used for production"""
+    staging_item = db.query(StagingItem).filter(StagingItem.id == staging_item_id).first()
+    if not staging_item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Staging item not found"
+        )
+    
+    available_quantity = staging_item.quantity_staged - staging_item.quantity_used - staging_item.quantity_returned
+    
+    if request.quantity > available_quantity:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot use more than available. Available: {available_quantity}, Requested: {request.quantity}"
+        )
+    
+    # Get receipt for pallet calculations
+    receipt = db.query(Receipt).filter(Receipt.id == staging_item.receipt_id).first()
+    if not receipt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Receipt not found for staging item"
+        )
+    
+    # Calculate pallets used proportionally
+    pallets_to_free = 0
+    if staging_item.pallets_staged and staging_item.pallets_staged > 0 and staging_item.quantity_staged > 0:
+        # Calculate: (quantity_used / quantity_staged) * pallets_staged
+        pallets_to_free = (request.quantity / staging_item.quantity_staged) * staging_item.pallets_staged
+    
+    # Free pallets from original location's storage row (where items came from)
+    # This empties the rack space so it can be used for new inventory
+    if staging_item.original_storage_row_id and pallets_to_free > 0:
+        original_row = db.query(StorageRow).filter(StorageRow.id == staging_item.original_storage_row_id).first()
+        if original_row:
+            # Free pallets from original location (rack space is now empty and available)
+            original_row.occupied_pallets = max(0, (original_row.occupied_pallets or 0) - pallets_to_free)
+            
+            # Also update cases if receipt has cases_per_pallet
+            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
+                cases_to_free = pallets_to_free * receipt.cases_per_pallet
+                original_row.occupied_cases = max(0, (original_row.occupied_cases or 0) - cases_to_free)
+            
+            # Clear product_id if row is now empty (rack space is free for new inventory)
+            if original_row.occupied_pallets <= 0:
+                original_row.product_id = None
+    
+    # Also free from staging location's storage row if staging uses rows
+    if staging_item.staging_storage_row_id and pallets_to_free > 0:
+        staging_row = db.query(StorageRow).filter(StorageRow.id == staging_item.staging_storage_row_id).first()
+        if staging_row:
+            # Free pallets from staging location
+            staging_row.occupied_pallets = max(0, (staging_row.occupied_pallets or 0) - pallets_to_free)
+            
+            # Also update cases if receipt has cases_per_pallet
+            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
+                cases_to_free = pallets_to_free * receipt.cases_per_pallet
+                staging_row.occupied_cases = max(0, (staging_row.occupied_cases or 0) - cases_to_free)
+            
+            # Clear product_id if row is now empty
+            if staging_row.occupied_pallets <= 0:
+                staging_row.product_id = None
+    
+    # Update staging item
+    staging_item.quantity_used += request.quantity
+    staging_item.pallets_used = (staging_item.pallets_used or 0) + pallets_to_free
+    
+    if staging_item.quantity_used >= staging_item.quantity_staged:
+        staging_item.status = "used"
+    elif staging_item.quantity_used > 0:
+        staging_item.status = "partially_used"
+    staging_item.used_at = datetime.utcnow()
+    
+    # Create adjustment for consumption
+    adjustment_id = f"adjust-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+    adjustment = InventoryAdjustment(
+        id=adjustment_id,
+        receipt_id=staging_item.receipt_id,
+        category_id=receipt.category_id,
+        product_id=staging_item.product_id,
+        adjustment_type="production-consumption",
+        quantity=request.quantity,
+        reason="Used from staging for production",
+        status="approved",  # Auto-approved for staging usage
+        original_quantity=receipt.quantity,
+        new_quantity=receipt.quantity - request.quantity,
+        submitted_by=str(current_user.id),
+        approved_by=str(current_user.id),
+        approved_at=datetime.utcnow()
+    )
+    
+    # Update receipt quantity
+    receipt.quantity -= request.quantity
+    if receipt.quantity <= 0:
+        receipt.quantity = 0
+    
+    db.add(adjustment)
+    
+    db.commit()
+    db.refresh(staging_item)
+    return staging_item
+
+@router.post("/staging/{staging_item_id}/return")
+async def return_staging_item(
+    staging_item_id: str,
+    request: ReturnStagingRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Return staged item to warehouse"""
+    staging_item = db.query(StagingItem).filter(StagingItem.id == staging_item_id).first()
+    if not staging_item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Staging item not found"
+        )
+    
+    available_quantity = staging_item.quantity_staged - staging_item.quantity_used - staging_item.quantity_returned
+    
+    if request.quantity > available_quantity:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot return more than available. Available: {available_quantity}, Requested: {request.quantity}"
+        )
+    
+    # Get receipt for pallet calculations
+    receipt = db.query(Receipt).filter(Receipt.id == staging_item.receipt_id).first()
+    if not receipt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Receipt not found for staging item"
+        )
+    
+    # Get original transfer
+    transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == staging_item.transfer_id).first()
+    if not transfer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Original transfer not found"
+        )
+    
+    # Get unit from receipt
+    unit = receipt.unit or "cases"
+    product = db.query(Product).filter(Product.id == receipt.product_id).first()
+    if not unit or unit == "cases":
+        if product and product.quantity_uom:
+            unit = product.quantity_uom
+    
+    # Calculate pallets returned proportionally
+    pallets_to_free_from_original = 0
+    if staging_item.pallets_staged and staging_item.pallets_staged > 0 and staging_item.quantity_staged > 0:
+        # Calculate: (quantity_returned / quantity_staged) * pallets_staged
+        pallets_to_free_from_original = (request.quantity / staging_item.quantity_staged) * staging_item.pallets_staged
+    
+    # Free pallets from original location's storage row (where items came from)
+    # This empties the original rack space since items are being returned to a different location
+    if staging_item.original_storage_row_id and pallets_to_free_from_original > 0:
+        original_row = db.query(StorageRow).filter(StorageRow.id == staging_item.original_storage_row_id).first()
+        if original_row:
+            # Free pallets from original location (rack space is now empty)
+            original_row.occupied_pallets = max(0, (original_row.occupied_pallets or 0) - pallets_to_free_from_original)
+            
+            # Also update cases if receipt has cases_per_pallet
+            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
+                cases_to_free = pallets_to_free_from_original * receipt.cases_per_pallet
+                original_row.occupied_cases = max(0, (original_row.occupied_cases or 0) - cases_to_free)
+            
+            # Clear product_id if row is now empty (rack space is free for new inventory)
+            if original_row.occupied_pallets <= 0:
+                original_row.product_id = None
+    
+    # Also free from staging location's storage row if staging uses rows
+    if staging_item.staging_storage_row_id and pallets_to_free_from_original > 0:
+        staging_row = db.query(StorageRow).filter(StorageRow.id == staging_item.staging_storage_row_id).first()
+        if staging_row:
+            # Free pallets from staging location
+            staging_row.occupied_pallets = max(0, (staging_row.occupied_pallets or 0) - pallets_to_free_from_original)
+            
+            # Also update cases if receipt has cases_per_pallet
+            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
+                cases_to_free = pallets_to_free_from_original * receipt.cases_per_pallet
+                staging_row.occupied_cases = max(0, (staging_row.occupied_cases or 0) - cases_to_free)
+            
+            # Clear product_id if row is now empty
+            if staging_row.occupied_pallets <= 0:
+                staging_row.product_id = None
+    
+    # Pallets to reserve in return location
+    pallets_to_reserve_in_return = pallets_to_free_from_original
+    
+    # Reserve pallets in return location's storage row (if specified)
+    if request.to_storage_row_id and pallets_to_reserve_in_return > 0:
+        return_row = db.query(StorageRow).filter(StorageRow.id == request.to_storage_row_id).first()
+        if return_row:
+            # Check capacity
+            current_occupied = return_row.occupied_pallets or 0
+            capacity = return_row.pallet_capacity or 0
+            if capacity > 0 and (current_occupied + pallets_to_reserve_in_return) > capacity:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Returning {pallets_to_reserve_in_return} pallets would exceed row capacity ({capacity}). Currently occupied: {current_occupied}"
+                )
+            
+            # Reserve pallets in return location (new rack space is occupied)
+            return_row.occupied_pallets = current_occupied + pallets_to_reserve_in_return
+            
+            # Also update cases if receipt has cases_per_pallet
+            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
+                cases_to_reserve = pallets_to_reserve_in_return * receipt.cases_per_pallet
+                return_row.occupied_cases = (return_row.occupied_cases or 0) + cases_to_reserve
+            
+            # Set product_id if row doesn't have one
+            if not return_row.product_id:
+                return_row.product_id = receipt.product_id
+    elif pallets_to_reserve_in_return > 0:
+        # If no storage row specified, we free from original/staging but don't reserve anywhere
+        # This means items are returned but not assigned to a specific rack yet
+        pass
+    
+    # Create return transfer
+    return_transfer_id = f"transfer-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+    return_transfer = InventoryTransfer(
+        id=return_transfer_id,
+        receipt_id=staging_item.receipt_id,
+        from_location_id=transfer.to_location_id,  # From staging
+        from_sub_location_id=transfer.to_sub_location_id,
+        to_location_id=request.to_location_id,  # To new warehouse location
+        to_sub_location_id=request.to_sub_location_id,
+        quantity=request.quantity,
+        unit=unit,
+        reason="Returned from staging",
+        transfer_type="warehouse-transfer",
+        requested_by=str(current_user.id),
+        status="completed"  # Auto-completed
+    )
+    
+    db.add(return_transfer)
+    
+    # Update receipt location
+    receipt.location_id = request.to_location_id
+    receipt.sub_location_id = request.to_sub_location_id
+    if request.to_storage_row_id:
+        receipt.storage_row_id = request.to_storage_row_id
+    
+    # Update staging item
+    staging_item.quantity_returned += request.quantity
+    staging_item.pallets_returned = (staging_item.pallets_returned or 0) + pallets_to_free_from_original
+    
+    if staging_item.quantity_returned >= staging_item.quantity_staged - staging_item.quantity_used:
+        staging_item.status = "returned" if staging_item.quantity_used == 0 else "partially_returned"
+    staging_item.returned_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(staging_item)
+    return staging_item

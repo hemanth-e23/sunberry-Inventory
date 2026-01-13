@@ -35,12 +35,13 @@ async def login(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        print(f"Login error: {e}")
-        traceback.print_exc()
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.exception(f"Login error: {e}")
+        # Don't expose error details to client
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+            detail="An error occurred during login"
         )
 
 @router.post("/register", response_model=UserSchema)

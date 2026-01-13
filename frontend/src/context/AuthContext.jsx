@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import axios from 'axios';
+import { useAutoLogout } from '../hooks/useAutoLogout';
 
 // Dynamic API URL - use current hostname for network access
 const API_BASE_URL = `http://${window.location.hostname}:8000/api`;
@@ -18,6 +19,16 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  const logout = () => {
+    setUser(null);
+    setIsAuthenticated(false);
+    localStorage.removeItem('user');
+    localStorage.removeItem('token');
+  };
+
+  // Auto-logout after 30 minutes of inactivity
+  useAutoLogout(logout, isAuthenticated, 30);
 
   useEffect(() => {
     // Check for existing session on app load
@@ -86,13 +97,6 @@ export const AuthProvider = ({ children }) => {
       const errorMessage = error.response?.data?.detail || 'Invalid credentials';
       return { success: false, error: errorMessage };
     }
-  };
-
-  const logout = () => {
-    setUser(null);
-    setIsAuthenticated(false);
-    localStorage.removeItem('user');
-    localStorage.removeItem('token');
   };
 
   const value = {

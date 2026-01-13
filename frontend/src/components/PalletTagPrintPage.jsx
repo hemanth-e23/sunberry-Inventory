@@ -105,8 +105,8 @@ const PalletTagPrintPage = () => {
             const barcode1Element = document.getElementById(barcode1Id);
             if (barcode1Element && codeForBarcode2) {
               try {
-                // Clear previous barcode
-                barcode1Element.innerHTML = '';
+                // Clear previous barcode - Safe: only clearing, not setting user content
+                barcode1Element.textContent = '';
                 JsBarcode(barcode1Element, codeForBarcode2, {
                   format: 'CODE128',
                   width: 2,
@@ -126,8 +126,8 @@ const PalletTagPrintPage = () => {
             const barcode2Element = document.getElementById(barcode2Id);
             if (barcode2Element && lotNo) {
               try {
-                // Clear previous barcode
-                barcode2Element.innerHTML = '';
+                // Clear previous barcode - Safe: only clearing, not setting user content
+                barcode2Element.textContent = '';
                 JsBarcode(barcode2Element, lotNo, {
                   format: 'CODE128',
                   width: 2,

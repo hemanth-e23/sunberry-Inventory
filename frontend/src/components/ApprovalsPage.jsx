@@ -1877,9 +1877,12 @@ const ApprovalsPage = () => {
                   <button className="secondary-button danger" onClick={() => setShowRejectModal(true)}>
                     Reject
                   </button>
-                  <button className="secondary-button" onClick={() => setShowSendBackModal(true)}>
-                    Send Back
-                  </button>
+                  {/* Only admin and supervisor can send back - warehouse workers can only approve/reject */}
+                  {(user?.role === 'admin' || user?.role === 'supervisor') && (
+                    <button className="secondary-button" onClick={() => setShowSendBackModal(true)}>
+                      Send Back
+                    </button>
+                  )}
                   <button className="primary-button" onClick={handleApproveRequest} disabled={isApproving}>
                     {isApproving ? 'Approving...' : 'Approve'}
                   </button>

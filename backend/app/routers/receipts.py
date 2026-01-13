@@ -348,8 +348,8 @@ async def send_back_receipt(
 ):
     """Send back a receipt for correction
     
-    - Admin/supervisor can send back anything
-    - Warehouse worker can send back receipts submitted by OTHER users (not their own)
+    - Only Admin/supervisor can send back receipts
+    - Warehouse workers cannot send back (they can only approve/reject)
     """
     receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
     if not receipt:
@@ -364,11 +364,11 @@ async def send_back_receipt(
             detail="Receipt is not in a state that can be sent back"
         )
     
-    # Check permissions: warehouse workers cannot send back their own receipts
-    if current_user.role == "warehouse" and receipt.submitted_by == str(current_user.id):
+    # Check permissions: only admin and supervisor can send back
+    if current_user.role == "warehouse":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You cannot send back your own receipts. Only other users' receipts can be sent back."
+            detail="Warehouse workers cannot send back receipts. Only admins and supervisors can send back for correction."
         )
     
     # Clear storage row occupancy for sent-back receipts (free up reserved capacity for correction)

@@ -46,3 +46,20 @@ Thumbs.db
 # Misc
 .DS_Store
 .cursor/
+
+# Test files
+backend/tests/
+frontend/src/tests/
+backend/pytest.ini
+frontend/vitest.config.js
+backend/.coverage
+backend/htmlcov/
+*.pyc
+
+# Documentation files
+*.md
+
+# Config files with sensitive data (if already tracked, use: git rm --cached backend/app/config.py)
+backend/app/config.py
+.env.example
+.env.template

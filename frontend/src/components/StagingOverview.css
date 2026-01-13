@@ -1,0 +1,152 @@
+.staging-overview {
+  padding: 1.5rem;
+}
+
+.staging-table-container {
+  overflow-x: auto;
+  margin-top: 1rem;
+}
+
+.staging-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: white;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.staging-table thead {
+  background-color: #f5f5f5;
+}
+
+.staging-table th {
+  padding: 0.75rem;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid #ddd;
+}
+
+.staging-table td {
+  padding: 0.75rem;
+  border-bottom: 1px solid #eee;
+}
+
+.staging-table tbody tr:hover {
+  background-color: #f9f9f9;
+}
+
+.staging-table .text-right {
+  text-align: right;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.status-badge.staged {
+  background-color: #e3f2fd;
+  color: #1976d2;
+}
+
+.status-badge.partially-used {
+  background-color: #fff3e0;
+  color: #f57c00;
+}
+
+.status-badge.used {
+  background-color: #e8f5e9;
+  color: #388e3c;
+}
+
+.status-badge.returned {
+  background-color: #f3e5f5;
+  color: #7b1fa2;
+}
+
+.status-badge.partially-returned {
+  background-color: #fce4ec;
+  color: #c2185b;
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: white;
+  padding: 2rem;
+  border-radius: 8px;
+  max-width: 500px;
+  width: 90%;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-content h3 {
+  margin-top: 0;
+  margin-bottom: 1rem;
+}
+
+.modal-content label {
+  display: block;
+  margin-bottom: 1rem;
+}
+
+.modal-content label span {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+}
+
+.modal-content input,
+.modal-content select {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 1rem;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  margin-top: 1.5rem;
+}
+
+.filters-section {
+  background-color: #f5f5f5;
+  padding: 1rem;
+  border-radius: 4px;
+}
+
+.filters-section label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.filters-section label span {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.filters-section select,
+.filters-section input {
+  padding: 0.5rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}

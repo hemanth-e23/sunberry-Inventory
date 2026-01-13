@@ -21,6 +21,7 @@ import ReceiptCorrectionsPage from './components/ReceiptCorrectionsPage';
 import UnauthorizedPage from './components/UnauthorizedPage';
 import CycleCountingPage from './components/CycleCountingPage';
 import PalletTagPrintPage from './components/PalletTagPrintPage';
+import StagingOverview from './components/StagingOverview';
 
 // Context
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -28,7 +29,12 @@ import { AppDataProvider } from './context/AppDataContext';
 
 // Protected Route Component
 function ProtectedRoute({ children, requiredRole }) {
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, loading } = useAuth();
+
+  // Wait for authentication check to complete before making redirect decisions
+  if (loading) {
+    return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>Loading...</div>;
+  }
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
@@ -57,7 +63,7 @@ export const getDashboardPath = (userRole) => {
 
 // Main App Routes
 function AppRoutes() {
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, loading } = useAuth();
 
   const roleRedirects = {
     admin: '/admin',
@@ -123,6 +129,14 @@ function AppRoutes() {
       <Route path="/admin/inventory-actions" element={
         <ProtectedRoute requiredRole="admin">
           {inventoryActionsElement}
+        </ProtectedRoute>
+      } />
+
+      <Route path="/admin/staging" element={
+        <ProtectedRoute requiredRole="admin">
+          <Layout>
+            <StagingOverview />
+          </Layout>
         </ProtectedRoute>
       } />
 
@@ -197,6 +211,14 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
 
+      <Route path="/warehouse/staging" element={
+        <ProtectedRoute requiredRole="warehouse">
+          <Layout>
+            <StagingOverview />
+          </Layout>
+        </ProtectedRoute>
+      } />
+
       <Route path="/warehouse/receipt-corrections" element={
         <ProtectedRoute requiredRole="warehouse">
           <Layout>
@@ -259,6 +281,14 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
 
+      <Route path="/supervisor/staging" element={
+        <ProtectedRoute requiredRole="supervisor">
+          <Layout>
+            <StagingOverview />
+          </Layout>
+        </ProtectedRoute>
+      } />
+
       <Route path="/supervisor/products" element={
         <ProtectedRoute requiredRole="supervisor">
           <Layout>
@@ -302,7 +332,9 @@ function AppRoutes() {
       <Route
         path="/"
         element={
-          isAuthenticated ? (
+          loading ? (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>Loading...</div>
+          ) : isAuthenticated ? (
             <Navigate to={defaultRedirect} replace />
           ) : (
             <Navigate to="/login" replace />
@@ -315,7 +347,9 @@ function AppRoutes() {
       <Route
         path="*"
         element={
-          isAuthenticated ? (
+          loading ? (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>Loading...</div>
+          ) : isAuthenticated ? (
             <Navigate to={defaultRedirect} replace />
           ) : (
             <Navigate to="/login" replace />

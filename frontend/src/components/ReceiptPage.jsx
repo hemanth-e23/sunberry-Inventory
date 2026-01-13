@@ -108,7 +108,46 @@ const ReceiptPage = () => {
   const [floorPallets, setFloorPallets] = useState("0");
   const [confirmation, setConfirmation] = useState({ open: false, payload: null, summary: null });
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [lotNumberManuallyEdited, setLotNumberManuallyEdited] = useState(false);
   const formRef = useRef(null);
+  
+  // Helper function to calculate day of year (1-365/366)
+  const getDayOfYear = (date) => {
+    if (!date) return null;
+    const d = new Date(date);
+    const start = new Date(d.getFullYear(), 0, 0);
+    const diff = d - start;
+    const oneDay = 1000 * 60 * 60 * 24;
+    return Math.floor(diff / oneDay);
+  };
+  
+  // Helper function to extract line number from line name (e.g., "Line 1" -> "1", "L1" -> "1")
+  const extractLineNumber = (lineId) => {
+    if (!lineId) return null;
+    const line = productionLines.find(l => l.id === lineId);
+    if (!line) return null;
+    
+    // Try to extract number from name (e.g., "Line 1", "L1", "1", "Line Number 1")
+    const match = line.name.match(/\d+/);
+    return match ? match[0] : null;
+  };
+  
+  // Generate lot number: MP[day_of_year][year]L[line_number]
+  const generateLotNumber = (productionDate, lineNumber) => {
+    if (!productionDate || !lineNumber) return "";
+    
+    const dayOfYear = getDayOfYear(productionDate);
+    if (!dayOfYear) return "";
+    
+    const lineNum = extractLineNumber(lineNumber);
+    if (!lineNum) return "";
+    
+    const date = new Date(productionDate);
+    const year = date.getFullYear().toString().slice(-2); // Last 2 digits of year
+    
+    // Format: MP + 3-digit day of year + 2-digit year + L + line number
+    return `MP${String(dayOfYear).padStart(3, '0')}${year}L${lineNum}`;
+  };
   
   // State for raw materials/packaging multi-row allocation
   const [rawMaterialRowAllocations, setRawMaterialRowAllocations] = useState([]);
@@ -402,6 +441,17 @@ const ReceiptPage = () => {
     const { name, value, type, checked } = event.target;
     const parsedValue = type === "checkbox" ? checked : value;
 
+    // Track if lot number is manually edited
+    if (name === "lotNo") {
+      setLotNumberManuallyEdited(true);
+    }
+    
+    // Reset manual edit flag when production date or line number changes
+    // This allows regeneration when these fields change
+    if (name === "productionDate" || name === "lineNumber") {
+      setLotNumberManuallyEdited(false);
+    }
+
     setFormData((prev) => {
       const next = {
         ...prev,
@@ -453,6 +503,7 @@ const ReceiptPage = () => {
       categoryId: "",
       productId: "",
     }));
+    setLotNumberManuallyEdited(false);
   };
 
   const handleCategoryChange = (categoryId) => {
@@ -463,6 +514,7 @@ const ReceiptPage = () => {
       categoryId,
       productId: "",
     }));
+    setLotNumberManuallyEdited(false);
   };
 
   const finishedGoodOptions = useMemo(() => {
@@ -518,6 +570,7 @@ const ReceiptPage = () => {
     }));
     setManualAllocations([]);
     setFloorPallets("0");
+    setLotNumberManuallyEdited(false);
   };
 
   useEffect(() => {
@@ -542,6 +595,19 @@ const ReceiptPage = () => {
       }
     }
   }, [formData.productionDate, formData.expireYears, formData.expirationTouched, isFinishedGood, formData.expiration]);
+
+  // Auto-generate lot number for finished goods based on production date and line number
+  useEffect(() => {
+    if (isFinishedGood && !lotNumberManuallyEdited && formData.productionDate && formData.lineNumber) {
+      const generatedLotNo = generateLotNumber(formData.productionDate, formData.lineNumber);
+      if (generatedLotNo && generatedLotNo !== formData.lotNo) {
+        setFormData((prev) => ({
+          ...prev,
+          lotNo: generatedLotNo,
+        }));
+      }
+    }
+  }, [isFinishedGood, formData.productionDate, formData.lineNumber, lotNumberManuallyEdited]);
 
   useEffect(() => {
     const form = formRef.current;
@@ -876,6 +942,7 @@ const ReceiptPage = () => {
       setFloorPallets("0");
       setAutoQuantity(null);
       setIsSubmitting(false);
+      setLotNumberManuallyEdited(false);
       setFeedback({
         type: "success",
         message: "Receipt submitted for approval.",
@@ -916,6 +983,7 @@ const ReceiptPage = () => {
       setFloorPallets("0");
       setAutoQuantity(null);
       setIsSubmitting(false);
+      setLotNumberManuallyEdited(false);
       setFeedback({
         type: "success",
         message: "Receipt submitted for approval.",
@@ -1138,22 +1206,6 @@ const ReceiptPage = () => {
                     />
                   </label>
 
-                  <label>
-                    <span>Lot Number {requiredStar}</span>
-                    <input
-                      type="text"
-                      name="lotNo"
-                      value={formData.lotNo}
-                      onChange={handleChange}
-                      required
-                      aria-label="Lot number"
-                      aria-describedby="lot-number-help"
-                    />
-                    <span id="lot-number-help" className="sr-only">
-                      Unique lot number for this inventory item
-                    </span>
-                  </label>
-
                   {isFinishedGood && (
                     <label>
                       <span>Shift {requiredStar}</span>
@@ -1191,6 +1243,22 @@ const ReceiptPage = () => {
                       </select>
                     </label>
                   )}
+
+                  <label>
+                    <span>Lot Number {requiredStar}</span>
+                    <input
+                      type="text"
+                      name="lotNo"
+                      value={formData.lotNo}
+                      onChange={handleChange}
+                      required
+                      aria-label="Lot number"
+                      aria-describedby="lot-number-help"
+                    />
+                    <span id="lot-number-help" className="sr-only">
+                      Unique lot number for this inventory item
+                    </span>
+                  </label>
 
                   {(isIngredient || showPackagingFields) && (
                     <React.Fragment>
@@ -1891,6 +1959,7 @@ const ReceiptPage = () => {
                 onClick={() => {
                   setFormData(defaultFormState);
                   setAutoQuantity(null);
+                  setLotNumberManuallyEdited(false);
                 }}
               >
                 Clear

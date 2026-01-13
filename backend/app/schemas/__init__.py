@@ -1,4 +1,6 @@
-from pydantic import BaseModel, EmailStr
+from __future__ import annotations
+
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List
 from datetime import datetime
 
@@ -9,21 +11,21 @@ class BaseSchema(BaseModel):
 
 # User schemas
 class UserBase(BaseSchema):
-    username: str
-    name: str
-    email: EmailStr
-    role: str
+    username: str = Field(..., min_length=3, max_length=50, description="Username (3-50 characters)")
+    name: str = Field(..., min_length=1, max_length=100, description="Full name (1-100 characters)")
+    email: EmailStr = Field(..., max_length=100, description="Email address")
+    role: str = Field(..., max_length=20, description="User role")
 
 class UserCreate(UserBase):
-    password: str
+    password: str = Field(..., min_length=8, max_length=128, description="Password (minimum 8 characters)")
 
 class UserUpdate(BaseSchema):
-    username: Optional[str] = None
-    name: Optional[str] = None
-    email: Optional[EmailStr] = None
-    role: Optional[str] = None
+    username: Optional[str] = Field(None, min_length=3, max_length=50)
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    email: Optional[EmailStr] = Field(None, max_length=100)
+    role: Optional[str] = Field(None, max_length=20)
     is_active: Optional[bool] = None
-    password: Optional[str] = None
+    password: Optional[str] = Field(None, min_length=8, max_length=128)
 
 class User(UserBase):
     id: str
@@ -39,21 +41,21 @@ class TokenData(BaseSchema):
     username: Optional[str] = None
 
 class LoginRequest(BaseSchema):
-    username: str
-    password: str
+    username: str = Field(..., min_length=1, max_length=50)
+    password: str = Field(..., min_length=1, max_length=128)
 
 # Category schemas
 class CategoryGroupBase(BaseSchema):
-    id: str
-    name: str
-    description: Optional[str] = None
+    id: str = Field(..., max_length=50)
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
 
 class CategoryGroupCreate(CategoryGroupBase):
     pass
 
 class CategoryGroupUpdate(BaseSchema):
-    name: Optional[str] = None
-    description: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
     is_active: Optional[bool] = None
 
 class CategoryGroup(CategoryGroupBase):
@@ -61,18 +63,18 @@ class CategoryGroup(CategoryGroupBase):
     created_at: datetime
 
 class CategoryBase(BaseSchema):
-    id: str
-    name: str
-    type: str
-    parent_id: Optional[str] = None
+    id: str = Field(..., max_length=50)
+    name: str = Field(..., min_length=1, max_length=100)
+    type: str = Field(..., max_length=50)
+    parent_id: Optional[str] = Field(None, max_length=50)
 
 class CategoryCreate(CategoryBase):
     pass
 
 class CategoryUpdate(BaseSchema):
-    name: Optional[str] = None
-    type: Optional[str] = None
-    parent_id: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    type: Optional[str] = Field(None, max_length=50)
+    parent_id: Optional[str] = Field(None, max_length=50)
     is_active: Optional[bool] = None
 
 class Category(CategoryBase):
@@ -81,12 +83,12 @@ class Category(CategoryBase):
 
 # Vendor schemas
 class VendorBase(BaseSchema):
-    id: str
-    name: str
-    contact_person: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    address: Optional[str] = None
+    id: str = Field(..., max_length=50)
+    name: str = Field(..., min_length=1, max_length=100)
+    contact_person: Optional[str] = Field(None, max_length=100)
+    email: Optional[str] = Field(None, max_length=100)
+    phone: Optional[str] = Field(None, max_length=20)
+    address: Optional[str] = Field(None, max_length=500)
 
 class VendorCreate(VendorBase):
     pass
@@ -304,9 +306,9 @@ class ReceiptBase(BaseSchema):
     pallets: Optional[float] = None  # Pallet count for raw materials/packaging row occupancy
     hold: bool = False
     held_quantity: float = 0  # Quantity currently on hold
-    hold_location: Optional[str] = None  # Row/location name on hold
+    hold_location: Optional[str] = Field(None, max_length=100)  # Row/location name on hold
     allocation: Optional[dict] = None
-    note: Optional[str] = None
+    note: Optional[str] = Field(None, max_length=5000)  # Max 5000 characters for notes
 
 class ReceiptCreate(ReceiptBase):
     id: Optional[str] = None  # Allow frontend to provide ID
@@ -352,9 +354,9 @@ class InventoryTransferBase(BaseSchema):
     to_sub_location_id: Optional[str] = None
     quantity: float
     unit: str = "cases"
-    reason: Optional[str] = None
+    reason: Optional[str] = Field(None, max_length=1000)  # Max 1000 characters for reason
     transfer_type: str = "warehouse-transfer"  # warehouse-transfer, shipped-out
-    order_number: Optional[str] = None
+    order_number: Optional[str] = Field(None, max_length=100)
     source_breakdown: Optional[List[dict]] = None
     destination_breakdown: Optional[List[dict]] = None
 
@@ -363,7 +365,7 @@ class InventoryTransferCreate(InventoryTransferBase):
 
 class InventoryTransferUpdate(BaseSchema):
     status: Optional[str] = None
-    reason: Optional[str] = None
+    reason: Optional[str] = Field(None, max_length=1000)
 
 class InventoryTransfer(InventoryTransferBase):
     id: str
@@ -381,8 +383,8 @@ class InventoryAdjustmentBase(BaseSchema):
     product_id: Optional[str] = None
     adjustment_type: str
     quantity: float
-    reason: str
-    recipient: Optional[str] = None
+    reason: str = Field(..., max_length=1000)  # Required, max 1000 characters
+    recipient: Optional[str] = Field(None, max_length=100)
     source_breakdown: Optional[List[dict]] = None
 
 class InventoryAdjustmentCreate(InventoryAdjustmentBase):
@@ -390,7 +392,7 @@ class InventoryAdjustmentCreate(InventoryAdjustmentBase):
 
 class InventoryAdjustmentUpdate(BaseSchema):
     status: Optional[str] = None
-    reason: Optional[str] = None
+    reason: Optional[str] = Field(None, max_length=1000)
 
 class InventoryAdjustment(InventoryAdjustmentBase):
     id: str
@@ -410,7 +412,7 @@ class HoldItem(BaseSchema):
 class InventoryHoldActionBase(BaseSchema):
     receipt_id: Optional[str] = None  # For legacy full-lot holds
     action: str  # hold, release
-    reason: str
+    reason: str = Field(..., max_length=1000)  # Required, max 1000 characters
     hold_items: Optional[List[HoldItem]] = None  # For partial holds by location
     total_quantity: Optional[float] = None  # Total quantity being held
 
@@ -419,7 +421,7 @@ class InventoryHoldActionCreate(InventoryHoldActionBase):
 
 class InventoryHoldActionUpdate(BaseSchema):
     status: Optional[str] = None
-    reason: Optional[str] = None
+    reason: Optional[str] = Field(None, max_length=1000)
 
 class InventoryHoldAction(InventoryHoldActionBase):
     id: str
@@ -446,3 +448,71 @@ class CycleCountCreate(CycleCountBase):
 class CycleCount(CycleCountBase):
     id: str
     created_at: datetime
+
+# Staging schemas
+class StagingItemBase(BaseSchema):
+    transfer_id: str
+    receipt_id: str
+    product_id: str
+    quantity_staged: float
+    quantity_used: float = 0
+    quantity_returned: float = 0
+    pallets_staged: Optional[float] = None
+    pallets_used: float = 0
+    pallets_returned: float = 0
+    original_storage_row_id: Optional[str] = None
+    staging_storage_row_id: Optional[str] = None
+    status: str = "staged"
+    staging_batch_id: Optional[str] = None
+
+class StagingItemCreate(StagingItemBase):
+    pass
+
+class StagingItemUpdate(BaseSchema):
+    quantity_used: Optional[float] = None
+    quantity_returned: Optional[float] = None
+    status: Optional[str] = None
+
+class StagingItem(StagingItemBase):
+    id: str
+    staged_at: datetime
+    used_at: Optional[datetime] = None
+    returned_at: Optional[datetime] = None
+
+# Staging request schemas
+class StagingLotSuggestion(BaseSchema):
+    receipt_id: str
+    lot_number: str
+    location_id: Optional[str] = None
+    location_name: Optional[str] = None
+    sub_location_id: Optional[str] = None
+    sub_location_name: Optional[str] = None
+    expiration_date: Optional[datetime] = None
+    available_quantity: float
+    unit: Optional[str] = "cases"
+
+class StagingLotRequest(BaseSchema):
+    receipt_id: str
+    quantity: float
+
+class StagingItemRequest(BaseSchema):
+    product_id: str
+    quantity_needed: float
+    lots: List[StagingLotRequest]  # Multiple lots for same product
+
+class CreateStagingRequest(BaseSchema):
+    staging_location_id: str
+    staging_sub_location_id: Optional[str] = None
+    items: List[StagingItemRequest]
+
+class MarkStagingUsedRequest(BaseSchema):
+    quantity: float
+
+class ReturnStagingRequest(BaseSchema):
+    quantity: float
+    to_location_id: str
+    to_sub_location_id: Optional[str] = None
+    to_storage_row_id: Optional[str] = None  # Optional: specify which row/rack in return location
+
+# Rebuild models to resolve forward references
+SubLocation.model_rebuild()

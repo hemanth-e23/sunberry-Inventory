@@ -1618,7 +1618,6 @@ const InventoryOverview = () => {
                         if (bulkAction === "print") {
                           setShowPrintModal(true);
                         } else {
-                          // TODO: Implement other bulk actions
                           alert(`Bulk action "${bulkAction}" for ${selectedItems.size} items`);
                         }
                         setBulkAction("");
