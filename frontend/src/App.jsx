@@ -382,7 +382,7 @@ function App() {
     <ErrorBoundary>
       <AuthProvider>
         <AppDataProvider>
-          <Router basename="/ims">
+          <Router>
             <div className="App">
               <AppRoutes />
             </div>
