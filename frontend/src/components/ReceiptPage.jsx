@@ -1472,12 +1472,22 @@ const ReceiptPage = () => {
                                           checked={isSelected}
                                           onChange={(e) => {
                                             if (e.target.checked) {
+                                              // Calculate how many pallets are already allocated to other rows
+                                              const alreadyAllocated = rawMaterialRowAllocations.reduce(
+                                                (sum, a) => sum + (Number(a.pallets) || 0), 0
+                                              );
+                                              const totalNeeded = Number(formData.pallets) || 0;
+                                              const remainingToAllocate = Math.max(0, totalNeeded - alreadyAllocated);
+                                              
+                                              // For the new row, assign remaining pallets (capped by row capacity)
+                                              const palletsForThisRow = Math.min(remainingToAllocate, row.available || 0);
+                                              
                                               // Add row allocation
                                               const newAlloc = {
                                                 id: `raw-alloc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                                                 rowId: row.value,
                                                 rowName: row.rowData.name,
-                                                pallets: canFitAll ? formData.pallets : Math.min(Number(formData.pallets), row.available || 0),
+                                                pallets: palletsForThisRow,
                                                 available: row.available,
                                                 capacity: row.capacity,
                                               };
@@ -1519,7 +1529,9 @@ const ReceiptPage = () => {
                                   </div>
                                   {rawMaterialRowAllocations.map((alloc) => {
                                     const row = availableRows.find(r => r.value === alloc.rowId);
-                                    const maxPallets = row?.available || alloc.capacity || 0;
+                                    // Use the original available capacity (stored at selection time), not the reduced available
+                                    // The reduced 'row?.available' incorrectly subtracts current allocations from this form
+                                    const maxPallets = alloc.available || row?.capacity || alloc.capacity || 0;
                                     
                                     return (
                                       <div key={alloc.id} style={{ marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
