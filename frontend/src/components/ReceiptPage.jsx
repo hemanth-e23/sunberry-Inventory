@@ -389,26 +389,18 @@ const ReceiptPage = () => {
       .map(row => {
         const capacity = row.palletCapacity || 0;
         const occupied = row.occupiedPallets || 0;
+        // This is the TRUE available from database (capacity - already occupied)
         const available = capacity > 0 ? Math.max(0, capacity - occupied) : null;
         
-        // Calculate how many pallets from other allocations in this form
-        const palletsFromOtherAllocations = rawMaterialRowAllocations
-          .filter(alloc => alloc.rowId === row.id)
-          .reduce((sum, alloc) => sum + (Number(alloc.pallets) || 0), 0);
-        
-        const actuallyAvailable = available !== null 
-          ? Math.max(0, available - palletsFromOtherAllocations)
-          : null;
-        
-        // Determine if row can fit the needed pallets
+        // Determine if row can fit the needed pallets (use TRUE database available)
         let canFit = true;
         let fitStatus = '';
-        if (totalPalletsNeeded > 0 && actuallyAvailable !== null) {
-          if (actuallyAvailable >= totalPalletsNeeded) {
+        if (totalPalletsNeeded > 0 && available !== null) {
+          if (available >= totalPalletsNeeded) {
             fitStatus = '✓ Can fit all';
             canFit = true;
-          } else if (actuallyAvailable > 0) {
-            fitStatus = `Can fit ${actuallyAvailable} of ${totalPalletsNeeded}`;
+          } else if (available > 0) {
+            fitStatus = `Can fit ${available} of ${totalPalletsNeeded}`;
             canFit = true; // Can partially fit
           } else {
             fitStatus = 'No capacity';
@@ -419,10 +411,10 @@ const ReceiptPage = () => {
         return {
           value: row.id,
           rowData: row,
-          label: actuallyAvailable !== null
-            ? `${row.name} (${actuallyAvailable} available of ${capacity})`
+          label: available !== null
+            ? `${row.name} (${available} available of ${capacity})`
             : row.name,
-          available: actuallyAvailable,
+          available: available, // TRUE database available, not reduced by current form allocations
           capacity: capacity,
           canFit: canFit,
           fitStatus: fitStatus,
@@ -435,7 +427,7 @@ const ReceiptPage = () => {
         }
         return true;
       });
-  }, [formData.location, formData.subLocation, formData.pallets, locations, subLocationMap, rawMaterialRowAllocations]);
+  }, [formData.location, formData.subLocation, formData.pallets, locations, subLocationMap]);
 
   const handleChange = (event) => {
     const { name, value, type, checked } = event.target;
@@ -797,17 +789,16 @@ const ReceiptPage = () => {
       }
       
       // Validate each row doesn't exceed capacity
+      // Use alloc.available (original capacity from database) not row.available (which incorrectly subtracts current allocations)
       for (const alloc of rawMaterialRowAllocations) {
-        const row = availableRows.find(r => r.value === alloc.rowId);
-        if (row && row.available !== null) {
-          const palletsToAdd = Number(alloc.pallets);
-          if (palletsToAdd > row.available) {
-            setFeedback({
-              type: "error",
-              message: `Row ${alloc.rowName} cannot accommodate ${palletsToAdd} pallets. Available: ${row.available} pallets.`,
-            });
-            return;
-          }
+        const palletsToAdd = Number(alloc.pallets);
+        const originalAvailable = alloc.available; // This is the true available from when row was selected
+        if (originalAvailable !== null && palletsToAdd > originalAvailable) {
+          setFeedback({
+            type: "error",
+            message: `Row ${alloc.rowName} cannot accommodate ${palletsToAdd} pallets. Available: ${originalAvailable} pallets.`,
+          });
+          return;
         }
       }
     }
