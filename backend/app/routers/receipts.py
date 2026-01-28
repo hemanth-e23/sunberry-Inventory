@@ -408,7 +408,7 @@ async def send_back_receipt(
                 if storage_row.occupied_pallets <= 0:
                     storage_row.product_id = None
     
-    receipt.status = "recorded"  # Back to recorded for warehouse worker to fix
+    receipt.status = "sent-back"  # Distinct status so it leaves approval queue and shows in Receipt Corrections
     receipt.note = f"{receipt.note or ''}\n[Sent Back by {current_user.name}]: {reason}".strip()
     
     db.commit()

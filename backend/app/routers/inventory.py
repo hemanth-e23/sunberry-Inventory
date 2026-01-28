@@ -234,6 +234,58 @@ async def approve_transfer(
                                 if storage_row.occupied_pallets <= 0:
                                     storage_row.product_id = None
     
+    # For raw materials/packaging (non-finished goods), free storage row occupancy when shipping out
+    if transfer.transfer_type == "shipped-out" and not is_finished_goods:
+        transfer_quantity = float(transfer.quantity)
+        receipt_total_quantity = float(receipt.quantity)
+        
+        if receipt_total_quantity > 0:
+            proportion_shipped = min(1.0, transfer_quantity / receipt_total_quantity)
+            
+            # Handle multiple row allocations (rawMaterialRowAllocations)
+            if receipt.raw_material_row_allocations and isinstance(receipt.raw_material_row_allocations, list):
+                for alloc in receipt.raw_material_row_allocations:
+                    row_id = alloc.get("rowId")
+                    alloc_pallets = float(alloc.get("pallets", 0))
+                    
+                    if row_id and alloc_pallets > 0:
+                        pallets_to_free = alloc_pallets * proportion_shipped
+                        
+                        storage_row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
+                        if storage_row and pallets_to_free > 0:
+                            # Free pallets from storage row (location is now available again)
+                            storage_row.occupied_pallets = max(0, (storage_row.occupied_pallets or 0) - pallets_to_free)
+                            
+                            # Also update cases if receipt has cases_per_pallet
+                            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
+                                cases_to_free = pallets_to_free * receipt.cases_per_pallet
+                                storage_row.occupied_cases = max(0, (storage_row.occupied_cases or 0) - cases_to_free)
+                            
+                            # Clear product_id if row is now empty (location is free for new inventory)
+                            if storage_row.occupied_pallets <= 0:
+                                storage_row.product_id = None
+            
+            # Handle single row allocation (backward compatibility)
+            elif receipt.storage_row_id and receipt.pallets:
+                receipt_total_pallets = float(receipt.pallets)
+                
+                if receipt_total_pallets > 0:
+                    pallets_to_free = receipt_total_pallets * proportion_shipped
+                    
+                    storage_row = db.query(StorageRow).filter(StorageRow.id == receipt.storage_row_id).first()
+                    if storage_row and pallets_to_free > 0:
+                        # Free pallets from storage row (location is now available again)
+                        storage_row.occupied_pallets = max(0, (storage_row.occupied_pallets or 0) - pallets_to_free)
+                        
+                        # Also update cases if receipt has cases_per_pallet
+                        if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
+                            cases_to_free = pallets_to_free * receipt.cases_per_pallet
+                            storage_row.occupied_cases = max(0, (storage_row.occupied_cases or 0) - cases_to_free)
+                        
+                        # Clear product_id if row is now empty (location is free for new inventory)
+                        if storage_row.occupied_pallets <= 0:
+                            storage_row.product_id = None
+    
     # Update receipt quantity based on transfer type
     if transfer.transfer_type == "shipped-out":
         # For shipped-out, reduce quantity
@@ -1287,9 +1339,42 @@ async def mark_staging_used(
         # Calculate: (quantity_used / quantity_staged) * pallets_staged
         pallets_to_free = (request.quantity / staging_item.quantity_staged) * staging_item.pallets_staged
     
-    # Free pallets from original location's storage row (where items came from)
-    # This empties the rack space so it can be used for new inventory
-    if staging_item.original_storage_row_id and pallets_to_free > 0:
+    # Calculate proportion of receipt that was staged, and proportion of staged that is now being used
+    receipt_total_quantity = float(receipt.quantity)
+    quantity_staged = float(staging_item.quantity_staged)
+    quantity_used_now = float(request.quantity)
+    
+    # Proportion: how much of the original receipt is being freed (used from staging)
+    proportion_of_receipt_freed = 0
+    if receipt_total_quantity > 0 and quantity_staged > 0:
+        proportion_of_receipt_freed = (quantity_used_now / quantity_staged) * (quantity_staged / receipt_total_quantity)
+    
+    # Handle raw materials/packaging with multiple row allocations
+    if receipt.raw_material_row_allocations and isinstance(receipt.raw_material_row_allocations, list):
+        for alloc in receipt.raw_material_row_allocations:
+            row_id = alloc.get("rowId")
+            alloc_pallets = float(alloc.get("pallets", 0))
+            
+            if row_id and alloc_pallets > 0:
+                # Free proportional pallets from this row
+                pallets_to_free_from_row = alloc_pallets * proportion_of_receipt_freed
+                
+                storage_row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
+                if storage_row and pallets_to_free_from_row > 0:
+                    # Free pallets from original location (rack space is now empty and available)
+                    storage_row.occupied_pallets = max(0, (storage_row.occupied_pallets or 0) - pallets_to_free_from_row)
+                    
+                    # Also update cases if receipt has cases_per_pallet
+                    if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
+                        cases_to_free = pallets_to_free_from_row * receipt.cases_per_pallet
+                        storage_row.occupied_cases = max(0, (storage_row.occupied_cases or 0) - cases_to_free)
+                    
+                    # Clear product_id if row is now empty (rack space is free for new inventory)
+                    if storage_row.occupied_pallets <= 0:
+                        storage_row.product_id = None
+    
+    # Handle single row allocation (backward compatibility)
+    elif staging_item.original_storage_row_id and pallets_to_free > 0:
         original_row = db.query(StorageRow).filter(StorageRow.id == staging_item.original_storage_row_id).first()
         if original_row:
             # Free pallets from original location (rack space is now empty and available)

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Product, Category, Vendor, CategoryGroup
 from app.schemas import (
-    Product as ProductSchema, ProductCreate, ProductUpdate,
+    Product as ProductSchema, ProductCreate, ProductUpdate, ProductListResponse,
     Category as CategorySchema, CategoryCreate, CategoryUpdate,
     CategoryGroup as CategoryGroupSchema, CategoryGroupCreate, CategoryGroupUpdate,
     Vendor as VendorSchema, VendorCreate, VendorUpdate
@@ -14,17 +14,19 @@ from app.utils.auth import get_current_active_user, require_role
 
 router = APIRouter()
 
-# Product endpoints
-@router.get("/products", response_model=List[ProductSchema])
+# Product endpoints – paginated; no default cap on total count
+PRODUCTS_PAGE_MAX = 500  # max items per single request
+
+@router.get("/products", response_model=ProductListResponse)
 async def get_products(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 50,
     category_id: str = None,
     vendor_id: str = None,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
-    """Get all products"""
+    """Get products with pagination. Returns items for this page and total count."""
     query = db.query(Product)
     
     if category_id:
@@ -32,8 +34,10 @@ async def get_products(
     if vendor_id:
         query = query.filter(Product.vendor_id == vendor_id)
     
-    products = query.offset(skip).limit(limit).all()
-    return products
+    total = query.count()
+    effective_limit = min(max(1, limit), PRODUCTS_PAGE_MAX)
+    items = query.offset(skip).limit(effective_limit).all()
+    return {"items": items, "total": total}
 
 @router.post("/products", response_model=ProductSchema)
 async def create_product(

@@ -7,6 +7,24 @@ import { ChevronLeft, Plus, Filter, Edit2, Power, Package } from 'lucide-react';
 import './Shared.css';
 import './ProductsPage.css';
 
+/** Turn API error into a clear message for product create/update (SID, FCC, ID duplicates, validation). */
+function getProductErrorMessage(error) {
+  const detail = error.response?.data?.detail;
+  if (typeof detail === 'string') {
+    // Backend already returns clear messages; optionally shorten for consistency
+    if (detail.includes('SID code') && detail.includes('already exists')) return 'SID already exists. Please use a different SID or leave it blank.';
+    if (detail.includes('FCC code') && detail.includes('already exists')) return 'FCC already exists. Please use a different FCC code or leave it blank.';
+    if (detail.includes('Product with this ID already exists')) return 'Product ID already exists. Please use a different product ID.';
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    const first = detail[0];
+    const msg = first?.msg ?? first?.message ?? String(first);
+    return msg || 'Please check the form and try again.';
+  }
+  return error.message || 'Failed to save product. Please try again.';
+}
+
 const ProductsPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -83,7 +101,7 @@ const ProductsPage = () => {
       setShowForm(false);
     } catch (error) {
       console.error('Error saving product:', error);
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to save product. Please try again.';
+      const errorMessage = getProductErrorMessage(error);
       alert(errorMessage);
     }
   };

@@ -513,8 +513,21 @@ export const AppDataProvider = ({ children }) => {
           // No token available, skip this fetch
           return;
         }
-        const response = await axios.get(`${API_BASE_URL}/products/products`, { headers });
-        const prods = response.data.map(prod => ({
+        const pageSize = 100;
+        let skip = 0;
+        let total = 1;
+        const allProds = [];
+        while (skip < total) {
+          const response = await axios.get(`${API_BASE_URL}/products/products`, {
+            headers,
+            params: { skip, limit: pageSize },
+          });
+          const { items, total: totalCount } = response.data;
+          total = totalCount;
+          allProds.push(...items);
+          skip += pageSize;
+        }
+        const prods = allProds.map(prod => ({
           id: prod.id,
           name: prod.name,
           categoryId: prod.category_id,
@@ -2584,7 +2597,7 @@ export const AppDataProvider = ({ children }) => {
       const receipt = receipts.find(r => r.id === id);
       const hasRowAllocation = receipt?.storageRowId || receipt?.rawMaterialRowAllocations || 
                                (receipt?.allocation && receipt?.categoryId && 
-                                productCategories.find(c => c.id === receipt.categoryId)?.type === 'finished');
+                                categories.find(c => c.id === receipt.categoryId)?.type === 'finished');
 
       // Update local state with response data
       setReceipts((prev) =>
@@ -2633,7 +2646,7 @@ export const AppDataProvider = ({ children }) => {
       const receipt = receipts.find(r => r.id === id);
       const hasRowAllocation = receipt?.storageRowId || receipt?.rawMaterialRowAllocations || 
                                (receipt?.allocation && receipt?.categoryId && 
-                                productCategories.find(c => c.id === receipt.categoryId)?.type === 'finished');
+                                categories.find(c => c.id === receipt.categoryId)?.type === 'finished');
 
       // Update local state with response data
       setReceipts((prev) =>
@@ -2681,15 +2694,16 @@ export const AppDataProvider = ({ children }) => {
       const receipt = receipts.find(r => r.id === id);
       const hasRowAllocation = receipt?.storageRowId || receipt?.rawMaterialRowAllocations || 
                                (receipt?.allocation && receipt?.categoryId && 
-                                productCategories.find(c => c.id === receipt.categoryId)?.type === 'finished');
+                                categories.find(c => c.id === receipt.categoryId)?.type === 'finished');
 
-      // Update local state with response data
+      // Update local state with response data (backend sets status to "sent-back")
+      const updatedStatus = response.data.receipt?.status || "sent-back";
       setReceipts((prev) =>
         prev.map((receipt) => {
           if (receipt.id !== id) return receipt;
           return {
             ...receipt,
-            status: "recorded",
+            status: updatedStatus,
             note: response.data.receipt?.note || receipt.note,
           };
         }),

@@ -139,6 +139,13 @@ class Product(ProductBase):
     is_active: bool
     created_at: datetime
 
+
+class ProductListResponse(BaseSchema):
+    """Paginated product list: items for current page and total count."""
+    items: List[Product]
+    total: int
+
+
 # Location schemas
 class LocationBase(BaseSchema):
     id: str

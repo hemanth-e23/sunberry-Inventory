@@ -163,7 +163,7 @@ class Receipt(Base):
     quantity_produced = Column(Float)
     shift_id = Column(String(50), ForeignKey("production_shifts.id"))
     line_id = Column(String(50), ForeignKey("production_lines.id"))
-    status = Column(String(20), default="recorded")  # recorded, reviewed, approved, rejected
+    status = Column(String(20), default="recorded")  # recorded, reviewed, approved, rejected, sent-back
     bol = Column(String(100))
     purchase_order = Column(String(100))
     vendor_id = Column(String(50), ForeignKey("vendors.id"))

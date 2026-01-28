@@ -13,12 +13,12 @@ const ReceiptCorrectionsPage = () => {
   const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [draft, setDraft] = useState({});
 
-  // Filter receipts that have been sent back (status: "recorded" with supervisor notes)
+  // Filter receipts that have been sent back (status: "sent-back", or legacy: "recorded" with supervisor notes)
   const sentBackReceipts = useMemo(() => {
     return receipts.filter(receipt => {
+      if (receipt.status === 'sent-back') return true;
       if (receipt.status !== 'recorded') return false;
-      // Check if receipt has supervisor notes indicating it was sent back
-      return receipt.note && receipt.note.includes('[Sent Back by Supervisor]');
+      return receipt.note && receipt.note.includes('[Sent Back by');
     });
   }, [receipts]);
 
@@ -67,10 +67,10 @@ const ReceiptCorrectionsPage = () => {
   const handleSaveAndResubmit = () => {
     if (!selectedReceipt) return;
     
-    // Update the receipt with corrections
-    updateReceipt(selectedReceipt.id, draft);
+    // Update the receipt with corrections and set status to "reviewed" so it returns to approval queue
+    updateReceipt(selectedReceipt.id, { ...draft, status: "reviewed" });
     
-    // Change status back to "reviewed" to send it back to supervisor
+    // Update local state so UI reflects immediately
     updateReceiptStatus(selectedReceipt.id, "reviewed", "warehouse-user");
     
     // Close the detail view

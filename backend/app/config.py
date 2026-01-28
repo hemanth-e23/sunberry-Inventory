@@ -14,7 +14,9 @@ class Settings(BaseSettings):
     # JWT
     SECRET_KEY: str = os.getenv("SECRET_KEY", "your-super-secret-key-change-this-in-production")
     ALGORITHM: str = os.getenv("ALGORITHM", "HS256")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+    # Token expires after this many minutes; frontend auto-logout uses 30 min inactivity.
+    # Use 480 (8h) or 1440 (24h) so active users don't see "authentication required" mid-session.
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "480"))
     
     # Application
     DEBUG: bool = os.getenv("DEBUG", "True").lower() == "true"
