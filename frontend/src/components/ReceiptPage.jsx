@@ -48,10 +48,13 @@ const defaultFormState = {
 const unitOptions = [
   { value: "barrels", label: "Barrels" },
   { value: "bags", label: "Bags" },
+  { value: "bottles", label: "Bottles" },
   { value: "cases", label: "Cases" },
   { value: "pallets", label: "Pallets" },
   { value: "gallons", label: "Gallons" },
   { value: "liters", label: "Liters" },
+  { value: "unit", label: "Unit" },
+  { value: "units", label: "Units" },
   // Allow direct weight-based quantities for raw materials
   { value: "kg", label: "Kilograms" },
   { value: "lbs", label: "Pounds" },
@@ -59,8 +62,11 @@ const unitOptions = [
 
 const packagingUnitOptions = [
   { value: "boxes", label: "Boxes" },
+  { value: "bottles", label: "Bottles" },
   { value: "cases", label: "Cases" },
   { value: "pallets", label: "Pallets" },
+  { value: "unit", label: "Unit" },
+  { value: "units", label: "Units" },
 ];
 
 const weightUnitOptions = [
@@ -429,6 +435,9 @@ const ReceiptPage = () => {
       });
   }, [formData.location, formData.subLocation, formData.pallets, locations, subLocationMap]);
 
+  // Sub location with 0 rows = unlimited storage (no row selection needed)
+  const isUnlimitedStorage = requiresRowSelection && formData.subLocation && availableRows.length === 0;
+
   const handleChange = (event) => {
     const { name, value, type, checked } = event.target;
     const parsedValue = type === "checkbox" ? checked : value;
@@ -704,15 +713,25 @@ const ReceiptPage = () => {
       return;
     }
 
-    // Validate lot number
-    const existingLotNumbers = receipts.map(r => r.lotNo).filter(Boolean);
-    const lotValidation = validateLotNumber(formData.lotNo, existingLotNumbers);
-    if (!lotValidation.valid) {
+    // Validate lot number (required for finished goods; optional for packaging/raw materials)
+    const lotRequired = isFinishedGood;
+    if (lotRequired && !(formData.lotNo && formData.lotNo.trim())) {
       setFeedback({
         type: "error",
-        message: lotValidation.error,
+        message: "Lot number is required for finished goods.",
       });
       return;
+    }
+    if (formData.lotNo && formData.lotNo.trim()) {
+      const existingLotNumbers = receipts.map(r => r.lotNo).filter(Boolean);
+      const lotValidation = validateLotNumber(formData.lotNo, existingLotNumbers);
+      if (!lotValidation.valid) {
+        setFeedback({
+          type: "error",
+          message: lotValidation.error,
+        });
+        return;
+      }
     }
 
     // Validate expiration date
@@ -758,47 +777,49 @@ const ReceiptPage = () => {
 
     // Validate row selection and pallet count for raw materials and packaging
     if (requiresRowSelection && formData.subLocation) {
-      // Validate pallet count is entered first
+      // Validate pallet count is entered
       if (!formData.pallets || Number(formData.pallets) <= 0) {
         setFeedback({
           type: "error",
-          message: "Please enter the total number of pallets needed first.",
+          message: "Please enter the total number of pallets needed.",
         });
         return;
       }
-      
-      // Validate at least one row is selected
-      if (rawMaterialRowAllocations.length === 0) {
-        setFeedback({
-          type: "error",
-          message: "Please select at least one row to store the pallets.",
-        });
-        return;
-      }
-      
-      // Validate total pallets match
-      const totalAllocated = rawMaterialRowAllocations.reduce((sum, alloc) => sum + (Number(alloc.pallets) || 0), 0);
-      const totalNeeded = Number(formData.pallets);
-      
-      if (totalAllocated !== totalNeeded) {
-        setFeedback({
-          type: "error",
-          message: `Total pallets allocated (${totalAllocated}) must equal total pallets needed (${totalNeeded}).`,
-        });
-        return;
-      }
-      
-      // Validate each row doesn't exceed capacity
-      // Use alloc.available (original capacity from database) not row.available (which incorrectly subtracts current allocations)
-      for (const alloc of rawMaterialRowAllocations) {
-        const palletsToAdd = Number(alloc.pallets);
-        const originalAvailable = alloc.available; // This is the true available from when row was selected
-        if (originalAvailable !== null && palletsToAdd > originalAvailable) {
+
+      // Unlimited storage (0/0 sub location): no row selection required
+      if (!isUnlimitedStorage) {
+        // Validate at least one row is selected
+        if (rawMaterialRowAllocations.length === 0) {
           setFeedback({
             type: "error",
-            message: `Row ${alloc.rowName} cannot accommodate ${palletsToAdd} pallets. Available: ${originalAvailable} pallets.`,
+            message: "Please select at least one row to store the pallets.",
           });
           return;
+        }
+
+        // Validate total pallets match
+        const totalAllocated = rawMaterialRowAllocations.reduce((sum, alloc) => sum + (Number(alloc.pallets) || 0), 0);
+        const totalNeeded = Number(formData.pallets);
+
+        if (totalAllocated !== totalNeeded) {
+          setFeedback({
+            type: "error",
+            message: `Total pallets allocated (${totalAllocated}) must equal total pallets needed (${totalNeeded}).`,
+          });
+          return;
+        }
+
+        // Validate each row doesn't exceed capacity
+        for (const alloc of rawMaterialRowAllocations) {
+          const palletsToAdd = Number(alloc.pallets);
+          const originalAvailable = alloc.available;
+          if (originalAvailable !== null && palletsToAdd > originalAvailable) {
+            setFeedback({
+              type: "error",
+              message: `Row ${alloc.rowName} cannot accommodate ${palletsToAdd} pallets. Available: ${originalAvailable} pallets.`,
+            });
+            return;
+          }
         }
       }
     }
@@ -855,16 +876,16 @@ const ReceiptPage = () => {
       purchaseOrder: formData.purchaseOrder,
       location: formData.location,
       subLocation: formData.subLocation,
-      storageRowId: requiresRowSelection && rawMaterialRowAllocations.length === 1 
-        ? rawMaterialRowAllocations[0].rowId 
-        : (formData.storageRowId || null), // For single row, use the selected row
-      pallets: requiresRowSelection ? Number(formData.pallets) || null : null, // Total pallet count
-      rawMaterialRowAllocations: requiresRowSelection && rawMaterialRowAllocations.length > 0
+      storageRowId: !isUnlimitedStorage && requiresRowSelection && rawMaterialRowAllocations.length === 1
+        ? rawMaterialRowAllocations[0].rowId
+        : (isUnlimitedStorage ? null : (formData.storageRowId || null)),
+      pallets: requiresRowSelection ? Number(formData.pallets) || null : null,
+      rawMaterialRowAllocations: !isUnlimitedStorage && requiresRowSelection && rawMaterialRowAllocations.length > 0
         ? rawMaterialRowAllocations.map(alloc => ({
             rowId: alloc.rowId,
             pallets: Number(alloc.pallets) || 0,
           }))
-        : null, // Multiple row allocations for raw materials/packaging
+        : null,
       autoAssignSubLocation:
         !isFinishedGood && selectedCategory?.subType === "packaging",
       productionDate: formData.productionDate,
@@ -1236,18 +1257,18 @@ const ReceiptPage = () => {
                   )}
 
                   <label>
-                    <span>Lot Number {requiredStar}</span>
+                    <span>Lot Number {isFinishedGood ? requiredStar : null}</span>
                     <input
                       type="text"
                       name="lotNo"
                       value={formData.lotNo}
                       onChange={handleChange}
-                      required
+                      required={isFinishedGood}
                       aria-label="Lot number"
                       aria-describedby="lot-number-help"
                     />
                     <span id="lot-number-help" className="sr-only">
-                      Unique lot number for this inventory item
+                      Unique lot number for this inventory item {!isFinishedGood && "(optional for packaging/raw materials)"}
                     </span>
                   </label>
 
@@ -1415,12 +1436,14 @@ const ReceiptPage = () => {
                               />
                             </div>
                             <div className="form-hint" style={{ marginTop: '4px', color: '#666', fontSize: '0.875rem' }}>
-                              Enter the total number of pallets you need to store. Then select one or more rows below.
+                              {isUnlimitedStorage
+                                ? "Unlimited storage – no row selection needed. Enter total pallets and submit."
+                                : "Enter the total number of pallets you need to store. Then select one or more rows below."}
                             </div>
                           </label>
 
-                          {/* Step 2: Select rows (filtered by pallet count) */}
-                          {formData.pallets && Number(formData.pallets) > 0 && (
+                          {/* Step 2: Select rows (only when sub location has rows; 0/0 = unlimited, no selection) */}
+                          {formData.pallets && Number(formData.pallets) > 0 && !isUnlimitedStorage && (
                             <div>
                               <label style={{ display: 'block', marginBottom: '8px' }}>
                                 <span>Select Row(s) {requiredStar}</span>
@@ -1428,7 +1451,7 @@ const ReceiptPage = () => {
                               
                               {availableRows.length === 0 ? (
                                 <div className="form-error" style={{ padding: '12px', borderRadius: '4px', backgroundColor: '#fee', border: '1px solid #fcc' }}>
-                                  No rows available with sufficient capacity for {formData.pallets} pallets. 
+                                  No rows available with sufficient capacity for {formData.pallets} pallets.
                                   Please add more rows in Master Data or reduce the pallet count.
                                 </div>
                               ) : (
@@ -1587,7 +1610,9 @@ const ReceiptPage = () => {
 
                           {formData.subLocation && availableRows.length === 0 && !formData.pallets && requiresRowSelection && (
                             <div className="form-hint" style={{ marginTop: '4px', color: '#666', fontSize: '0.875rem' }}>
-                              Enter pallet count above to see available rows.
+                              {isUnlimitedStorage
+                                ? "Unlimited storage – enter total pallets above and submit."
+                                : "Enter pallet count above to see available rows."}
                             </div>
                           )}
                         </>
