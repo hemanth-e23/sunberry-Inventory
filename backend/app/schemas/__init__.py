@@ -18,6 +18,7 @@ class UserBase(BaseSchema):
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8, max_length=128, description="Password (minimum 8 characters)")
+    badge_id: Optional[str] = Field(None, max_length=50, description="Badge ID for forklift users")
 
 class UserUpdate(BaseSchema):
     username: Optional[str] = Field(None, min_length=3, max_length=50)
@@ -26,10 +27,12 @@ class UserUpdate(BaseSchema):
     role: Optional[str] = Field(None, max_length=20)
     is_active: Optional[bool] = None
     password: Optional[str] = Field(None, min_length=8, max_length=128)
+    badge_id: Optional[str] = Field(None, max_length=50)
 
 class User(UserBase):
     id: str
     is_active: bool
+    badge_id: Optional[str] = None
     created_at: datetime
 
 # Auth schemas
@@ -43,6 +46,103 @@ class TokenData(BaseSchema):
 class LoginRequest(BaseSchema):
     username: str = Field(..., min_length=1, max_length=50)
     password: str = Field(..., min_length=1, max_length=128)
+
+
+class BadgeLoginRequest(BaseSchema):
+    badge_id: str = Field(..., min_length=1, max_length=50)
+
+
+class ScanPalletRequest(BaseSchema):
+    licence_number: str = Field(..., min_length=1, max_length=100)
+    storage_row_id: str = Field(..., min_length=1, max_length=50)
+    is_partial: bool = False
+    partial_cases: Optional[int] = Field(None, ge=0)
+
+
+class MarkMissingRequest(BaseSchema):
+    licence_numbers: List[str] = Field(..., min_length=1)
+
+
+# Pallet Licence schemas
+class PalletLicenceBase(BaseSchema):
+    licence_number: str
+    product_id: str
+    lot_number: str
+    storage_area_id: Optional[str] = None
+    storage_row_id: Optional[str] = None
+    cases: int
+    is_partial: bool = False
+    sequence: int
+    status: str = "pending"
+
+
+class PalletLicenceCreate(PalletLicenceBase):
+    receipt_id: Optional[str] = None
+    forklift_request_id: Optional[str] = None
+
+
+class PalletLicence(PalletLicenceBase):
+    id: str
+    receipt_id: Optional[str] = None
+    forklift_request_id: Optional[str] = None
+    transfer_id: Optional[str] = None
+    scanned_by: Optional[str] = None
+    scanned_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+# Forklift Request schemas
+class ForkliftRequestBase(BaseSchema):
+    product_id: str
+    lot_number: str
+    production_date: Optional[datetime] = None
+    expiration_date: Optional[datetime] = None
+    shift_id: Optional[str] = None
+    line_id: Optional[str] = None
+    cases_per_pallet: int
+    total_full_pallets: int = 0
+    total_partial_pallets: int = 0
+    total_cases: float = 0
+    status: str = "scanning"
+
+
+class ForkliftRequestCreate(BaseSchema):
+    licence_number: str = Field(..., min_length=1, max_length=100)  # First scanned licence to derive product/lot
+
+
+class ForkliftRequestProductRef(BaseSchema):
+    id: str
+    name: str
+    fcc_code: Optional[str] = None
+    short_code: Optional[str] = None
+
+
+class ForkliftRequest(ForkliftRequestBase):
+    id: str
+    receipt_id: Optional[str] = None
+    scanned_by: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    submitted_at: Optional[datetime] = None
+    created_at: datetime
+    pallet_licences: List[PalletLicence] = []
+    product: Optional[ForkliftRequestProductRef] = None
+
+
+class ForkliftRequestUpdate(BaseSchema):
+    shift_id: Optional[str] = None
+    line_id: Optional[str] = None
+    production_date: Optional[datetime] = None
+    expiration_date: Optional[datetime] = None
+    cases_per_pallet: Optional[int] = None
+    lot_number: Optional[str] = None
+
+
+class PalletLicenceUpdate(BaseSchema):
+    cases: Optional[int] = None
+    is_partial: Optional[bool] = None
+
 
 # Category schemas
 class CategoryGroupBase(BaseSchema):
@@ -109,6 +209,7 @@ class Vendor(VendorBase):
 class ProductBase(BaseSchema):
     id: str
     name: str
+    short_code: Optional[str] = None
     fcc_code: Optional[str] = None
     sid: Optional[str] = None
     brix: Optional[float] = None
@@ -118,12 +219,15 @@ class ProductBase(BaseSchema):
     default_cases_per_pallet: Optional[int] = None
     expire_years: Optional[int] = None
     quantity_uom: Optional[str] = None
+    inventory_tracked: bool = True
+    gal_per_case: Optional[float] = None
 
 class ProductCreate(ProductBase):
     pass
 
 class ProductUpdate(BaseSchema):
     name: Optional[str] = None
+    short_code: Optional[str] = None
     fcc_code: Optional[str] = None
     sid: Optional[str] = None
     brix: Optional[float] = None
@@ -134,6 +238,8 @@ class ProductUpdate(BaseSchema):
     expire_years: Optional[int] = None
     quantity_uom: Optional[str] = None
     is_active: Optional[bool] = None
+    inventory_tracked: Optional[bool] = None
+    gal_per_case: Optional[float] = None
 
 class Product(ProductBase):
     is_active: bool
@@ -294,6 +400,10 @@ class ReceiptBase(BaseSchema):
     lot_number: Optional[str] = None
     quantity: float
     unit: str = "cases"
+    container_count: Optional[float] = None        # How many containers (barrels, bags, etc.)
+    container_unit: Optional[str] = None            # Container type: barrels, bags, cases, etc.
+    weight_per_container: Optional[float] = None    # Weight of each container
+    weight_unit: Optional[str] = None               # Weight unit: lbs, kg, g, oz, etc.
     receipt_date: Optional[datetime] = None
     production_date: Optional[datetime] = None
     expiration_date: Optional[datetime] = None
@@ -366,6 +476,7 @@ class InventoryTransferBase(BaseSchema):
     order_number: Optional[str] = Field(None, max_length=100)
     source_breakdown: Optional[List[dict]] = None
     destination_breakdown: Optional[List[dict]] = None
+    pallet_licence_ids: Optional[List[str]] = None  # Specific pallets for licence-aware transfers
 
 class InventoryTransferCreate(InventoryTransferBase):
     pass
@@ -373,6 +484,12 @@ class InventoryTransferCreate(InventoryTransferBase):
 class InventoryTransferUpdate(BaseSchema):
     status: Optional[str] = None
     reason: Optional[str] = Field(None, max_length=1000)
+
+class PalletLicenceTransferRef(BaseSchema):
+    id: str
+    licence_number: str
+    cases: int = 0
+
 
 class InventoryTransfer(InventoryTransferBase):
     id: str
@@ -382,6 +499,27 @@ class InventoryTransfer(InventoryTransferBase):
     approved_at: Optional[datetime] = None
     submitted_at: datetime
     created_at: datetime
+    pallet_licence_details: Optional[List["PalletLicenceTransferRef"]] = None
+
+
+class ShipOutPickListCreate(BaseSchema):
+    """Create ship-out transfer with specific pallet licence IDs (pick list)"""
+    receipt_id: str = Field(..., min_length=1)
+    order_number: str = Field(..., min_length=1, max_length=100)
+    pallet_licence_ids: List[str] = Field(..., min_length=1)
+
+
+class ScanPickRequest(BaseSchema):
+    """Forklift scan for ship-out picking"""
+    licence_number: Optional[str] = Field(None, max_length=100)
+    licence_id: Optional[str] = Field(None, max_length=50)
+
+
+class ForkliftSubmitRequest(BaseSchema):
+    """Forklift submits a ship-out pick as done (full or partial)"""
+    notes: Optional[str] = Field(None, max_length=1000)
+    skipped_pallet_ids: Optional[List[str]] = Field(default_factory=list)
+
 
 # Adjustment schemas
 class InventoryAdjustmentBase(BaseSchema):
@@ -494,9 +632,15 @@ class StagingLotSuggestion(BaseSchema):
     location_name: Optional[str] = None
     sub_location_id: Optional[str] = None
     sub_location_name: Optional[str] = None
+    storage_row_name: Optional[str] = None
     expiration_date: Optional[datetime] = None
     available_quantity: float
     unit: Optional[str] = "cases"
+    # Container/weight info for warehouse-friendly display
+    container_count: Optional[float] = None
+    container_unit: Optional[str] = None
+    weight_per_container: Optional[float] = None
+    weight_unit: Optional[str] = None
 
 class StagingLotRequest(BaseSchema):
     receipt_id: str

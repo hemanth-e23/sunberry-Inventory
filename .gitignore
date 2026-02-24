@@ -47,13 +47,10 @@ Thumbs.db
 .DS_Store
 .cursor/
 
-# Test files
-backend/tests/
-frontend/src/tests/
-backend/pytest.ini
-frontend/vitest.config.js
+# Test artifacts (test FILES are committed; these generated outputs are not)
 backend/.coverage
 backend/htmlcov/
+backend/.pytest_cache/
 *.pyc
 
 # Documentation files

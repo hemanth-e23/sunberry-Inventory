@@ -1,0 +1,70 @@
+.scanner-home {
+  max-width: 500px;
+  margin: 0 auto;
+}
+
+.scanner-home-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #333;
+  margin: 0 0 1.5rem 0;
+}
+
+.scanner-home-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.scanner-home-btn {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  width: 100%;
+  padding: 1.25rem 1.5rem;
+  background: white;
+  border: 2px solid #e0e0e0;
+  border-radius: 12px;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #333;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+  box-shadow: none;
+}
+
+.scanner-home-btn::before {
+  display: none;
+}
+
+.scanner-home-btn:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.scanner-home-btn:active {
+  transform: scale(0.98);
+}
+
+.scanner-home-btn.primary {
+  background: #1a472a;
+  border-color: #1a472a;
+  color: white;
+}
+
+.scanner-home-btn span:first-of-type {
+  flex-shrink: 0;
+}
+
+.scanner-home-desc {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 400;
+  opacity: 0.85;
+  margin-top: 0.25rem;
+}
+
+.scanner-home-btn:not(.primary) .scanner-home-desc {
+  opacity: 0.7;
+}

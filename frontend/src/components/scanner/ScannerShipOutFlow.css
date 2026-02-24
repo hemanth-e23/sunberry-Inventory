@@ -1,0 +1,465 @@
+/* ── General screen wrapper ─────────────────────────────────────────────── */
+.sso-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-bottom: 2rem;
+}
+
+/* ── Order selection ────────────────────────────────────────────────────── */
+.sso-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.25rem;
+}
+
+.sso-subtitle {
+  font-size: 1rem;
+  color: #555;
+  margin: 0;
+}
+
+.sso-refresh-btn {
+  background: none;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 0.4rem;
+  cursor: pointer;
+  color: #555;
+  display: flex;
+  align-items: center;
+}
+.sso-refresh-btn:hover { background: #f3f4f6; }
+.sso-refresh-btn:disabled { opacity: 0.5; }
+
+.sso-spin {
+  animation: sso-spin 0.8s linear infinite;
+}
+@keyframes sso-spin { to { transform: rotate(360deg); } }
+
+.sso-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 3rem 1rem;
+  color: #9ca3af;
+  text-align: center;
+}
+
+.sso-order-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sso-order-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.1rem;
+  background: white;
+  color: #111;
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.sso-order-card:hover {
+  border-color: #1a472a;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+.sso-order-card--submitted {
+  border-color: #22c55e;
+  background: #f0fdf4;
+}
+
+.sso-order-icon {
+  width: 44px;
+  height: 44px;
+  background: #f3f4f6;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #1a472a;
+  flex-shrink: 0;
+}
+
+.sso-order-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.95rem;
+}
+.sso-order-info strong { font-size: 1rem; }
+.sso-order-info span { color: #6b7280; font-size: 0.85rem; }
+
+.sso-submitted-badge {
+  display: inline-flex;
+  background: #22c55e;
+  color: white !important;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.75rem !important;
+  font-weight: 600;
+}
+
+.sso-chevron { color: #9ca3af; flex-shrink: 0; }
+
+/* ── Progress bar ───────────────────────────────────────────────────────── */
+.sso-progress-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.sso-progress-counts {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+.sso-count-scanned { color: #22c55e; font-weight: 600; }
+.sso-count-skipped { color: #f59e0b; font-weight: 600; }
+.sso-count-total { margin-left: auto; }
+
+.sso-progress-track {
+  height: 8px;
+  background: #e5e7eb;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.sso-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #22c55e, #16a34a);
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+/* ── Scan form ──────────────────────────────────────────────────────────── */
+.sso-scan-form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.sso-scan-input {
+  flex: 1;
+  font-size: 1.05rem;
+  padding: 0.85rem 1rem;
+  border: 2px solid #d1d5db;
+  border-radius: 10px;
+  background: white;
+  transition: border-color 0.15s;
+}
+.sso-scan-input:focus {
+  outline: none;
+  border-color: #1a472a;
+}
+.sso-scan-input::placeholder { color: #9ca3af; }
+
+.sso-scan-btn {
+  padding: 0.85rem 1.1rem;
+  background: #1a472a;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  transition: opacity 0.15s;
+}
+.sso-scan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.sso-scan-btn:not(:disabled):hover { background: #145222; }
+
+/* ── Scan feedback ──────────────────────────────────────────────────────── */
+.sso-feedback {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+.sso-feedback--ok  { background: #dcfce7; color: #166534; }
+.sso-feedback--warn { background: #fef3c7; color: #92400e; }
+.sso-feedback--err { background: #fee2e2; color: #991b1b; }
+
+/* ── Pallet pick list ───────────────────────────────────────────────────── */
+.sso-picklist {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.sso-pallet-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: white;
+  border: 2px solid #e5e7eb;
+  border-radius: 10px;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.sso-pallet-row.sso-pallet--active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+}
+.sso-pallet-row.sso-pallet--scanned {
+  border-color: #22c55e;
+  background: #f0fdf4;
+}
+.sso-pallet-row.sso-pallet--skipped {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  opacity: 0.75;
+}
+
+.sso-pallet-status-icon { flex-shrink: 0; }
+.sso-icon-ok   { color: #22c55e; }
+.sso-icon-skip { color: #f59e0b; }
+.sso-icon-pending { color: #d1d5db; }
+
+.sso-pallet-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.sso-pallet-licence {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  font-family: monospace;
+  color: #111;
+}
+
+.sso-pallet-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+.sso-pallet-time {
+  font-size: 0.75rem;
+  color: #22c55e;
+  font-weight: 500;
+}
+
+.sso-skip-btn {
+  padding: 0.35rem;
+  background: none;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #9ca3af;
+  flex-shrink: 0;
+  transition: color 0.15s, border-color 0.15s;
+}
+.sso-skip-btn:hover { color: #f59e0b; border-color: #f59e0b; }
+
+.sso-unskip-btn {
+  color: #f59e0b !important;
+  border-color: #f59e0b !important;
+  font-size: 14px;
+  font-weight: 700;
+}
+.sso-unskip-btn:hover { color: #d97706 !important; border-color: #d97706 !important; }
+
+/* ── Exceptions summary ─────────────────────────────────────────────────── */
+.sso-exceptions-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.65rem 0.9rem;
+  background: #fef3c7;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: #92400e;
+}
+
+.sso-exception-badge {
+  background: #fde68a;
+  color: #78350f;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-family: monospace;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* ── Submit section ─────────────────────────────────────────────────────── */
+.sso-submit-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #e5e7eb;
+  margin-top: 0.5rem;
+}
+
+.sso-pending-note {
+  font-size: 0.85rem;
+  color: #6b7280;
+  margin: 0;
+}
+
+.sso-notes-input {
+  width: 100%;
+  font-size: 0.9rem;
+  padding: 0.6rem 0.8rem;
+  border: 1.5px solid #d1d5db;
+  border-radius: 8px;
+  resize: vertical;
+  font-family: inherit;
+}
+.sso-notes-input:focus { outline: none; border-color: #1a472a; }
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+.sso-primary-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.9rem 1.25rem;
+  background: #1a472a;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  width: 100%;
+  transition: background 0.15s;
+}
+.sso-primary-btn:hover:not(:disabled) { background: #145222; }
+.sso-primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.sso-secondary-btn {
+  padding: 0.85rem 1.25rem;
+  background: white;
+  color: #374151;
+  border: 2px solid #d1d5db;
+  border-radius: 10px;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  width: 100%;
+  transition: border-color 0.15s;
+}
+.sso-secondary-btn:hover { border-color: #9ca3af; }
+
+.sso-submit-btn--disabled { opacity: 0.4 !important; }
+
+/* ── Exception / confirm dialog ─────────────────────────────────────────── */
+.sso-except-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.sso-except-dialog {
+  background: white;
+  border-radius: 16px;
+  padding: 2rem 1.5rem;
+  max-width: 380px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+}
+.sso-except-dialog h3 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin: 0;
+  color: #111;
+}
+.sso-except-dialog p {
+  font-size: 0.9rem;
+  color: #4b5563;
+  margin: 0;
+}
+
+.sso-dialog-actions {
+  display: flex;
+  gap: 0.75rem;
+  width: 100%;
+}
+.sso-dialog-actions .sso-secondary-btn,
+.sso-dialog-actions .sso-primary-btn { flex: 1; }
+
+.sso-skipped-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: #4b5563;
+  justify-content: center;
+  align-items: center;
+}
+
+/* ── Done screen ────────────────────────────────────────────────────────── */
+.sso-done-screen {
+  align-items: center;
+  text-align: center;
+  padding-top: 2rem;
+}
+
+.sso-done-icon { margin-bottom: 0.5rem; }
+
+.sso-done-title {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #111;
+  margin: 0;
+}
+
+.sso-done-sub {
+  font-size: 0.95rem;
+  color: #6b7280;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.sso-done-partial {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: #fef3c7;
+  color: #92400e;
+  padding: 0.65rem 1rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  width: 100%;
+  justify-content: center;
+}
+
+/* ── Pick screen wrapper ─────────────────────────────────────────────────── */
+.sso-pick-screen {
+  max-width: 520px;
+  margin: 0 auto;
+  width: 100%;
+}

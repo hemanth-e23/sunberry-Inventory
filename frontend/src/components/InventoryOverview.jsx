@@ -564,10 +564,26 @@ const InventoryOverview = () => {
       }
     }
 
+    // Derive sub-location from storageRowId when receipt is missing subLocation
+    let effectiveSubLocation = receipt?.subLocation;
+    if (!effectiveSubLocation && (receipt?.storageRowId || receipt?.storage_row_id)) {
+      const rowId = receipt.storageRowId || receipt.storage_row_id;
+      // Search locationsState for the row's parent sub-location
+      for (const loc of (locationsTree || [])) {
+        for (const sub of (loc.subLocations || [])) {
+          if ((sub.rows || []).some(r => r.id === rowId)) {
+            effectiveSubLocation = sub.id;
+            break;
+          }
+        }
+        if (effectiveSubLocation) break;
+      }
+    }
+
     const label = getLocationLabel(
       locationLookup,
       receipt?.location,
-      receipt?.subLocation,
+      effectiveSubLocation,
     );
     
     // Add row information for raw materials/packaging
@@ -763,6 +779,17 @@ const InventoryOverview = () => {
         // Determine unit label for quantity: finished goods default to cases; for others use last receipt units
         const quantityUnitLabel = (lastApproval?.quantityUnits || lastSubmission?.quantityUnits || (category?.type === 'finished' ? 'cases' : ''));
 
+        // Build container info string for display (e.g. "40 barrels @ 500 lbs ea.")
+        const refReceipt = lastApproval || lastSubmission;
+        let containerInfo = null;
+        if (refReceipt?.containerCount && refReceipt?.containerUnit && refReceipt?.weightPerContainer && refReceipt?.weightUnit) {
+          // Compute current container count based on total quantity / weight_per_container
+          const currentContainers = refReceipt.weightPerContainer > 0 
+            ? Math.round((summary.quantity / refReceipt.weightPerContainer) * 100) / 100
+            : refReceipt.containerCount;
+          containerInfo = `≈ ${currentContainers.toLocaleString()} ${refReceipt.containerUnit} @ ${refReceipt.weightPerContainer.toLocaleString()} ${refReceipt.weightUnit} ea.`;
+        }
+
         return {
           id: product.id,
           name: product.name,
@@ -770,6 +797,7 @@ const InventoryOverview = () => {
           type: category?.type || "-",
           quantity: summary.quantity,
           unitLabel: quantityUnitLabel,
+          containerInfo,
           lotCount: summary.lots.size,
           pendingCount: pending,
           description: product.description,
@@ -1772,6 +1800,11 @@ const InventoryOverview = () => {
                             <span className={`quantity-cell ${getQuantityClass()}`}>
                               {row.quantity.toLocaleString()} {row.unitLabel ? row.unitLabel : ''}
                             </span>
+                            {row.containerInfo && (
+                              <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '2px' }}>
+                                {row.containerInfo}
+                              </div>
+                            )}
                           </td>}
                           {visibleColumns.lotsTracked && <td>{row.lotCount}</td>}
                           {visibleColumns.pendingReceipts && <td>
@@ -2027,7 +2060,14 @@ const InventoryOverview = () => {
                                   <td>{r.lotNo || '—'}</td>
                                   <td>{locationLabel}</td>
                                   <td>{rowDisplay}</td>
-                                  <td>{Number(r.quantity || 0).toLocaleString()} {r.quantityUnits || ''}</td>
+                                  <td>
+                                    {Number(r.quantity || 0).toLocaleString()} {r.quantityUnits || ''}
+                                    {r.containerCount && r.containerUnit && r.weightPerContainer && r.weightUnit && (
+                                      <div style={{ fontSize: '0.75rem', color: '#666' }}>
+                                        ({r.containerCount} {r.containerUnit} × {r.weightPerContainer} {r.weightUnit})
+                                      </div>
+                                    )}
+                                  </td>
                                   <td className="capitalize">{r.status}</td>
                                   <td>
                                     {(() => {

@@ -78,6 +78,18 @@ async def create_product(
                 detail=f"Product with FCC code '{product_data.fcc_code}' already exists"
             )
     
+    # Check for unique short_code
+    if product_data.short_code:
+        existing_sc = db.query(Product).filter(
+            Product.short_code == product_data.short_code,
+            Product.id != product_data.id
+        ).first()
+        if existing_sc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Product with short code '{product_data.short_code}' already exists"
+            )
+    
     db_product = Product(**product_data.dict())
     db.add(db_product)
     db.commit()
@@ -123,6 +135,18 @@ async def update_product(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Product with FCC code '{update_data['fcc_code']}' already exists"
+            )
+    
+    # Check for unique short_code (if being updated)
+    if 'short_code' in update_data and update_data['short_code']:
+        existing_sc = db.query(Product).filter(
+            Product.short_code == update_data['short_code'],
+            Product.id != product_id
+        ).first()
+        if existing_sc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Product with short code '{update_data['short_code']}' already exists"
             )
     
     for field, value in update_data.items():

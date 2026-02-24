@@ -34,7 +34,7 @@ async def create_user(
         )
     
     # Create new user
-    new_user = User(
+    user_kwargs = dict(
         id=f"user-{uuid.uuid4().hex[:12]}",
         username=user_data.username,
         name=user_data.name,
@@ -43,6 +43,9 @@ async def create_user(
         hashed_password=get_password_hash(user_data.password),
         is_active=True
     )
+    if user_data.badge_id:
+        user_kwargs["badge_id"] = user_data.badge_id
+    new_user = User(**user_kwargs)
     
     db.add(new_user)
     db.commit()
@@ -96,7 +99,11 @@ async def update_user(
     # Handle password hashing if password is being updated
     if "password" in update_data:
         update_data["hashed_password"] = get_password_hash(update_data.pop("password"))
-    
+
+    # Exclude badge_id from generic setattr if it's being cleared
+    if "badge_id" in update_data and update_data["badge_id"] == "":
+        update_data["badge_id"] = None
+
     for field, value in update_data.items():
         setattr(user, field, value)
     

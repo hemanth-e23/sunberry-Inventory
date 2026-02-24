@@ -11,7 +11,8 @@ import './UsersPageEnhanced.css';
 const roleLabels = {
   admin: 'Admin',
   supervisor: 'Supervisor',
-  warehouse: 'Warehouse'
+  warehouse: 'Warehouse',
+  forklift: 'Forklift'
 };
 
 const UsersPage = () => {
@@ -26,7 +27,8 @@ const UsersPage = () => {
     username: '',
     email: '',
     role: 'warehouse',
-    password: ''
+    password: '',
+    badgeId: ''
   });
 
   const filteredUsers = useMemo(() => {
@@ -35,23 +37,44 @@ const UsersPage = () => {
   }, [users, filter]);
 
   const resetForm = () => {
-    setFormData({ name: '', username: '', email: '', role: 'warehouse', password: '' });
+    setFormData({ name: '', username: '', email: '', role: 'warehouse', password: '', badgeId: '' });
     setEditingUser(null);
   };
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    if (!formData.name.trim() || !formData.username.trim() || !formData.email.trim()) return;
+    if (!formData.name.trim() || !formData.username.trim()) return;
+    const isForklift = formData.role === 'forklift';
+
+    // Forklift users need badge ID; others need email
+    if (isForklift && !formData.badgeId?.trim()) {
+      alert('Badge ID is required for forklift users (used for badge scan login).');
+      return;
+    }
+    if (!isForklift && !formData.email.trim()) {
+      alert('Email is required for this role.');
+      return;
+    }
 
     const payload = {
       name: formData.name.trim(),
       username: formData.username.trim(),
-      email: formData.email.trim(),
+      email: isForklift && !editingUser
+        ? `${formData.username.trim()}@forklift.sunberry.com`
+        : (formData.email?.trim() || editingUser?.email || ''),
       role: formData.role
     };
 
     if (formData.password.trim()) {
       payload.password = formData.password.trim();
+    } else if (isForklift && !editingUser) {
+      payload.password = 'ChangeMe123!'; // Placeholder; forklift uses badge login
+    } else if (!isForklift && !editingUser) {
+      alert('Password is required for new users.');
+      return;
+    }
+    if (isForklift && formData.badgeId?.trim()) {
+      payload.badgeId = formData.badgeId.trim();
     }
 
     try {
@@ -63,7 +86,8 @@ const UsersPage = () => {
       resetForm();
       setShowForm(false);
     } catch (error) {
-      alert(error.message || 'Failed to save user. Please try again.');
+      const msg = (error?.message && String(error.message) !== '[object Object]') ? error.message : 'Failed to save user. Please try again.';
+      alert(msg);
     }
   };
 
@@ -74,7 +98,8 @@ const UsersPage = () => {
       username: user.username,
       email: user.email || '',
       role: user.role,
-      password: ''
+      password: '',
+      badgeId: user.badgeId || user.badge_id || ''
     });
     setShowForm(true);
   };
@@ -105,6 +130,7 @@ const UsersPage = () => {
                   <option value="admin">Admins</option>
                   <option value="supervisor">Supervisors</option>
                   <option value="warehouse">Warehouse</option>
+                  <option value="forklift">Forklift</option>
                 </select>
               </div>
               <button className="primary-button" onClick={() => {
@@ -147,26 +173,30 @@ const UsersPage = () => {
                   />
                 </label>
 
-                <label>
-                  <span>Email</span>
-                  <input
-                    type="email"
-                    value={formData.email}
-                    onChange={(e) => setFormData(prev => ({ ...prev, email: e.target.value }))}
-                    required
-                  />
-                </label>
+                {formData.role !== 'forklift' && (
+                  <label>
+                    <span>Email</span>
+                    <input
+                      type="email"
+                      value={formData.email}
+                      onChange={(e) => setFormData(prev => ({ ...prev, email: e.target.value }))}
+                      required
+                    />
+                  </label>
+                )}
 
-                <label>
-                  <span>Password</span>
-                  <input
-                    type="password"
-                    value={formData.password}
-                    onChange={(e) => setFormData(prev => ({ ...prev, password: e.target.value }))}
-                    placeholder={editingUser ? 'Leave blank to keep current password' : 'Set initial password'}
-                    {...(editingUser ? {} : { required: true })}
-                  />
-                </label>
+                {formData.role !== 'forklift' && (
+                  <label>
+                    <span>Password</span>
+                    <input
+                      type="password"
+                      value={formData.password}
+                      onChange={(e) => setFormData(prev => ({ ...prev, password: e.target.value }))}
+                      placeholder={editingUser ? 'Leave blank to keep current password' : 'Set initial password'}
+                      {...(editingUser ? {} : { required: true })}
+                    />
+                  </label>
+                )}
 
                 <label>
                   <span>Role</span>
@@ -178,8 +208,21 @@ const UsersPage = () => {
                     <option value="admin">Admin</option>
                     <option value="supervisor">Supervisor</option>
                     <option value="warehouse">Warehouse</option>
+                    <option value="forklift">Forklift</option>
                   </select>
                 </label>
+
+                {formData.role === 'forklift' && (
+                  <label>
+                    <span>Badge ID</span>
+                    <input
+                      type="text"
+                      value={formData.badgeId}
+                      onChange={(e) => setFormData(prev => ({ ...prev, badgeId: e.target.value }))}
+                      placeholder="e.g. FK-001 (for badge scan login)"
+                    />
+                  </label>
+                )}
               </div>
 
               <div className="form-actions">
@@ -230,7 +273,8 @@ const UsersPage = () => {
                           try {
                             await toggleUserStatus(user.id);
                           } catch (error) {
-                            alert(error.message || 'Failed to toggle user status. Please try again.');
+                            const msg = (error?.message && String(error.message) !== '[object Object]') ? error.message : 'Failed to toggle user status. Please try again.';
+                            alert(msg);
                           }
                         }}>
                           <Power size={14} />

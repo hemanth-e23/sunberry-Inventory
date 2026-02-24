@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, JSON
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, Text, ForeignKey, Float, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -11,7 +11,8 @@ class User(Base):
     name = Column(String(100), nullable=False)
     email = Column(String(100), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
-    role = Column(String(20), nullable=False)  # admin, supervisor, warehouse
+    role = Column(String(20), nullable=False)  # admin, supervisor, warehouse, forklift
+    badge_id = Column(String(50), unique=True, nullable=True, index=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -54,6 +55,7 @@ class Product(Base):
     
     id = Column(String(50), primary_key=True)
     name = Column(String(200), nullable=False)
+    short_code = Column(String(20), unique=True, nullable=True, index=True)
     fcc_code = Column(String(50))
     sid = Column(String(50))
     brix = Column(Float)
@@ -63,6 +65,8 @@ class Product(Base):
     default_cases_per_pallet = Column(Integer)
     expire_years = Column(Integer)
     quantity_uom = Column(String(20))  # Unit of measure: cases, bags, etc.
+    inventory_tracked = Column(Boolean, default=True)  # False for items like water/sugar that don't need staging
+    gal_per_case = Column(Float, nullable=True)  # For finished goods: gallons per case (e.g. 4 for 4x1gal bottles)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
@@ -151,8 +155,12 @@ class Receipt(Base):
     product_id = Column(String(50), ForeignKey("products.id"))
     category_id = Column(String(50), ForeignKey("categories.id"), nullable=True)
     lot_number = Column(String(100))
-    quantity = Column(Float, nullable=False)
-    unit = Column(String(20), default="cases")
+    quantity = Column(Float, nullable=False)          # Primary quantity used for staging/availability (total weight when weight info provided)
+    unit = Column(String(20), default="cases")          # Unit for quantity (lbs, kg, cases, etc.)
+    container_count = Column(Float, nullable=True)      # How many containers (barrels, bags, etc.)
+    container_unit = Column(String(30), nullable=True)  # Container type: barrels, bags, cases, etc.
+    weight_per_container = Column(Float, nullable=True)  # Weight of each container (e.g. 500 lbs per barrel)
+    weight_unit = Column(String(10), nullable=True)      # Weight unit: lbs, kg, g, oz, etc.
     production_date = Column(DateTime(timezone=True))
     expiration_date = Column(DateTime(timezone=True))
     receipt_date = Column(DateTime(timezone=True), server_default=func.now())
@@ -174,7 +182,8 @@ class Receipt(Base):
     hold = Column(Boolean, default=False)
     held_quantity = Column(Float, default=0) # Quantity currently on hold for this receipt
     hold_location = Column(String(100), nullable=True)  # Name of location/row on hold (e.g., "AC")
-    allocation = Column(JSON)  # Store allocation plan as JSON
+    allocation = Column(JSON)  # Store allocation plan as JSON (finished goods)
+    raw_material_row_allocations = Column(JSON, nullable=True)  # Store multi-row pallet allocations for raw/packaging
     note = Column(Text)
     submitted_by = Column(String(50), ForeignKey("users.id"))
     approved_by = Column(String(50), ForeignKey("users.id"))
@@ -207,6 +216,69 @@ class ReceiptAllocation(Base):
     receipt = relationship("Receipt", backref="allocations")
     storage_area = relationship("StorageArea", backref="allocations")
 
+
+class ForkliftRequest(Base):
+    """Forklift scan session - pallets scanned by forklift person before approval"""
+    __tablename__ = "forklift_requests"
+
+    id = Column(String(50), primary_key=True)
+    product_id = Column(String(50), ForeignKey("products.id"))
+    lot_number = Column(String(100))
+    production_date = Column(DateTime(timezone=True))
+    expiration_date = Column(DateTime(timezone=True))
+    shift_id = Column(String(50), ForeignKey("production_shifts.id"), nullable=True)
+    line_id = Column(String(50), ForeignKey("production_lines.id"), nullable=True)
+    cases_per_pallet = Column(Integer)
+    total_full_pallets = Column(Integer, default=0)
+    total_partial_pallets = Column(Integer, default=0)
+    total_cases = Column(Float, default=0)
+    status = Column(String(20), default="scanning")  # scanning, submitted, approved, rejected
+    receipt_id = Column(String(50), ForeignKey("receipts.id"), nullable=True)
+    scanned_by = Column(String(50), ForeignKey("users.id"))
+    approved_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    product = relationship("Product", backref="forklift_requests")
+    shift = relationship("ProductionShift", backref="forklift_requests")
+    line = relationship("ProductionLine", backref="forklift_requests")
+    receipt = relationship("Receipt", backref="forklift_requests", foreign_keys=[receipt_id])
+    scanner = relationship("User", foreign_keys=[scanned_by], backref="scanned_forklift_requests")
+    approver = relationship("User", foreign_keys=[approved_by], backref="approved_forklift_requests")
+
+
+class PalletLicence(Base):
+    """Individual pallet tracking with unique licence number"""
+    __tablename__ = "pallet_licences"
+
+    id = Column(String(50), primary_key=True)
+    licence_number = Column(String(100), unique=True, index=True)
+    receipt_id = Column(String(50), ForeignKey("receipts.id"), nullable=True)
+    forklift_request_id = Column(String(50), ForeignKey("forklift_requests.id"), nullable=True)
+    product_id = Column(String(50), ForeignKey("products.id"))
+    lot_number = Column(String(100))
+    storage_area_id = Column(String(50), ForeignKey("storage_areas.id"), nullable=True)
+    storage_row_id = Column(String(50), ForeignKey("storage_rows.id"), nullable=True)
+    cases = Column(Integer)
+    is_partial = Column(Boolean, default=False)
+    sequence = Column(Integer)
+    status = Column(String(20), default="pending")  # pending, in_stock, shipped, adjusted, removed, missing_sticker, cancelled
+    transfer_id = Column(String(50), ForeignKey("inventory_transfers.id"), nullable=True)
+    scanned_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    scanned_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    receipt = relationship("Receipt", backref="pallet_licences")
+    forklift_request = relationship("ForkliftRequest", backref="pallet_licences")
+    product = relationship("Product", backref="pallet_licences")
+    storage_area = relationship("StorageArea", backref="pallet_licences")
+    storage_row = relationship("StorageRow", backref="pallet_licences")
+    transfer = relationship("InventoryTransfer", backref="pallet_licences")
+    scanner = relationship("User", foreign_keys=[scanned_by], backref="scanned_pallet_licences")
+
+
 class InventoryTransfer(Base):
     __tablename__ = "inventory_transfers"
     
@@ -223,12 +295,16 @@ class InventoryTransfer(Base):
     order_number = Column(String(100), nullable=True)  # For shipped-out transfers
     source_breakdown = Column(JSON, nullable=True)  # Track source allocations
     destination_breakdown = Column(JSON, nullable=True)  # Track destination allocations
+    pallet_licence_ids = Column(JSON, nullable=True)  # List of pallet licence IDs for licence-aware transfers
     status = Column(String(20), default="pending")  # pending, approved, rejected, completed
     requested_by = Column(String(50), ForeignKey("users.id"))
     approved_by = Column(String(50), ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
     submitted_at = Column(DateTime(timezone=True), server_default=func.now())
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    forklift_submitted_at = Column(DateTime(timezone=True), nullable=True)
+    forklift_notes = Column(Text, nullable=True)
+    skipped_pallet_ids = Column(JSON, nullable=True)
     
     receipt = relationship("Receipt", backref="transfers")
     from_location = relationship("Location", foreign_keys=[from_location_id], backref="transfers_from")
@@ -237,6 +313,23 @@ class InventoryTransfer(Base):
     to_sub_location = relationship("SubLocation", foreign_keys=[to_sub_location_id], backref="transfers_to")
     requester = relationship("User", foreign_keys=[requested_by], backref="requested_transfers")
     approver = relationship("User", foreign_keys=[approved_by], backref="approved_transfers")
+
+
+class TransferScanEvent(Base):
+    """Log each pallet scan during ship-out picking for progress and exception reporting."""
+    __tablename__ = "transfer_scan_events"
+
+    id = Column(String(50), primary_key=True)
+    transfer_id = Column(String(50), ForeignKey("inventory_transfers.id"), nullable=False)
+    licence_number = Column(String(100), nullable=False)
+    licence_id = Column(String(50), ForeignKey("pallet_licences.id"), nullable=True)
+    on_list = Column(Boolean, nullable=False)
+    scanned_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    scanned_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    transfer = relationship("InventoryTransfer", backref="scan_events")
+    scanner = relationship("User", foreign_keys=[scanned_by], backref="transfer_scan_events")
+
 
 class InventoryAdjustment(Base):
     __tablename__ = "inventory_adjustments"
@@ -341,3 +434,49 @@ class StagingItem(Base):
     product = relationship("Product", backref="staging_items")
     original_storage_row = relationship("StorageRow", foreign_keys=[original_storage_row_id], backref="staging_items_from")
     staging_storage_row = relationship("StorageRow", foreign_keys=[staging_storage_row_id], backref="staging_items_at")
+
+
+# ---------------------------------------------------------------------------
+# Production staging requests (created by Production app via service API)
+# ---------------------------------------------------------------------------
+
+class StagingRequest(Base):
+    """
+    A request from the Production system to stage materials for a batch.
+    Created automatically when QA creates a batch in Production.
+    """
+    __tablename__ = "staging_requests"
+
+    id = Column(String(50), primary_key=True)
+    production_batch_uid = Column(String(500), nullable=False, index=True)
+    product_name = Column(String(200), nullable=True)       # What is being produced
+    formula_name = Column(String(200), nullable=True)       # Which formula
+    number_of_batches = Column(Integer, default=1)
+    status = Column(String(20), default="pending")          # pending, in_progress, fulfilled, cancelled
+    production_date = Column(Date, nullable=True)            # Planned production date (from Production)
+    last_synced_at = Column(DateTime(timezone=True), nullable=True)  # Last time we synced usage from Production
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    items = relationship("StagingRequestItem", backref="request", cascade="all, delete-orphan")
+
+
+class StagingRequestItem(Base):
+    """
+    One line-item inside a staging request (one ingredient needed).
+    """
+    __tablename__ = "staging_request_items"
+
+    id = Column(String(50), primary_key=True)
+    request_id = Column(String(50), ForeignKey("staging_requests.id"), nullable=False, index=True)
+    product_id = Column(String(50), ForeignKey("products.id"), nullable=True)  # matched Inventory product
+    sid = Column(String(50), nullable=True)                 # SID from Production ingredient
+    ingredient_name = Column(String(200), nullable=False)   # Name from Production
+    quantity_needed = Column(Float, nullable=False)
+    quantity_fulfilled = Column(Float, default=0)
+    unit = Column(String(20), nullable=True)
+    status = Column(String(20), default="pending")          # pending, fulfilled, partially_fulfilled
+    staging_item_ids = Column(Text, nullable=True)          # JSON array of StagingItem IDs linked to this request item
+
+    product = relationship("Product")

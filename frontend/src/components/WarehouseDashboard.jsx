@@ -273,6 +273,26 @@ const WarehouseDashboard = () => {
             <p>Physical inventory counts</p>
           </div>
         </button>
+
+        <button className="action-button" onClick={() => navigate('/warehouse/bol')}>
+          <div className="action-icon">
+            <FileText size={24} />
+          </div>
+          <div className="action-content">
+            <h3>BOL Report</h3>
+            <p>Batch output vs logged finished goods</p>
+          </div>
+        </button>
+
+        <button className="action-button" onClick={() => navigate('/warehouse/production-requests')} style={{ borderLeft: '3px solid #007bff' }}>
+          <div className="action-icon">
+            <Layers size={24} />
+          </div>
+          <div className="action-content">
+            <h3>Production Staging Requests</h3>
+            <p>View batch staging requests from Production</p>
+          </div>
+        </button>
       </section>
 
       {/* Helpful Reminders */}

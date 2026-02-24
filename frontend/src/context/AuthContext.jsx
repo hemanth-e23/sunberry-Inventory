@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useAutoLogout } from '../hooks/useAutoLogout';
 
@@ -15,20 +15,36 @@ export const useAuth = () => {
   return context;
 };
 
+const getLoginDate = () => localStorage.getItem('loginDate') || '';
+const setLoginDate = (d) => localStorage.setItem('loginDate', d);
+const clearLoginDate = () => localStorage.removeItem('loginDate');
+
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
+  const isForklift = useRef(false);
 
   const logout = () => {
     setUser(null);
     setIsAuthenticated(false);
+    clearLoginDate();
     localStorage.removeItem('user');
     localStorage.removeItem('token');
+    isForklift.current = false;
   };
 
-  // Auto-logout after 30 minutes of inactivity
-  useAutoLogout(logout, isAuthenticated, 30);
+  // Auto-logout: 30 min for non-forklift; forklift uses day-change only
+  useAutoLogout(logout, isAuthenticated, user?.role === 'forklift' ? null : 30);
+
+  // Forklift: check day-change and force re-login
+  useEffect(() => {
+    if (!isAuthenticated || user?.role !== 'forklift') return;
+    const today = new Date().toDateString();
+    if (getLoginDate() && getLoginDate() !== today) {
+      logout();
+    }
+  }, [isAuthenticated, user?.role]);
 
   useEffect(() => {
     // Check for existing session on app load
@@ -90,6 +106,7 @@ export const AuthProvider = ({ children }) => {
       setUser(userData);
       setIsAuthenticated(true);
       localStorage.setItem('user', JSON.stringify(userData));
+      setLoginDate(new Date().toDateString());
 
       return { success: true, user: userData };
     } catch (error) {
@@ -99,11 +116,45 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
+  const badgeLogin = async (badgeId) => {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/auth/badge-login`, {
+        badge_id: badgeId
+      });
+
+      const token = response.data.access_token;
+      localStorage.setItem('token', token);
+
+      const headers = { Authorization: `Bearer ${token}` };
+      const userResponse = await axios.get(`${API_BASE_URL}/auth/me`, { headers });
+
+      const userData = {
+        id: userResponse.data.id,
+        username: userResponse.data.username,
+        role: userResponse.data.role,
+        name: userResponse.data.name,
+        email: userResponse.data.email
+      };
+
+      setUser(userData);
+      setIsAuthenticated(true);
+      localStorage.setItem('user', JSON.stringify(userData));
+      setLoginDate(new Date().toDateString());
+
+      return { success: true, user: userData };
+    } catch (error) {
+      console.error('Badge login error:', error);
+      const errorMessage = error.response?.data?.detail || 'Invalid badge';
+      return { success: false, error: errorMessage };
+    }
+  };
+
   const value = {
     user,
     isAuthenticated,
     loading,
     login,
+    badgeLogin,
     logout
   };
 

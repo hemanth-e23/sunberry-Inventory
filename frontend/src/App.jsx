@@ -22,6 +22,14 @@ import UnauthorizedPage from './components/UnauthorizedPage';
 import CycleCountingPage from './components/CycleCountingPage';
 import PalletTagPrintPage from './components/PalletTagPrintPage';
 import StagingOverview from './components/StagingOverview';
+import ProductionStagingRequests from './components/ProductionStagingRequests';
+import BOLPage from './components/BOLPage';
+import ScannerLogin from './components/scanner/ScannerLogin';
+import ScannerHome from './components/scanner/ScannerHome';
+import ScannerReceiptFlow from './components/scanner/ScannerReceiptFlow';
+import ScannerTransferFlow from './components/scanner/ScannerTransferFlow';
+import ScannerShipOutFlow from './components/scanner/ScannerShipOutFlow';
+import ScannerLayout from './components/scanner/ScannerLayout';
 
 // Context
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -30,6 +38,7 @@ import { AppDataProvider } from './context/AppDataContext';
 // Protected Route Component
 function ProtectedRoute({ children, requiredRole }) {
   const { user, isAuthenticated, loading } = useAuth();
+  const redirectTo = requiredRole === 'forklift' ? '/forklift/login' : '/login';
 
   // Wait for authentication check to complete before making redirect decisions
   if (loading) {
@@ -37,7 +46,7 @@ function ProtectedRoute({ children, requiredRole }) {
   }
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
+    return <Navigate to={redirectTo} replace />;
   }
 
   if (requiredRole && user?.role !== requiredRole) {
@@ -56,6 +65,8 @@ export const getDashboardPath = (userRole) => {
       return '/supervisor';
     case 'warehouse':
       return '/warehouse';
+    case 'forklift':
+      return '/forklift';
     default:
       return '/warehouse';
   }
@@ -68,7 +79,8 @@ function AppRoutes() {
   const roleRedirects = {
     admin: '/admin',
     supervisor: '/supervisor',
-    warehouse: '/warehouse'
+    warehouse: '/warehouse',
+    forklift: '/forklift'
   };
 
   const defaultRedirect = user?.role && roleRedirects[user.role] ? roleRedirects[user.role] : '/warehouse';
@@ -85,6 +97,37 @@ function AppRoutes() {
         path="/login"
         element={!isAuthenticated ? <Login /> : <Navigate to={defaultRedirect} replace />}
       />
+
+      <Route
+        path="/forklift/login"
+        element={!isAuthenticated ? <ScannerLogin /> : <Navigate to="/forklift" replace />}
+      />
+
+      <Route path="/forklift" element={
+        <ProtectedRoute requiredRole="forklift">
+          <ScannerLayout title="Forklift">
+            <ScannerHome />
+          </ScannerLayout>
+        </ProtectedRoute>
+      } />
+
+      <Route path="/forklift/receipt" element={
+        <ProtectedRoute requiredRole="forklift">
+          <ScannerReceiptFlow />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/forklift/transfer" element={
+        <ProtectedRoute requiredRole="forklift">
+          <ScannerTransferFlow />
+        </ProtectedRoute>
+      } />
+
+      <Route path="/forklift/ship-out" element={
+        <ProtectedRoute requiredRole="forklift">
+          <ScannerShipOutFlow />
+        </ProtectedRoute>
+      } />
 
       <Route path="/admin" element={
         <ProtectedRoute requiredRole="admin">
@@ -140,6 +183,14 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
 
+      <Route path="/admin/production-requests" element={
+        <ProtectedRoute requiredRole="admin">
+          <Layout>
+            <ProductionStagingRequests />
+          </Layout>
+        </ProtectedRoute>
+      } />
+
       <Route path="/admin/approvals" element={
         <ProtectedRoute requiredRole="admin">
           <Layout>
@@ -160,6 +211,14 @@ function AppRoutes() {
         <ProtectedRoute requiredRole="admin">
           <Layout>
             <ReportsPage />
+          </Layout>
+        </ProtectedRoute>
+      } />
+
+      <Route path="/admin/bol" element={
+        <ProtectedRoute requiredRole="admin">
+          <Layout>
+            <BOLPage />
           </Layout>
         </ProtectedRoute>
       } />
@@ -219,6 +278,14 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
 
+      <Route path="/warehouse/production-requests" element={
+        <ProtectedRoute requiredRole="warehouse">
+          <Layout>
+            <ProductionStagingRequests />
+          </Layout>
+        </ProtectedRoute>
+      } />
+
       <Route path="/warehouse/receipt-corrections" element={
         <ProtectedRoute requiredRole="warehouse">
           <Layout>
@@ -247,6 +314,14 @@ function AppRoutes() {
         <ProtectedRoute requiredRole="warehouse">
           <Layout>
             <ApprovalsPage />
+          </Layout>
+        </ProtectedRoute>
+      } />
+
+      <Route path="/warehouse/bol" element={
+        <ProtectedRoute requiredRole="warehouse">
+          <Layout>
+            <BOLPage />
           </Layout>
         </ProtectedRoute>
       } />
@@ -289,6 +364,14 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
 
+      <Route path="/supervisor/production-requests" element={
+        <ProtectedRoute requiredRole="supervisor">
+          <Layout>
+            <ProductionStagingRequests />
+          </Layout>
+        </ProtectedRoute>
+      } />
+
       <Route path="/supervisor/products" element={
         <ProtectedRoute requiredRole="supervisor">
           <Layout>
@@ -325,6 +408,14 @@ function AppRoutes() {
         <ProtectedRoute requiredRole="supervisor">
           <Layout>
             <CycleCountingPage />
+          </Layout>
+        </ProtectedRoute>
+      } />
+
+      <Route path="/supervisor/bol" element={
+        <ProtectedRoute requiredRole="supervisor">
+          <Layout>
+            <BOLPage />
           </Layout>
         </ProtectedRoute>
       } />

@@ -238,6 +238,10 @@ const AdminDashboard = () => {
               <Printer size={18} />
               <span>Print Pallet Tags</span>
             </button>
+            <button className="nav-button" onClick={() => navigate('/admin/production-requests')} style={{ borderLeft: '3px solid #007bff' }}>
+              <ClipboardList size={18} />
+              <span>Production Staging Requests</span>
+            </button>
           </div>
         </section>
 
@@ -254,6 +258,10 @@ const AdminDashboard = () => {
             <button className="nav-button" onClick={() => navigate('/admin/reports')}>
               <BarChart3 size={18} />
               <span>Reports</span>
+            </button>
+            <button className="nav-button" onClick={() => navigate('/admin/bol')}>
+              <BarChart3 size={18} />
+              <span>BOL</span>
             </button>
           </div>
         </section>

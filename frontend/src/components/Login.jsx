@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { getDashboardPath } from '../App';
-import { Eye, EyeOff, User, Lock, LogIn, Sparkles, Leaf } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Eye, EyeOff, User, Lock, LogIn, Scan, Leaf } from 'lucide-react';
 import LoadingSpinner from './LoadingSpinner';
 import './Login.css';
 
@@ -148,6 +149,11 @@ const Login = () => {
                   </>
                 )}
               </button>
+
+              <Link to="/forklift/login" className="login-badge-link">
+                <Scan size={18} />
+                <span>Forklift? Scan badge to sign in</span>
+              </Link>
             </form>
           </div>
         </div>

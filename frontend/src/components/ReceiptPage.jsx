@@ -45,9 +45,13 @@ const defaultFormState = {
   pallets: "", // For raw materials and packaging - pallet count for row occupancy
 };
 
+// Container-type units only (how many, not how much weight)
 const unitOptions = [
   { value: "barrels", label: "Barrels" },
   { value: "bags", label: "Bags" },
+  { value: "drums", label: "Drums" },
+  { value: "totes", label: "Totes" },
+  { value: "pails", label: "Pails" },
   { value: "bottles", label: "Bottles" },
   { value: "cases", label: "Cases" },
   { value: "pallets", label: "Pallets" },
@@ -55,9 +59,6 @@ const unitOptions = [
   { value: "liters", label: "Liters" },
   { value: "unit", label: "Unit" },
   { value: "units", label: "Units" },
-  // Allow direct weight-based quantities for raw materials
-  { value: "kg", label: "Kilograms" },
-  { value: "lbs", label: "Pounds" },
 ];
 
 const packagingUnitOptions = [
@@ -83,6 +84,19 @@ const getProductLabel = (product) => {
   if (!product) return "";
   const code = product.fcc || product.sid || "";
   return code ? `${product.name} (${code})` : product.name;
+};
+
+const buildLicenceNote = (receipt, products = []) => {
+  const lot = receipt?.lotNo || receipt?.lot_number;
+  const prodId = receipt?.productId || receipt?.product_id;
+  if (!receipt?.allocation?.plan?.length || !lot || !prodId) return null;
+  const plan = receipt.allocation.plan;
+  const totalPallets = plan.reduce((s, i) => s + (parseInt(i.pallets, 10) || 0), 0);
+  if (totalPallets < 1) return null;
+  const product = products.find((p) => p.id === prodId) || {};
+  const productCode = (product.fcc || product.name || "PRD").slice(0, 10).replace(/\s/g, "").toUpperCase();
+  const lastSeq = String(totalPallets).padStart(3, "0");
+  return `${totalPallets} pallet licence numbers generated (e.g. ${lot}-${productCode}-001 through ${productCode}-${lastSeq})`;
 };
 
 const ReceiptPage = () => {
@@ -869,6 +883,11 @@ const ReceiptPage = () => {
       expiration: formData.expiration,
       quantity: formData.quantity,
       quantityUnits: formData.quantityUnits,
+      // Container & weight fields for proper UOM tracking
+      containerCount: formData.quantity ? parseFloat(formData.quantity) : null,
+      containerUnit: formData.quantityUnits || null,
+      weightPerContainer: formData.weightPerUnit ? parseFloat(formData.weightPerUnit) : null,
+      weightUnit: formData.weightUnits || null,
       weight: formData.weight,
       weightUnits: formData.weightUnits,
       brix: formData.brix,
@@ -909,11 +928,19 @@ const ReceiptPage = () => {
       receiptPayload.floorPallets = Number(floorPallets) || 0;
       receiptPayload.floorCases = Number(manualTotals.floorCases) || 0;
 
+      const fakeReceiptForLicence = {
+        allocation: {
+          plan: receiptPayload.manualAllocations.map((a) => ({ pallets: a.pallets })),
+        },
+        lotNo: formData.lotNo,
+        productId: formData.productId,
+      };
       const summary = {
         product: products.find((p) => p.id === formData.productId)?.name || "",
         totalCases: totalCasesExpected,
         rackCases: manualTotals.totalManualCases,
         floorCases: manualTotals.floorCases,
+        licencePreview: buildLicenceNote(fakeReceiptForLicence, products),
         placements: receiptPayload.manualAllocations.map((entry) => {
           const area = storageAreas.find((areaItem) => areaItem.id === entry.areaId);
           const row = area?.rows.find((rowItem) => rowItem.id === entry.rowId);
@@ -955,9 +982,12 @@ const ReceiptPage = () => {
       setAutoQuantity(null);
       setIsSubmitting(false);
       setLotNumberManuallyEdited(false);
+      const licenceNote = buildLicenceNote(result.receipt, products);
       setFeedback({
         type: "success",
-        message: "Receipt submitted for approval.",
+        message: licenceNote
+          ? `Receipt submitted for approval. ${licenceNote}`
+          : "Receipt submitted for approval.",
       });
     } catch (error) {
       console.error('Error submitting receipt:', error);
@@ -996,9 +1026,12 @@ const ReceiptPage = () => {
       setAutoQuantity(null);
       setIsSubmitting(false);
       setLotNumberManuallyEdited(false);
+      const licenceNote = buildLicenceNote(result.receipt, products);
       setFeedback({
         type: "success",
-        message: "Receipt submitted for approval.",
+        message: licenceNote
+          ? `Receipt submitted for approval. ${licenceNote}`
+          : "Receipt submitted for approval.",
       });
       setConfirmation({ open: false, payload: null, summary: null });
     } catch (error) {
@@ -1275,7 +1308,7 @@ const ReceiptPage = () => {
                   {(isIngredient || showPackagingFields) && (
                     <React.Fragment>
                       <label>
-                        <span>Quantity {requiredStar}</span>
+                        <span>Container Count {requiredStar}</span>
                         <input
                           type="number"
                           name="quantity"
@@ -1284,18 +1317,19 @@ const ReceiptPage = () => {
                           min="0"
                           step="0.01"
                           required
+                          placeholder="e.g. 40"
                         />
                       </label>
 
                       <label>
-                        <span>Unit Description {requiredStar}</span>
+                        <span>Container Type {requiredStar}</span>
                         <select
                           name="quantityUnits"
                           value={formData.quantityUnits}
                           onChange={handleChange}
                           required
                         >
-                          <option value="">Select unit</option>
+                          <option value="">Select container type</option>
                           {unitOptions.map((option) => (
                             <option key={option.value} value={option.value}>
                               {option.label}
@@ -1306,7 +1340,7 @@ const ReceiptPage = () => {
 
                       {isIngredient && (
                         <label>
-                          <span>Weight per Unit</span>
+                          <span>Weight per Container</span>
                           <div className="two-col">
                             <input
                               type="number"
@@ -1315,13 +1349,14 @@ const ReceiptPage = () => {
                               onChange={handleChange}
                               min="0"
                               step="0.01"
+                              placeholder="e.g. 500"
                             />
                             <select
                               name="weightUnits"
                               value={formData.weightUnits}
                               onChange={handleChange}
                             >
-                              <option value="">Select</option>
+                              <option value="">Weight unit</option>
                               {weightUnitOptions.map((option) => (
                                 <option key={option.value} value={option.value}>
                                   {option.label}
@@ -1332,15 +1367,18 @@ const ReceiptPage = () => {
                         </label>
                       )}
 
-                      {isIngredient && (
+                      {isIngredient && totalWeight > 0 && (
                         <label>
-                          <span>Total Weight</span>
+                          <span>Total Weight (auto-calculated)</span>
                           <input
-                            type="number"
-                            name="weight"
-                            value={formData.weight}
+                            type="text"
+                            value={`${Number(formData.weight).toLocaleString()} ${formData.weightUnits || ''}`}
                             readOnly
+                            style={{ backgroundColor: '#f0f8ff', fontWeight: 'bold', color: '#1a5276' }}
                           />
+                          <span style={{ fontSize: '0.8rem', color: '#666', marginTop: '2px' }}>
+                            {formData.quantity} {formData.quantityUnits} × {formData.weightPerUnit} {formData.weightUnits} = {Number(formData.weight).toLocaleString()} {formData.weightUnits}
+                          </span>
                         </label>
                       )}
 
@@ -2023,6 +2061,11 @@ const ReceiptPage = () => {
                     <strong>Floor Cases</strong>
                     <span>{formatNumber(confirmation.summary.floorCases)}</span>
                   </div>
+                  {confirmation.summary.licencePreview && (
+                    <div style={{ gridColumn: "1 / -1", marginTop: "8px", fontSize: "0.9rem" }}>
+                      <strong>Pallet licences:</strong> {confirmation.summary.licencePreview}
+                    </div>
+                  )}
                 </div>
 
                 <div className="table-wrapper mini">

@@ -2,18 +2,23 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
-from datetime import datetime
+from datetime import datetime, date
 import json
 import uuid
 import copy
+import os
+import httpx
+import logging
 
 from app.database import get_db
 from app.models import (
     Receipt, InventoryTransfer, InventoryAdjustment, InventoryHoldAction,
-    StorageArea, StorageRow, Location, SubLocation, User, Category, CycleCount, StagingItem, Product
+    StorageArea, StorageRow, Location, SubLocation, User, Category, CycleCount, StagingItem, Product,
+    PalletLicence, TransferScanEvent
 )
 from app.schemas import (
     InventoryTransfer as InventoryTransferSchema, InventoryTransferCreate, InventoryTransferUpdate,
+    ShipOutPickListCreate, ScanPickRequest, ForkliftSubmitRequest,
     InventoryAdjustment as InventoryAdjustmentSchema, InventoryAdjustmentCreate, InventoryAdjustmentUpdate,
     InventoryHoldAction as InventoryHoldActionSchema, InventoryHoldActionCreate, InventoryHoldActionUpdate,
     CycleCount as CycleCountSchema, CycleCountCreate,
@@ -25,16 +30,73 @@ from app.utils.auth import get_current_active_user, require_role
 router = APIRouter()
 
 # Inventory Transfer endpoints
-@router.get("/transfers", response_model=List[InventoryTransferSchema])
+def _transfer_to_response(transfer, db: Session) -> dict:
+    """Convert transfer to response dict including pallet licence details."""
+    data = {
+        "id": transfer.id,
+        "receipt_id": transfer.receipt_id,
+        "from_location_id": transfer.from_location_id,
+        "from_sub_location_id": transfer.from_sub_location_id,
+        "to_location_id": transfer.to_location_id,
+        "to_sub_location_id": transfer.to_sub_location_id,
+        "quantity": transfer.quantity,
+        "unit": transfer.unit or "cases",
+        "reason": transfer.reason,
+        "transfer_type": transfer.transfer_type or "warehouse-transfer",
+        "order_number": transfer.order_number,
+        "source_breakdown": transfer.source_breakdown,
+        "destination_breakdown": transfer.destination_breakdown,
+        "pallet_licence_ids": transfer.pallet_licence_ids,
+        "status": transfer.status,
+        "requested_by": transfer.requested_by,
+        "approved_by": transfer.approved_by,
+        "approved_at": transfer.approved_at,
+        "submitted_at": transfer.submitted_at,
+        "created_at": transfer.created_at,
+        "forklift_submitted_at": getattr(transfer, "forklift_submitted_at", None),
+        "forklift_notes": getattr(transfer, "forklift_notes", None),
+        "skipped_pallet_ids": getattr(transfer, "skipped_pallet_ids", None) or [],
+    }
+    pl_ids = transfer.pallet_licence_ids or []
+    if pl_ids:
+        licences = db.query(PalletLicence).filter(PalletLicence.id.in_(pl_ids)).all()
+        licence_list = []
+        for pl in licences:
+            row_name = None
+            area_name = None
+            if pl.storage_row_id:
+                row = db.query(StorageRow).filter(StorageRow.id == pl.storage_row_id).first()
+                if row:
+                    row_name = row.name
+                    if row.storage_area_id:
+                        area = db.query(StorageArea).filter(StorageArea.id == row.storage_area_id).first()
+                        if area:
+                            area_name = area.name
+            location_label = "Floor" if not row_name else f"{area_name}/{row_name}" if area_name else row_name
+            licence_list.append({
+                "id": pl.id,
+                "licence_number": pl.licence_number or "",
+                "cases": pl.cases or 0,
+                "lot_number": pl.lot_number or "",
+                "storage_row_id": pl.storage_row_id,
+                "location": location_label,
+            })
+        data["pallet_licence_details"] = licence_list
+    else:
+        data["pallet_licence_details"] = []
+    return data
+
+
+@router.get("/transfers")
 async def get_transfers(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 1000,
     status: str = None,
     requested_by: str = None,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
-    """Get all inventory transfers"""
+    """Get all inventory transfers with pallet licence details."""
     query = db.query(InventoryTransfer)
     
     if status:
@@ -42,8 +104,8 @@ async def get_transfers(
     if requested_by:
         query = query.filter(InventoryTransfer.requested_by == requested_by)
     
-    transfers = query.offset(skip).limit(limit).all()
-    return transfers
+    transfers = query.order_by(InventoryTransfer.submitted_at.desc()).offset(skip).limit(limit).all()
+    return [_transfer_to_response(t, db) for t in transfers]
 
 @router.post("/transfers", response_model=InventoryTransferSchema)
 async def create_transfer(
@@ -96,7 +158,245 @@ async def create_transfer(
     db.add(db_transfer)
     db.commit()
     db.refresh(db_transfer)
-    return db_transfer
+    return _transfer_to_response(db_transfer, db)
+
+
+@router.post("/ship-out/pick-list")
+async def create_ship_out_pick_list(
+    data: ShipOutPickListCreate,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Create ship-out transfer with specific pallet licence IDs (pick list).
+    Warehouse selects exact pallets to ship; quantity and source breakdown are derived from licences."""
+    receipt = db.query(Receipt).filter(Receipt.id == data.receipt_id).first()
+    if not receipt:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found")
+
+    licences = db.query(PalletLicence).filter(
+        PalletLicence.id.in_(data.pallet_licence_ids),
+        PalletLicence.receipt_id == receipt.id,
+        PalletLicence.status == "in_stock"
+    ).all()
+    if len(licences) != len(data.pallet_licence_ids):
+        found_ids = {pl.id for pl in licences}
+        missing = [x for x in data.pallet_licence_ids if x not in found_ids]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Some pallet licences not found or not in stock: {missing}"
+        )
+
+    total_cases = sum(pl.cases for pl in licences)
+    if total_cases <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No cases in selected pallets")
+
+    # Build source_breakdown from storage rows
+    row_cases = {}
+    for pl in licences:
+        rid = pl.storage_row_id or "floor"
+        key = f"row-{rid}" if rid != "floor" else "floor"
+        row_cases[key] = row_cases.get(key, 0) + pl.cases
+
+    source_breakdown = [{"id": k, "quantity": v} for k, v in row_cases.items()]
+
+    transfer_id = f"transfer-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+    db_transfer = InventoryTransfer(
+        id=transfer_id,
+        receipt_id=receipt.id,
+        quantity=total_cases,
+        unit="cases",
+        transfer_type="shipped-out",
+        order_number=data.order_number,
+        source_breakdown=source_breakdown,
+        pallet_licence_ids=data.pallet_licence_ids,
+        requested_by=str(current_user.id),
+        status="pending"
+    )
+    receipt.hold = True
+    db.add(db_transfer)
+    db.commit()
+    db.refresh(db_transfer)
+    return _transfer_to_response(db_transfer, db)
+
+
+@router.post("/transfers/{transfer_id}/scan-pick")
+async def scan_pick_transfer(
+    transfer_id: str,
+    data: ScanPickRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Forklift scans pallet during ship-out picking. Validates pallet is on the pick list."""
+    transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == transfer_id).first()
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+    if transfer.transfer_type != "shipped-out":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a ship-out transfer")
+    if transfer.status != "pending":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transfer is not pending")
+
+    pl_ids = transfer.pallet_licence_ids or []
+    if not pl_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transfer has no pick list")
+
+    if data.licence_id:
+        pl = db.query(PalletLicence).filter(PalletLicence.id == data.licence_id).first()
+    elif data.licence_number:
+        pl = db.query(PalletLicence).filter(PalletLicence.licence_number == data.licence_number).first()
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="licence_number or licence_id required")
+
+    if not pl:
+        # Persist exception: scanned licence not found in system
+        event_id = f"scan-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+        scan_event = TransferScanEvent(
+            id=event_id,
+            transfer_id=transfer_id,
+            licence_number=data.licence_number or data.licence_id or "",
+            licence_id=None,
+            on_list=False,
+            scanned_by=str(current_user.id) if current_user else None,
+        )
+        db.add(scan_event)
+        db.commit()
+        return {"success": False, "on_list": False, "message": "Pallet licence not found"}
+
+    on_list = pl.id in pl_ids
+
+    # Persist scan event for progress and exception reporting
+    event_id = f"scan-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+    scan_event = TransferScanEvent(
+        id=event_id,
+        transfer_id=transfer_id,
+        licence_number=pl.licence_number or data.licence_number or "",
+        licence_id=pl.id,
+        on_list=on_list,
+        scanned_by=str(current_user.id) if current_user else None,
+    )
+    db.add(scan_event)
+    db.commit()
+
+    return {
+        "success": True,
+        "on_list": on_list,
+        "licence": {"id": pl.id, "licence_number": pl.licence_number, "cases": pl.cases},
+        "message": "On pick list" if on_list else "Not on pick list (override allowed)"
+    }
+
+
+@router.get("/transfers/{transfer_id}/scan-progress")
+async def get_transfer_scan_progress(
+    transfer_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Get ship-out picking progress with per-pallet status (for forklift UI and approvals live view)."""
+    transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == transfer_id).first()
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+    pl_ids = transfer.pallet_licence_ids or []
+    total_pallets = len(pl_ids) if isinstance(pl_ids, list) else 0
+    skipped_ids = set(getattr(transfer, "skipped_pallet_ids", None) or [])
+
+    events = (
+        db.query(TransferScanEvent)
+        .filter(TransferScanEvent.transfer_id == transfer_id)
+        .order_by(TransferScanEvent.scanned_at)
+        .all()
+    )
+
+    # Build scan lookup: pallet_id -> latest scan event
+    scanned_pl_ids: dict = {}
+    exceptions = []
+    last_scan = None
+    for e in events:
+        scanner_name = None
+        if e.scanned_by:
+            u = db.query(User).filter(User.id == e.scanned_by).first()
+            scanner_name = u.name if u else e.scanned_by
+        evt = {
+            "licence_number": e.licence_number,
+            "on_list": e.on_list,
+            "scanned_by": scanner_name or e.scanned_by,
+            "scanned_at": e.scanned_at.isoformat() if e.scanned_at else None,
+        }
+        if e.on_list and e.licence_id:
+            scanned_pl_ids[e.licence_id] = evt
+        if not e.on_list:
+            exceptions.append(evt)
+        last_scan = evt
+
+    # Build per-pallet pick list
+    pick_list = []
+    if pl_ids:
+        licences = db.query(PalletLicence).filter(PalletLicence.id.in_(pl_ids)).all()
+        pl_map = {pl.id: pl for pl in licences}
+        for pl_id in pl_ids:
+            pl = pl_map.get(pl_id)
+            if not pl:
+                continue
+            row_name = None
+            area_name = None
+            if pl.storage_row_id:
+                row = db.query(StorageRow).filter(StorageRow.id == pl.storage_row_id).first()
+                if row:
+                    row_name = row.name
+                    if row.storage_area_id:
+                        area = db.query(StorageArea).filter(StorageArea.id == row.storage_area_id).first()
+                        if area:
+                            area_name = area.name
+            location_label = "Floor" if not row_name else f"{area_name}/{row_name}" if area_name else row_name
+            scan_evt = scanned_pl_ids.get(pl_id)
+            pick_list.append({
+                "pallet_id": pl.id,
+                "licence_number": pl.licence_number or "",
+                "cases": pl.cases or 0,
+                "lot_number": pl.lot_number or "",
+                "location": location_label,
+                "is_scanned": pl_id in scanned_pl_ids,
+                "is_skipped": pl_id in skipped_ids,
+                "scanned_at": scan_evt["scanned_at"] if scan_evt else None,
+                "scanned_by": scan_evt["scanned_by"] if scan_evt else None,
+            })
+
+    return {
+        "transfer_id": transfer_id,
+        "order_number": transfer.order_number,
+        "total_pallets": total_pallets,
+        "scanned_count": len(scanned_pl_ids),
+        "pick_list": pick_list,
+        "exceptions": exceptions,
+        "last_scan": last_scan,
+        "forklift_submitted_at": getattr(transfer, "forklift_submitted_at", None),
+        "forklift_notes": getattr(transfer, "forklift_notes", None),
+        "skipped_pallet_ids": list(skipped_ids),
+    }
+
+
+@router.post("/transfers/{transfer_id}/forklift-submit")
+async def forklift_submit_transfer(
+    transfer_id: str,
+    data: ForkliftSubmitRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Forklift driver submits the ship-out pick as done (full or partial).
+    Sets forklift_submitted_at and stores notes + any skipped pallet IDs."""
+    transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == transfer_id).first()
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+    if transfer.transfer_type != "shipped-out":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a ship-out transfer")
+    if transfer.status not in ("pending",):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transfer cannot be submitted in its current state")
+
+    transfer.forklift_submitted_at = datetime.utcnow()
+    transfer.forklift_notes = data.notes or None
+    transfer.skipped_pallet_ids = data.skipped_pallet_ids or []
+    db.commit()
+    db.refresh(transfer)
+    return {"success": True, "message": "Pick submitted for approval", "transfer": _transfer_to_response(transfer, db)}
+
 
 @router.put("/transfers/{transfer_id}", response_model=InventoryTransferSchema)
 async def update_transfer(
@@ -169,9 +469,64 @@ async def approve_transfer(
     # Check if this is a finished goods receipt
     category = db.query(Category).filter(Category.id == receipt.category_id).first()
     is_finished_goods = category and (category.parent_id == 'group-finished' or category.type == 'finished')
+
+    # Handle pallet licence aware transfers
+    pl_ids = transfer.pallet_licence_ids if isinstance(transfer.pallet_licence_ids, list) else []
+    if pl_ids and is_finished_goods:
+        licences = db.query(PalletLicence).filter(
+            PalletLicence.id.in_(pl_ids),
+            PalletLicence.receipt_id == receipt.id,
+            PalletLicence.status == "in_stock"
+        ).all()
+        if transfer.transfer_type == "shipped-out":
+            for pl in licences:
+                pl.status = "shipped"
+                pl.transfer_id = transfer_id
+                if pl.storage_row_id:
+                    row = db.query(StorageRow).filter(StorageRow.id == pl.storage_row_id).first()
+                    if row:
+                        row.occupied_pallets = max(0, (row.occupied_pallets or 0) - 1)
+                        row.occupied_cases = max(0, (row.occupied_cases or 0) - pl.cases)
+                        if row.occupied_pallets <= 0:
+                            row.product_id = None
+        else:
+            # Internal transfer - update pallet locations from destination_breakdown
+            # Support per-destination pallet_licence_ids (forklift scanner) or fallback to single dest
+            dest_list = transfer.destination_breakdown or []
+            has_per_row_pl_ids = any(d.get("pallet_licence_ids") for d in dest_list)
+            for dest in dest_list:
+                dest_id = dest.get("id", "")
+                if not dest_id.startswith("row-"):
+                    continue
+                to_row_id = dest_id.removeprefix("row-")
+                to_row = db.query(StorageRow).filter(StorageRow.id == to_row_id).first()
+                if not to_row:
+                    continue
+                # Pallets going to this row: explicit list or all to first dest (legacy)
+                dest_pl_ids = dest.get("pallet_licence_ids")
+                if dest_pl_ids:
+                    dest_licences = [pl for pl in licences if pl.id in dest_pl_ids]
+                elif not has_per_row_pl_ids and dest_list[0].get("id") == dest_id:
+                    dest_licences = licences  # legacy: all pallets to first dest
+                else:
+                    dest_licences = []
+                for pl in dest_licences:
+                    if pl.storage_row_id:
+                        src_row = db.query(StorageRow).filter(StorageRow.id == pl.storage_row_id).first()
+                        if src_row:
+                            src_row.occupied_pallets = max(0, (src_row.occupied_pallets or 0) - 1)
+                            src_row.occupied_cases = max(0, (src_row.occupied_cases or 0) - pl.cases)
+                            if src_row.occupied_pallets <= 0:
+                                src_row.product_id = None
+                    pl.storage_row_id = to_row_id
+                    pl.storage_area_id = to_row.storage_area_id
+                    to_row.occupied_pallets = (to_row.occupied_pallets or 0) + 1
+                    to_row.occupied_cases = (to_row.occupied_cases or 0) + pl.cases
+                    if not to_row.product_id:
+                        to_row.product_id = pl.product_id
     
-    # For finished goods, subtract from storage row occupancy
-    if is_finished_goods and receipt.allocation:
+    # For finished goods (without pallet_licence_ids), subtract from storage row occupancy
+    if is_finished_goods and not pl_ids and receipt.allocation:
         if isinstance(receipt.allocation, str):
             allocation_data = json.loads(receipt.allocation)
         else:
@@ -190,7 +545,7 @@ async def approve_transfer(
                     
                     # Extract rowId from "row-{rowId}" format
                     if source_id.startswith("row-"):
-                        row_id = source_id.replace("row-", "")
+                        row_id = source_id.removeprefix("row-")
                         # Find the allocation item for this row to get pallet info
                         alloc_item = next((item for item in plan if item.get("rowId") == row_id), None)
                         if alloc_item:
@@ -297,9 +652,48 @@ async def approve_transfer(
             receipt.location_id = transfer.to_location_id
         if transfer.to_sub_location_id:
             receipt.sub_location_id = transfer.to_sub_location_id
-        
-        # Update allocation JSON for finished goods transfers
-        if receipt.allocation and transfer.source_breakdown and transfer.destination_breakdown:
+
+        # Rebuild receipt.allocation from PalletLicence for pallet-licence transfers
+        # (inventory overview reads allocation; without this, transferred rows don't show)
+        if pl_ids and is_finished_goods:
+            # Flush pending ORM changes so the query below sees updated storage_row_id values
+            # (session uses autoflush=False, so explicit flush is required here)
+            db.flush()
+            all_in_stock = db.query(PalletLicence).filter(
+                PalletLicence.receipt_id == receipt.id,
+                PalletLicence.status == "in_stock",
+                PalletLicence.storage_row_id.isnot(None),
+            ).all()
+            row_groups = {}
+            for pl in all_in_stock:
+                rid = pl.storage_row_id
+                if rid not in row_groups:
+                    row_groups[rid] = {"pallets": 0, "cases": 0}
+                row_groups[rid]["pallets"] += 1
+                row_groups[rid]["cases"] += pl.cases
+            plan = []
+            for row_id, data in row_groups.items():
+                row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
+                area = db.query(StorageArea).filter(StorageArea.id == row.storage_area_id).first() if row else None
+                plan.append({
+                    "areaId": row.storage_area_id if row else None,
+                    "rowId": row_id,
+                    "areaName": area.name if area else "",
+                    "rowName": row.name if row else "",
+                    "pallets": data["pallets"],
+                    "cases": data["cases"],
+                })
+            total_cases = sum(p["cases"] for p in plan)
+            total_pallets = sum(p["pallets"] for p in plan)
+            receipt.allocation = {
+                "success": True,
+                "plan": plan,
+                "totalCases": total_cases,
+                "totalPallets": total_pallets,
+            }
+
+        # Update allocation JSON for finished goods transfers (skip when using pallet_licence_ids)
+        if not pl_ids and receipt.allocation and transfer.source_breakdown and transfer.destination_breakdown:
             try:
                 if isinstance(receipt.allocation, str):
                     allocation_data = json.loads(receipt.allocation)
@@ -1047,12 +1441,20 @@ async def suggest_lots_for_staging(
             # Get location info
             location_name = None
             sub_location_name = None
+            storage_row_name = None
             if receipt.location_id:
                 location = db.query(Location).filter(Location.id == receipt.location_id).first()
                 location_name = location.name if location else None
             if receipt.sub_location_id:
                 sub_location = db.query(SubLocation).filter(SubLocation.id == receipt.sub_location_id).first()
                 sub_location_name = sub_location.name if sub_location else None
+            if receipt.storage_row_id:
+                storage_row = db.query(StorageRow).filter(StorageRow.id == receipt.storage_row_id).first()
+                storage_row_name = storage_row.name if storage_row else None
+                # Fallback: derive sub_location from storage_row when receipt is missing it
+                if not sub_location_name and storage_row and storage_row.sub_location_id:
+                    sub_location = db.query(SubLocation).filter(SubLocation.id == storage_row.sub_location_id).first()
+                    sub_location_name = sub_location.name if sub_location else None
             
             # Get unit from receipt or product
             unit = receipt.unit or "cases"
@@ -1068,9 +1470,15 @@ async def suggest_lots_for_staging(
                 "location_name": location_name,
                 "sub_location_id": receipt.sub_location_id,
                 "sub_location_name": sub_location_name,
+                "storage_row_name": storage_row_name,
                 "expiration_date": receipt.expiration_date,
                 "available_quantity": available_quantity,
-                "unit": unit
+                "unit": unit,
+                # Container/weight info for display
+                "container_count": receipt.container_count,
+                "container_unit": receipt.container_unit,
+                "weight_per_container": receipt.weight_per_container,
+                "weight_unit": receipt.weight_unit,
             })
     
     # Return ALL available lots (sorted by expiry), not just enough to meet quantity
@@ -1597,3 +2005,138 @@ async def return_staging_item(
     db.commit()
     db.refresh(staging_item)
     return staging_item
+
+
+# ---------------------------------------------------------------------------
+# BOL Report (Batch Output vs Logged) - compares Production actual batch size to Inventory finished goods
+# ---------------------------------------------------------------------------
+
+PRODUCTION_API_URL = os.environ.get("PRODUCTION_API_URL", "http://localhost:8001")
+BOL_VARIANCE_THRESHOLD_PCT = 3.0  # Within ±3% is OK
+
+
+@router.get("/bol-report")
+async def get_bol_report(
+    production_date_start: Optional[str] = None,
+    production_date_end: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """
+    BOL (Batch Output vs Logged) report. Compares actual batch size from Production
+    (after lab test, when batch is Complete) to finished goods logged in Inventory.
+    Aggregates by production_date and product/flavor. Shows variance and flags if outside ±3%.
+    """
+    # 1. Fetch batch output summary from Production
+    try:
+        params = {}
+        if production_date_start:
+            params["production_date_start"] = production_date_start
+        if production_date_end:
+            params["production_date_end"] = production_date_end
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{PRODUCTION_API_URL}/service/batch-output-summary",
+                params=params,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        logging.warning(f"BOL: Could not reach Production API: {e}")
+        data = {"rows": []}
+
+    prod_rows = data.get("rows", [])
+
+    # 2. Get finished goods receipts from Inventory, aggregated by (production_date, product_name)
+    fg_category_ids = [
+        c.id for c in db.query(Category).filter(Category.parent_id == "group-finished").all()
+    ]
+    if not fg_category_ids:
+        fg_receipts = []
+    else:
+        fg_receipts = (
+            db.query(Receipt)
+            .filter(
+                Receipt.category_id.in_(fg_category_ids),
+                Receipt.status.in_(["approved", "recorded", "reviewed"]),
+            )
+            .all()
+        )
+
+    # Aggregate receipts by (production_date_str, product_id)
+    receipt_agg = {}
+    product_ids_seen = set()
+    for r in fg_receipts:
+        pd = r.production_date
+        pd_str = pd.date().isoformat() if pd else None
+        if not pd_str:
+            continue
+        key = (pd_str, r.product_id)
+        if key not in receipt_agg:
+            receipt_agg[key] = {"production_date": pd_str, "product_id": r.product_id, "logged_cases": 0}
+        receipt_agg[key]["logged_cases"] += float(r.quantity or 0)
+        product_ids_seen.add(r.product_id)
+
+    products_by_id = {
+        p.id: p for p in db.query(Product).filter(Product.id.in_(product_ids_seen)).all()
+    } if product_ids_seen else {}
+
+    # 3. Match Production rows to Inventory data and calculate variance
+    result = []
+    for pr in prod_rows:
+        prod_date = pr.get("production_date") or ""
+        prod_name = pr.get("product_name") or "Unknown"
+        total_gal = float(pr.get("total_actual_batch_size_gal") or 0)
+        batch_count = int(pr.get("batch_count") or 0)
+
+        inv_product = db.query(Product).filter(Product.name == prod_name).first()
+        if not inv_product:
+            inv_product = db.query(Product).filter(Product.name.ilike(f"%{prod_name}%")).first()
+        gal_per_case = None
+        if inv_product and inv_product.gal_per_case and inv_product.gal_per_case > 0:
+            gal_per_case = float(inv_product.gal_per_case)
+        else:
+            gal_per_case = 4.0
+
+        expected_cases = total_gal / gal_per_case if gal_per_case else None
+
+        logged_cases = 0
+        for (pd_str, pid), agg in receipt_agg.items():
+            if pd_str != prod_date:
+                continue
+            p = products_by_id.get(pid)
+            if not p:
+                continue
+            name_match = (
+                (p.name == prod_name) or
+                (p.name and prod_name and p.name.lower() == prod_name.lower()) or
+                (p.name and prod_name and prod_name.lower() in p.name.lower()) or
+                (p.name and prod_name and p.name.lower() in prod_name.lower())
+            )
+            if name_match or (inv_product and pid == inv_product.id):
+                logged_cases += agg["logged_cases"]
+
+        variance_pct = None
+        status_flag = "no_data"
+        if expected_cases is not None and expected_cases > 0:
+            variance_pct = ((logged_cases - expected_cases) / expected_cases) * 100.0
+            if abs(variance_pct) <= BOL_VARIANCE_THRESHOLD_PCT:
+                status_flag = "ok"
+            elif variance_pct < -BOL_VARIANCE_THRESHOLD_PCT:
+                status_flag = "under"
+            else:
+                status_flag = "over"
+
+        result.append({
+            "production_date": prod_date,
+            "product_name": prod_name,
+            "total_actual_batch_size_gal": round(total_gal, 2),
+            "batch_count": batch_count,
+            "gal_per_case": gal_per_case,
+            "expected_cases": round(expected_cases, 1) if expected_cases is not None else None,
+            "logged_cases": round(logged_cases, 1),
+            "variance_pct": round(variance_pct, 2) if variance_pct is not None else None,
+            "status": status_flag,
+        })
+
+    return {"rows": result}

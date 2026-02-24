@@ -1,21 +1,32 @@
-// Date utility functions
+// All times displayed in Detroit (Eastern) timezone
+const TIMEZONE = 'America/Detroit';
+
+const ensureUtc = (value) => {
+  if (!value) return value;
+  const str = String(value);
+  if (str.includes('T') && !str.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(str)) {
+    return str + 'Z';
+  }
+  return str;
+};
+
 export const formatDateTime = (value) => {
   if (!value) return "—";
-  const date = new Date(value); 
+  const date = new Date(ensureUtc(value)); 
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
+  return date.toLocaleString('en-US', { timeZone: TIMEZONE });
 };
 
 export const formatDate = (value) => {
   if (!value) return "—";
-  const date = new Date(value);
+  const date = new Date(ensureUtc(value));
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString();
+  return date.toLocaleDateString('en-US', { timeZone: TIMEZONE });
 };
 
 export const formatTimeAgo = (dateValue) => {
   if (!dateValue) return 'Unknown';
-  const date = new Date(dateValue);
+  const date = new Date(ensureUtc(dateValue));
   if (Number.isNaN(date.getTime())) return 'Invalid date';
   
   const days = getDaysAgo(dateValue);
@@ -29,7 +40,7 @@ export const formatTimeAgo = (dateValue) => {
 
 export const getDaysAgo = (dateValue) => {
   if (!dateValue) return 0;
-  const date = new Date(dateValue);
+  const date = new Date(ensureUtc(dateValue));
   if (Number.isNaN(date.getTime())) return 0;
   const now = new Date();
   const diffTime = Math.abs(now - date);
@@ -39,14 +50,14 @@ export const getDaysAgo = (dateValue) => {
 
 export const toDateKey = (value) => {
   if (!value) return "";
-  const date = new Date(value);
+  const date = new Date(ensureUtc(value));
   if (Number.isNaN(date.getTime())) return "";
   return date.toISOString().slice(0, 10);
 };
 
 export const isDateInPast = (dateValue) => {
   if (!dateValue) return false;
-  const date = new Date(dateValue);
+  const date = new Date(ensureUtc(dateValue));
   if (Number.isNaN(date.getTime())) return false;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -56,11 +67,10 @@ export const isDateInPast = (dateValue) => {
 
 export const isDateValid = (dateValue) => {
   if (!dateValue) return false;
-  const date = new Date(dateValue);
+  const date = new Date(ensureUtc(dateValue));
   return !Number.isNaN(date.getTime());
 };
 
 export const getTodayDateKey = () => {
   return new Date().toISOString().slice(0, 10);
 };
-

@@ -14,6 +14,7 @@ function getProductErrorMessage(error) {
     // Backend already returns clear messages; optionally shorten for consistency
     if (detail.includes('SID code') && detail.includes('already exists')) return 'SID already exists. Please use a different SID or leave it blank.';
     if (detail.includes('FCC code') && detail.includes('already exists')) return 'FCC already exists. Please use a different FCC code or leave it blank.';
+    if (detail.includes('short code') && detail.includes('already exists')) return 'Short code already exists. Please use a different short code.';
     if (detail.includes('Product with this ID already exists')) return 'Product ID already exists. Please use a different product ID.';
     return detail;
   }
@@ -44,13 +45,16 @@ const ProductsPage = () => {
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [formData, setFormData] = useState({
     name: '',
+    shortCode: '',
     categoryId: '',
     description: '',
     sid: '',
     fcc: '',
     defaultCasesPerPallet: '',
     expireYears: '',
-    quantityUom: 'cases'
+    quantityUom: 'cases',
+    inventoryTracked: true,
+    galPerCase: '',
   });
 
   const filteredProducts = useMemo(() => {
@@ -61,13 +65,16 @@ const ProductsPage = () => {
   const resetForm = () => {
     setFormData({
       name: '',
+      shortCode: '',
       categoryId: '',
       description: '',
       sid: '',
       fcc: '',
       defaultCasesPerPallet: '',
       expireYears: '',
-      quantityUom: 'cases'
+      quantityUom: 'cases',
+      inventoryTracked: true,
+      galPerCase: '',
     });
     setEditingProduct(null);
   };
@@ -79,15 +86,16 @@ const ProductsPage = () => {
 
     const payload = {
       name: formData.name.trim(),
+      shortCode: formData.shortCode ? formData.shortCode.trim().toUpperCase() : '',
       categoryId: formData.categoryId,
       description: formData.description.trim() || '',
       sid: formData.sid.trim() || '',
-      // Always include FCC code - send empty string if not provided, it will be converted to null
       fcc: formData.fcc ? formData.fcc.trim() : '',
       defaultCasesPerPallet: formData.defaultCasesPerPallet ? Number(formData.defaultCasesPerPallet) : null,
       expireYears: formData.expireYears ? Number(formData.expireYears) : null,
       quantityUom: formData.quantityUom || 'cases',
-      // Include active status if editing
+      inventoryTracked: formData.inventoryTracked,
+      galPerCase: formData.galPerCase != null && formData.galPerCase !== '' ? Number(formData.galPerCase) : null,
       active: editingProduct ? editingProduct.active : true
     };
 
@@ -110,13 +118,16 @@ const ProductsPage = () => {
     setEditingProduct(product);
     setFormData({
       name: product.name,
+      shortCode: product.shortCode || '',
       categoryId: product.categoryId,
       description: product.description || '',
       sid: product.sid || '',
       fcc: product.fcc || '',
       defaultCasesPerPallet: product.defaultCasesPerPallet ?? '',
       expireYears: product.expireYears ?? '',
-      quantityUom: product.quantityUom || 'cases'
+      quantityUom: product.quantityUom || 'cases',
+      inventoryTracked: product.inventoryTracked !== false,
+      galPerCase: product.galPerCase ?? '',
     });
     setShowForm(true);
   };
@@ -195,6 +206,17 @@ const ProductsPage = () => {
                 </label>
 
                 <label>
+                  <span>Short Code <span className="muted small">(for barcodes, e.g. PFJ128C)</span></span>
+                  <input
+                    type="text"
+                    value={formData.shortCode}
+                    onChange={(e) => setFormData(prev => ({ ...prev, shortCode: e.target.value.toUpperCase() }))}
+                    placeholder="e.g. PFJ128C"
+                    maxLength={20}
+                  />
+                </label>
+
+                <label>
                   <span>Category {requiredStar}</span>
                   <select
                     value={formData.categoryId}
@@ -263,7 +285,35 @@ const ProductsPage = () => {
                         onChange={(e) => setFormData(prev => ({ ...prev, quantityUom: e.target.value }))}
                       />
                     </label>
+
+                    <label>
+                      <span>Gal per Case <span className="muted small">(for BOL)</span></span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        placeholder="e.g. 4"
+                        value={formData.galPerCase}
+                        onChange={(e) => setFormData(prev => ({ ...prev, galPerCase: e.target.value }))}
+                      />
+                    </label>
                   </>
+                )}
+
+                {!isFinishedCategory && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0' }}>
+                    <input
+                      type="checkbox"
+                      checked={formData.inventoryTracked}
+                      onChange={(e) => setFormData(prev => ({ ...prev, inventoryTracked: e.target.checked }))}
+                    />
+                    <span>Track Inventory</span>
+                    {!formData.inventoryTracked && (
+                      <span style={{ fontSize: '0.8rem', color: '#856404', backgroundColor: '#fff3cd', padding: '2px 8px', borderRadius: '4px', border: '1px solid #ffc107' }}>
+                        No staging needed (e.g. water, sugar)
+                      </span>
+                    )}
+                  </label>
                 )}
 
                 <label className="full-width">
@@ -322,6 +372,7 @@ const ProductsPage = () => {
                 <tr>
                   <th>ID</th>
                   <th>Name</th>
+                  <th>Short Code</th>
                   <th>Category</th>
                   <th>Code</th>
                   <th>Description</th>
@@ -335,7 +386,23 @@ const ProductsPage = () => {
                   return (
                     <tr key={product.id}>
                       <td>{product.id}</td>
-                      <td>{product.name}</td>
+                      <td>
+                        {product.name}
+                        {product.inventoryTracked === false && (
+                          <span style={{ marginLeft: '6px', fontSize: '0.7rem', color: '#856404', backgroundColor: '#fff3cd', padding: '1px 6px', borderRadius: '3px', border: '1px solid #ffc107', verticalAlign: 'middle' }}>
+                            Not Tracked
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {product.shortCode ? (
+                          <span style={{ fontFamily: 'monospace', fontWeight: 600, fontSize: '0.9rem' }}>
+                            {product.shortCode}
+                          </span>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
                       <td>{category ? formatCategoryLabel(category) : 'Unknown'}</td>
                       <td>{product.fcc || product.sid || '—'}</td>
                       <td>{product.description}</td>

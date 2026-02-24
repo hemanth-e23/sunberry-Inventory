@@ -26,7 +26,7 @@ export const useAutoLogout = (logout, isAuthenticated, timeoutMinutes = 30) => {
   const resetTimer = useCallback(() => {
     clearTimeout();
     
-    if (!isAuthenticated) {
+    if (!isAuthenticated || timeoutMinutes == null || timeoutMinutes <= 0) {
       return;
     }
 

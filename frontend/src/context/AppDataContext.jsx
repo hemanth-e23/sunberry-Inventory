@@ -530,6 +530,7 @@ export const AppDataProvider = ({ children }) => {
         const prods = allProds.map(prod => ({
           id: prod.id,
           name: prod.name,
+          shortCode: prod.short_code || '',
           categoryId: prod.category_id,
           description: prod.description || '',
           status: prod.is_active ? 'active' : 'inactive',
@@ -539,6 +540,8 @@ export const AppDataProvider = ({ children }) => {
           expireYears: prod.expire_years,
           quantityUom: prod.quantity_uom || 'cases',
           active: prod.is_active !== false,
+          inventoryTracked: prod.inventory_tracked !== false,
+          galPerCase: prod.gal_per_case ?? null,
         }));
         setProducts(prods);
       } catch (error) {
@@ -563,7 +566,7 @@ export const AppDataProvider = ({ children }) => {
           // No token available, skip this fetch
           return;
         }
-        const response = await axios.get(`${API_BASE_URL}/receipts/`, { headers });
+        const response = await axios.get(`${API_BASE_URL}/receipts/`, { headers, params: { limit: 10000 } });
         const recs = response.data.map(rec => {
           // Find the product to get SID
           const product = products.find(p => p.id === rec.product_id);
@@ -573,6 +576,10 @@ export const AppDataProvider = ({ children }) => {
             categoryId: rec.category_id || null,
             quantity: Number(rec.quantity) || 0,
             quantityUnits: rec.unit || rec.quantity_units || 'cases',
+            containerCount: rec.container_count || null,
+            containerUnit: rec.container_unit || null,
+            weightPerContainer: rec.weight_per_container || null,
+            weightUnit: rec.weight_unit || null,
             lotNo: rec.lot_number || '',
             receiptDate: rec.receipt_date ? new Date(rec.receipt_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
             expiryDate: rec.expiration_date ? new Date(rec.expiration_date).toISOString().split('T')[0] : null,
@@ -658,6 +665,7 @@ export const AppDataProvider = ({ children }) => {
           role: user.role,
           status: user.is_active ? "active" : "inactive",
           email: user.email || null,
+          badgeId: user.badge_id || null,
         }));
         setUsers(usersData);
       } catch (error) {
@@ -902,6 +910,8 @@ export const AppDataProvider = ({ children }) => {
           id: t.id,
           receiptId: t.receipt_id,
           transferType: t.transfer_type,
+          fromLocation: t.from_location_id,
+          fromSubLocation: t.from_sub_location_id,
           toLocation: t.to_location_id,
           toSubLocation: t.to_sub_location_id,
           quantity: t.quantity,
@@ -912,6 +922,10 @@ export const AppDataProvider = ({ children }) => {
           submittedBy: t.requested_by,
           approvedBy: t.approved_by,
           approvedAt: t.approved_at,
+          sourceBreakdown: t.source_breakdown || [],
+          destinationBreakdown: t.destination_breakdown || [],
+          palletLicenceIds: t.pallet_licence_ids || [],
+          palletLicenceDetails: t.pallet_licence_details || [],
           editHistory: []
         }));
         setInventoryTransfers(transfers);
@@ -971,7 +985,27 @@ export const AppDataProvider = ({ children }) => {
     };
     fetchCycleCounts();
   }, [authLoading, isAuthenticated]);
+
+  // Fetch forklift requests (for approvals page)
+  useEffect(() => {
+    if (authLoading) return;
+    if (!isAuthenticated) return;
+
+    const fetchForkliftRequests = async () => {
+      try {
+        const headers = await getAuthHeaders(true);
+        if (!headers.Authorization) return;
+        const response = await axios.get(`${API_BASE_URL}/scanner/requests`, { headers });
+        setForkliftRequests(response.data || []);
+      } catch (error) {
+        console.error('Error fetching forklift requests:', error);
+      }
+    };
+    fetchForkliftRequests();
+  }, [authLoading, isAuthenticated]);
+
   const [cycleCounts, setCycleCounts] = useState([]);
+  const [forkliftRequests, setForkliftRequests] = useState([]);
   const [inventoryTransfers, setInventoryTransfers] =
     useState(initialTransfers);
   const [inventoryHoldActions, setInventoryHoldActions] =
@@ -1104,6 +1138,7 @@ export const AppDataProvider = ({ children }) => {
       const productData = {
         id: product.id || `prod-${Date.now()}`,
         name: product.name,
+        short_code: product.shortCode?.trim() || null,
         category_id: product.categoryId,
         description: product.description?.trim() || null,
         sid: product.sid?.trim() || null,
@@ -1113,6 +1148,8 @@ export const AppDataProvider = ({ children }) => {
         expire_years: product.expireYears ? Number(product.expireYears) : null,
         quantity_uom: product.quantityUom || null,
         is_active: product.active !== undefined ? product.active : true,
+        inventory_tracked: product.inventoryTracked !== undefined ? product.inventoryTracked : true,
+        gal_per_case: product.galPerCase != null && product.galPerCase !== '' ? Number(product.galPerCase) : null,
       };
 
       // Remove null/empty fields (except required ones)
@@ -1128,6 +1165,7 @@ export const AppDataProvider = ({ children }) => {
       const newProduct = {
         id: response.data.id,
         name: response.data.name,
+        shortCode: response.data.short_code || "",
         categoryId: response.data.category_id,
         description: response.data.description || "",
         status: response.data.is_active ? "active" : "inactive",
@@ -1138,6 +1176,8 @@ export const AppDataProvider = ({ children }) => {
         expireYears: response.data.expire_years || product.expireYears || null,
         quantityUom: response.data.quantity_uom || product.quantityUom || "cases",
         active: response.data.is_active !== false,
+        inventoryTracked: response.data.inventory_tracked !== false,
+        galPerCase: response.data.gal_per_case ?? product.galPerCase ?? null,
       };
       setProducts((prev) => [...prev, newProduct]);
       return newProduct;
@@ -1159,11 +1199,13 @@ export const AppDataProvider = ({ children }) => {
 
       // Only include fields that are explicitly provided in updates
       if (updates.name !== undefined) updateData.name = updates.name;
+      if (updates.shortCode !== undefined) {
+        updateData.short_code = (updates.shortCode && updates.shortCode.trim()) ? updates.shortCode.trim() : null;
+      }
       if (updates.categoryId !== undefined) updateData.category_id = updates.categoryId;
       if (updates.description !== undefined) updateData.description = updates.description || null;
       if (updates.sid !== undefined) updateData.sid = updates.sid || null;
       if (updates.fcc !== undefined) {
-        // Send FCC code - trim if it exists, otherwise send null
         updateData.fcc_code = (updates.fcc && updates.fcc.trim()) ? updates.fcc.trim() : null;
       }
       if (updates.vendorId !== undefined) updateData.vendor_id = updates.vendorId || null;
@@ -1174,6 +1216,10 @@ export const AppDataProvider = ({ children }) => {
         updateData.expire_years = updates.expireYears ? Number(updates.expireYears) : null;
       }
       if (updates.quantityUom !== undefined) updateData.quantity_uom = updates.quantityUom || null;
+      if (updates.inventoryTracked !== undefined) updateData.inventory_tracked = updates.inventoryTracked;
+      if (updates.galPerCase !== undefined) {
+        updateData.gal_per_case = updates.galPerCase != null && updates.galPerCase !== '' ? Number(updates.galPerCase) : null;
+      }
       if (updates.active !== undefined) {
         updateData.is_active = updates.active;
       } else if (updates.status !== undefined) {
@@ -1184,6 +1230,7 @@ export const AppDataProvider = ({ children }) => {
       const updatedProduct = {
         id: response.data.id,
         name: response.data.name,
+        shortCode: response.data.short_code || "",
         categoryId: response.data.category_id,
         description: response.data.description || "",
         status: response.data.is_active ? "active" : "inactive",
@@ -1194,6 +1241,8 @@ export const AppDataProvider = ({ children }) => {
         expireYears: response.data.expire_years || updates.expireYears || null,
         quantityUom: response.data.quantity_uom || updates.quantityUom || "cases",
         active: response.data.is_active !== false,
+        inventoryTracked: response.data.inventory_tracked !== false,
+        galPerCase: response.data.gal_per_case ?? updates.galPerCase ?? null,
       };
       setProducts((prev) =>
         prev.map((product) => (product.id === id ? updatedProduct : product))
@@ -2347,6 +2396,26 @@ export const AppDataProvider = ({ children }) => {
     if (receipt.location && !isFinishedGood) locationId = receipt.location;
     if (receipt.subLocation && !isFinishedGood) subLocationId = receipt.subLocation;
 
+    // Fallback: derive sub_location_id from storageRowId via locationsState
+    // This prevents sub_location_id being lost if the form state loses it
+    if (!subLocationId && (receipt.storageRowId || receipt.rawMaterialRowAllocations)) {
+      const rowId = receipt.storageRowId || (receipt.rawMaterialRowAllocations?.[0]?.rowId);
+      if (rowId) {
+        // Search all sub-locations' rows for this row ID
+        for (const loc of locationsState) {
+          for (const sub of (loc.subLocations || [])) {
+            const matchRow = (sub.rows || []).find(r => r.id === rowId);
+            if (matchRow) {
+              subLocationId = sub.id;
+              if (!locationId) locationId = loc.id;
+              break;
+            }
+          }
+          if (subLocationId) break;
+        }
+      }
+    }
+
     // Prepare receipt data for API
     // Map frontend field names to backend field names
     const receiptData = {
@@ -2355,6 +2424,11 @@ export const AppDataProvider = ({ children }) => {
       category_id: receipt.categoryId || null,
       quantity: Number(receipt.quantity) || 0,
       unit: receipt.quantityUnits || 'cases',
+      // Container & weight fields (backend will auto-compute quantity as total weight when all are present)
+      container_count: receipt.containerCount || null,
+      container_unit: receipt.containerUnit || null,
+      weight_per_container: receipt.weightPerContainer || null,
+      weight_unit: receipt.weightUnit || null,
       lot_number: receipt.lotNo || null,
       receipt_date: receipt.receiptDate ? new Date(receipt.receiptDate).toISOString() : new Date().toISOString(),
       expiration_date: (receipt.expiryDate || receipt.expiration) ? new Date(receipt.expiryDate || receipt.expiration).toISOString() : null,
@@ -2421,6 +2495,10 @@ export const AppDataProvider = ({ children }) => {
         categoryId: response.data.category_id || receipt.categoryId,
         quantity: Number(response.data.quantity) || 0,
         quantityUnits: response.data.unit || 'cases',
+        containerCount: response.data.container_count || null,
+        containerUnit: response.data.container_unit || null,
+        weightPerContainer: response.data.weight_per_container || null,
+        weightUnit: response.data.weight_unit || null,
         lotNo: response.data.lot_number || '',
         receiptDate: response.data.receipt_date ? new Date(response.data.receipt_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
         expiryDate: response.data.expiration_date ? new Date(response.data.expiration_date).toISOString().split('T')[0] : null,
@@ -2774,6 +2852,7 @@ export const AppDataProvider = ({ children }) => {
         order_number: transfer.orderNumber || null,
         source_breakdown: transfer.sourceBreakdown || null,
         destination_breakdown: transfer.destinationBreakdown || null,
+        ...(transfer.palletLicenceIds?.length ? { pallet_licence_ids: transfer.palletLicenceIds } : {}),
       };
 
       const response = await axios.post(`${API_BASE_URL}/inventory/transfers`, payload, { headers });
@@ -2789,11 +2868,13 @@ export const AppDataProvider = ({ children }) => {
         reason: response.data.reason,
         transferType: response.data.transfer_type,
         orderNumber: response.data.order_number,
-        sourceBreakdown: response.data.source_breakdown,
-        destinationBreakdown: response.data.destination_breakdown,
+        sourceBreakdown: response.data.source_breakdown || [],
+        destinationBreakdown: response.data.destination_breakdown || [],
+        palletLicenceIds: response.data.pallet_licence_ids || [],
+        palletLicenceDetails: response.data.pallet_licence_details || [],
         status: response.data.status || 'pending',
         submittedAt: response.data.submitted_at,
-        requestedBy: response.data.requested_by,
+        submittedBy: response.data.requested_by,
         approvedBy: response.data.approved_by || null,
         approvedAt: response.data.approved_at || null,
         editHistory: [],
@@ -3059,6 +3140,209 @@ export const AppDataProvider = ({ children }) => {
       }
       const errorMessage = error.response?.data?.detail || error.message || 'Failed to reject transfer';
       return { success: false, error: errorMessage };
+    }
+  };
+
+  const fetchForkliftRequests = async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await axios.get(`${API_BASE_URL}/scanner/requests`, { headers });
+      setForkliftRequests(response.data || []);
+      return response.data || [];
+    } catch (error) {
+      console.error('Error fetching forklift requests:', error);
+      return [];
+    }
+  };
+
+  const approveForkliftRequest = async (id) => {
+    try {
+      const headers = await getAuthHeaders();
+      await axios.post(`${API_BASE_URL}/scanner/requests/${id}/approve`, {}, { headers });
+      await fetchForkliftRequests();
+
+      const receiptsResponse = await axios.get(`${API_BASE_URL}/receipts/`, { headers, params: { limit: 10000 } });
+      const recs = receiptsResponse.data.map(rec => {
+        const product = products.find(p => p.id === rec.product_id);
+        return {
+          id: rec.id,
+          productId: rec.product_id,
+          categoryId: rec.category_id || null,
+          quantity: Number(rec.quantity) || 0,
+          quantityUnits: rec.unit || rec.quantity_units || 'cases',
+          containerCount: rec.container_count || null,
+          containerUnit: rec.container_unit || null,
+          weightPerContainer: rec.weight_per_container || null,
+          weightUnit: rec.weight_unit || null,
+          lotNo: rec.lot_number || '',
+          receiptDate: rec.receipt_date ? new Date(rec.receipt_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
+          expiryDate: rec.expiration_date ? new Date(rec.expiration_date).toISOString().split('T')[0] : null,
+          expiration: rec.expiration_date ? new Date(rec.expiration_date).toISOString().split('T')[0] : null,
+          productionDate: rec.production_date ? new Date(rec.production_date).toISOString().split('T')[0] : null,
+          vendorId: rec.vendor_id || null,
+          status: rec.status || 'recorded',
+          submittedBy: rec.submitted_by || '',
+          submittedAt: rec.submitted_at || null,
+          approvedBy: rec.approved_by || null,
+          approvedAt: rec.approved_at || null,
+          note: rec.note || '',
+          locationId: rec.location_id || null,
+          location: rec.location_id || null,
+          subLocationId: rec.sub_location_id || null,
+          subLocation: rec.sub_location_id || null,
+          storageAreaId: rec.storage_area_id || null,
+          storageRowId: rec.storage_row_id || null,
+          pallets: rec.pallets || null,
+          rawMaterialRowAllocations: rec.raw_material_row_allocations || null,
+          fullPallets: rec.full_pallets || 0,
+          partialCases: rec.partial_cases || 0,
+          casesPerPallet: rec.cases_per_pallet || null,
+          bol: rec.bol || null,
+          purchaseOrder: rec.purchase_order || null,
+          hold: rec.hold || false,
+          heldQuantity: rec.held_quantity || 0,
+          holdLocation: rec.hold_location || null,
+          shift: rec.shift_id || null,
+          lineNumber: rec.line_id || null,
+          editHistory: [],
+          sid: product?.sid || '',
+          allocation: (() => {
+            if (!rec.allocation) return null;
+            if (typeof rec.allocation === 'string') {
+              try { return JSON.parse(rec.allocation); } catch (e) { return null; }
+            }
+            return rec.allocation;
+          })(),
+        };
+      });
+      setReceipts(recs);
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error approving forklift request:', error);
+      const msg = error.response?.data?.detail || error.message || 'Approval failed';
+      return { success: false, error: msg };
+    }
+  };
+
+  const rejectForkliftRequest = async (id) => {
+    try {
+      const headers = await getAuthHeaders();
+      await axios.post(`${API_BASE_URL}/scanner/requests/${id}/reject`, {}, { headers });
+      await fetchForkliftRequests();
+      return { success: true };
+    } catch (error) {
+      console.error('Error rejecting forklift request:', error);
+      const msg = error.response?.data?.detail || error.message || 'Reject failed';
+      return { success: false, error: msg };
+    }
+  };
+
+  const updateForkliftRequest = async (id, updates) => {
+    try {
+      const headers = await getAuthHeaders();
+      await axios.put(`${API_BASE_URL}/scanner/requests/${id}`, updates, { headers });
+      await fetchForkliftRequests();
+      return { success: true };
+    } catch (error) {
+      console.error('Error updating forklift request:', error);
+      const msg = error.response?.data?.detail || error.message || 'Update failed';
+      return { success: false, error: msg };
+    }
+  };
+
+  const removePalletLicence = async (requestId, licenceId) => {
+    try {
+      const headers = await getAuthHeaders();
+      await axios.delete(`${API_BASE_URL}/scanner/requests/${requestId}/pallet-licences/${licenceId}`, { headers });
+      await fetchForkliftRequests();
+      return { success: true };
+    } catch (error) {
+      console.error('Error removing pallet licence:', error);
+      const msg = error.response?.data?.detail || error.message || 'Remove failed';
+      return { success: false, error: msg };
+    }
+  };
+
+  const updatePalletLicence = async (requestId, licenceId, updates) => {
+    try {
+      const headers = await getAuthHeaders();
+      await axios.put(`${API_BASE_URL}/scanner/requests/${requestId}/pallet-licences/${licenceId}`, updates, { headers });
+      await fetchForkliftRequests();
+      return { success: true };
+    } catch (error) {
+      console.error('Error updating pallet licence:', error);
+      const msg = error.response?.data?.detail || error.message || 'Update failed';
+      return { success: false, error: msg };
+    }
+  };
+
+  const addPalletToForkliftRequest = async (requestId, palletData) => {
+    try {
+      const headers = await getAuthHeaders();
+      await axios.post(`${API_BASE_URL}/scanner/requests/${requestId}/add-pallet`, palletData, { headers });
+      await fetchForkliftRequests();
+      return { success: true };
+    } catch (error) {
+      console.error('Error adding pallet to request:', error);
+      const msg = error.response?.data?.detail || error.message || 'Add pallet failed';
+      return { success: false, error: msg };
+    }
+  };
+
+  const fetchPalletLicences = async (filters = {}) => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await axios.get(`${API_BASE_URL}/pallet-licences/`, { headers, params: filters });
+      return response.data || [];
+    } catch (error) {
+      console.error('Error fetching pallet licences:', error);
+      return [];
+    }
+  };
+
+  const createShipOutPickList = async (data) => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await axios.post(`${API_BASE_URL}/inventory/ship-out/pick-list`, {
+        receipt_id: data.receiptId,
+        order_number: data.orderNumber,
+        pallet_licence_ids: data.palletLicenceIds,
+      }, { headers });
+      const t = response.data;
+      const newTransfer = {
+        id: t.id,
+        receiptId: t.receipt_id,
+        transferType: t.transfer_type,
+        fromLocation: t.from_location_id,
+        toLocation: t.to_location_id,
+        quantity: t.quantity,
+        orderNumber: t.order_number,
+        status: t.status,
+        submittedAt: t.submitted_at,
+        palletLicenceIds: t.pallet_licence_ids || [],
+        palletLicenceDetails: t.pallet_licence_details || [],
+        sourceBreakdown: t.source_breakdown || [],
+        destinationBreakdown: t.destination_breakdown || [],
+        editHistory: [],
+      };
+      setInventoryTransfers((prev) => [newTransfer, ...prev]);
+      return { success: true, transfer: newTransfer };
+    } catch (error) {
+      console.error('Error creating ship-out pick list:', error);
+      const msg = error.response?.data?.detail || error.message || 'Create failed';
+      return { success: false, error: msg };
+    }
+  };
+
+  const fetchTransferScanProgress = async (transferId) => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await axios.get(`${API_BASE_URL}/inventory/transfers/${transferId}/scan-progress`, { headers });
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching transfer scan progress:', error);
+      return null;
     }
   };
 
@@ -3417,6 +3701,7 @@ export const AppDataProvider = ({ children }) => {
         role: user.role,
         password: user.password,
         email: user.email || null,
+        ...(user.badgeId ? { badge_id: user.badgeId } : {}),
       };
       const response = await axios.post(`${API_BASE_URL}/users/`, userData, { headers });
       const newUser = {
@@ -3426,6 +3711,7 @@ export const AppDataProvider = ({ children }) => {
         role: response.data.role,
         status: response.data.is_active ? "active" : "inactive",
         email: response.data.email || null,
+        badgeId: response.data.badge_id || null,
       };
       setUsers((prev) => [...prev, newUser]);
       return newUser;
@@ -3435,7 +3721,10 @@ export const AppDataProvider = ({ children }) => {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
       }
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to add user';
+      const detail = error.response?.data?.detail;
+      const errorMessage = typeof detail === 'string' ? detail
+        : Array.isArray(detail) ? detail.map((d) => d.msg || JSON.stringify(d)).join(', ')
+        : detail && typeof detail === 'object' ? JSON.stringify(detail) : (error.message || 'Failed to add user');
       throw new Error(errorMessage);
     }
   };
@@ -3451,6 +3740,9 @@ export const AppDataProvider = ({ children }) => {
       if (updates.password !== undefined && updates.password !== "") {
         updateData.password = updates.password;
       }
+      if (updates.badgeId !== undefined) {
+        updateData.badge_id = updates.badgeId === "" ? null : updates.badgeId;
+      }
 
       const response = await axios.put(`${API_BASE_URL}/users/${id}`, updateData, { headers });
       const updatedUser = {
@@ -3460,6 +3752,7 @@ export const AppDataProvider = ({ children }) => {
         role: response.data.role,
         status: response.data.is_active ? "active" : "inactive",
         email: response.data.email || null,
+        badgeId: response.data.badge_id || null,
       };
       setUsers((prev) =>
         prev.map((user) => (user.id === id ? updatedUser : user))
@@ -3471,7 +3764,10 @@ export const AppDataProvider = ({ children }) => {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
       }
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to update user';
+      const detail = error.response?.data?.detail;
+      const errorMessage = typeof detail === 'string' ? detail
+        : Array.isArray(detail) ? detail.map((d) => d.msg || JSON.stringify(d)).join(', ')
+        : detail && typeof detail === 'object' ? JSON.stringify(detail) : (error.message || 'Failed to update user');
       throw new Error(errorMessage);
     }
   };
@@ -3497,7 +3793,10 @@ export const AppDataProvider = ({ children }) => {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
       }
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to toggle user status';
+      const detail = error.response?.data?.detail;
+      const errorMessage = typeof detail === 'string' ? detail
+        : Array.isArray(detail) ? detail.map((d) => d.msg || JSON.stringify(d)).join(', ')
+        : detail && typeof detail === 'object' ? JSON.stringify(detail) : (error.message || 'Failed to toggle user status');
       throw new Error(errorMessage);
     }
   };
@@ -3999,6 +4298,17 @@ export const AppDataProvider = ({ children }) => {
       updateTransfer,
       approveTransfer,
       rejectTransfer,
+      forkliftRequests,
+      fetchForkliftRequests,
+      approveForkliftRequest,
+      rejectForkliftRequest,
+      updateForkliftRequest,
+      removePalletLicence,
+      updatePalletLicence,
+      addPalletToForkliftRequest,
+      fetchPalletLicences,
+      createShipOutPickList,
+      fetchTransferScanProgress,
       inventoryHoldActions,
       submitHoldAction,
       updateHoldAction,
@@ -4035,6 +4345,7 @@ export const AppDataProvider = ({ children }) => {
       productionLinesState,
       pendingEdits,
       inventoryTransfers,
+      forkliftRequests,
       inventoryHoldActions,
       inventoryAdjustments,
       receiptReportingRows,

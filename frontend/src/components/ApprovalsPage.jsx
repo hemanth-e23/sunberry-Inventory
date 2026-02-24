@@ -43,6 +43,7 @@ const ApprovalsPage = () => {
     inventoryTransfers,
     approveTransfer,
     rejectTransfer,
+    fetchTransferScanProgress,
     inventoryHoldActions,
     approveHoldAction,
     rejectHoldAction,
@@ -50,6 +51,14 @@ const ApprovalsPage = () => {
     approveAdjustment,
     rejectAdjustment,
     users,
+    forkliftRequests,
+    fetchForkliftRequests,
+    approveForkliftRequest,
+    rejectForkliftRequest,
+    updateForkliftRequest,
+    removePalletLicence,
+    updatePalletLicence,
+    addPalletToForkliftRequest,
   } = useAppData();
 
   const todayKey = useMemo(() => getTodayDateKey(), []);
@@ -322,6 +331,8 @@ const ApprovalsPage = () => {
   const [isRejecting, setIsRejecting] = useState(false);
   const [isSendingBack, setIsSendingBack] = useState(false);
 
+  const [transferScanProgress, setTransferScanProgress] = useState({});
+
   const todaysPending = useMemo(
     () =>
       receipts
@@ -398,6 +409,12 @@ const ApprovalsPage = () => {
     [inventoryHoldActions, user, currentUserId],
   );
 
+  const pendingForkliftRequests = useMemo(
+    () =>
+      (forkliftRequests || []).filter((fr) => fr.status === 'submitted'),
+    [forkliftRequests],
+  );
+
   const pendingAdjustments = useMemo(
     () =>
       inventoryAdjustments
@@ -412,6 +429,30 @@ const ApprovalsPage = () => {
     [inventoryAdjustments, user, currentUserId],
   );
 
+  // Poll scan progress for pending ship-out transfers (live update)
+  useEffect(() => {
+    const shipOuts = pendingTransfers.filter(
+      (t) => t.transferType === 'shipped-out' && (t.palletLicenceIds || t.pallet_licence_ids || []).length > 0
+    );
+    if (shipOuts.length === 0) {
+      setTransferScanProgress({});
+      return;
+    }
+    const load = async () => {
+      const next = {};
+      for (const t of shipOuts) {
+        try {
+          const data = await fetchTransferScanProgress(t.id);
+          if (data) next[t.id] = data;
+        } catch (_) {}
+      }
+      setTransferScanProgress((prev) => ({ ...prev, ...next }));
+    };
+    load();
+    const interval = setInterval(load, 5000);
+    return () => clearInterval(interval);
+  }, [pendingTransfers, fetchTransferScanProgress]);
+
   // Summary statistics
   const summaryStats = useMemo(() => {
     const todayApproved = approvedHistory.filter(r => {
@@ -422,19 +463,20 @@ const ApprovalsPage = () => {
     const urgentCount = backlogPending.filter(r => getDaysAgo(r.submittedAt || r.receiptDate) >= 7).length;
 
     const totalPendingReceipts = todaysPending.length + backlogPending.length;
-    const totalPendingItems = totalPendingReceipts + pendingTransfers.length + pendingHolds.length + pendingAdjustments.length;
+    const totalPendingItems = totalPendingReceipts + pendingTransfers.length + pendingHolds.length + pendingAdjustments.length + pendingForkliftRequests.length;
 
     return {
       totalPending: totalPendingItems,
       receiptsPending: totalPendingReceipts,
       transfersPending: pendingTransfers.length,
+      forkliftRequestsPending: pendingForkliftRequests.length,
       holdsPending: pendingHolds.length,
       adjustmentsPending: pendingAdjustments.length,
       todayApproved,
       urgentCount,
       todayCount: todaysPending.length,
     };
-  }, [todaysPending, backlogPending, approvedHistory, todayKey, pendingTransfers, pendingHolds, pendingAdjustments]);
+  }, [todaysPending, backlogPending, approvedHistory, todayKey, pendingTransfers, pendingHolds, pendingAdjustments, pendingForkliftRequests]);
 
   // Filtered lists
   const filteredTodaysPending = useMemo(() => {
@@ -1018,6 +1060,25 @@ const ApprovalsPage = () => {
       );
     }
 
+    const formatBreakdownRows = (breakdown) => {
+      if (!breakdown || !Array.isArray(breakdown)) return [];
+      return breakdown.map((item) => {
+        const id = item?.id || '';
+        if (id.startsWith('row-')) {
+          const rowId = id.replace('row-', '');
+          return { label: rowLookup[rowId] || rowId, cases: item?.quantity || 0 };
+        }
+        return { label: id === 'floor' ? 'Floor Staging' : id, cases: item?.quantity || 0 };
+      });
+    };
+
+    const manualRefreshProgress = async (transferId) => {
+      try {
+        const data = await fetchTransferScanProgress(transferId);
+        if (data) setTransferScanProgress((prev) => ({ ...prev, [transferId]: data }));
+      } catch (_) {}
+    };
+
     return (
       <div className="card-grid">
         {pendingTransfers.map((transfer) => {
@@ -1025,60 +1086,213 @@ const ApprovalsPage = () => {
           const product = productLookup[receipt?.productId];
           const days = getDaysAgo(transfer.submittedAt);
           const priority = getPriorityLevel(days);
+          const sourceRows = formatBreakdownRows(transfer.sourceBreakdown);
+          const destRows = formatBreakdownRows(transfer.destinationBreakdown);
+          const isShipOut = transfer.transferType === 'shipped-out' || transfer.transfer_type === 'shipped-out';
+          const hasPallets = (transfer.palletLicenceIds || transfer.pallet_licence_ids || []).length > 0;
+          const progress = transferScanProgress[transfer.id];
+          const pickList = progress?.pick_list || [];
+          const scannedCount = pickList.filter(p => p.is_scanned).length;
+          const skippedCount = pickList.filter(p => p.is_skipped).length;
+          const totalPallets = pickList.length || progress?.total_pallets || 0;
+          const forkliftDone = !!(progress?.forklift_submitted_at || transfer.forklift_submitted_at);
+          const lastScan = progress?.last_scan;
+          const exceptions = progress?.exceptions || [];
 
           return (
-            <article key={transfer.id} className="approval-card">
+            <article key={transfer.id} className="approval-card" style={{ maxWidth: '720px' }}>
               <header>
                 <div>
                   <h3>{product?.name || "Unknown Product"}</h3>
-                  <span className="badge">{transfer.transferType === 'shipped-out' ? 'Shipped Out' : (transfer.reason || 'Transfer')}</span>
+                  <span className="badge">{isShipOut ? 'Shipped Out' : (transfer.reason || 'Transfer')}</span>
+                  {isShipOut && forkliftDone && (
+                    <span style={{ marginLeft: '8px', background: '#22c55e', color: 'white', borderRadius: '999px', padding: '2px 10px', fontSize: '12px', fontWeight: 600 }}>
+                      ✓ Forklift Done
+                    </span>
+                  )}
+                  {isShipOut && !forkliftDone && hasPallets && (
+                    <span style={{ marginLeft: '8px', background: '#f59e0b', color: 'white', borderRadius: '999px', padding: '2px 10px', fontSize: '12px', fontWeight: 600 }}>
+                      Picking in progress
+                    </span>
+                  )}
                 </div>
                 <div className="meta">
+                  <button
+                    type="button"
+                    onClick={() => manualRefreshProgress(transfer.id)}
+                    style={{ background: 'none', border: '1px solid #e5e7eb', borderRadius: '6px', padding: '4px 8px', cursor: 'pointer', fontSize: '12px', color: '#6b7280', marginRight: '6px' }}
+                    title="Refresh progress"
+                  >
+                    ↻ Refresh
+                  </button>
                   <span className="priority-badge" style={{ background: priority.color, color: 'white' }}>
                     {priority.label}
                   </span>
                 </div>
               </header>
+
               <dl className="summary-grid">
                 <div>
                   <dt>Quantity</dt>
                   <dd>{transfer.quantity} cases</dd>
                 </div>
-                {transfer.transferType === 'shipped-out' && transfer.orderNumber && (
+                {isShipOut && (transfer.orderNumber || transfer.order_number) && (
                   <div>
-                    <dt>Order Number</dt>
-                    <dd>{transfer.orderNumber}</dd>
+                    <dt>Order #</dt>
+                    <dd>{transfer.orderNumber || transfer.order_number}</dd>
                   </div>
                 )}
-                {transfer.transferType !== 'shipped-out' && (
-                  <>
-                    <div>
-                      <dt>From</dt>
-                      <dd>{locationLookupMap[transfer.fromLocation] || transfer.fromLocation}</dd>
-                    </div>
-                    <div>
-                      <dt>To</dt>
-                      <dd>{locationLookupMap[transfer.toLocation] || transfer.toLocation}</dd>
-                    </div>
-                  </>
-                )}
                 <div>
-                  <dt>Submitted</dt>
-                  <dd>{formatTimeAgo(transfer.submittedAt)}</dd>
+                  <dt>Created</dt>
+                  <dd>{formatDateTime(transfer.submittedAt || transfer.submitted_at)}</dd>
                 </div>
+                {forkliftDone && (
+                  <div>
+                    <dt>Forklift submitted</dt>
+                    <dd style={{ color: '#22c55e', fontWeight: 600 }}>
+                      {formatDateTime(progress?.forklift_submitted_at || transfer.forklift_submitted_at)}
+                    </dd>
+                  </div>
+                )}
               </dl>
+
+              {/* Forklift notes */}
+              {forkliftDone && (progress?.forklift_notes || transfer.forklift_notes) && (
+                <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '10px 14px', marginBottom: '10px', fontSize: '13px', color: '#166534' }}>
+                  <strong>Forklift note:</strong> {progress?.forklift_notes || transfer.forklift_notes}
+                </div>
+              )}
+
+              {/* From / To rows */}
+              {(sourceRows.length > 0 || destRows.length > 0) && (
+                <div style={{ background: '#f9fafb', borderRadius: '8px', padding: '10px 14px', marginBottom: '10px', fontSize: '13px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                    <div>
+                      <div style={{ fontWeight: 600, color: '#6b7280', marginBottom: '4px' }}>From</div>
+                      {sourceRows.length > 0 ? (
+                        <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                          {sourceRows.map((r, i) => <li key={i}>{r.label} — {r.cases} cases</li>)}
+                        </ul>
+                      ) : (
+                        <div>{locationLookupMap[transfer.fromLocation] || transfer.fromLocation || '—'}</div>
+                      )}
+                    </div>
+                    <div>
+                      <div style={{ fontWeight: 600, color: '#6b7280', marginBottom: '4px' }}>To</div>
+                      {destRows.length > 0 ? (
+                        <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                          {destRows.map((r, i) => <li key={i}>{r.label} — {r.cases} cases</li>)}
+                        </ul>
+                      ) : (
+                        <div>{locationLookupMap[transfer.toLocation] || transfer.toLocation || '—'}</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Ship-out pallet pick list with scan status */}
+              {isShipOut && hasPallets && (
+                <div style={{ marginBottom: '10px' }}>
+                  {/* Progress header */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <div style={{ fontWeight: 600, fontSize: '13px', color: '#374151' }}>
+                      Pallet Pick List
+                    </div>
+                    <div style={{ fontSize: '13px', color: '#6b7280' }}>
+                      <span style={{ color: '#22c55e', fontWeight: 700 }}>{scannedCount}</span>
+                      {skippedCount > 0 && <span style={{ color: '#f59e0b', fontWeight: 700 }}> + {skippedCount} skipped</span>}
+                      <span> / {totalPallets} pallets</span>
+                    </div>
+                  </div>
+
+                  {/* Progress bar */}
+                  {totalPallets > 0 && (
+                    <div style={{ height: '6px', background: '#e5e7eb', borderRadius: '999px', overflow: 'hidden', marginBottom: '8px' }}>
+                      <div style={{ height: '100%', width: `${(scannedCount / totalPallets) * 100}%`, background: 'linear-gradient(90deg, #22c55e, #16a34a)', borderRadius: '999px', transition: 'width 0.4s' }} />
+                    </div>
+                  )}
+
+                  {/* Per-pallet checklist */}
+                  {pickList.length > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '220px', overflowY: 'auto' }}>
+                      {pickList.map((pallet) => (
+                        <div
+                          key={pallet.pallet_id}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            padding: '6px 10px',
+                            borderRadius: '8px',
+                            fontSize: '12px',
+                            background: pallet.is_scanned ? '#f0fdf4' : pallet.is_skipped ? '#fffbeb' : '#f9fafb',
+                            border: `1.5px solid ${pallet.is_scanned ? '#86efac' : pallet.is_skipped ? '#fde68a' : '#e5e7eb'}`,
+                          }}
+                        >
+                          <span style={{ fontSize: '16px', lineHeight: 1 }}>
+                            {pallet.is_scanned ? '✅' : pallet.is_skipped ? '⏭' : '⬜'}
+                          </span>
+                          <span style={{ fontFamily: 'monospace', fontWeight: 600, color: '#1e40af' }}>{pallet.licence_number}</span>
+                          <span style={{ color: '#6b7280' }}>{pallet.location}</span>
+                          <span style={{ color: '#6b7280' }}>· {pallet.cases} cs</span>
+                          {pallet.is_scanned && pallet.scanned_at && (
+                            <span style={{ marginLeft: 'auto', color: '#22c55e', fontSize: '11px' }}>
+                              {new Date(pallet.scanned_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          )}
+                          {pallet.is_skipped && (
+                            <span style={{ marginLeft: 'auto', color: '#f59e0b', fontSize: '11px', fontWeight: 600 }}>Skipped</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: '12px', color: '#9ca3af', padding: '8px 0' }}>
+                      Waiting for forklift to start scanning…
+                    </div>
+                  )}
+
+                  {/* Last scan indicator */}
+                  {lastScan && (
+                    <div style={{ marginTop: '8px', padding: '6px 10px', background: '#eff6ff', borderRadius: '6px', fontSize: '12px', color: '#1e40af' }}>
+                      <strong>Last scan:</strong> {lastScan.licence_number}
+                      {lastScan.scanned_by && ` · by ${lastScan.scanned_by}`}
+                      {lastScan.scanned_at && ` · ${new Date(lastScan.scanned_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
+                    </div>
+                  )}
+
+                  {/* Exceptions */}
+                  {exceptions.length > 0 && (
+                    <div style={{ marginTop: '8px', padding: '8px 12px', background: '#fef3c7', borderRadius: '8px', fontSize: '12px', color: '#92400e' }}>
+                      <div style={{ fontWeight: 600, marginBottom: '4px' }}>⚠ {exceptions.length} exception{exceptions.length !== 1 ? 's' : ''} — pallets not on pick list:</div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                        {exceptions.map((ex, i) => (
+                          <span key={i} style={{ background: '#fde68a', padding: '2px 8px', borderRadius: '999px', fontFamily: 'monospace', fontSize: '11px' }}>
+                            {ex.licence_number}{ex.scanned_by ? ` (${ex.scanned_by})` : ''}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <footer>
                 <button
                   type="button"
                   className="secondary-button"
                   onClick={() => {
-                    if (window.confirm('Approve this transfer?')) {
+                    const msg = forkliftDone
+                      ? `Approve ship-out order ${transfer.orderNumber || transfer.order_number}?\n\n${scannedCount}/${totalPallets} pallets scanned${skippedCount > 0 ? `, ${skippedCount} skipped` : ''}.\n\nThis will subtract ${transfer.quantity} cases from inventory.`
+                      : 'Approve this transfer?';
+                    if (window.confirm(msg)) {
                       approveTransfer(transfer.id, user?.id || user?.username);
                     }
                   }}
                   style={{ marginRight: '8px' }}
                 >
-                  Approve
+                  {isShipOut ? '✓ Approve & Deduct Inventory' : 'Approve'}
                 </button>
                 <button
                   type="button"
@@ -1273,6 +1487,410 @@ const ApprovalsPage = () => {
     );
   };
 
+  const [editingForkliftId, setEditingForkliftId] = useState(null);
+  const [editingPalletId, setEditingPalletId] = useState(null);
+  const [editPalletCases, setEditPalletCases] = useState('');
+  const [addPalletForm, setAddPalletForm] = useState({ licence_number: '', storage_row_id: '', is_partial: false, partial_cases: '' });
+  const [isAddingPallet, setIsAddingPallet] = useState(false);
+
+  const allStorageRows = useMemo(() => {
+    const rows = [];
+    if (storageAreas && Array.isArray(storageAreas)) {
+      storageAreas.forEach((area) => {
+        (area.rows || []).forEach((row) => {
+          if (row.is_active !== false) {
+            rows.push({ id: row.id, name: row.name, areaName: area.name });
+          }
+        });
+      });
+    }
+    return rows;
+  }, [storageAreas]);
+
+  const renderForkliftTab = () => {
+    if (pendingForkliftRequests.length === 0) {
+      return (
+        <div className="empty-state" style={{ padding: '48px', textAlign: 'center' }}>
+          <p>No pending forklift requests.</p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="card-grid">
+        {pendingForkliftRequests.map((fr) => {
+          const productName = fr.product?.name || productLookup[fr.product_id]?.name || 'Unknown';
+          const fccCode = fr.product?.fcc_code || productLookup[fr.product_id]?.fcc_code || '';
+          const shortCode = fr.product?.short_code || productLookup[fr.product_id]?.short_code || '';
+          const licences = (fr.pallet_licences || []).filter(pl => pl.status !== 'cancelled');
+          const isEditing = editingForkliftId === fr.id;
+          const rowGroups = {};
+          licences.forEach((pl) => {
+            const rowId = pl.storage_row_id || 'unknown';
+            if (!rowGroups[rowId]) rowGroups[rowId] = [];
+            rowGroups[rowId].push(pl);
+          });
+
+          return (
+            <article key={fr.id} className="approval-card" style={{ maxWidth: '720px' }}>
+              <header>
+                <div style={{ flex: 1 }}>
+                  <h3 style={{ margin: 0 }}>{productName}</h3>
+                  <div style={{ display: 'flex', gap: '6px', marginTop: '4px', flexWrap: 'wrap' }}>
+                    <span className="badge">{fr.lot_number || '—'}</span>
+                    {fccCode && <span className="badge" style={{ background: '#e0e7ff', color: '#3730a3' }}>FCC: {fccCode}</span>}
+                    {shortCode && <span className="badge" style={{ background: '#d1fae5', color: '#065f46' }}>{shortCode}</span>}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  style={{ fontSize: '13px', padding: '4px 12px' }}
+                  onClick={() => setEditingForkliftId(isEditing ? null : fr.id)}
+                >
+                  {isEditing ? 'Done Editing' : 'Edit'}
+                </button>
+              </header>
+
+              {/* Summary row */}
+              <dl className="summary-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+                <div><dt>Pallets</dt><dd>{licences.length}</dd></div>
+                <div><dt>Total Cases</dt><dd>{fr.total_cases ?? 0}</dd></div>
+                <div><dt>Cases/Pallet</dt><dd>{fr.cases_per_pallet ?? '—'}</dd></div>
+                <div><dt>Scanned By</dt><dd>{userLookup[fr.scanned_by] || fr.scanned_by || '—'}</dd></div>
+              </dl>
+
+              {/* Full details section */}
+              <div style={{ background: '#f9fafb', borderRadius: '8px', padding: '12px 16px', marginBottom: '12px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '14px' }}>
+                  <div>
+                    <span style={{ color: '#6b7280', fontWeight: 500 }}>Lot Number</span>
+                    <div style={{ fontWeight: 600, marginTop: '2px' }}>{fr.lot_number || '—'}</div>
+                  </div>
+                  <div>
+                    <span style={{ color: '#6b7280', fontWeight: 500 }}>Submitted</span>
+                    <div style={{ marginTop: '2px' }}>{formatDateTime(fr.submitted_at || fr.created_at)}</div>
+                  </div>
+                  <div>
+                    <span style={{ color: '#6b7280', fontWeight: 500 }}>Production Date</span>
+                    {isEditing ? (
+                      <input
+                        type="date"
+                        value={fr.production_date ? new Date(fr.production_date).toISOString().slice(0, 10) : ''}
+                        onChange={(e) => {
+                          const val = e.target.value ? new Date(e.target.value + 'T00:00:00').toISOString() : null;
+                          updateForkliftRequest(fr.id, { production_date: val });
+                        }}
+                        style={{ display: 'block', marginTop: '2px', padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', width: '100%', boxSizing: 'border-box' }}
+                      />
+                    ) : (
+                      <div style={{ marginTop: '2px', fontWeight: 600 }}>
+                        {fr.production_date ? new Date(fr.production_date).toLocaleDateString() : '—'}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <span style={{ color: '#6b7280', fontWeight: 500 }}>Expiration Date</span>
+                    {isEditing ? (
+                      <input
+                        type="date"
+                        value={fr.expiration_date ? new Date(fr.expiration_date).toISOString().slice(0, 10) : ''}
+                        onChange={(e) => {
+                          const val = e.target.value ? new Date(e.target.value + 'T00:00:00').toISOString() : null;
+                          updateForkliftRequest(fr.id, { expiration_date: val });
+                        }}
+                        style={{ display: 'block', marginTop: '2px', padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', width: '100%', boxSizing: 'border-box' }}
+                      />
+                    ) : (
+                      <div style={{ marginTop: '2px', fontWeight: 600 }}>
+                        {fr.expiration_date ? new Date(fr.expiration_date).toLocaleDateString() : '—'}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <span style={{ color: '#6b7280', fontWeight: 500 }}>Cases Per Pallet</span>
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        min="1"
+                        value={fr.cases_per_pallet ?? ''}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value);
+                          if (val > 0) updateForkliftRequest(fr.id, { cases_per_pallet: val });
+                        }}
+                        style={{ display: 'block', marginTop: '2px', padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', width: '100%', boxSizing: 'border-box' }}
+                      />
+                    ) : (
+                      <div style={{ marginTop: '2px', fontWeight: 600 }}>{fr.cases_per_pallet ?? '—'}</div>
+                    )}
+                  </div>
+                  <div>
+                    <span style={{ color: '#6b7280', fontWeight: 500 }}>Line</span>
+                    {isEditing ? (
+                      <select
+                        value={fr.line_id || ''}
+                        onChange={(e) => updateForkliftRequest(fr.id, { line_id: e.target.value || null })}
+                        style={{ display: 'block', marginTop: '2px', padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', width: '100%', boxSizing: 'border-box' }}
+                      >
+                        <option value="">No line</option>
+                        {(productionLines || []).map((l) => (
+                          <option key={l.id} value={l.id}>{l.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div style={{ marginTop: '2px', fontWeight: 600 }}>
+                        {fr.line_id ? (lineLookup[fr.line_id] || fr.line_id) : '—'}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Shift selector */}
+              <div style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <strong style={{ fontSize: '14px' }}>Shift</strong>
+                <select
+                  value={fr.shift_id || ''}
+                  onChange={(e) => updateForkliftRequest(fr.id, { shift_id: e.target.value || null })}
+                  style={{ padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '14px' }}
+                >
+                  <option value="">Select shift</option>
+                  {(productionShifts || []).map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+                {!fr.shift_id && <span style={{ color: '#ef4444', fontSize: '12px' }}>Required before approval</span>}
+              </div>
+
+              {/* Pallet licences - always visible */}
+              <div style={{ marginBottom: '12px' }}>
+                <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>
+                  Pallet Licences ({licences.length})
+                </h4>
+                <div style={{ maxHeight: '300px', overflow: 'auto', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                    <thead>
+                      <tr style={{ background: '#f3f4f6', position: 'sticky', top: 0 }}>
+                        <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 600 }}>Licence #</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 600 }}>Row</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 600 }}>Cases</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 600 }}>Type</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 600 }}>Status</th>
+                        {isEditing && <th style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 600 }}>Actions</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {licences.map((pl) => (
+                        <tr key={pl.id} style={{ borderTop: '1px solid #e5e7eb' }}>
+                          <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: '12px' }}>{pl.licence_number}</td>
+                          <td style={{ padding: '8px 10px' }}>{rowLookup[pl.storage_row_id] || pl.storage_row_id || '—'}</td>
+                          <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                            {isEditing && editingPalletId === pl.id ? (
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={editPalletCases}
+                                  onChange={(e) => setEditPalletCases(e.target.value)}
+                                  style={{ width: '60px', padding: '2px 6px', border: '1px solid #d1d5db', borderRadius: '4px', textAlign: 'center' }}
+                                  autoFocus
+                                />
+                                <button
+                                  type="button"
+                                  style={{ padding: '2px 6px', fontSize: '12px', background: '#10b981', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                                  onClick={async () => {
+                                    const val = parseInt(editPalletCases);
+                                    if (val > 0) {
+                                      await updatePalletLicence(fr.id, pl.id, { cases: val, is_partial: val !== fr.cases_per_pallet });
+                                    }
+                                    setEditingPalletId(null);
+                                    setEditPalletCases('');
+                                  }}
+                                >Save</button>
+                                <button
+                                  type="button"
+                                  style={{ padding: '2px 6px', fontSize: '12px', background: '#9ca3af', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                                  onClick={() => { setEditingPalletId(null); setEditPalletCases(''); }}
+                                >Cancel</button>
+                              </span>
+                            ) : (
+                              <span
+                                style={isEditing ? { cursor: 'pointer', borderBottom: '1px dashed #6b7280' } : {}}
+                                onClick={() => {
+                                  if (isEditing) {
+                                    setEditingPalletId(pl.id);
+                                    setEditPalletCases(String(pl.cases));
+                                  }
+                                }}
+                                title={isEditing ? 'Click to edit cases' : ''}
+                              >
+                                {pl.cases}
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                            {pl.is_partial ? (
+                              <span style={{ background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Partial</span>
+                            ) : (
+                              <span style={{ background: '#d1fae5', color: '#065f46', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Full</span>
+                            )}
+                          </td>
+                          <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                            {pl.status === 'missing_sticker' ? (
+                              <span style={{ background: '#fee2e2', color: '#991b1b', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Missing Sticker</span>
+                            ) : (
+                              <span style={{ background: '#e0e7ff', color: '#3730a3', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Pending</span>
+                            )}
+                          </td>
+                          {isEditing && (
+                            <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                              <button
+                                type="button"
+                                style={{ padding: '2px 8px', fontSize: '12px', background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', borderRadius: '4px', cursor: 'pointer' }}
+                                onClick={async () => {
+                                  if (window.confirm(`Remove pallet ${pl.licence_number}?`)) {
+                                    const result = await removePalletLicence(fr.id, pl.id);
+                                    if (!result?.success) alert(result?.error || 'Remove failed');
+                                  }
+                                }}
+                              >Remove</button>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Add Pallet form - only in edit mode */}
+              {isEditing && (
+                <div style={{ marginBottom: '12px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '12px' }}>
+                  <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>Add Missing Pallet</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '2px' }}>Licence Number</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. MP04926L1-PFN640-002"
+                        value={addPalletForm.licence_number}
+                        onChange={(e) => setAddPalletForm(prev => ({ ...prev, licence_number: e.target.value }))}
+                        style={{ width: '100%', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '13px', boxSizing: 'border-box' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '2px' }}>Storage Row</label>
+                      <select
+                        value={addPalletForm.storage_row_id}
+                        onChange={(e) => setAddPalletForm(prev => ({ ...prev, storage_row_id: e.target.value }))}
+                        style={{ width: '100%', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '13px', boxSizing: 'border-box' }}
+                      >
+                        <option value="">Select row...</option>
+                        {allStorageRows.map((r) => (
+                          <option key={r.id} value={r.id}>{r.areaName} - {r.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '8px' }}>
+                    <label style={{ fontSize: '13px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <input
+                        type="checkbox"
+                        checked={addPalletForm.is_partial}
+                        onChange={(e) => setAddPalletForm(prev => ({ ...prev, is_partial: e.target.checked }))}
+                      />
+                      Partial pallet
+                    </label>
+                    {addPalletForm.is_partial && (
+                      <input
+                        type="number"
+                        min="1"
+                        placeholder="Cases"
+                        value={addPalletForm.partial_cases}
+                        onChange={(e) => setAddPalletForm(prev => ({ ...prev, partial_cases: e.target.value }))}
+                        style={{ width: '80px', padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '13px' }}
+                      />
+                    )}
+                    <button
+                      type="button"
+                      disabled={!addPalletForm.licence_number || !addPalletForm.storage_row_id || isAddingPallet}
+                      style={{
+                        marginLeft: 'auto', padding: '6px 16px', fontSize: '13px', fontWeight: 600,
+                        background: (!addPalletForm.licence_number || !addPalletForm.storage_row_id) ? '#d1d5db' : '#10b981',
+                        color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer'
+                      }}
+                      onClick={async () => {
+                        setIsAddingPallet(true);
+                        const payload = {
+                          licence_number: addPalletForm.licence_number.trim(),
+                          storage_row_id: addPalletForm.storage_row_id,
+                          is_partial: addPalletForm.is_partial,
+                          partial_cases: addPalletForm.is_partial ? parseInt(addPalletForm.partial_cases) || null : null,
+                        };
+                        const result = await addPalletToForkliftRequest(fr.id, payload);
+                        setIsAddingPallet(false);
+                        if (result?.success) {
+                          setAddPalletForm({ licence_number: '', storage_row_id: '', is_partial: false, partial_cases: '' });
+                        } else {
+                          alert(result?.error || 'Failed to add pallet');
+                        }
+                      }}
+                    >
+                      {isAddingPallet ? 'Adding...' : 'Add Pallet'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <footer style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={!fr.shift_id || isApproving}
+                  onClick={async () => {
+                    if (!fr.shift_id) {
+                      alert('Please select a shift before approving.');
+                      return;
+                    }
+                    setIsApproving(true);
+                    const result = await approveForkliftRequest(fr.id);
+                    setIsApproving(false);
+                    if (result?.success) {
+                      fetchForkliftRequests();
+                    } else {
+                      alert(result?.error || 'Approval failed');
+                    }
+                  }}
+                >
+                  {isApproving ? 'Approving...' : 'Approve'}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button danger"
+                  disabled={isRejecting}
+                  onClick={async () => {
+                    if (window.confirm('Reject this forklift request? All pallet licences will be cancelled.')) {
+                      setIsRejecting(true);
+                      const result = await rejectForkliftRequest(fr.id);
+                      setIsRejecting(false);
+                      if (result?.success) {
+                        fetchForkliftRequests();
+                      } else {
+                        alert(result?.error || 'Reject failed');
+                      }
+                    }
+                  }}
+                >
+                  {isRejecting ? 'Rejecting...' : 'Reject'}
+                </button>
+              </footer>
+            </article>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <div className="approvals-page">
       <div className="page-header">
@@ -1360,6 +1978,34 @@ const ApprovalsPage = () => {
           >
             Transfers ({summaryStats.transfersPending})
             {summaryStats.transfersPending > 0 && (
+              <span style={{
+                position: 'absolute',
+                top: '8px',
+                right: '8px',
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: '#dc2626',
+                border: '2px solid white',
+              }} />
+            )}
+          </button>
+          <button
+            className={`tab-button ${activeTab === 'forklift' ? 'active' : ''}`}
+            onClick={() => setActiveTab('forklift')}
+            style={{
+              padding: '12px 24px',
+              border: 'none',
+              background: 'none',
+              cursor: 'pointer',
+              borderBottom: activeTab === 'forklift' ? '2px solid #3b82f6' : '2px solid transparent',
+              color: activeTab === 'forklift' ? '#3b82f6' : (summaryStats.forkliftRequestsPending > 0 ? '#dc2626' : '#64748b'),
+              fontWeight: activeTab === 'forklift' ? '600' : (summaryStats.forkliftRequestsPending > 0 ? '600' : '400'),
+              position: 'relative',
+            }}
+          >
+            Forklift Requests ({summaryStats.forkliftRequestsPending})
+            {summaryStats.forkliftRequestsPending > 0 && (
               <span style={{
                 position: 'absolute',
                 top: '8px',
@@ -1527,6 +2173,16 @@ const ApprovalsPage = () => {
               <p className="muted">{pendingTransfers.length} transfer{pendingTransfers.length === 1 ? '' : 's'} awaiting approval</p>
             </div>
             {renderTransfersTab()}
+          </section>
+        )}
+
+        {activeTab === 'forklift' && (
+          <section className="panel">
+            <div className="panel-header">
+              <h2>Forklift Requests</h2>
+              <p className="muted">{pendingForkliftRequests.length} request{pendingForkliftRequests.length === 1 ? '' : 's'} awaiting approval</p>
+            </div>
+            {renderForkliftTab()}
           </section>
         )}
 

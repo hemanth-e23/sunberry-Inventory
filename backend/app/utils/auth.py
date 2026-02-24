@@ -62,6 +62,16 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
         return None
     return user
 
+
+def authenticate_by_badge(db: Session, badge_id: str) -> Optional[User]:
+    """Authenticate a user by badge ID (for forklift users)"""
+    user = db.query(User).filter(User.badge_id == badge_id).first()
+    if not user:
+        return None
+    if user.role != "forklift":
+        return None
+    return user
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)

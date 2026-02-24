@@ -11,7 +11,8 @@ import {
   CheckCircle,
   Printer,
   Layers,
-  ClipboardList
+  ClipboardList,
+  BarChart3
 } from 'lucide-react';
 import './SupervisorDashboard.css';
 
@@ -224,6 +225,24 @@ const SupervisorDashboard = () => {
             <button className="nav-button" onClick={() => navigate('/supervisor/cycle-counting')}>
               <ClipboardList size={18} />
               <span>Cycle Counting</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="supervisor-dashboard-card card-gradient">
+          <div className="card-icon">
+            <BarChart3 size={28} />
+          </div>
+          <div className="card-content">
+            <h3 className="card-title">Analytics & Reporting</h3>
+            <p className="card-description">
+              BOL report — batch output vs logged finished goods.
+            </p>
+          </div>
+          <div className="button-stack">
+            <button className="nav-button" onClick={() => navigate('/supervisor/bol')}>
+              <BarChart3 size={18} />
+              <span>BOL</span>
             </button>
           </div>
         </div>

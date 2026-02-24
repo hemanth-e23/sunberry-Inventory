@@ -297,6 +297,25 @@
   transform: none;
 }
 
+.login-badge-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding: 0.75rem;
+  color: var(--color-primary);
+  font-size: 0.9rem;
+  text-decoration: none;
+  border: 1px dashed var(--color-primary);
+  border-radius: var(--radius-md);
+  transition: all var(--transition-base);
+}
+
+.login-badge-link:hover {
+  background: rgba(26, 71, 42, 0.08);
+}
+
 /* Demo Section */
 .demo-section {
   margin-top: var(--spacing-2xl);
