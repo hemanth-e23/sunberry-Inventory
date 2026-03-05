@@ -407,4 +407,68 @@
     .row-actions button {
         width: 100%;
     }
+
+    .products-page,
+    .master-data-page,
+    .inventory-page,
+    .reports-page,
+    .users-page,
+    .approvals-page,
+    .cycle-counting-page,
+    .receipt-page {
+        padding: var(--spacing-md) var(--spacing-sm);
+    }
+}
+
+/* ========================================
+   RESPONSIVE TABLE UTILITIES
+   ======================================== */
+
+/* Hide columns at tablet breakpoint (≤768px) */
+@media (max-width: 768px) {
+    .hide-tablet {
+        display: none !important;
+    }
+}
+
+/* Hide columns at mobile breakpoint (≤480px) */
+@media (max-width: 480px) {
+    .hide-mobile {
+        display: none !important;
+    }
+}
+
+/* Horizontal scroll wrapper for tables */
+.table-scroll-x {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+}
+
+/* Responsive filter bars — prevent horizontal overflow */
+.filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+}
+
+.filter-bar input,
+.filter-bar select {
+    flex: 1 1 180px;
+    min-width: 0;
+    max-width: 100%;
+}
+
+/* Form grid — single column on mobile */
+@media (max-width: 480px) {
+    .form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .form-grid input,
+    .form-grid select,
+    .form-grid textarea {
+        width: 100%;
+        min-width: 0;
+    }
 }

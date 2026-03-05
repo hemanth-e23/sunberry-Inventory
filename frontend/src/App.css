@@ -1,12 +1,9 @@
-/* Import the professional design system */
-@import url('./styles/design-system.css');
-
 /* Import Inter font for better typography */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 .App {
   min-height: 100vh;
-  background: linear-gradient(135deg, var(--gray-50) 0%, var(--primary-50) 100%);
+  background: var(--color-canvas);
 }
 
 #root {
@@ -76,34 +73,14 @@
   transition: opacity 300ms ease-in, transform 300ms ease-in;
 }
 
-/* Scrollbar styling */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: var(--gray-100);
-  border-radius: var(--radius-full);
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--gray-400);
-  border-radius: var(--radius-full);
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--gray-500);
-}
-
 /* Selection styling */
 ::selection {
-  background-color: var(--primary-200);
-  color: var(--primary-900);
+  background-color: var(--color-primary-soft);
+  color: var(--color-primary-dark);
 }
 
 /* Focus visible for better accessibility */
 :focus-visible {
-  outline: 2px solid var(--primary-500);
+  outline: 2px solid var(--color-primary);
   outline-offset: 2px;
 }

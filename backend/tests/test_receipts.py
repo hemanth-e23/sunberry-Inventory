@@ -113,6 +113,7 @@ def test_create_receipt_without_sub_location_still_works(
     """Receipts without sub_location should be accepted (field is optional)."""
     payload = {
         "product_id": "product-1",
+        "category_id": "raw-sunberry",
         "quantity": 100,
         "unit": "cases",
         "location_id": "loc-paw-paw",
@@ -130,6 +131,7 @@ def test_create_receipt_computes_total_weight_from_containers(
     """40 barrels × 500 lbs = 20,000 lbs (backend auto-computes quantity)."""
     payload = {
         "product_id": "product-1",
+        "category_id": "raw-sunberry",
         "quantity": 0,
         "unit": "lbs",
         "container_count": 40,
@@ -150,6 +152,7 @@ def test_create_receipt_sub_location_derived_from_storage_row(
     """When sub_location_id is missing but storage_row_id given, derive from row."""
     payload = {
         "product_id": "product-1",
+        "category_id": "raw-sunberry",
         "quantity": 100,
         "unit": "cases",
         "location_id": "loc-paw-paw",
@@ -177,6 +180,7 @@ def test_get_receipt_returns_sub_location(client, auth_headers, seed_data):
     """After POST, GET must return sub_location_id in the response."""
     payload = {
         "product_id": "product-1",
+        "category_id": "raw-sunberry",
         "quantity": 100,
         "unit": "cases",
         "location_id": "loc-paw-paw",
@@ -228,6 +232,7 @@ def test_warehouse_cannot_approve_own_receipt(
     """Warehouse workers cannot approve receipts they submitted."""
     payload = {
         "product_id": "product-1",
+        "category_id": "raw-sunberry",
         "quantity": 100,
         "unit": "cases",
         "location_id": "loc-paw-paw",

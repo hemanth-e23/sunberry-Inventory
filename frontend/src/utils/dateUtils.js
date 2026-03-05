@@ -1,9 +1,17 @@
-// All times displayed in Detroit (Eastern) timezone
-const TIMEZONE = 'America/Detroit';
+// Module-level timezone — set by AuthContext after login from warehouse.timezone.
+// null = fall back to browser's local timezone.
+let APP_TIMEZONE = null;
+
+export const setAppTimezone = (tz) => {
+  APP_TIMEZONE = tz || null;
+};
+
+export const getAppTimezone = () => APP_TIMEZONE;
 
 const ensureUtc = (value) => {
   if (!value) return value;
   const str = String(value);
+  // If datetime string has 'T' but no timezone indicator, treat as UTC
   if (str.includes('T') && !str.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(str)) {
     return str + 'Z';
   }
@@ -12,23 +20,35 @@ const ensureUtc = (value) => {
 
 export const formatDateTime = (value) => {
   if (!value) return "—";
-  const date = new Date(ensureUtc(value)); 
+  const date = new Date(ensureUtc(value));
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString('en-US', { timeZone: TIMEZONE });
+  const opts = APP_TIMEZONE ? { timeZone: APP_TIMEZONE } : undefined;
+  return date.toLocaleString('en-US', opts);
+};
+
+export const formatTime = (value) => {
+  if (!value) return "—";
+  const date = new Date(ensureUtc(value));
+  if (Number.isNaN(date.getTime())) return value;
+  const opts = APP_TIMEZONE
+    ? { timeZone: APP_TIMEZONE, hour: '2-digit', minute: '2-digit' }
+    : { hour: '2-digit', minute: '2-digit' };
+  return date.toLocaleTimeString('en-US', opts);
 };
 
 export const formatDate = (value) => {
   if (!value) return "—";
   const date = new Date(ensureUtc(value));
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString('en-US', { timeZone: TIMEZONE });
+  const opts = APP_TIMEZONE ? { timeZone: APP_TIMEZONE } : undefined;
+  return date.toLocaleDateString('en-US', opts);
 };
 
 export const formatTimeAgo = (dateValue) => {
   if (!dateValue) return 'Unknown';
   const date = new Date(ensureUtc(dateValue));
   if (Number.isNaN(date.getTime())) return 'Invalid date';
-  
+
   const days = getDaysAgo(dateValue);
   if (days === 0) return 'Today';
   if (days === 1) return 'Yesterday';
@@ -48,11 +68,20 @@ export const getDaysAgo = (dateValue) => {
   return diffDays;
 };
 
+// Returns YYYY-MM-DD in the warehouse timezone (or browser local if not set)
+// en-CA locale natively produces YYYY-MM-DD format
 export const toDateKey = (value) => {
   if (!value) return "";
   const date = new Date(ensureUtc(value));
   if (Number.isNaN(date.getTime())) return "";
-  return date.toISOString().slice(0, 10);
+  const opts = APP_TIMEZONE ? { timeZone: APP_TIMEZONE } : undefined;
+  return date.toLocaleDateString('en-CA', opts);
+};
+
+export const getTodayDateKey = () => {
+  const now = new Date();
+  const opts = APP_TIMEZONE ? { timeZone: APP_TIMEZONE } : undefined;
+  return now.toLocaleDateString('en-CA', opts);
 };
 
 export const isDateInPast = (dateValue) => {
@@ -71,6 +100,16 @@ export const isDateValid = (dateValue) => {
   return !Number.isNaN(date.getTime());
 };
 
-export const getTodayDateKey = () => {
-  return new Date().toISOString().slice(0, 10);
-};
+/**
+ * Escape a value for safe HTML insertion in print windows.
+ * Use on ALL server-supplied strings interpolated into document.write() HTML.
+ */
+export function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}

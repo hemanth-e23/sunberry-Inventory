@@ -1,11 +1,17 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import axios from "axios";
+import apiClient from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { getDashboardPath } from "../App";
+import { getTodayDateKey } from "../utils/dateUtils";
+import "./Shared.css";
 import "./BOLPage.css";
 
-const API_BASE_URL = "/api";
+function getDefaultDates() {
+  const today = getTodayDateKey();          // YYYY-MM-DD
+  const firstOfMonth = today.slice(0, 8) + "01";
+  return { start: firstOfMonth, end: today };
+}
 
 const BOLPage = () => {
   const navigate = useNavigate();
@@ -13,25 +19,20 @@ const BOLPage = () => {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-
-  const getAuthHeaders = async () => {
-    const token = localStorage.getItem("token");
-    if (!token) return {};
-    return { Authorization: `Bearer ${token}` };
-  };
+  const defaults = getDefaultDates();
+  const [startDate, setStartDate] = useState(defaults.start);
+  const [endDate, setEndDate] = useState(defaults.end);
 
   const fetchBOL = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const headers = await getAuthHeaders();
-      const params = new URLSearchParams();
-      if (startDate) params.append("production_date_start", startDate);
-      if (endDate) params.append("production_date_end", endDate);
-      const url = `${API_BASE_URL}/inventory/bol-report${params.toString() ? `?${params}` : ""}`;
-      const response = await axios.get(url, { headers });
+      const response = await apiClient.get('/inventory/bol-report', {
+        params: {
+          ...(startDate && { production_date_start: startDate }),
+          ...(endDate && { production_date_end: endDate }),
+        },
+      });
       setRows(response.data?.rows || []);
     } catch (err) {
       setError(err.response?.data?.detail || err.message || "Failed to load BOL report");

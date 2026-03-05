@@ -5,16 +5,26 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.schemas import User as UserSchema, UserCreate, UserUpdate
-from app.utils.auth import get_current_active_user, require_role, get_password_hash
+from app.utils.auth import get_current_active_user, require_role, require_superadmin, warehouse_filter, get_password_hash
 import uuid
 
 router = APIRouter()
+
+@router.get("/directory", response_model=List[dict])
+async def get_user_directory(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("supervisor"))
+):
+    """Lightweight name directory — returns id, username, name for all users.
+    Used for resolving submitter names in approvals across warehouses."""
+    users = db.query(User.id, User.username, User.name).all()
+    return [{"id": u.id, "username": u.username, "name": u.name} for u in users]
 
 @router.post("/", response_model=UserSchema)
 async def create_user(
     user_data: UserCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin"))
+    current_user: User = Depends(require_superadmin)
 ):
     """Create a new user (admin only)"""
     # Check if username already exists
@@ -45,6 +55,8 @@ async def create_user(
     )
     if user_data.badge_id:
         user_kwargs["badge_id"] = user_data.badge_id
+    if user_data.warehouse_id:
+        user_kwargs["warehouse_id"] = user_data.warehouse_id
     new_user = User(**user_kwargs)
     
     db.add(new_user)
@@ -59,9 +71,12 @@ async def get_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("admin"))
 ):
-    """Get all users (admin only)"""
-    users = db.query(User).offset(skip).limit(limit).all()
-    return users
+    """Get all users. Superadmin sees all; admin sees only their warehouse users."""
+    query = db.query(User)
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(User.warehouse_id == wh_id)
+    return query.offset(skip).limit(limit).all()
 
 @router.get("/{user_id}", response_model=UserSchema)
 async def get_user(
@@ -95,7 +110,21 @@ async def update_user(
     
     # Update fields
     update_data = user_update.dict(exclude_unset=True)
-    
+
+    # Prevent elevating a user's role to equal or higher than the updater's own role
+    if "role" in update_data:
+        from app.schemas.user import ROLE_HIERARCHY
+        def _role_rank(role: str) -> int:
+            try:
+                return ROLE_HIERARCHY.index(role)
+            except ValueError:
+                return -1
+        if _role_rank(update_data["role"]) >= _role_rank(current_user.role):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Cannot assign a role equal to or higher than your own"
+            )
+
     # Handle password hashing if password is being updated
     if "password" in update_data:
         update_data["hashed_password"] = get_password_hash(update_data.pop("password"))
@@ -115,7 +144,7 @@ async def update_user(
 async def delete_user(
     user_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin"))
+    current_user: User = Depends(require_superadmin)
 ):
     """Delete a user (admin only)"""
     user = db.query(User).filter(User.id == user_id).first()
@@ -135,7 +164,7 @@ async def delete_user(
 async def toggle_user_status(
     user_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin"))
+    current_user: User = Depends(require_superadmin)
 ):
     """Toggle user active status (admin only)"""
     user = db.query(User).filter(User.id == user_id).first()

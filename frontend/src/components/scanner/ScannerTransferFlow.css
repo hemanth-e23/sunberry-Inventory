@@ -4,8 +4,9 @@
 }
 
 .scanner-transfer-instruction {
-  font-size: 1.1rem;
-  margin-bottom: 1rem;
+  font-size: 1rem;
+  color: #4b5563;
+  margin-bottom: 0.75rem;
 }
 
 .scanner-transfer-form {
@@ -15,46 +16,107 @@
 
 .scanner-transfer-input {
   flex: 1;
-  font-size: 1.1rem;
-  padding: 1rem;
-  border: 2px solid #ccc;
+  font-size: 1.05rem;
+  padding: 0.85rem 1rem;
+  border: 2px solid #d1d5db;
   border-radius: 10px;
+  background: white;
+  transition: border-color 0.15s;
 }
 
 .scanner-transfer-input:focus {
   outline: none;
-  border-color: #1a472a;
+  border-color: #2563eb;
 }
 
+.scanner-transfer-input::placeholder { color: #9ca3af; }
+
 .scanner-transfer-btn {
-  padding: 1rem 1.5rem;
-  background: #1a472a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  padding: 0.85rem 1.25rem;
+  background: #2563eb;
   color: white;
   border: none;
   border-radius: 10px;
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
+  transition: background 0.15s;
+  box-shadow: none;
 }
+
+.scanner-transfer-btn::before { display: none; }
+.scanner-transfer-btn:hover:not(:disabled) { background: #1d4ed8; transform: none; box-shadow: none; }
+.scanner-transfer-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .scanner-transfer-btn.secondary {
-  background: #666;
+  background: white;
+  color: #374151;
+  border: 2px solid #d1d5db;
+  font-weight: 500;
 }
 
-.scanner-transfer-btn:disabled {
-  opacity: 0.6;
+.scanner-transfer-btn.secondary:hover:not(:disabled) {
+  background: #f9fafb;
+  border-color: #9ca3af;
 }
 
+/* Pallet info card */
 .scanner-transfer-current {
   display: flex;
-  align-items: center;
-  gap: 1rem;
+  align-items: flex-start;
+  gap: 0.75rem;
   padding: 1rem;
-  background: #e8f5e9;
-  border-radius: 10px;
+  background: #eff6ff;
+  border: 1.5px solid #bfdbfe;
+  border-radius: 12px;
   margin-bottom: 1rem;
 }
 
+.scanner-transfer-current-icon {
+  width: 40px;
+  height: 40px;
+  background: #2563eb;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  flex-shrink: 0;
+}
+
+.scanner-transfer-current-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.scanner-transfer-current-lic {
+  font-family: monospace;
+  font-weight: 700;
+  font-size: 1rem;
+  color: #1e3a8a;
+  word-break: break-all;
+}
+
+.scanner-transfer-current-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+  font-size: 0.85rem;
+  color: #4b5563;
+}
+
+.scanner-transfer-current-meta span {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Destination confirm */
 .scanner-transfer-dest-confirm {
   margin-bottom: 1rem;
 }
@@ -63,44 +125,14 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 1rem;
-  background: #e3f2fd;
+  padding: 0.85rem 1rem;
+  background: #f0fdf4;
+  border: 1.5px solid #bbf7d0;
   border-radius: 10px;
-  font-size: 1.1rem;
+  font-size: 1rem;
   font-weight: 600;
-  margin-bottom: 1rem;
-}
-
-.scanner-transfer-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-}
-
-.scanner-transfer-row-btn {
-  padding: 1rem;
-  background: white;
-  color: #333;
-  border: 2px solid #e0e0e0;
-  border-radius: 8px;
-  text-align: left;
-  cursor: pointer;
-  box-shadow: none;
-}
-
-.scanner-transfer-row-btn::before {
-  display: none;
-}
-
-.scanner-transfer-row-btn:hover {
-  transform: none;
-  box-shadow: none;
-}
-
-.scanner-transfer-row-btn.selected {
-  border-color: #1a472a;
-  background: #e8f5e9;
+  color: #14532d;
+  margin-bottom: 0.75rem;
 }
 
 .scanner-transfer-actions {
@@ -113,41 +145,112 @@
 }
 
 .scanner-transfer-error {
-  color: #c53030;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   margin-top: 0.5rem;
+  padding: 0.55rem 0.8rem;
+  background: #fee2e2;
+  color: #991b1b;
+  border-radius: 8px;
+  font-size: 0.9rem;
 }
 
+/* Moves list */
 .scanner-transfer-moves {
   margin-top: 1.5rem;
   padding-top: 1rem;
-  border-top: 1px solid #ddd;
+  border-top: 1px solid #e5e7eb;
 }
 
-.scanner-transfer-moves h3 {
-  font-size: 1rem;
+.scanner-transfer-moves-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 0.5rem;
 }
 
-.scanner-transfer-move-item {
-  padding: 0.5rem;
-  background: #f5f5f5;
-  border-radius: 6px;
-  margin-bottom: 0.25rem;
+.scanner-transfer-moves-header h3 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  margin: 0;
 }
 
+.scanner-transfer-move-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.8rem;
+  background: white;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.scanner-transfer-move-lic {
+  font-family: monospace;
+  font-weight: 600;
+  color: #1e3a8a;
+  font-size: 0.85rem;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scanner-transfer-move-arrow {
+  color: #9ca3af;
+  flex-shrink: 0;
+}
+
+.scanner-transfer-move-dest {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #14532d;
+  flex-shrink: 0;
+}
+
+.scanner-transfer-move-remove {
+  background: none;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: #ef4444;
+  cursor: pointer;
+  padding: 0.25rem 0.4rem;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+  box-shadow: none;
+}
+
+.scanner-transfer-move-remove::before { display: none; }
+.scanner-transfer-move-remove:hover { background: #fee2e2; transform: none; box-shadow: none; }
+
 .scanner-transfer-submit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
   width: 100%;
-  margin-top: 1rem;
-  padding: 1rem;
-  background: #1a472a;
+  margin-top: 0.75rem;
+  padding: 0.9rem 1rem;
+  background: #2563eb;
   color: white;
   border: none;
   border-radius: 10px;
-  font-size: 1.1rem;
+  font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
+  transition: background 0.15s;
+  box-shadow: none;
 }
 
-.scanner-transfer-submit:disabled {
-  opacity: 0.6;
-}
+.scanner-transfer-submit::before { display: none; }
+.scanner-transfer-submit:hover:not(:disabled) { background: #1d4ed8; transform: none; box-shadow: none; }
+.scanner-transfer-submit:disabled { opacity: 0.5; cursor: not-allowed; }

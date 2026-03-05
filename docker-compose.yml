@@ -50,19 +50,6 @@ services:
       - sunberry-network
     restart: unless-stopped
 
-  # Frontend
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: sunberry-frontend
-    ports:
-      - "${FRONTEND_PORT:-8080}:80"
-    depends_on:
-      - backend
-    networks:
-      - sunberry-network
-    restart: unless-stopped
 
 volumes:
   postgres_data:

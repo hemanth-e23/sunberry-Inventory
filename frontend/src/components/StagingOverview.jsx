@@ -3,15 +3,15 @@ import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
 import { getDashboardPath } from '../App';
-import axios from 'axios';
+import apiClient from '../api/client';
+import { formatDateTime } from '../utils/dateUtils';
+import './Shared.css';
 import './StagingOverview.css';
-
-const API_BASE_URL = '/api';
 
 const StagingOverview = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { products, locations, subLocationMap, locationLookup, storageAreas, receipts } = useAppData();
+  const { products, locations, subLocationMap, storageAreas, receipts } = useAppData();
 
   const [stagingItems, setStagingItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -71,24 +71,14 @@ const StagingOverview = () => {
     fetchStagingItems();
   }, [filterStatus]);
 
-  const getAuthHeaders = async () => {
-    const token = localStorage.getItem('token');
-    return {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    };
-  };
-
   const fetchStagingItems = async () => {
     try {
       setLoading(true);
       setError('');
-      const headers = await getAuthHeaders();
       const statusParam = filterStatus === 'active' ? null : 'all';
-      const response = await axios.get(
-        `${API_BASE_URL}/inventory/staging/items${statusParam ? `?status_filter=${statusParam}` : ''}`,
-        { headers }
-      );
+      const response = await apiClient.get('/inventory/staging/items', {
+        params: statusParam ? { status_filter: statusParam } : undefined,
+      });
       
       // Ensure response.data is an array
       if (Array.isArray(response.data)) {
@@ -140,12 +130,9 @@ const StagingOverview = () => {
 
     setIsSubmitting(true);
     try {
-      const headers = await getAuthHeaders();
-      await axios.post(
-        `${API_BASE_URL}/inventory/staging/${selectedItem.id}/mark-used`,
-        { quantity: parseFloat(markUsedQuantity) },
-        { headers }
-      );
+      await apiClient.post(`/inventory/staging/${selectedItem.id}/mark-used`, {
+        quantity: parseFloat(markUsedQuantity),
+      });
       setShowMarkUsedModal(false);
       setSelectedItem(null);
       setMarkUsedQuantity('');
@@ -179,17 +166,12 @@ const StagingOverview = () => {
 
     setIsSubmitting(true);
     try {
-      const headers = await getAuthHeaders();
-      await axios.post(
-        `${API_BASE_URL}/inventory/staging/${selectedItem.id}/return`,
-        {
-          quantity: parseFloat(returnQuantity),
-          to_location_id: returnLocation,
-          to_sub_location_id: returnSubLocation || null,
-          to_storage_row_id: returnStorageRow || null
-        },
-        { headers }
-      );
+      await apiClient.post(`/inventory/staging/${selectedItem.id}/return`, {
+        quantity: parseFloat(returnQuantity),
+        to_location_id: returnLocation,
+        to_sub_location_id: returnSubLocation || null,
+        to_storage_row_id: returnStorageRow || null,
+      });
       setShowReturnModal(false);
       setSelectedItem(null);
       setReturnQuantity('');
@@ -207,15 +189,6 @@ const StagingOverview = () => {
     }
   };
 
-  const getLocationLabel = (locationId, subLocationId) => {
-    const location = locationId ? locationLookup[locationId] : null;
-    const subLocation = subLocationId ? (subLocationMap[locationId] || []).find(s => s.id === subLocationId) : null;
-    
-    if (subLocation) {
-      return `${location?.name || ''} / ${subLocation.name}`;
-    }
-    return location?.name || 'Unknown';
-  };
 
   const filteredItems = stagingItems.filter(item => {
     // Calculate available quantity
@@ -366,7 +339,7 @@ const StagingOverview = () => {
                     <td className="text-right">{item.quantity_used.toLocaleString()} {unit}</td>
                     <td className="text-right">{item.quantity_returned.toLocaleString()} {unit}</td>
                     <td className="text-right"><strong>{available.toLocaleString()} {unit}</strong></td>
-                    <td>{item.staged_at ? new Date(item.staged_at).toLocaleDateString() : '-'}</td>
+                    <td>{formatDateTime(item.staged_at) || '-'}</td>
                     <td>
                       <span className={statusBadge.className}>{statusBadge.label}</span>
                     </td>

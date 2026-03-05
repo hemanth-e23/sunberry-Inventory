@@ -1,5 +1,7 @@
 from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
+from app.constants import ROLE_ADMIN, ROLE_SUPERADMIN, FORKLIFT_TOKEN_EXPIRE_MINUTES
+from app.schemas.user import ROLE_HIERARCHY
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
@@ -65,7 +67,7 @@ async def badge_login(
                 detail="User account is inactive",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        access_token_expires = timedelta(minutes=1440)  # 24 hours for forklift
+        access_token_expires = timedelta(minutes=FORKLIFT_TOKEN_EXPIRE_MINUTES)  # 24 hours for forklift
         access_token = create_access_token(
             data={"sub": user.username}, expires_delta=access_token_expires
         )
@@ -89,12 +91,25 @@ async def register(
     current_user: User = Depends(get_current_active_user)
 ):
     """Register a new user (admin only)"""
-    if current_user.role != "admin":
+    if current_user.role not in (ROLE_ADMIN, ROLE_SUPERADMIN):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only admins can create new users"
         )
-    
+
+    # Prevent assigning a role equal to or higher than the creator's own role
+    def _role_rank(role: str) -> int:
+        try:
+            return ROLE_HIERARCHY.index(role)
+        except ValueError:
+            return -1
+
+    if _role_rank(user_data.role) >= _role_rank(current_user.role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot assign a role equal to or higher than your own"
+        )
+
     # Check if user already exists
     existing_user = db.query(User).filter(
         (User.username == user_data.username) | (User.email == user_data.email)
@@ -123,6 +138,16 @@ async def register(
     db.refresh(db_user)
     
     return db_user
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(current_user: User = Depends(get_current_active_user)):
+    """Refresh the access token. Issues a new token with full expiry for the authenticated user."""
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": current_user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
 
 @router.get("/me", response_model=UserSchema)
 async def get_current_user_info(current_user: User = Depends(get_current_active_user)):

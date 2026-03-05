@@ -2,31 +2,65 @@
 Service-to-service API endpoints.
 
 These endpoints are used by other Sunberry applications (e.g. Production)
-to read shared data from Inventory. No JWT required — intended for
-internal network use between Docker containers.
+to read shared data from Inventory. Requires X-Api-Key header matching
+SERVICE_API_KEY in .env — intended for internal network use between services.
 """
 
 import json
 import os
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
+from app.config import settings
 from app.database import get_db
-from app.models import Product, Category, Receipt, StagingRequest, StagingRequestItem, StagingItem
+from app.models import Product, Category, Receipt, StagingRequest, StagingRequestItem, StagingItem, InventoryAdjustment, User
+from app.models.product import WarehouseCategoryAccess, CategoryGroup
+from app.enums import ReceiptStatus, AdjustmentStatus, StagingItemStatus, StagingRequestStatus
 
 import logging
 logger = logging.getLogger(__name__)
 
-PRODUCTION_API_URL = os.environ.get("PRODUCTION_API_URL", "http://localhost:8001")
+from app.config import settings
+PRODUCTION_API_URL = settings.PRODUCTION_API_URL or ""
 
-router = APIRouter()
+def verify_service_key(
+    x_api_key: Optional[str] = Header(None, alias="X-Api-Key"),
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Accept either:
+    - X-Api-Key header matching SERVICE_API_KEY  (service-to-service)
+    - Authorization: Bearer <jwt>               (inventory frontend users)
+    """
+    # 1. API key check (service-to-service)
+    if x_api_key is not None:
+        if settings.SERVICE_API_KEY and x_api_key == settings.SERVICE_API_KEY:
+            return
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # 2. JWT bearer check (frontend)
+    if authorization and authorization.lower().startswith("bearer "):
+        from app.utils.auth import verify_token
+        token = authorization[7:]
+        token_data = verify_token(token)
+        if token_data:
+            user = db.query(User).filter(User.username == token_data.username).first()
+            if user and user.is_active:
+                return
+
+    raise HTTPException(status_code=401, detail="Authentication required")
+
+
+# All routes require a valid X-Api-Key header matching SERVICE_API_KEY in .env
+router = APIRouter(dependencies=[Depends(verify_service_key)])
 
 
 # ---------------------------------------------------------------------------
@@ -44,24 +78,30 @@ class AvailabilityRequest(BaseModel):
 
 @router.get("/raw-materials")
 async def get_raw_materials(
+    warehouse_id: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """
-    Return all products whose category belongs to the 'Raw Materials' group
-    (parent_id = 'group-raw').  Used by the Production app to sync ingredients.
+    Return all products whose category has type 'raw' or 'raw-material'.
+    If warehouse_id is provided, only returns products from category groups
+    assigned to that warehouse via WarehouseCategoryAccess.
     """
-    # Step 1: get all category IDs under group-raw
-    raw_category_ids = (
-        db.query(Category.id)
-        .filter(Category.parent_id == "group-raw")
-        .all()
-    )
-    raw_category_ids = [cid[0] for cid in raw_category_ids]
+    query = db.query(Category.id).filter(Category.type.in_(["raw", "raw-material"]))
+    if warehouse_id:
+        group_ids = [
+            row.category_group_id for row in
+            db.query(WarehouseCategoryAccess)
+            .filter(WarehouseCategoryAccess.warehouse_id == warehouse_id)
+            .all()
+        ]
+        if not group_ids:
+            return []
+        query = query.filter(Category.parent_id.in_(group_ids))
+    raw_category_ids = [cid[0] for cid in query.all()]
 
     if not raw_category_ids:
         return []
 
-    # Step 2: get products in those categories
     products = (
         db.query(Product)
         .filter(Product.category_id.in_(raw_category_ids))
@@ -79,6 +119,53 @@ async def get_raw_materials(
             "quantity_uom": p.quantity_uom,
             "is_active": p.is_active,
             "inventory_tracked": p.inventory_tracked if p.inventory_tracked is not None else True,
+        }
+        for p in products
+    ]
+
+
+@router.get("/finished-goods")
+async def get_finished_goods(
+    warehouse_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Return all active products whose category has type 'finished'.
+    If warehouse_id is provided, only returns products from category groups
+    assigned to that warehouse via WarehouseCategoryAccess.
+    """
+    query = db.query(Category.id).filter(Category.type == "finished")
+    if warehouse_id:
+        group_ids = [
+            row.category_group_id for row in
+            db.query(WarehouseCategoryAccess)
+            .filter(WarehouseCategoryAccess.warehouse_id == warehouse_id)
+            .all()
+        ]
+        if not group_ids:
+            return []
+        query = query.filter(Category.parent_id.in_(group_ids))
+    fg_category_ids = [cid[0] for cid in query.all()]
+
+    if not fg_category_ids:
+        return []
+
+    products = (
+        db.query(Product)
+        .filter(Product.category_id.in_(fg_category_ids), Product.is_active == True)
+        .order_by(Product.name)
+        .all()
+    )
+
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "sid": p.sid,
+            "fcc_code": p.fcc_code,
+            "description": p.description,
+            "category_id": p.category_id,
+            "quantity_uom": p.quantity_uom,
         }
         for p in products
     ]
@@ -145,7 +232,7 @@ async def check_availability(
             db.query(func.coalesce(func.sum(Receipt.quantity), 0))
             .filter(
                 Receipt.product_id == product.id,
-                Receipt.status == "approved",
+                Receipt.status == ReceiptStatus.APPROVED,
                 Receipt.quantity > 0,
             )
             .scalar()
@@ -205,7 +292,7 @@ async def create_staging_request(
     Called by Production after batch creation.
     Creates a staging request so warehouse staff know what to stage.
     """
-    request_id = f"sr-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+    request_id = f"sr-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
 
     sr = StagingRequest(
         id=request_id,
@@ -214,7 +301,7 @@ async def create_staging_request(
         formula_name=payload.formula_name,
         number_of_batches=payload.number_of_batches,
         production_date=payload.production_date,
-        status="pending",
+        status=StagingRequestStatus.PENDING,
     )
 
     for item in payload.items:
@@ -227,7 +314,7 @@ async def create_staging_request(
         if product and product.inventory_tracked is False:
             is_tracked = False
 
-        item_id = f"sri-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+        item_id = f"sri-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
         sri = StagingRequestItem(
             id=item_id,
             request_id=request_id,
@@ -236,7 +323,7 @@ async def create_staging_request(
             ingredient_name=item.ingredient_name,
             quantity_needed=item.quantity_needed,
             unit=item.unit,
-            status="fulfilled" if not is_tracked else "pending",
+            status=StagingRequestStatus.FULFILLED if not is_tracked else StagingRequestStatus.PENDING,
             quantity_fulfilled=item.quantity_needed if not is_tracked else 0,
         )
         sr.items.append(sri)
@@ -268,7 +355,7 @@ async def list_staging_requests(
 
     if status_filter and status_filter != "all":
         if status_filter == "active":
-            query = query.filter(~StagingRequest.status.in_(["closed", "cancelled"]))
+            query = query.filter(~StagingRequest.status.in_([StagingRequestStatus.CLOSED, StagingRequestStatus.CANCELLED]))
         else:
             query = query.filter(StagingRequest.status == status_filter)
 
@@ -362,9 +449,9 @@ async def fulfill_staging_request_item(
 
     item.quantity_fulfilled = min(item.quantity_fulfilled + quantity_fulfilled, item.quantity_needed)
     if item.quantity_fulfilled >= item.quantity_needed:
-        item.status = "fulfilled"
+        item.status = StagingItemStatus.FULFILLED
     else:
-        item.status = "partially_fulfilled"
+        item.status = StagingItemStatus.PARTIALLY_FULFILLED
 
     # Store staging_item_ids link (append to existing if any)
     if body and body.staging_item_ids:
@@ -382,12 +469,12 @@ async def fulfill_staging_request_item(
         StagingRequestItem.request_id == request_id
     ).all()
 
-    if all(i.status == "fulfilled" for i in all_items):
-        sr.status = "fulfilled"
-    elif any(i.status in ("fulfilled", "partially_fulfilled") for i in all_items):
-        sr.status = "in_progress"
+    if all(i.status == StagingItemStatus.FULFILLED for i in all_items):
+        sr.status = StagingRequestStatus.FULFILLED
+    elif any(i.status in (StagingItemStatus.FULFILLED, StagingItemStatus.PARTIALLY_FULFILLED) for i in all_items):
+        sr.status = StagingRequestStatus.IN_PROGRESS
 
-    sr.updated_at = datetime.utcnow()
+    sr.updated_at = datetime.now(timezone.utc)
     db.commit()
 
     return {"status": "ok", "item_status": item.status, "request_status": sr.status}
@@ -548,7 +635,7 @@ async def mark_request_item_used(
         raise HTTPException(status_code=404, detail="Receipt not found")
 
     # Create adjustment record
-    adj_id = f"adj-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+    adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
     adjustment = InventoryAdjustment(
         id=adj_id,
         receipt_id=receipt.id,
@@ -556,7 +643,7 @@ async def mark_request_item_used(
         adjustment_type="stock-correction",
         quantity=body.quantity,
         reason=f"Used from staging for production (request {request_id})",
-        status="approved",
+        status=AdjustmentStatus.APPROVED,
         original_quantity=receipt.quantity,
         new_quantity=receipt.quantity - body.quantity,
         submitted_by=None,
@@ -567,15 +654,15 @@ async def mark_request_item_used(
     # Update receipt quantity
     receipt.quantity = max(0, receipt.quantity - body.quantity)
     if receipt.quantity <= 0:
-        receipt.status = "depleted"
+        receipt.status = ReceiptStatus.DEPLETED
 
     # Update staging item
     staging_item.quantity_used += body.quantity
     if staging_item.quantity_used >= staging_item.quantity_staged - staging_item.quantity_returned:
-        staging_item.status = "used"
+        staging_item.status = StagingItemStatus.USED
     else:
-        staging_item.status = "partially_used"
-    staging_item.used_at = datetime.utcnow()
+        staging_item.status = StagingItemStatus.PARTIALLY_USED
+    staging_item.used_at = datetime.now(timezone.utc)
 
     db.commit()
     return {
@@ -634,7 +721,7 @@ async def return_request_item(
     transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == staging_item.transfer_id).first()
 
     # Create return transfer record
-    return_transfer_id = f"transfer-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+    return_transfer_id = f"transfer-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
     unit = receipt.unit or "units"
     product = db.query(Product).filter(Product.id == receipt.product_id).first()
     if product and product.quantity_uom:
@@ -663,15 +750,15 @@ async def return_request_item(
     # Update staging item
     staging_item.quantity_returned += body.quantity
     if staging_item.quantity_returned >= staging_item.quantity_staged - staging_item.quantity_used:
-        staging_item.status = "returned" if staging_item.quantity_used == 0 else "partially_returned"
-    staging_item.returned_at = datetime.utcnow()
+        staging_item.status = StagingItemStatus.RETURNED if staging_item.quantity_used == 0 else StagingItemStatus.PARTIALLY_RETURNED
+    staging_item.returned_at = datetime.now(timezone.utc)
 
     # Update the request item fulfilled quantity (reduce it)
     item.quantity_fulfilled = max(0, item.quantity_fulfilled - body.quantity)
     if item.quantity_fulfilled <= 0:
-        item.status = "pending"
+        item.status = StagingItemStatus.PENDING
     elif item.quantity_fulfilled < item.quantity_needed:
-        item.status = "partially_fulfilled"
+        item.status = StagingItemStatus.PARTIALLY_FULFILLED
 
     # Update parent request status
     sr = db.query(StagingRequest).filter(StagingRequest.id == request_id).first()
@@ -679,13 +766,13 @@ async def return_request_item(
         all_items = db.query(StagingRequestItem).filter(
             StagingRequestItem.request_id == request_id
         ).all()
-        if all(i.status == "fulfilled" for i in all_items):
-            sr.status = "fulfilled"
-        elif any(i.status in ("fulfilled", "partially_fulfilled") for i in all_items):
-            sr.status = "in_progress"
+        if all(i.status == StagingItemStatus.FULFILLED for i in all_items):
+            sr.status = StagingRequestStatus.FULFILLED
+        elif any(i.status in (StagingItemStatus.FULFILLED, StagingItemStatus.PARTIALLY_FULFILLED) for i in all_items):
+            sr.status = StagingRequestStatus.IN_PROGRESS
         else:
-            sr.status = "pending"
-        sr.updated_at = datetime.utcnow()
+            sr.status = StagingRequestStatus.PENDING
+        sr.updated_at = datetime.now(timezone.utc)
 
     db.commit()
     return {
@@ -752,7 +839,7 @@ async def undo_staging(
         if product and product.quantity_uom:
             unit = product.quantity_uom
 
-        return_transfer_id = f"transfer-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+        return_transfer_id = f"transfer-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
         return_transfer = InventoryTransfer(
             id=return_transfer_id,
             receipt_id=si.receipt_id,
@@ -773,13 +860,13 @@ async def undo_staging(
         receipt.sub_location_id = body.to_sub_location_id
 
         si.quantity_returned += available
-        si.status = "returned" if si.quantity_used == 0 else "partially_returned"
-        si.returned_at = datetime.utcnow()
+        si.status = StagingItemStatus.RETURNED if si.quantity_used == 0 else StagingItemStatus.PARTIALLY_RETURNED
+        si.returned_at = datetime.now(timezone.utc)
         returned_count += 1
 
     # Reset the request item
     item.quantity_fulfilled = 0
-    item.status = "pending"
+    item.status = StagingItemStatus.PENDING
     item.staging_item_ids = None
 
     # Update parent request status
@@ -788,13 +875,13 @@ async def undo_staging(
         all_items = db.query(StagingRequestItem).filter(
             StagingRequestItem.request_id == request_id
         ).all()
-        if all(i.status == "fulfilled" for i in all_items):
-            sr.status = "fulfilled"
-        elif any(i.status in ("fulfilled", "partially_fulfilled") for i in all_items):
-            sr.status = "in_progress"
+        if all(i.status == StagingItemStatus.FULFILLED for i in all_items):
+            sr.status = StagingRequestStatus.FULFILLED
+        elif any(i.status in (StagingItemStatus.FULFILLED, StagingItemStatus.PARTIALLY_FULFILLED) for i in all_items):
+            sr.status = StagingRequestStatus.IN_PROGRESS
         else:
-            sr.status = "pending"
-        sr.updated_at = datetime.utcnow()
+            sr.status = StagingRequestStatus.PENDING
+        sr.updated_at = datetime.now(timezone.utc)
 
     db.commit()
     return {
@@ -820,7 +907,7 @@ async def get_reconciliation_summary(
 
     # Get all staging requests that are in_progress
     active_requests = db.query(StagingRequest).filter(
-        StagingRequest.status.in_(["pending", "in_progress"])
+        StagingRequest.status.in_([StagingRequestStatus.PENDING, StagingRequestStatus.IN_PROGRESS])
     ).options(joinedload(StagingRequest.items)).order_by(StagingRequest.created_at.desc()).all()
 
     result = []
@@ -950,7 +1037,7 @@ async def notify_ingredient_used(
 
                 # Create adjustment
                 from app.models import InventoryAdjustment
-                adj_id = f"adj-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+                adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
                 adjustment = InventoryAdjustment(
                     id=adj_id,
                     receipt_id=receipt.id,
@@ -958,7 +1045,7 @@ async def notify_ingredient_used(
                     adjustment_type="stock-correction",
                     quantity=use_qty,
                     reason=f"Used in production scan (batch {payload.production_batch_uid}, lot {payload.lot_barcode or 'N/A'})",
-                    status="approved",
+                    status=AdjustmentStatus.APPROVED,
                     original_quantity=receipt.quantity,
                     new_quantity=max(0, receipt.quantity - use_qty),
                     submitted_by=None,
@@ -968,14 +1055,14 @@ async def notify_ingredient_used(
 
                 receipt.quantity = max(0, receipt.quantity - use_qty)
                 if receipt.quantity <= 0:
-                    receipt.status = "depleted"
+                    receipt.status = ReceiptStatus.DEPLETED
 
                 si.quantity_used += use_qty
                 if si.quantity_used >= si.quantity_staged - si.quantity_returned:
                     si.status = "used"
                 else:
                     si.status = "partially_used"
-                si.used_at = datetime.utcnow()
+                si.used_at = datetime.now(timezone.utc)
 
                 remaining_to_mark -= use_qty
                 marked_count += 1
@@ -1015,9 +1102,12 @@ async def sync_production_usage(
     if not batch_uids:
         return {"status": "ok", "message": "No batch UIDs to sync", "batches_completed": 0, "marked_count": 0}
 
+    if not PRODUCTION_API_URL:
+        return {"status": "ok", "message": "Production integration not configured (PRODUCTION_API_URL not set)", "batches_completed": 0, "marked_count": 0}
+
     # Call Production's batch-usage endpoint
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
                 f"{PRODUCTION_API_URL}/service/batch-usage",
                 params={"batch_uids": ",".join(batch_uids)},
@@ -1026,7 +1116,7 @@ async def sync_production_usage(
             data = resp.json()
     except Exception as e:
         logger.warning(f"Failed to sync with Production: {e}")
-        raise HTTPException(status_code=502, detail=f"Could not reach Production app: {str(e)}")
+        raise HTTPException(status_code=503, detail="Production app is not reachable. Please try again later.")
 
     batches_data = data.get("batches", {})
 
@@ -1091,9 +1181,9 @@ async def sync_production_usage(
                 receipt = db.query(Receipt).filter(Receipt.id == si.receipt_id).first()
                 if receipt:
                     receipt.quantity = (receipt.quantity or 0) + reduce_qty
-                    if receipt.status == "depleted":
-                        receipt.status = "recorded"
-                    adj_id = f"adj-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+                    if receipt.status == ReceiptStatus.DEPLETED:
+                        receipt.status = ReceiptStatus.RECORDED
+                    adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
                     db.add(InventoryAdjustment(
                         id=adj_id,
                         receipt_id=receipt.id,
@@ -1101,14 +1191,14 @@ async def sync_production_usage(
                         adjustment_type="stock-correction",
                         quantity=-reduce_qty,  # negative = credit back
                         reason=f"Sync correction: was over-marked, restored to match Production ({batches_completed} completed batch(es))",
-                        status="approved",
+                        status=AdjustmentStatus.APPROVED,
                         original_quantity=receipt.quantity - reduce_qty,
                         new_quantity=receipt.quantity,
                         submitted_by=None,
                         approved_by=None,
                     ))
                 avail = si.quantity_staged - si.quantity_used - si.quantity_returned
-                si.status = "used" if avail <= 0 else "partially_used"
+                si.status = StagingItemStatus.USED if avail <= 0 else StagingItemStatus.PARTIALLY_USED
                 total_marked += 1
             continue
         remaining_to_mark = delta
@@ -1131,7 +1221,7 @@ async def sync_production_usage(
 
             # Create adjustment
             from app.models import InventoryAdjustment
-            adj_id = f"adj-{int(datetime.utcnow().timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+            adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
             adjustment = InventoryAdjustment(
                 id=adj_id,
                 receipt_id=receipt.id,
@@ -1139,7 +1229,7 @@ async def sync_production_usage(
                 adjustment_type="stock-correction",
                 quantity=use_qty,
                 reason=f"Synced from Production — {batches_completed} completed batch(es)",
-                status="approved",
+                status=AdjustmentStatus.APPROVED,
                 original_quantity=receipt.quantity,
                 new_quantity=max(0, receipt.quantity - use_qty),
                 submitted_by=None,
@@ -1149,20 +1239,20 @@ async def sync_production_usage(
 
             receipt.quantity = max(0, receipt.quantity - use_qty)
             if receipt.quantity <= 0:
-                receipt.status = "depleted"
+                receipt.status = ReceiptStatus.DEPLETED
 
             si.quantity_used += use_qty
             if si.quantity_used >= si.quantity_staged - si.quantity_returned:
                 si.status = "used"
             else:
                 si.status = "partially_used"
-            si.used_at = datetime.utcnow()
+            si.used_at = datetime.now(timezone.utc)
 
             remaining_to_mark -= use_qty
             total_marked += 1
 
     # Update last_synced_at
-    sr.last_synced_at = datetime.utcnow()
+    sr.last_synced_at = datetime.now(timezone.utc)
     db.commit()
 
     return {
@@ -1214,8 +1304,8 @@ async def dismiss_staging_request(
             detail="Cannot dismiss: some materials were staged. Use Close Out to reconcile leftovers first."
         )
 
-    sr.status = "cancelled"
-    sr.updated_at = datetime.utcnow()
+    sr.status = StagingRequestStatus.CANCELLED
+    sr.updated_at = datetime.now(timezone.utc)
     db.commit()
     return {"status": "ok", "message": "Staging request dismissed"}
 
@@ -1421,7 +1511,7 @@ async def close_out_staging_request(
                 )
 
     sr.status = "closed"
-    sr.updated_at = datetime.utcnow()
+    sr.updated_at = datetime.now(timezone.utc)
     db.commit()
     return {"status": "ok", "message": "Staging request closed"}
 

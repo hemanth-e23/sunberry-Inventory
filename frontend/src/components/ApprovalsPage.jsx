@@ -1,16 +1,17 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAppData } from "../context/AppDataContext";
 import { useAuth } from "../context/AuthContext";
+import { useToast } from "../context/ToastContext";
+import { useConfirm } from "../context/ConfirmContext";
 import { getDashboardPath } from "../App";
-import { formatDateTime, formatTimeAgo, getDaysAgo, toDateKey, getTodayDateKey } from "../utils/dateUtils";
-import axios from "axios";
+import { formatDateTime, formatDate, formatTime, formatTimeAgo, getDaysAgo, toDateKey, getTodayDateKey } from "../utils/dateUtils";
+import apiClient from "../api/client";
+import "./Shared.css";
 import "./ApprovalsPage.css";
-import "./ApprovalsPageEnhanced.css";
+import { ROLES, CATEGORY_TYPES, RECEIPT_STATUS, TRANSFER_STATUS, ADJUSTMENT_STATUS, HOLD_STATUS, FORKLIFT_REQUEST_STATUS, PALLET_STATUS } from '../constants';
 
-const API_BASE_URL = '/api';
-
-const STATUS_PENDING = new Set(["recorded", "reviewed"]);
+const STATUS_PENDING = new Set([RECEIPT_STATUS.RECORDED, RECEIPT_STATUS.REVIEWED]);
 
 // Remove duplicate date utility functions - now imported from utils
 const getPriorityLevel = (days) => {
@@ -39,7 +40,6 @@ const ApprovalsPage = () => {
     rejectReceipt,
     sendBackReceipt,
     updateReceipt,
-    updateReceiptStatus,
     inventoryTransfers,
     approveTransfer,
     rejectTransfer,
@@ -50,7 +50,7 @@ const ApprovalsPage = () => {
     inventoryAdjustments,
     approveAdjustment,
     rejectAdjustment,
-    users,
+    userNameMap,
     forkliftRequests,
     fetchForkliftRequests,
     approveForkliftRequest,
@@ -61,6 +61,8 @@ const ApprovalsPage = () => {
     addPalletToForkliftRequest,
   } = useAppData();
 
+  const { addToast } = useToast();
+  const { confirm } = useConfirm();
   const todayKey = useMemo(() => getTodayDateKey(), []);
 
   const productLookup = useMemo(() => {
@@ -105,6 +107,16 @@ const ApprovalsPage = () => {
     }
     return map;
   }, [locations, subLocationMap, subLocationsUnifiedMap]);
+
+  const receiptLookup = useMemo(() => {
+    const map = {};
+    if (receipts && Array.isArray(receipts)) {
+      receipts.forEach((receipt) => {
+        map[receipt.id] = receipt;
+      });
+    }
+    return map;
+  }, [receipts]);
 
   // Row lookup: get row name from storageRowId
   const [rowNameCache, setRowNameCache] = useState({});
@@ -164,17 +176,12 @@ const ApprovalsPage = () => {
   }, [locations, subLocationMap, subLocationsUnifiedMap, storageAreas, rowNameCache]);
 
   // Helper function to fetch row name from backend if not in lookup
-  const fetchRowName = async (rowId) => {
+  const fetchRowName = useCallback(async (rowId) => {
     if (!rowId || rowNameCache[rowId]) return rowNameCache[rowId];
-    
+
     try {
-      const token = localStorage.getItem('token');
-      if (!token) return null;
-      
-      const response = await axios.get(`${API_BASE_URL}/master-data/storage-rows/${rowId}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      
+      const response = await apiClient.get(`/master-data/storage-rows/${rowId}`);
+
       if (response.data?.name) {
         setRowNameCache(prev => ({ ...prev, [rowId]: response.data.name }));
         return response.data.name;
@@ -183,12 +190,12 @@ const ApprovalsPage = () => {
       console.warn(`Failed to fetch row name for ${rowId}:`, error);
     }
     return null;
-  };
+  }, [rowNameCache]);
 
   // Pre-fetch row names for receipts that have storageRowId but no name in lookup
   useEffect(() => {
     const missingRowIds = new Set();
-    
+
     // Check all receipts for missing row names
     receipts.forEach(receipt => {
       if (receipt.storageRowId || receipt.storage_row_id) {
@@ -206,26 +213,14 @@ const ApprovalsPage = () => {
         });
       }
     });
-    
+
     // Fetch all missing row names
     if (missingRowIds.size > 0) {
       missingRowIds.forEach(rowId => {
         fetchRowName(rowId);
       });
     }
-  }, [receipts, rowLookup, rowNameCache]);
-
-  const userLookup = useMemo(() => {
-    const map = {};
-    if (users && Array.isArray(users)) {
-      users.forEach((user) => {
-        const label = user.name || user.username;
-        map[user.id] = label;
-        map[user.username] = label;
-      });
-    }
-    return map;
-  }, [users]);
+  }, [receipts, rowLookup, rowNameCache, fetchRowName]);
 
   const shiftLookup = useMemo(() => {
     const map = {};
@@ -246,16 +241,6 @@ const ApprovalsPage = () => {
     }
     return map;
   }, [productionLines]);
-
-  const storageAreaLookup = useMemo(() => {
-    const map = {};
-    if (storageAreas && Array.isArray(storageAreas)) {
-      storageAreas.forEach((area) => {
-        map[area.id] = area;
-      });
-    }
-    return map;
-  }, [storageAreas]);
 
   // Helper to get location display for finished goods receipts
   // Format: "FG: AA (10 pallets), AB (15 pallets)"
@@ -370,7 +355,7 @@ const ApprovalsPage = () => {
   const approvedHistory = useMemo(
     () =>
       receipts
-        .filter((receipt) => receipt.status === "approved")
+        .filter((receipt) => receipt.status === RECEIPT_STATUS.APPROVED)
         .sort(
           (a, b) =>
             new Date(b.approvedAt || 0) - new Date(a.approvedAt || 0),
@@ -384,8 +369,8 @@ const ApprovalsPage = () => {
   const pendingTransfers = useMemo(
     () =>
       inventoryTransfers
-        .filter((transfer) => 
-          transfer.status === "pending" &&
+        .filter((transfer) =>
+          transfer.status === TRANSFER_STATUS.PENDING &&
           (user?.role !== 'warehouse' || (transfer.requestedBy !== currentUserId && transfer.requested_by !== currentUserId))
         )
         .sort(
@@ -398,8 +383,8 @@ const ApprovalsPage = () => {
   const pendingHolds = useMemo(
     () =>
       inventoryHoldActions
-        .filter((hold) => 
-          hold.status === "pending" &&
+        .filter((hold) =>
+          hold.status === HOLD_STATUS.PENDING &&
           (user?.role !== 'warehouse' || (hold.submittedBy !== currentUserId && hold.submitted_by !== currentUserId))
         )
         .sort(
@@ -411,15 +396,15 @@ const ApprovalsPage = () => {
 
   const pendingForkliftRequests = useMemo(
     () =>
-      (forkliftRequests || []).filter((fr) => fr.status === 'submitted'),
+      (forkliftRequests || []).filter((fr) => fr.status === FORKLIFT_REQUEST_STATUS.SUBMITTED),
     [forkliftRequests],
   );
 
   const pendingAdjustments = useMemo(
     () =>
       inventoryAdjustments
-        .filter((adjustment) => 
-          adjustment.status === "pending" &&
+        .filter((adjustment) =>
+          adjustment.status === ADJUSTMENT_STATUS.PENDING &&
           (user?.role !== 'warehouse' || (adjustment.submittedBy !== currentUserId && adjustment.submitted_by !== currentUserId))
         )
         .sort(
@@ -444,7 +429,8 @@ const ApprovalsPage = () => {
         try {
           const data = await fetchTransferScanProgress(t.id);
           if (data) next[t.id] = data;
-        } catch (_) {}
+        } catch (_) { // ignore
+        }
       }
       setTransferScanProgress((prev) => ({ ...prev, ...next }));
     };
@@ -455,10 +441,7 @@ const ApprovalsPage = () => {
 
   // Summary statistics
   const summaryStats = useMemo(() => {
-    const todayApproved = approvedHistory.filter(r => {
-      const approvedDate = r.approvedAt ? new Date(r.approvedAt).toISOString().slice(0, 10) : null;
-      return approvedDate === todayKey;
-    }).length;
+    const todayApproved = approvedHistory.filter(r => toDateKey(r.approvedAt) === todayKey).length;
 
     const urgentCount = backlogPending.filter(r => getDaysAgo(r.submittedAt || r.receiptDate) >= 7).length;
 
@@ -482,7 +465,6 @@ const ApprovalsPage = () => {
   const filteredTodaysPending = useMemo(() => {
     return todaysPending.filter(receipt => {
       const product = productLookup[receipt.productId];
-      const category = categoryLookup[receipt.categoryId];
 
       // Search filter
       if (searchQuery) {
@@ -498,12 +480,11 @@ const ApprovalsPage = () => {
 
       return true;
     });
-  }, [todaysPending, searchQuery, categoryFilter, productLookup, categoryLookup]);
+  }, [todaysPending, searchQuery, categoryFilter, productLookup]);
 
   const filteredBacklogPending = useMemo(() => {
     return backlogPending.filter(receipt => {
       const product = productLookup[receipt.productId];
-      const category = categoryLookup[receipt.categoryId];
 
       // Search filter
       if (searchQuery) {
@@ -526,11 +507,11 @@ const ApprovalsPage = () => {
 
       return true;
     });
-  }, [backlogPending, searchQuery, categoryFilter, dateRangeFilter, productLookup, categoryLookup]);
+  }, [backlogPending, searchQuery, categoryFilter, dateRangeFilter, productLookup]);
 
   const selectedReceipt = useMemo(
-    () => receipts.find((receipt) => receipt.id === selectedReceiptId) || null,
-    [receipts, selectedReceiptId],
+    () => receiptLookup[selectedReceiptId] || null,
+    [receiptLookup, selectedReceiptId],
   );
 
   useEffect(() => {
@@ -538,10 +519,8 @@ const ApprovalsPage = () => {
       setDraft(null);
       return;
     }
-    const { quantityTouched, ...rest } = selectedReceipt;
+    const { quantityTouched: _quantityTouched, ...rest } = selectedReceipt;
     const product = productLookup[selectedReceipt.productId];
-    const category = categoryLookup[selectedReceipt.categoryId];
-    const isFinishedGoods = category?.parentId === 'group-finished';
 
     // Get location values from receipt - prioritize locationId/subLocationId
     const receiptLocationId = selectedReceipt.locationId || selectedReceipt.location || rest.locationId || rest.location || '';
@@ -561,7 +540,7 @@ const ApprovalsPage = () => {
       shift: rest.shift || selectedReceipt.shift || '',
       lineNumber: rest.lineNumber || selectedReceipt.lineNumber || '',
     });
-  }, [selectedReceipt, productLookup, categoryLookup]);
+  }, [selectedReceipt, productLookup]);
 
   const closeDetail = () => {
     setSelectedReceiptId(null);
@@ -632,17 +611,12 @@ const ApprovalsPage = () => {
         }
       }
 
-      if (category?.type !== "finished" &&
+      if (category?.type !== CATEGORY_TYPES.FINISHED &&
         ["productionDate", "fccCode", "shift", "lineNumber", "hold"].includes(field)) {
         return;
       }
-      if (category?.type !== "raw" || category?.subType !== "ingredient") {
+      if (category?.type !== CATEGORY_TYPES.INGREDIENT) {
         if (["vendorId", "brix", "sid"].includes(field)) return;
-      }
-      if (category?.type !== "raw" || category?.subType !== "packaging") {
-        if (field === "note" && receipt.categoryId !== field) {
-          // packaging specific note already handled, keep generic
-        }
       }
 
       summary.push({
@@ -679,16 +653,16 @@ const ApprovalsPage = () => {
         }, {});
         await updateReceipt(selectedReceipt.id, updates);
       }
-      const result = await approveReceipt(selectedReceipt.id, "supervisor-01");
+      const result = await approveReceipt(selectedReceipt.id, user?.id || user?.username);
       if (!result.success) {
-        alert(result.message || 'Failed to approve receipt');
+        addToast(result.message || 'Failed to approve receipt', 'error');
         setIsApproving(false);
         return;
       }
       closeDetail();
     } catch (error) {
       console.error('Error approving receipt:', error);
-      alert('Failed to approve receipt. Please try again.');
+      addToast('Failed to approve receipt. Please try again.', 'error');
     } finally {
       setIsApproving(false);
     }
@@ -697,14 +671,14 @@ const ApprovalsPage = () => {
   const handleSendBack = async () => {
     if (!selectedReceipt) return;
     if (!sendBackReason.trim()) {
-      alert('Please provide a reason for sending back.');
+      addToast('Please provide a reason for sending back.', 'error');
       return;
     }
     setIsSendingBack(true);
     try {
-      const result = await sendBackReceipt(selectedReceipt.id, sendBackReason, "supervisor-01");
+      const result = await sendBackReceipt(selectedReceipt.id, sendBackReason, user?.id || user?.username);
       if (!result.success) {
-        alert(result.message || 'Failed to send back receipt');
+        addToast(result.message || 'Failed to send back receipt', 'error');
         setIsSendingBack(false);
         return;
       }
@@ -713,7 +687,7 @@ const ApprovalsPage = () => {
       closeDetail();
     } catch (error) {
       console.error('Error sending back receipt:', error);
-      alert('Failed to send back receipt. Please try again.');
+      addToast('Failed to send back receipt. Please try again.', 'error');
     } finally {
       setIsSendingBack(false);
     }
@@ -722,14 +696,14 @@ const ApprovalsPage = () => {
   const handleReject = async () => {
     if (!selectedReceipt) return;
     if (!rejectionReason.trim()) {
-      alert('Please provide a reason for rejection.');
+      addToast('Please provide a reason for rejection.', 'error');
       return;
     }
     setIsRejecting(true);
     try {
-      const result = await rejectReceipt(selectedReceipt.id, rejectionReason, "supervisor-01");
+      const result = await rejectReceipt(selectedReceipt.id, rejectionReason, user?.id || user?.username);
       if (!result.success) {
-        alert(result.message || 'Failed to reject receipt');
+        addToast(result.message || 'Failed to reject receipt', 'error');
         setIsRejecting(false);
         return;
       }
@@ -738,35 +712,36 @@ const ApprovalsPage = () => {
       closeDetail();
     } catch (error) {
       console.error('Error rejecting receipt:', error);
-      alert('Failed to reject receipt. Please try again.');
+      addToast('Failed to reject receipt. Please try again.', 'error');
     } finally {
       setIsRejecting(false);
     }
   };
 
   const approveAllToday = async () => {
-    if (todaysPending.length === 0) return;
-    const confirmMessage = `Approve ${todaysPending.length} receipt${todaysPending.length > 1 ? "s" : ""} from today?`;
-    if (!window.confirm(confirmMessage)) return;
+    if (filteredTodaysPending.length === 0) return;
+    const confirmMessage = `Approve ${filteredTodaysPending.length} receipt${filteredTodaysPending.length > 1 ? "s" : ""} from today?`;
+    const ok = await confirm(confirmMessage);
+    if (!ok) return;
 
     try {
       const results = await Promise.all(
-        todaysPending.map((receipt) => approveReceipt(receipt.id, "supervisor-01"))
+        filteredTodaysPending.map((receipt) => approveReceipt(receipt.id, user?.id || user?.username))
       );
       const failed = results.filter(r => !r.success);
       if (failed.length > 0) {
-        alert(`Failed to approve ${failed.length} receipt(s). Please try again.`);
+        addToast(`Failed to approve ${failed.length} receipt(s). Please try again.`, 'error');
       }
     } catch (error) {
       console.error('Error approving receipts:', error);
-      alert('Error approving receipts. Please try again.');
+      addToast('Error approving receipts. Please try again.', 'error');
     }
   };
 
   const renderCard = (receipt) => {
     const product = productLookup[receipt.productId];
     const category = categoryLookup[receipt.categoryId];
-    const statusLabel = receipt.status === "reviewed" ? "Reviewed" : "Pending";
+    const _statusLabel = receipt.status === "reviewed" ? "Reviewed" : "Pending";
     const days = getDaysAgo(receipt.submittedAt || receipt.receiptDate);
     const priority = getPriorityLevel(days);
     const timeAgo = formatTimeAgo(receipt.submittedAt || receipt.receiptDate);
@@ -807,11 +782,11 @@ const ApprovalsPage = () => {
             <dd>{product?.sid || receipt.sid || "—"}</dd>
           </div>
           {/* Vendor, BOL, and Purchase Order only for raw materials, not finished goods */}
-          {category?.parentId !== 'group-finished' && (
+          {category?.type !== CATEGORY_TYPES.FINISHED && (
             <>
               <div>
                 <dt>Vendor</dt>
-                <dd>{receipt.vendorId ? vendors.find(v => v.id === receipt.vendorId)?.name || receipt.vendorId : "—"}</dd>
+                <dd>{receipt.vendorId ? vendorLookup[receipt.vendorId] || receipt.vendorId : "—"}</dd>
               </div>
               <div>
                 <dt>BOL</dt>
@@ -824,7 +799,7 @@ const ApprovalsPage = () => {
             </>
           )}
           {/* Shift and Line for finished goods */}
-          {category?.parentId === 'group-finished' && (
+          {category?.type === CATEGORY_TYPES.FINISHED && (
             <>
               <div>
                 <dt>Shift</dt>
@@ -841,7 +816,7 @@ const ApprovalsPage = () => {
             <dd>
               {(() => {
                 // For finished goods, always use allocation-based display
-                if (category?.parentId === 'group-finished') {
+                if (category?.type === CATEGORY_TYPES.FINISHED) {
                   const location = getFinishedGoodsLocation(receipt);
                   return location || "—";
                 }
@@ -869,21 +844,10 @@ const ApprovalsPage = () => {
                 // Check for single row (storageRowId)
                 else if (receipt.storageRowId || receipt.storage_row_id) {
                   const rowId = receipt.storageRowId || receipt.storage_row_id;
-                  let rowName = rowLookup[rowId];
+                  const rowName = rowLookup[rowId];
                   const pallets = receipt.pallets || 0;
-                  
-                  // If not found in lookup, try to fetch from backend (async, will update on next render)
-                  if (!rowName) {
-                    fetchRowName(rowId).then(name => {
-                      if (name) {
-                        setRowNameCache(prev => ({ ...prev, [rowId]: name }));
-                      }
-                    });
-                    // For now, show ID but it will update when fetch completes
-                    rowInfo.push(`${rowId}${pallets > 0 ? ` (${pallets} pallets)` : ''}`);
-                  } else {
-                    rowInfo.push(`${rowName}${pallets > 0 ? ` (${pallets} pallets)` : ''}`);
-                  }
+                  // rowLookup is pre-populated by the useEffect above; show rowId as fallback while loading
+                  rowInfo.push(`${rowName || rowId}${pallets > 0 ? ` (${pallets} pallets)` : ''}`);
                 }
                 
                 if (rowInfo.length > 0) {
@@ -895,6 +859,14 @@ const ApprovalsPage = () => {
             </dd>
           </div>
         </dl>
+        <div className="requester-row">
+          <span className="requester-avatar">
+            {(userNameMap[receipt.submittedBy || receipt.submitted_by] || '?')[0].toUpperCase()}
+          </span>
+          <span className="requester-label">
+            <strong>{userNameMap[receipt.submittedBy || receipt.submitted_by] || 'Unknown'}</strong> submitted this receipt
+          </span>
+        </div>
         <footer>
           <button
             type="button"
@@ -938,6 +910,14 @@ const ApprovalsPage = () => {
         <p className="muted small">
           Awaiting approval since {formatDateTime(receipt.submittedAt || receipt.receiptDate)}
         </p>
+        <div className="requester-row">
+          <span className="requester-avatar">
+            {(userNameMap[receipt.submittedBy || receipt.submitted_by] || '?')[0].toUpperCase()}
+          </span>
+          <span className="requester-label">
+            <strong>{userNameMap[receipt.submittedBy || receipt.submitted_by] || 'Unknown'}</strong> submitted this receipt
+          </span>
+        </div>
         <footer>
           <button
             type="button"
@@ -965,10 +945,10 @@ const ApprovalsPage = () => {
               <span>{product?.name || "Unknown"}</span>
             </div>
           </td>
-          <td>{category?.name || "—"}</td>
+          <td className="hide-tablet">{category?.name || "—"}</td>
           <td>{receipt.quantity} {receipt.quantityUnits}</td>
-          <td>{receipt.lotNo || "—"}</td>
-          <td>{formatDateTime(receipt.approvedAt)}</td>
+          <td className="hide-mobile">{receipt.lotNo || "—"}</td>
+          <td className="hide-mobile">{formatDateTime(receipt.approvedAt)}</td>
         </tr>
         {isExpanded && (
           <tr className="expanded-details">
@@ -985,7 +965,7 @@ const ApprovalsPage = () => {
                 <div>
                   <strong style={{ fontSize: '12px', color: '#64748b' }}>LOCATION</strong>
                   <p style={{ margin: '4px 0 0', fontWeight: 500 }}>
-                    {category?.parentId === 'group-finished' ? (
+                    {category?.type === CATEGORY_TYPES.FINISHED ? (
                       // For finished goods, show storage area/row name from allocations
                       getFinishedGoodsLocation(receipt) || "—"
                     ) : receipt.subLocationId || receipt.subLocation ? (
@@ -998,12 +978,12 @@ const ApprovalsPage = () => {
                   </p>
                 </div>
                 {/* Vendor, BOL, and Purchase Order only for raw materials, not finished goods */}
-                {category?.parentId !== 'group-finished' && (
+                {category?.type !== CATEGORY_TYPES.FINISHED && (
                   <>
                     <div>
                       <strong style={{ fontSize: '12px', color: '#64748b' }}>VENDOR</strong>
                       <p style={{ margin: '4px 0 0', fontWeight: 500 }}>
-                        {receipt.vendorId ? vendors.find(v => v.id === receipt.vendorId)?.name || receipt.vendorId : "—"}
+                        {receipt.vendorId ? vendorLookup[receipt.vendorId] || receipt.vendorId : "—"}
                       </p>
                     </div>
                     <div>
@@ -1017,7 +997,7 @@ const ApprovalsPage = () => {
                   </>
                 )}
                 {/* Shift and Line for finished goods */}
-                {category?.parentId === 'group-finished' && (
+                {category?.type === CATEGORY_TYPES.FINISHED && (
                   <>
                     <div>
                       <strong style={{ fontSize: '12px', color: '#64748b' }}>SHIFT</strong>
@@ -1046,9 +1026,9 @@ const ApprovalsPage = () => {
   const isEditable = selectedReceipt && STATUS_PENDING.has(selectedReceipt.status);
 
   const category = selectedReceipt ? categoryLookup[selectedReceipt.categoryId] : null;
-  const isIngredient = category?.type === "raw" && category?.subType === "ingredient";
-  const isPackaging = category?.type === "raw" && category?.subType === "packaging";
-  const isFinished = category?.type === "finished";
+  const isIngredient = category?.type === CATEGORY_TYPES.INGREDIENT;
+  const isPackaging = category?.type === CATEGORY_TYPES.PACKAGING;
+  const isFinished = category?.type === CATEGORY_TYPES.FINISHED;
 
   // Render functions for other tabs
   const renderTransfersTab = () => {
@@ -1076,13 +1056,14 @@ const ApprovalsPage = () => {
       try {
         const data = await fetchTransferScanProgress(transferId);
         if (data) setTransferScanProgress((prev) => ({ ...prev, [transferId]: data }));
-      } catch (_) {}
+      } catch (_) { // ignore
+      }
     };
 
     return (
       <div className="card-grid">
         {pendingTransfers.map((transfer) => {
-          const receipt = receipts.find(r => r.id === transfer.receiptId);
+          const receipt = receiptLookup[transfer.receiptId];
           const product = productLookup[receipt?.productId];
           const days = getDaysAgo(transfer.submittedAt);
           const priority = getPriorityLevel(days);
@@ -1163,8 +1144,65 @@ const ApprovalsPage = () => {
                 </div>
               )}
 
-              {/* From / To rows */}
-              {(sourceRows.length > 0 || destRows.length > 0) && (
+              {/* Pallet warehouse transfer: show clear FROM → TO with pallet table */}
+              {hasPallets && !isShipOut && (() => {
+                const palletDetails = transfer.palletLicenceDetails || [];
+                const fromLocations = [...new Set(palletDetails.map(p => p.location).filter(Boolean))];
+                const toLabel = destRows[0]?.label || locationLookupMap[transfer.toLocation] || '—';
+                const palletCount = (transfer.palletLicenceIds || transfer.pallet_licence_ids || []).length;
+                return (
+                  <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: '8px', padding: '12px 14px', marginBottom: '10px', fontSize: '13px' }}>
+                    {/* Movement summary row */}
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: palletDetails.length ? '10px' : 0, flexWrap: 'wrap' }}>
+                      <div style={{ flex: 1, minWidth: '100px' }}>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: '#0369a1', textTransform: 'uppercase', letterSpacing: '0.4px', marginBottom: '3px' }}>Moving from</div>
+                        {fromLocations.length > 0
+                          ? fromLocations.map((loc, i) => (
+                              <div key={i} style={{ fontWeight: 600, color: '#1e3a5f' }}>{loc}</div>
+                            ))
+                          : <div style={{ color: '#6b7280' }}>—</div>
+                        }
+                      </div>
+                      <div style={{ fontSize: '22px', color: '#6366f1', paddingTop: '14px', flexShrink: 0 }}>→</div>
+                      <div style={{ flex: 1, minWidth: '100px' }}>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: '#0369a1', textTransform: 'uppercase', letterSpacing: '0.4px', marginBottom: '3px' }}>Moving to</div>
+                        <div style={{ fontWeight: 600, color: '#1e3a5f' }}>{toLabel}</div>
+                      </div>
+                      <div style={{ marginLeft: 'auto', textAlign: 'right', flexShrink: 0 }}>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: '#0369a1', textTransform: 'uppercase', letterSpacing: '0.4px', marginBottom: '3px' }}>Pallets</div>
+                        <div style={{ fontWeight: 700, color: '#1e3a5f' }}>{palletCount} pallets · {(transfer.quantity || 0).toLocaleString()} cs</div>
+                      </div>
+                    </div>
+
+                    {/* Per-pallet details */}
+                    {palletDetails.length > 0 && (
+                      <div style={{ maxHeight: '200px', overflowY: 'auto', borderRadius: '6px', border: '1px solid #bae6fd', overflow: 'hidden' }}>
+                        <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse' }}>
+                          <thead>
+                            <tr style={{ background: '#e0f2fe' }}>
+                              <th style={{ textAlign: 'left', padding: '5px 8px', color: '#0369a1', fontWeight: 600 }}>Licence #</th>
+                              <th style={{ textAlign: 'left', padding: '5px 8px', color: '#0369a1', fontWeight: 600 }}>Current Location</th>
+                              <th style={{ textAlign: 'right', padding: '5px 8px', color: '#0369a1', fontWeight: 600 }}>Cases</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {palletDetails.map((p, i) => (
+                              <tr key={p.id} style={{ borderBottom: '1px solid #e0f2fe', background: i % 2 === 0 ? '#f0f9ff' : 'white' }}>
+                                <td style={{ padding: '5px 8px', fontFamily: 'monospace', fontWeight: 700, color: '#1e40af' }}>{p.licence_number}</td>
+                                <td style={{ padding: '5px 8px', color: '#374151' }}>{p.location || '—'}</td>
+                                <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{(p.cases || 0).toLocaleString()} cs</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* RM / non-pallet transfer: show source → dest rows */}
+              {!hasPallets && (sourceRows.length > 0 || destRows.length > 0) && (
                 <div style={{ background: '#f9fafb', borderRadius: '8px', padding: '10px 14px', marginBottom: '10px', fontSize: '13px' }}>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                     <div>
@@ -1238,7 +1276,7 @@ const ApprovalsPage = () => {
                           <span style={{ color: '#6b7280' }}>· {pallet.cases} cs</span>
                           {pallet.is_scanned && pallet.scanned_at && (
                             <span style={{ marginLeft: 'auto', color: '#22c55e', fontSize: '11px' }}>
-                              {new Date(pallet.scanned_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              {formatTime(pallet.scanned_at)}
                             </span>
                           )}
                           {pallet.is_skipped && (
@@ -1258,7 +1296,7 @@ const ApprovalsPage = () => {
                     <div style={{ marginTop: '8px', padding: '6px 10px', background: '#eff6ff', borderRadius: '6px', fontSize: '12px', color: '#1e40af' }}>
                       <strong>Last scan:</strong> {lastScan.licence_number}
                       {lastScan.scanned_by && ` · by ${lastScan.scanned_by}`}
-                      {lastScan.scanned_at && ` · ${new Date(lastScan.scanned_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
+                      {lastScan.scanned_at && ` · ${formatTime(lastScan.scanned_at)}`}
                     </div>
                   )}
 
@@ -1278,6 +1316,15 @@ const ApprovalsPage = () => {
                 </div>
               )}
 
+              <div className="requester-row">
+                <span className="requester-avatar">
+                  {(userNameMap[transfer.requestedBy || transfer.requested_by] || '?')[0].toUpperCase()}
+                </span>
+                <span className="requester-label">
+                  <strong>{userNameMap[transfer.requestedBy || transfer.requested_by] || 'Unknown'}</strong> requested this · {formatTimeAgo(transfer.submittedAt || transfer.submitted_at)}
+                </span>
+              </div>
+
               <footer>
                 <button
                   type="button"
@@ -1286,9 +1333,9 @@ const ApprovalsPage = () => {
                     const msg = forkliftDone
                       ? `Approve ship-out order ${transfer.orderNumber || transfer.order_number}?\n\n${scannedCount}/${totalPallets} pallets scanned${skippedCount > 0 ? `, ${skippedCount} skipped` : ''}.\n\nThis will subtract ${transfer.quantity} cases from inventory.`
                       : 'Approve this transfer?';
-                    if (window.confirm(msg)) {
-                      approveTransfer(transfer.id, user?.id || user?.username);
-                    }
+                    confirm(msg).then(ok => {
+                      if (ok) approveTransfer(transfer.id, user?.id || user?.username);
+                    });
                   }}
                   style={{ marginRight: '8px' }}
                 >
@@ -1298,10 +1345,9 @@ const ApprovalsPage = () => {
                   type="button"
                   className="secondary-button danger"
                   onClick={() => {
-                    const reason = window.prompt('Reason for rejection:');
-                    if (reason) {
-                      rejectTransfer(transfer.id, user?.id || user?.username);
-                    }
+                    confirm('Reject this transfer?').then(ok => {
+                      if (ok) rejectTransfer(transfer.id, user?.id || user?.username);
+                    });
                   }}
                 >
                   Reject
@@ -1326,17 +1372,27 @@ const ApprovalsPage = () => {
     return (
       <div className="card-grid">
         {pendingHolds.map((hold) => {
-          const receipt = receipts.find(r => r.id === hold.receiptId);
-          const product = productLookup[receipt?.productId];
+          const isPalletHold = hold.palletLicenceIds?.length > 0;
+          const receipt = receiptLookup[hold.receiptId];
+          const palletProductId = isPalletHold ? hold.palletLicenceDetails?.[0]?.product_id : null;
+          const product = productLookup[receipt?.productId] || (palletProductId ? productLookup[palletProductId] : null);
+          const category = categoryLookup[receipt?.categoryId];
           const days = getDaysAgo(hold.submittedAt);
           const priority = getPriorityLevel(days);
+          const isPlacingHold = hold.action === 'hold';
 
           return (
             <article key={hold.id} className="approval-card">
               <header>
                 <div>
-                  <h3>{product?.name || "Unknown Product"}</h3>
-                  <span className="badge">{hold.action === 'hold' ? 'Place on Hold' : 'Release Hold'}</span>
+                  <h3>{product?.name || (isPalletHold ? 'Pallet Hold' : 'Unknown Product')}</h3>
+                  <span className="badge" style={{ background: isPlacingHold ? '#fef3c7' : '#dcfce7', color: isPlacingHold ? '#92400e' : '#166534' }}>
+                    {isPlacingHold ? '🔒 Place on Hold' : '🔓 Release Hold'}
+                  </span>
+                  {isPalletHold
+                    ? <span className="badge" style={{ marginLeft: '6px', background: '#eff6ff', color: '#1d4ed8' }}>Finished Goods · Pallets</span>
+                    : category && <span className="badge" style={{ marginLeft: '6px' }}>{category.name}</span>
+                  }
                 </div>
                 <div className="meta">
                   <span className="priority-badge" style={{ background: priority.color, color: 'white' }}>
@@ -1344,32 +1400,98 @@ const ApprovalsPage = () => {
                   </span>
                 </div>
               </header>
+
+              {/* Hold action summary */}
+              <div style={{ background: isPlacingHold ? '#fffbeb' : '#f0fdf4', border: `1px solid ${isPlacingHold ? '#fde68a' : '#bbf7d0'}`, borderRadius: '8px', padding: '12px 16px', marginBottom: '12px' }}>
+                <div style={{ fontSize: '13px', color: '#374151', fontWeight: 600, marginBottom: '6px' }}>
+                  {isPlacingHold ? 'Requesting to place inventory on hold' : 'Requesting to release inventory from hold'}
+                </div>
+
+                {isPalletHold ? (
+                  /* Pallet hold summary */
+                  <div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '13px', marginBottom: '10px' }}>
+                      <div>
+                        <span style={{ color: '#6b7280' }}>Pallets</span>
+                        <div style={{ fontWeight: 600, marginTop: '2px' }}>{hold.palletLicenceIds.length} pallet{hold.palletLicenceIds.length !== 1 ? 's' : ''}</div>
+                      </div>
+                      <div>
+                        <span style={{ color: '#6b7280' }}>Total Cases</span>
+                        <div style={{ fontWeight: 600, marginTop: '2px' }}>{(hold.totalQuantity ?? 0).toLocaleString()} cases</div>
+                      </div>
+                    </div>
+                    {hold.palletLicenceDetails?.length > 0 && (
+                      <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse' }}>
+                        <thead>
+                          <tr style={{ borderBottom: '1px solid #e5e7eb' }}>
+                            <th style={{ textAlign: 'left', padding: '4px 6px', color: '#6b7280', fontWeight: 500 }}>Licence #</th>
+                            <th style={{ textAlign: 'left', padding: '4px 6px', color: '#6b7280', fontWeight: 500 }}>Location</th>
+                            <th style={{ textAlign: 'right', padding: '4px 6px', color: '#6b7280', fontWeight: 500 }}>Cases</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {hold.palletLicenceDetails.map(p => (
+                            <tr key={p.id} style={{ borderBottom: '1px solid #f3f4f6' }}>
+                              <td style={{ padding: '4px 6px', fontFamily: 'monospace', fontWeight: 600 }}>{p.licence_number}</td>
+                              <td style={{ padding: '4px 6px', color: '#374151' }}>{p.location}</td>
+                              <td style={{ padding: '4px 6px', textAlign: 'right', fontWeight: 600 }}>{p.cases}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                ) : (
+                  /* Lot hold summary */
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '13px' }}>
+                    <div>
+                      <span style={{ color: '#6b7280' }}>Lot Number</span>
+                      <div style={{ fontWeight: 600, marginTop: '2px' }}>{receipt?.lotNo || '—'}</div>
+                    </div>
+                    <div>
+                      <span style={{ color: '#6b7280' }}>Lot Quantity</span>
+                      <div style={{ fontWeight: 600, marginTop: '2px' }}>{(receipt?.quantity ?? 0).toLocaleString()} {receipt?.quantityUnits || 'cases'}</div>
+                    </div>
+                    {receipt?.heldQuantity > 0 && (
+                      <div>
+                        <span style={{ color: '#6b7280' }}>Currently on Hold</span>
+                        <div style={{ fontWeight: 600, color: '#d97706', marginTop: '2px' }}>{receipt.heldQuantity} cases</div>
+                      </div>
+                    )}
+                    {(receipt?.locationId || receipt?.location) && (
+                      <div>
+                        <span style={{ color: '#6b7280' }}>Location</span>
+                        <div style={{ fontWeight: 600, marginTop: '2px' }}>{locationLookupMap[receipt.subLocationId || receipt.subLocation || receipt.locationId || receipt.location] || '—'}</div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <dl className="summary-grid">
-                <div>
-                  <dt>Lot</dt>
-                  <dd>{receipt?.lotNo || '—'}</dd>
-                </div>
-                <div>
+                <div style={{ gridColumn: '1 / -1' }}>
                   <dt>Reason</dt>
-                  <dd>{hold.reason || '—'}</dd>
-                </div>
-                <div>
-                  <dt>Submitted</dt>
-                  <dd>{formatTimeAgo(hold.submittedAt)}</dd>
-                </div>
-                <div>
-                  <dt>By</dt>
-                  <dd>{userLookup[hold.submittedBy] || hold.submittedBy}</dd>
+                  <dd style={{ fontStyle: hold.reason ? 'normal' : 'italic', color: hold.reason ? 'inherit' : '#9ca3af' }}>{hold.reason || 'No reason provided'}</dd>
                 </div>
               </dl>
+
+              <div className="requester-row">
+                <span className="requester-avatar">
+                  {(userNameMap[hold.submittedBy] || '?')[0].toUpperCase()}
+                </span>
+                <span className="requester-label">
+                  <strong>{userNameMap[hold.submittedBy] || 'Unknown'}</strong> requested this · {formatTimeAgo(hold.submittedAt)}
+                </span>
+              </div>
+
               <footer>
                 <button
                   type="button"
                   className="secondary-button"
                   onClick={() => {
-                    if (window.confirm(`Approve ${hold.action === 'hold' ? 'placing on hold' : 'releasing from hold'}?`)) {
-                      approveHoldAction(hold.id, user?.id || user?.username);
-                    }
+                    confirm(`Approve ${isPlacingHold ? 'placing on hold' : 'releasing from hold'}?`).then(ok => {
+                      if (ok) approveHoldAction(hold.id, user?.id || user?.username);
+                    });
                   }}
                   style={{ marginRight: '8px' }}
                 >
@@ -1379,9 +1501,9 @@ const ApprovalsPage = () => {
                   type="button"
                   className="secondary-button danger"
                   onClick={() => {
-                    if (window.confirm('Reject this hold request?')) {
-                      rejectHoldAction(hold.id, user?.id || user?.username);
-                    }
+                    confirm('Reject this hold request?').then(ok => {
+                      if (ok) rejectHoldAction(hold.id, user?.id || user?.username);
+                    });
                   }}
                 >
                   Reject
@@ -1415,20 +1537,38 @@ const ApprovalsPage = () => {
       return labels[type] || type;
     };
 
+    const adjustmentTypeColors = {
+      'stock-correction': { bg: '#eff6ff', color: '#1d4ed8' },
+      'damage-reduction': { bg: '#fef3c7', color: '#92400e' },
+      'donation': { bg: '#f0fdf4', color: '#166534' },
+      'trash-disposal': { bg: '#fee2e2', color: '#991b1b' },
+      'quality-rejection': { bg: '#fef3c7', color: '#92400e' },
+      'shipped-out': { bg: '#f5f3ff', color: '#5b21b6' },
+    };
+
     return (
       <div className="card-grid">
         {pendingAdjustments.map((adjustment) => {
-          const receipt = receipts.find(r => r.id === adjustment.receiptId);
+          const receipt = receiptLookup[adjustment.receiptId];
           const product = productLookup[receipt?.productId];
+          const category = categoryLookup[receipt?.categoryId || adjustment.categoryId];
           const days = getDaysAgo(adjustment.submittedAt);
           const priority = getPriorityLevel(days);
+          const typeStyle = adjustmentTypeColors[adjustment.adjustmentType] || { bg: '#f3f4f6', color: '#374151' };
+          const currentQty = receipt?.quantity ?? 0;
+          const adjQty = Number(adjustment.quantity) || 0;
+          const afterQty = Math.max(0, currentQty - adjQty);
+          const isIncrease = adjustment.adjustmentType === 'stock-correction' && adjQty > 0;
 
           return (
             <article key={adjustment.id} className="approval-card">
               <header>
                 <div>
                   <h3>{product?.name || "Unknown Product"}</h3>
-                  <span className="badge">{getAdjustmentTypeLabel(adjustment.adjustmentType)}</span>
+                  <span className="badge" style={{ background: typeStyle.bg, color: typeStyle.color }}>
+                    {getAdjustmentTypeLabel(adjustment.adjustmentType)}
+                  </span>
+                  {category && <span className="badge" style={{ marginLeft: '6px' }}>{category.name}</span>}
                 </div>
                 <div className="meta">
                   <span className="priority-badge" style={{ background: priority.color, color: 'white' }}>
@@ -1436,32 +1576,69 @@ const ApprovalsPage = () => {
                   </span>
                 </div>
               </header>
+
+              {/* Before / After quantity panel */}
+              {receipt && (
+                <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '12px 16px', marginBottom: '12px' }}>
+                  <div style={{ fontSize: '12px', color: '#6b7280', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>Quantity Impact</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '15px' }}>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '11px', color: '#6b7280', marginBottom: '2px' }}>Current</div>
+                      <div style={{ fontWeight: 700, fontSize: '18px', color: '#111827' }}>{currentQty}</div>
+                      <div style={{ fontSize: '11px', color: '#6b7280' }}>{receipt.quantityUnits || 'cases'}</div>
+                    </div>
+                    <div style={{ fontSize: '20px', color: '#9ca3af', flex: 1, textAlign: 'center' }}>
+                      {isIncrease ? '↑' : '→'}
+                    </div>
+                    <div style={{ textAlign: 'center', padding: '6px 12px', background: '#fee2e2', borderRadius: '8px' }}>
+                      <div style={{ fontSize: '11px', color: '#991b1b', marginBottom: '2px' }}>Adjusting by</div>
+                      <div style={{ fontWeight: 700, fontSize: '18px', color: '#dc2626' }}>−{adjQty}</div>
+                      <div style={{ fontSize: '11px', color: '#991b1b' }}>{receipt.quantityUnits || 'cases'}</div>
+                    </div>
+                    <div style={{ fontSize: '20px', color: '#9ca3af', flex: 1, textAlign: 'center' }}>→</div>
+                    <div style={{ textAlign: 'center', padding: '6px 12px', background: afterQty === 0 ? '#fee2e2' : '#f0fdf4', borderRadius: '8px' }}>
+                      <div style={{ fontSize: '11px', color: afterQty === 0 ? '#991b1b' : '#166534', marginBottom: '2px' }}>After</div>
+                      <div style={{ fontWeight: 700, fontSize: '18px', color: afterQty === 0 ? '#dc2626' : '#16a34a' }}>{afterQty}</div>
+                      <div style={{ fontSize: '11px', color: afterQty === 0 ? '#991b1b' : '#166534' }}>{receipt.quantityUnits || 'cases'}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <dl className="summary-grid">
                 <div>
-                  <dt>Quantity</dt>
-                  <dd>{adjustment.quantity} cases</dd>
+                  <dt>Lot Number</dt>
+                  <dd>{receipt?.lotNo || '—'}</dd>
                 </div>
-                <div>
+                {adjustment.recipient && (
+                  <div>
+                    <dt>Recipient</dt>
+                    <dd>{adjustment.recipient}</dd>
+                  </div>
+                )}
+                <div style={{ gridColumn: adjustment.recipient ? 'auto' : '1 / -1' }}>
                   <dt>Reason</dt>
-                  <dd>{adjustment.reason || '—'}</dd>
-                </div>
-                <div>
-                  <dt>Submitted</dt>
-                  <dd>{formatTimeAgo(adjustment.submittedAt)}</dd>
-                </div>
-                <div>
-                  <dt>By</dt>
-                  <dd>{userLookup[adjustment.submittedBy] || adjustment.submittedBy}</dd>
+                  <dd style={{ fontStyle: adjustment.reason ? 'normal' : 'italic', color: adjustment.reason ? 'inherit' : '#9ca3af' }}>{adjustment.reason || 'No reason provided'}</dd>
                 </div>
               </dl>
+
+              <div className="requester-row">
+                <span className="requester-avatar">
+                  {(userNameMap[adjustment.submittedBy] || '?')[0].toUpperCase()}
+                </span>
+                <span className="requester-label">
+                  <strong>{userNameMap[adjustment.submittedBy] || 'Unknown'}</strong> requested this · {formatTimeAgo(adjustment.submittedAt)}
+                </span>
+              </div>
+
               <footer>
                 <button
                   type="button"
                   className="secondary-button"
                   onClick={() => {
-                    if (window.confirm('Approve this adjustment?')) {
-                      approveAdjustment(adjustment.id, user?.id || user?.username);
-                    }
+                    confirm(`Approve this ${getAdjustmentTypeLabel(adjustment.adjustmentType).toLowerCase()} of ${adjQty} cases?`).then(ok => {
+                      if (ok) approveAdjustment(adjustment.id, user?.id || user?.username);
+                    });
                   }}
                   style={{ marginRight: '8px' }}
                 >
@@ -1471,10 +1648,9 @@ const ApprovalsPage = () => {
                   type="button"
                   className="secondary-button danger"
                   onClick={() => {
-                    const reason = window.prompt('Reason for rejection:');
-                    if (reason) {
-                      rejectAdjustment(adjustment.id, user?.id || user?.username);
-                    }
+                    confirm('Reject this adjustment?').then(ok => {
+                      if (ok) rejectAdjustment(adjustment.id, user?.id || user?.username);
+                    });
                   }}
                 >
                   Reject
@@ -1488,6 +1664,8 @@ const ApprovalsPage = () => {
   };
 
   const [editingForkliftId, setEditingForkliftId] = useState(null);
+  const [forkliftProcessingId, setForkliftProcessingId] = useState(null);
+  const [forkliftRejectingId, setForkliftRejectingId] = useState(null);
   const [editingPalletId, setEditingPalletId] = useState(null);
   const [editPalletCases, setEditPalletCases] = useState('');
   const [addPalletForm, setAddPalletForm] = useState({ licence_number: '', storage_row_id: '', is_partial: false, partial_cases: '' });
@@ -1522,14 +1700,8 @@ const ApprovalsPage = () => {
           const productName = fr.product?.name || productLookup[fr.product_id]?.name || 'Unknown';
           const fccCode = fr.product?.fcc_code || productLookup[fr.product_id]?.fcc_code || '';
           const shortCode = fr.product?.short_code || productLookup[fr.product_id]?.short_code || '';
-          const licences = (fr.pallet_licences || []).filter(pl => pl.status !== 'cancelled');
+          const licences = (fr.pallet_licences || []).filter(pl => pl.status !== FORKLIFT_REQUEST_STATUS.CANCELLED);
           const isEditing = editingForkliftId === fr.id;
-          const rowGroups = {};
-          licences.forEach((pl) => {
-            const rowId = pl.storage_row_id || 'unknown';
-            if (!rowGroups[rowId]) rowGroups[rowId] = [];
-            rowGroups[rowId].push(pl);
-          });
 
           return (
             <article key={fr.id} className="approval-card" style={{ maxWidth: '720px' }}>
@@ -1557,7 +1729,7 @@ const ApprovalsPage = () => {
                 <div><dt>Pallets</dt><dd>{licences.length}</dd></div>
                 <div><dt>Total Cases</dt><dd>{fr.total_cases ?? 0}</dd></div>
                 <div><dt>Cases/Pallet</dt><dd>{fr.cases_per_pallet ?? '—'}</dd></div>
-                <div><dt>Scanned By</dt><dd>{userLookup[fr.scanned_by] || fr.scanned_by || '—'}</dd></div>
+                <div><dt>Scanned By</dt><dd>{userNameMap[fr.scanned_by] || '—'}</dd></div>
               </dl>
 
               {/* Full details section */}
@@ -1576,7 +1748,7 @@ const ApprovalsPage = () => {
                     {isEditing ? (
                       <input
                         type="date"
-                        value={fr.production_date ? new Date(fr.production_date).toISOString().slice(0, 10) : ''}
+                        value={fr.production_date ? toDateKey(fr.production_date) : ''}
                         onChange={(e) => {
                           const val = e.target.value ? new Date(e.target.value + 'T00:00:00').toISOString() : null;
                           updateForkliftRequest(fr.id, { production_date: val });
@@ -1585,7 +1757,7 @@ const ApprovalsPage = () => {
                       />
                     ) : (
                       <div style={{ marginTop: '2px', fontWeight: 600 }}>
-                        {fr.production_date ? new Date(fr.production_date).toLocaleDateString() : '—'}
+                        {fr.production_date ? formatDate(fr.production_date) : '—'}
                       </div>
                     )}
                   </div>
@@ -1594,7 +1766,7 @@ const ApprovalsPage = () => {
                     {isEditing ? (
                       <input
                         type="date"
-                        value={fr.expiration_date ? new Date(fr.expiration_date).toISOString().slice(0, 10) : ''}
+                        value={fr.expiration_date ? toDateKey(fr.expiration_date) : ''}
                         onChange={(e) => {
                           const val = e.target.value ? new Date(e.target.value + 'T00:00:00').toISOString() : null;
                           updateForkliftRequest(fr.id, { expiration_date: val });
@@ -1603,7 +1775,7 @@ const ApprovalsPage = () => {
                       />
                     ) : (
                       <div style={{ marginTop: '2px', fontWeight: 600 }}>
-                        {fr.expiration_date ? new Date(fr.expiration_date).toLocaleDateString() : '—'}
+                        {formatDate(fr.expiration_date)}
                       </div>
                     )}
                   </div>
@@ -1736,7 +1908,7 @@ const ApprovalsPage = () => {
                             )}
                           </td>
                           <td style={{ padding: '8px 10px', textAlign: 'center' }}>
-                            {pl.status === 'missing_sticker' ? (
+                            {pl.status === PALLET_STATUS.MISSING_STICKER ? (
                               <span style={{ background: '#fee2e2', color: '#991b1b', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Missing Sticker</span>
                             ) : (
                               <span style={{ background: '#e0e7ff', color: '#3730a3', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Pending</span>
@@ -1748,9 +1920,10 @@ const ApprovalsPage = () => {
                                 type="button"
                                 style={{ padding: '2px 8px', fontSize: '12px', background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', borderRadius: '4px', cursor: 'pointer' }}
                                 onClick={async () => {
-                                  if (window.confirm(`Remove pallet ${pl.licence_number}?`)) {
+                                  const ok = await confirm(`Remove pallet ${pl.licence_number}?`);
+                                  if (ok) {
                                     const result = await removePalletLicence(fr.id, pl.id);
-                                    if (!result?.success) alert(result?.error || 'Remove failed');
+                                    if (!result?.success) addToast(result?.error || 'Remove failed', 'error');
                                   }
                                 }}
                               >Remove</button>
@@ -1832,7 +2005,7 @@ const ApprovalsPage = () => {
                         if (result?.success) {
                           setAddPalletForm({ licence_number: '', storage_row_id: '', is_partial: false, partial_cases: '' });
                         } else {
-                          alert(result?.error || 'Failed to add pallet');
+                          addToast(result?.error || 'Failed to add pallet', 'error');
                         }
                       }}
                     >
@@ -1846,42 +2019,43 @@ const ApprovalsPage = () => {
                 <button
                   type="button"
                   className="secondary-button"
-                  disabled={!fr.shift_id || isApproving}
+                  disabled={!fr.shift_id || forkliftProcessingId === fr.id}
                   onClick={async () => {
                     if (!fr.shift_id) {
-                      alert('Please select a shift before approving.');
+                      addToast('Please select a shift before approving.', 'error');
                       return;
                     }
-                    setIsApproving(true);
+                    setForkliftProcessingId(fr.id);
                     const result = await approveForkliftRequest(fr.id);
-                    setIsApproving(false);
+                    setForkliftProcessingId(null);
                     if (result?.success) {
                       fetchForkliftRequests();
                     } else {
-                      alert(result?.error || 'Approval failed');
+                      addToast(result?.error || 'Approval failed', 'error');
                     }
                   }}
                 >
-                  {isApproving ? 'Approving...' : 'Approve'}
+                  {forkliftProcessingId === fr.id ? 'Approving...' : 'Approve'}
                 </button>
                 <button
                   type="button"
                   className="secondary-button danger"
-                  disabled={isRejecting}
-                  onClick={async () => {
-                    if (window.confirm('Reject this forklift request? All pallet licences will be cancelled.')) {
-                      setIsRejecting(true);
+                  disabled={forkliftRejectingId === fr.id}
+                  onClick={() => {
+                    confirm('Reject this forklift request? All pallet licences will be cancelled.').then(async (ok) => {
+                      if (!ok) return;
+                      setForkliftRejectingId(fr.id);
                       const result = await rejectForkliftRequest(fr.id);
-                      setIsRejecting(false);
+                      setForkliftRejectingId(null);
                       if (result?.success) {
                         fetchForkliftRequests();
                       } else {
-                        alert(result?.error || 'Reject failed');
+                        addToast(result?.error || 'Reject failed', 'error');
                       }
-                    }
+                    });
                   }}
                 >
-                  {isRejecting ? 'Rejecting...' : 'Reject'}
+                  {forkliftRejectingId === fr.id ? 'Rejecting...' : 'Reject'}
                 </button>
               </footer>
             </article>
@@ -1933,147 +2107,23 @@ const ApprovalsPage = () => {
         </div>
 
         {/* Tabs */}
-        <div className="tabs" style={{ marginBottom: '24px', borderBottom: '2px solid #e2e8f0' }}>
-          <button
-            className={`tab-button ${activeTab === 'receipts' ? 'active' : ''}`}
-            onClick={() => setActiveTab('receipts')}
-            style={{
-              padding: '12px 24px',
-              border: 'none',
-              background: 'none',
-              cursor: 'pointer',
-              borderBottom: activeTab === 'receipts' ? '2px solid #3b82f6' : '2px solid transparent',
-              color: activeTab === 'receipts' ? '#3b82f6' : (summaryStats.receiptsPending > 0 ? '#dc2626' : '#64748b'),
-              fontWeight: activeTab === 'receipts' ? '600' : (summaryStats.receiptsPending > 0 ? '600' : '400'),
-              position: 'relative',
-            }}
-          >
-            Receipts ({summaryStats.receiptsPending})
-            {summaryStats.receiptsPending > 0 && (
-              <span style={{
-                position: 'absolute',
-                top: '8px',
-                right: '8px',
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                backgroundColor: '#dc2626',
-                border: '2px solid white',
-              }} />
-            )}
-          </button>
-          <button
-            className={`tab-button ${activeTab === 'transfers' ? 'active' : ''}`}
-            onClick={() => setActiveTab('transfers')}
-            style={{
-              padding: '12px 24px',
-              border: 'none',
-              background: 'none',
-              cursor: 'pointer',
-              borderBottom: activeTab === 'transfers' ? '2px solid #3b82f6' : '2px solid transparent',
-              color: activeTab === 'transfers' ? '#3b82f6' : (summaryStats.transfersPending > 0 ? '#dc2626' : '#64748b'),
-              fontWeight: activeTab === 'transfers' ? '600' : (summaryStats.transfersPending > 0 ? '600' : '400'),
-              position: 'relative',
-            }}
-          >
-            Transfers ({summaryStats.transfersPending})
-            {summaryStats.transfersPending > 0 && (
-              <span style={{
-                position: 'absolute',
-                top: '8px',
-                right: '8px',
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                backgroundColor: '#dc2626',
-                border: '2px solid white',
-              }} />
-            )}
-          </button>
-          <button
-            className={`tab-button ${activeTab === 'forklift' ? 'active' : ''}`}
-            onClick={() => setActiveTab('forklift')}
-            style={{
-              padding: '12px 24px',
-              border: 'none',
-              background: 'none',
-              cursor: 'pointer',
-              borderBottom: activeTab === 'forklift' ? '2px solid #3b82f6' : '2px solid transparent',
-              color: activeTab === 'forklift' ? '#3b82f6' : (summaryStats.forkliftRequestsPending > 0 ? '#dc2626' : '#64748b'),
-              fontWeight: activeTab === 'forklift' ? '600' : (summaryStats.forkliftRequestsPending > 0 ? '600' : '400'),
-              position: 'relative',
-            }}
-          >
-            Forklift Requests ({summaryStats.forkliftRequestsPending})
-            {summaryStats.forkliftRequestsPending > 0 && (
-              <span style={{
-                position: 'absolute',
-                top: '8px',
-                right: '8px',
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                backgroundColor: '#dc2626',
-                border: '2px solid white',
-              }} />
-            )}
-          </button>
-          <button
-            className={`tab-button ${activeTab === 'holds' ? 'active' : ''}`}
-            onClick={() => setActiveTab('holds')}
-            style={{
-              padding: '12px 24px',
-              border: 'none',
-              background: 'none',
-              cursor: 'pointer',
-              borderBottom: activeTab === 'holds' ? '2px solid #3b82f6' : '2px solid transparent',
-              color: activeTab === 'holds' ? '#3b82f6' : (summaryStats.holdsPending > 0 ? '#dc2626' : '#64748b'),
-              fontWeight: activeTab === 'holds' ? '600' : (summaryStats.holdsPending > 0 ? '600' : '400'),
-              position: 'relative',
-            }}
-          >
-            Holds ({summaryStats.holdsPending})
-            {summaryStats.holdsPending > 0 && (
-              <span style={{
-                position: 'absolute',
-                top: '8px',
-                right: '8px',
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                backgroundColor: '#dc2626',
-                border: '2px solid white',
-              }} />
-            )}
-          </button>
-          <button
-            className={`tab-button ${activeTab === 'adjustments' ? 'active' : ''}`}
-            onClick={() => setActiveTab('adjustments')}
-            style={{
-              padding: '12px 24px',
-              border: 'none',
-              background: 'none',
-              cursor: 'pointer',
-              borderBottom: activeTab === 'adjustments' ? '2px solid #3b82f6' : '2px solid transparent',
-              color: activeTab === 'adjustments' ? '#3b82f6' : (summaryStats.adjustmentsPending > 0 ? '#dc2626' : '#64748b'),
-              fontWeight: activeTab === 'adjustments' ? '600' : (summaryStats.adjustmentsPending > 0 ? '600' : '400'),
-              position: 'relative',
-            }}
-          >
-            Adjustments ({summaryStats.adjustmentsPending})
-            {summaryStats.adjustmentsPending > 0 && (
-              <span style={{
-                position: 'absolute',
-                top: '8px',
-                right: '8px',
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                backgroundColor: '#dc2626',
-                border: '2px solid white',
-              }} />
-            )}
-          </button>
+        <div className="tabs">
+          {[
+            { key: 'receipts', label: 'Receipts', count: summaryStats.receiptsPending },
+            { key: 'transfers', label: 'Transfers', count: summaryStats.transfersPending },
+            { key: 'forklift', label: 'Forklift Requests', count: summaryStats.forkliftRequestsPending },
+            { key: 'holds', label: 'Holds', count: summaryStats.holdsPending },
+            { key: 'adjustments', label: 'Adjustments', count: summaryStats.adjustmentsPending },
+          ].map(({ key, label, count }) => (
+            <button
+              key={key}
+              className={`tab-button${activeTab === key ? ' active' : ''}${count > 0 ? ' has-pending' : ''}`}
+              onClick={() => setActiveTab(key)}
+            >
+              {label} ({count})
+              {count > 0 && <span className="tab-badge-dot" />}
+            </button>
+          ))}
         </div>
 
         {/* Search and Filter Bar - Only show for receipts */}
@@ -2118,7 +2168,7 @@ const ApprovalsPage = () => {
             <section className="panel">
               <div className="panel-header horizontal">
                 <div>
-                  <h2>Today&apos;s Submissions</h2>
+                  <h2>Today's Submissions</h2>
                   <p className="muted">
                     {filteredTodaysPending.length} receipt{filteredTodaysPending.length === 1 ? "" : "s"} {filteredTodaysPending.length !== todaysPending.length ? 'found' : 'awaiting approval today'}
                   </p>
@@ -2126,7 +2176,7 @@ const ApprovalsPage = () => {
                 <button
                   type="button"
                   className="primary-button"
-                  disabled={todaysPending.length === 0}
+                  disabled={filteredTodaysPending.length === 0}
                   onClick={approveAllToday}
                 >
                   Approve All Today
@@ -2135,7 +2185,7 @@ const ApprovalsPage = () => {
 
               {filteredTodaysPending.length === 0 ? (
                 <div className="empty-state">
-                  {searchQuery || categoryFilter ? 'No receipts match your filters.' : 'All of today&apos;s receipts are approved.'}
+                  {searchQuery || categoryFilter ? 'No receipts match your filters.' : "All of today's receipts are approved."}
                 </div>
               ) : (
                 <div className="card-grid">
@@ -2222,10 +2272,10 @@ const ApprovalsPage = () => {
                   <thead>
                     <tr>
                       <th>Product</th>
-                      <th>Category</th>
+                      <th className="hide-tablet">Category</th>
                       <th>Quantity</th>
-                      <th>Lot</th>
-                      <th>Approved At</th>
+                      <th className="hide-mobile">Lot</th>
+                      <th className="hide-mobile">Approved At</th>
                     </tr>
                   </thead>
                   <tbody>{approvedHistory.map(renderHistoryRow)}</tbody>
@@ -2266,8 +2316,8 @@ const ApprovalsPage = () => {
                     <span className="info-value">{categoryLookup[selectedReceipt.categoryId]?.name || "Uncategorized"}</span>
                   </div>
                   <div className="info-item">
-                    <label>Product ID</label>
-                    <span className="info-value">{productLookup[selectedReceipt.productId]?.id || "—"}</span>
+                    <label>Product Code</label>
+                    <span className="info-value">{productLookup[selectedReceipt.productId]?.short_code || productLookup[selectedReceipt.productId]?.sid || "—"}</span>
                   </div>
                   <div className="info-item">
                     <label>Description</label>
@@ -2276,9 +2326,7 @@ const ApprovalsPage = () => {
                   <div className="info-item">
                     <label>Vendor</label>
                     <span className="info-value">
-                      {selectedReceipt.vendorId ?
-                        vendors.find(v => v.id === selectedReceipt.vendorId)?.name || selectedReceipt.vendorId :
-                        "—"}
+                      {selectedReceipt.vendorId ? vendorLookup[selectedReceipt.vendorId] || selectedReceipt.vendorId : "—"}
                     </span>
                   </div>
                 </div>
@@ -2534,7 +2582,7 @@ const ApprovalsPage = () => {
                     Reject
                   </button>
                   {/* Only admin and supervisor can send back - warehouse workers can only approve/reject */}
-                  {(user?.role === 'admin' || user?.role === 'supervisor') && (
+                  {(user?.role === ROLES.ADMIN || user?.role === ROLES.SUPERVISOR) && (
                     <button className="secondary-button" onClick={() => setShowSendBackModal(true)}>
                       Send Back
                     </button>

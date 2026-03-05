@@ -10,10 +10,14 @@
     "preview": "vite preview",
     "test": "vitest",
     "test:ui": "vitest --ui",
-    "test:coverage": "vitest --coverage"
+    "test:coverage": "vitest --coverage",
+    "deploy": "npm run build && npx gh-pages -d dist"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.90.21",
+    "@tanstack/react-virtual": "^3.13.19",
     "axios": "^1.12.2",
+    "exceljs": "^4.4.0",
     "jsbarcode": "^3.12.1",
     "jspdf": "^2.5.1",
     "jspdf-autotable": "^3.8.2",
@@ -21,23 +25,24 @@
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-router-dom": "^7.9.2",
-    "recharts": "^2.12.7",
-    "xlsx": "^0.18.5"
+    "recharts": "^2.12.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",
+    "@testing-library/jest-dom": "^6.1.5",
+    "@testing-library/react": "^16.0.1",
+    "@testing-library/user-event": "^14.5.1",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.3",
-    "@testing-library/react": "^16.0.1",
-    "@testing-library/jest-dom": "^6.1.5",
-    "@testing-library/user-event": "^14.5.1",
     "eslint": "^9.36.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
+    "gh-pages": "^6.3.0",
     "globals": "^16.4.0",
+    "jsdom": "^23.0.1",
     "vite": "^7.1.7",
-    "vitest": "^1.1.0",
-    "jsdom": "^23.0.1"
-  }
+    "vitest": "^1.1.0"
+  },
+  "homepage": "https://hemanth-e23.github.io/sunberry-Inventory"
 }

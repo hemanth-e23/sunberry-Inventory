@@ -2,14 +2,16 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.database import get_db
 from app.models import (
     Receipt, InventoryTransfer, InventoryAdjustment, InventoryHoldAction,
     Category, Product, Vendor, User, CycleCount, Location, SubLocation, StorageRow,
 )
-from app.utils.auth import get_current_active_user
+from app.utils.auth import get_current_active_user, warehouse_filter
+from app.enums import TransferStatus, AdjustmentStatus, HoldStatus
+from app.constants import CATEGORY_FINISHED
 
 router = APIRouter()
 
@@ -18,12 +20,12 @@ router = APIRouter()
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_dt_start(d: str) -> datetime:
-    return datetime.strptime(d, "%Y-%m-%d")
+    return datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
 
 def _parse_dt_end(d: str) -> datetime:
     dt = datetime.strptime(d, "%Y-%m-%d")
-    return dt.replace(hour=23, minute=59, second=59)
+    return dt.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
 
 
 def _product_info(db: Session, product_id: Optional[str]):
@@ -125,13 +127,13 @@ def _qty_on_date(receipt: Receipt, as_of_dt: datetime, db: Session) -> float:
     shipped_after = db.query(InventoryTransfer).filter(
         InventoryTransfer.receipt_id == receipt.id,
         InventoryTransfer.transfer_type == "shipped-out",
-        InventoryTransfer.status == "approved",
+        InventoryTransfer.status == TransferStatus.APPROVED,
         InventoryTransfer.approved_at > as_of_dt,
     ).all()
 
     adj_after = db.query(InventoryAdjustment).filter(
         InventoryAdjustment.receipt_id == receipt.id,
-        InventoryAdjustment.status == "approved",
+        InventoryAdjustment.status == AdjustmentStatus.APPROVED,
         InventoryAdjustment.approved_at > as_of_dt,
     ).all()
 
@@ -147,11 +149,11 @@ def _initial_receipt_qty(receipt: Receipt, db: Session) -> float:
     shipped = db.query(InventoryTransfer).filter(
         InventoryTransfer.receipt_id == receipt.id,
         InventoryTransfer.transfer_type == "shipped-out",
-        InventoryTransfer.status == "approved",
+        InventoryTransfer.status == TransferStatus.APPROVED,
     ).all()
     adjs = db.query(InventoryAdjustment).filter(
         InventoryAdjustment.receipt_id == receipt.id,
-        InventoryAdjustment.status == "approved",
+        InventoryAdjustment.status == AdjustmentStatus.APPROVED,
     ).all()
     return (
         float(receipt.quantity or 0)
@@ -184,6 +186,9 @@ async def point_in_time_snapshot(
         raise HTTPException(400, "Invalid date format. Use YYYY-MM-DD.")
 
     query = db.query(Receipt).filter(Receipt.receipt_date <= as_of_dt)
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(Receipt.warehouse_id == wh_id)
 
     if product_id:
         query = query.filter(Receipt.product_id == product_id)
@@ -282,7 +287,7 @@ async def activity_ledger(
     # Transfers approved in range
     tq = db.query(InventoryTransfer).filter(
         InventoryTransfer.transfer_type == "shipped-out",
-        InventoryTransfer.status == "approved",
+        InventoryTransfer.status == TransferStatus.APPROVED,
         InventoryTransfer.approved_at >= start_dt,
         InventoryTransfer.approved_at <= end_dt,
     )
@@ -294,7 +299,7 @@ async def activity_ledger(
 
     # Adjustments approved in range
     aq = db.query(InventoryAdjustment).filter(
-        InventoryAdjustment.status == "approved",
+        InventoryAdjustment.status == AdjustmentStatus.APPROVED,
         InventoryAdjustment.approved_at >= start_dt,
         InventoryAdjustment.approved_at <= end_dt,
     )
@@ -399,8 +404,11 @@ async def shipments_report(
     """All approved shipped-out transfers in the date range."""
     query = db.query(InventoryTransfer).filter(
         InventoryTransfer.transfer_type == "shipped-out",
-        InventoryTransfer.status == "approved",
+        InventoryTransfer.status == TransferStatus.APPROVED,
     )
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(InventoryTransfer.warehouse_id == wh_id)
     if start_date:
         query = query.filter(InventoryTransfer.approved_at >= _parse_dt_start(start_date))
     if end_date:
@@ -485,7 +493,7 @@ async def movement_ledger(
     if receipt_ids:
         tq = db.query(InventoryTransfer).filter(
             InventoryTransfer.receipt_id.in_(receipt_ids),
-            InventoryTransfer.status == "approved",
+            InventoryTransfer.status == TransferStatus.APPROVED,
         )
         for t in tq.all():
             ts = t.approved_at or t.submitted_at
@@ -509,7 +517,7 @@ async def movement_ledger(
     # Adjustments
     aq = db.query(InventoryAdjustment).filter(
         InventoryAdjustment.product_id == product_id,
-        InventoryAdjustment.status == "approved",
+        InventoryAdjustment.status == AdjustmentStatus.APPROVED,
     )
     for a in aq.all():
         ts = a.approved_at or a.submitted_at
@@ -571,17 +579,17 @@ async def lot_trace(
 
         transfers = db.query(InventoryTransfer).filter(
             InventoryTransfer.receipt_id == r.id,
-            InventoryTransfer.status == "approved",
+            InventoryTransfer.status == TransferStatus.APPROVED,
         ).order_by(InventoryTransfer.approved_at).all()
 
         adjustments = db.query(InventoryAdjustment).filter(
             InventoryAdjustment.receipt_id == r.id,
-            InventoryAdjustment.status == "approved",
+            InventoryAdjustment.status == AdjustmentStatus.APPROVED,
         ).order_by(InventoryAdjustment.approved_at).all()
 
         holds = db.query(InventoryHoldAction).filter(
             InventoryHoldAction.receipt_id == r.id,
-            InventoryHoldAction.status == "approved",
+            InventoryHoldAction.status == HoldStatus.APPROVED,
         ).order_by(InventoryHoldAction.approved_at).all()
 
         initial_qty = _initial_receipt_qty(r, db)
@@ -716,8 +724,11 @@ async def holds_report(
 ):
     """All hold and release actions in the date range."""
     query = db.query(InventoryHoldAction).filter(
-        InventoryHoldAction.status == "approved"
+        InventoryHoldAction.status == HoldStatus.APPROVED
     )
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(InventoryHoldAction.warehouse_id == wh_id)
     if start_date:
         query = query.filter(InventoryHoldAction.approved_at >= _parse_dt_start(start_date))
     if end_date:
@@ -774,7 +785,7 @@ async def finished_goods_report(
     """Cases of finished goods logged by production date."""
     fg_cat_ids = [c.id for c in db.query(Category).filter(Category.parent_id == "group-finished").all()]
     if not fg_cat_ids:
-        fg_cat_ids = [c.id for c in db.query(Category).filter(Category.type == "finished").all()]
+        fg_cat_ids = [c.id for c in db.query(Category).filter(Category.type == CATEGORY_FINISHED).all()]
 
     if not fg_cat_ids:
         return {"rows": [], "daily": [], "totals": {}}
@@ -783,6 +794,9 @@ async def finished_goods_report(
         Receipt.category_id.in_(fg_cat_ids),
         Receipt.status.notin_(["rejected"]),
     )
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(Receipt.warehouse_id == wh_id)
     if start_date:
         query = query.filter(Receipt.production_date >= _parse_dt_start(start_date))
     if end_date:
@@ -802,7 +816,7 @@ async def finished_goods_report(
             for t in db.query(InventoryTransfer).filter(
                 InventoryTransfer.receipt_id == r.id,
                 InventoryTransfer.transfer_type == "shipped-out",
-                InventoryTransfer.status == "approved",
+                InventoryTransfer.status == TransferStatus.APPROVED,
             ).all()
         )
         rows.append({
@@ -864,6 +878,9 @@ async def expiry_alerts(
         Receipt.status.notin_(["depleted", "rejected"]),
         Receipt.expiration_date.isnot(None),
     )
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(Receipt.warehouse_id == wh_id)
     if product_id:
         query = query.filter(Receipt.product_id == product_id)
     if category_type:
@@ -873,7 +890,7 @@ async def expiry_alerts(
 
     receipts = query.order_by(Receipt.expiration_date.asc()).all()
 
-    today = datetime.utcnow()
+    today = datetime.now(timezone.utc)
     rows = []
     for r in receipts:
         if not r.expiration_date:
@@ -943,8 +960,11 @@ async def adjustments_report(
 ):
     """All approved adjustments with full audit detail."""
     query = db.query(InventoryAdjustment).filter(
-        InventoryAdjustment.status == "approved"
+        InventoryAdjustment.status == AdjustmentStatus.APPROVED
     )
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(InventoryAdjustment.warehouse_id == wh_id)
     if start_date:
         query = query.filter(InventoryAdjustment.approved_at >= _parse_dt_start(start_date))
     if end_date:
@@ -1006,6 +1026,9 @@ async def vendor_receipts_report(
 ):
     """Receipts grouped by vendor (vendor is optional on receipts)."""
     query = db.query(Receipt)
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(Receipt.warehouse_id == wh_id)
     if start_date:
         query = query.filter(Receipt.receipt_date >= _parse_dt_start(start_date))
     if end_date:
@@ -1064,6 +1087,9 @@ async def cycle_count_report(
 ):
     """Cycle count records with per-item variance analysis."""
     query = db.query(CycleCount)
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(CycleCount.warehouse_id == wh_id)
     # count_date is stored as a string (YYYY-MM-DD)
     if start_date:
         query = query.filter(CycleCount.count_date >= start_date)

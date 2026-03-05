@@ -1,9 +1,13 @@
-import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
-import axios from 'axios';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAutoLogout } from '../hooks/useAutoLogout';
+import { useTokenRefresh } from '../hooks/useTokenRefresh';
+import { setViewWarehouse, setUnauthorizedHandler } from '../api/client';
+import * as authService from '../api/authService';
+import { setAppTimezone } from '../utils/dateUtils';
+import { ROLES } from '../constants';
 
-// API URL - use relative path, nginx will proxy to backend
-const API_BASE_URL = '/api';
+const CORPORATE_ROLES = ['superadmin', 'corporate_admin', 'corporate_viewer'];
 
 const AuthContext = createContext();
 
@@ -23,52 +27,107 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [sessionWarning, setSessionWarning] = useState(null);
+  const [selectedWarehouse, setSelectedWarehouse] = useState(null);
   const isForklift = useRef(false);
+  const queryClient = useQueryClient();
 
-  const logout = () => {
+  const logout = useCallback(() => {
     setUser(null);
     setIsAuthenticated(false);
+    setSessionWarning(null);
+    setSelectedWarehouse(null);
     clearLoginDate();
     localStorage.removeItem('user');
     localStorage.removeItem('token');
     isForklift.current = false;
-  };
+    queryClient.clear();
+  }, [queryClient]);
+
+  // Wire the unauthorized handler — uses a ref so logout is always current
+  const logoutRef = useRef(logout);
+  useEffect(() => { logoutRef.current = logout; }, [logout]);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      logoutRef.current();
+      window.location.href = '/login';
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  // Keep apiClient's X-View-Warehouse header in sync
+  useEffect(() => {
+    setViewWarehouse(selectedWarehouse);
+  }, [selectedWarehouse]);
+
+  const clearSessionWarning = useCallback(() => setSessionWarning(null), []);
+
+  // Silently call /api/auth/refresh and store the new token
+  const refreshToken = useCallback(async () => {
+    const token = localStorage.getItem('token');
+    if (!token) return false;
+    try {
+      const response = await authService.refresh();
+      localStorage.setItem('token', response.data.access_token);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  // Called when token is expired and refresh failed — warn then force logout
+  const handleTokenExpired = useCallback(() => {
+    setSessionWarning('Your session has expired. Please log in again.');
+    setTimeout(() => {
+      logout();
+      window.location.href = '/login';
+    }, 4000);
+  }, [logout]);
 
   // Auto-logout: 30 min for non-forklift; forklift uses day-change only
-  useAutoLogout(logout, isAuthenticated, user?.role === 'forklift' ? null : 30);
+  useAutoLogout(logout, isAuthenticated, user?.role === ROLES.FORKLIFT ? null : 30);
+
+  // Silent token refresh: only for non-forklift users
+  useTokenRefresh(
+    isAuthenticated && user?.role !== ROLES.FORKLIFT,
+    refreshToken,
+    handleTokenExpired
+  );
 
   // Forklift: check day-change and force re-login
   useEffect(() => {
-    if (!isAuthenticated || user?.role !== 'forklift') return;
+    if (!isAuthenticated || user?.role !== ROLES.FORKLIFT) return;
     const today = new Date().toDateString();
     if (getLoginDate() && getLoginDate() !== today) {
       logout();
     }
-  }, [isAuthenticated, user?.role]);
+  }, [isAuthenticated, user?.role, logout]);
 
   useEffect(() => {
-    // Check for existing session on app load
     const checkAuth = async () => {
       const savedUser = localStorage.getItem('user');
       const token = localStorage.getItem('token');
 
       if (savedUser && token) {
         try {
-          // Verify token is still valid by fetching user info
-          const headers = { Authorization: `Bearer ${token}` };
-          const response = await axios.get(`${API_BASE_URL}/auth/me`, { headers });
+          const response = await authService.getMe();
           const userData = {
             id: response.data.id,
             username: response.data.username,
             role: response.data.role,
             name: response.data.name,
-            email: response.data.email
+            email: response.data.email,
+            warehouse_id: response.data.warehouse_id || null,
+            warehouse_type: response.data.warehouse?.type || null,
+            warehouse_name: response.data.warehouse?.name || null,
+            warehouse_timezone: response.data.warehouse?.timezone || null,
           };
+          setAppTimezone(userData.warehouse_timezone);
           setUser(userData);
           setIsAuthenticated(true);
           localStorage.setItem('user', JSON.stringify(userData));
         } catch (error) {
-          // Token is invalid, clear everything
           console.error('Token validation failed:', error);
           localStorage.removeItem('user');
           localStorage.removeItem('token');
@@ -82,27 +141,24 @@ export const AuthProvider = ({ children }) => {
 
   const login = async (username, password) => {
     try {
-      // Call backend API for authentication
-      const response = await axios.post(`${API_BASE_URL}/auth/login`, {
-        username,
-        password
-      });
-
+      const response = await authService.login(username, password);
       const token = response.data.access_token;
       localStorage.setItem('token', token);
 
-      // Fetch user info
-      const headers = { Authorization: `Bearer ${token}` };
-      const userResponse = await axios.get(`${API_BASE_URL}/auth/me`, { headers });
-
+      const userResponse = await authService.getMe();
       const userData = {
         id: userResponse.data.id,
         username: userResponse.data.username,
         role: userResponse.data.role,
         name: userResponse.data.name,
-        email: userResponse.data.email
+        email: userResponse.data.email,
+        warehouse_id: userResponse.data.warehouse_id || null,
+        warehouse_type: userResponse.data.warehouse?.type || null,
+        warehouse_name: userResponse.data.warehouse?.name || null,
+        warehouse_timezone: userResponse.data.warehouse?.timezone || null,
       };
 
+      setAppTimezone(userData.warehouse_timezone);
       setUser(userData);
       setIsAuthenticated(true);
       localStorage.setItem('user', JSON.stringify(userData));
@@ -118,24 +174,24 @@ export const AuthProvider = ({ children }) => {
 
   const badgeLogin = async (badgeId) => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/auth/badge-login`, {
-        badge_id: badgeId
-      });
-
+      const response = await authService.badgeLogin(badgeId);
       const token = response.data.access_token;
       localStorage.setItem('token', token);
 
-      const headers = { Authorization: `Bearer ${token}` };
-      const userResponse = await axios.get(`${API_BASE_URL}/auth/me`, { headers });
-
+      const userResponse = await authService.getMe();
       const userData = {
         id: userResponse.data.id,
         username: userResponse.data.username,
         role: userResponse.data.role,
         name: userResponse.data.name,
-        email: userResponse.data.email
+        email: userResponse.data.email,
+        warehouse_id: userResponse.data.warehouse_id || null,
+        warehouse_type: userResponse.data.warehouse?.type || null,
+        warehouse_name: userResponse.data.warehouse?.name || null,
+        warehouse_timezone: userResponse.data.warehouse?.timezone || null,
       };
 
+      setAppTimezone(userData.warehouse_timezone);
       setUser(userData);
       setIsAuthenticated(true);
       localStorage.setItem('user', JSON.stringify(userData));
@@ -149,13 +205,20 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
+  const isCorporateUser = user && CORPORATE_ROLES.includes(user.role);
+
   const value = {
     user,
     isAuthenticated,
     loading,
     login,
     badgeLogin,
-    logout
+    logout,
+    sessionWarning,
+    clearSessionWarning,
+    selectedWarehouse,
+    setSelectedWarehouse: isCorporateUser ? setSelectedWarehouse : undefined,
+    isCorporateUser: !!isCorporateUser,
   };
 
   return (

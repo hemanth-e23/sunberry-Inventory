@@ -1,13 +1,15 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
 import { getDashboardPath } from '../App';
 import SearchableSelect from './SearchableSelect';
+import { formatDate } from '../utils/dateUtils';
 import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
+import './Shared.css';
 import './PalletTagPrintPage.css';
-import './PalletTagPrintPageEnhanced.css';
+import { CATEGORY_TYPES, RECEIPT_STATUS } from '../constants';
 
 const PalletTagPrintPage = () => {
   const navigate = useNavigate();
@@ -17,9 +19,7 @@ const PalletTagPrintPage = () => {
     receipts,
     products,
     categories,
-    productCategories,
     locations,
-    subLocationMap
   } = useAppData();
 
   // Get pre-selected receipt from URL
@@ -34,13 +34,11 @@ const PalletTagPrintPage = () => {
   const [showPreview, setShowPreview] = useState(false);
   const [previewReceipts, setPreviewReceipts] = useState([]);
 
-  const barcodeRefs = useRef({});
-
   // Filter receipts - only approved receipts with required data
   const availableReceipts = useMemo(() => {
     return receipts.filter(receipt => {
       // Only approved receipts
-      if (receipt.status !== 'approved') return false;
+      if (receipt.status !== RECEIPT_STATUS.APPROVED) return false;
 
       // Must have product, lot number, and quantity
       if (!receipt.productId || !receipt.lotNo || !receipt.quantity) return false;
@@ -90,7 +88,7 @@ const PalletTagPrintPage = () => {
           previewReceipts.forEach((receipt) => {
             const product = products.find(p => p.id === receipt.productId);
             const category = categories.find(c => c.id === product?.categoryId);
-            const isFinishedGoods = category?.parentId === 'group-finished';
+            const isFinishedGoods = category?.type === CATEGORY_TYPES.FINISHED;
 
             const lotNo = receipt.lotNo || '';
             const tagKey = `${receipt.id}-${copyIndex}`;
@@ -191,7 +189,7 @@ const PalletTagPrintPage = () => {
 
       const product = products.find(p => p.id === receipt.productId);
       const category = categories.find(c => c.id === product?.categoryId);
-      const isFinishedGoods = category?.parentId === 'group-finished';
+      const isFinishedGoods = category?.type === CATEGORY_TYPES.FINISHED;
 
       // Generate barcodes as canvas
       const canvas1 = document.createElement('canvas');
@@ -292,7 +290,7 @@ const PalletTagPrintPage = () => {
         pdf.text('BBD', 10, yPos);
         pdf.setFontSize(8);
         pdf.setFont(undefined, 'bold');
-        pdf.text(expDate.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }), 10, yPos + 3);
+        pdf.text(formatDate(expDate.toISOString()), 10, yPos + 3);
       }
       yPos += 8;
 
@@ -331,11 +329,6 @@ const PalletTagPrintPage = () => {
     });
   }, [products, categories, categoryFilter]);
 
-  const formatDate = (dateString) => {
-    if (!dateString) return '-';
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
-  };
 
   return (
     <div className="pallet-tag-print-page">
@@ -496,10 +489,10 @@ const PalletTagPrintPage = () => {
 
           <div className="tags-preview print-area">
             {Array.from({ length: copiesPerTag }).map((_, copyIndex) =>
-              previewReceipts.map((receipt, receiptIndex) => {
+              previewReceipts.map((receipt) => {
                 const product = products.find(p => p.id === receipt.productId);
                 const category = categories.find(c => c.id === product?.categoryId);
-                const isFinishedGoods = category?.parentId === 'group-finished';
+                const isFinishedGoods = category?.type === CATEGORY_TYPES.FINISHED;
                 const tagKey = `${receipt.id}-${copyIndex}`;
 
                 // Determine code to display: SID for raw materials, FCC for finished goods

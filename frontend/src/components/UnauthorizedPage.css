@@ -80,38 +80,6 @@
   margin-bottom: 24px;
 }
 
-.primary-button {
-  background: #6366f1;
-  color: white;
-  border: none;
-  border-radius: 8px;
-  padding: 12px 24px;
-  font-size: 16px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color 0.2s ease;
-}
-
-.primary-button:hover {
-  background: #4f46e5;
-}
-
-.secondary-button {
-  background: #f1f5f9;
-  color: #374151;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
-  padding: 12px 24px;
-  font-size: 16px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.secondary-button:hover {
-  background: #e2e8f0;
-  border-color: #9ca3af;
-}
 
 .help-text {
   border-top: 1px solid #e2e8f0;

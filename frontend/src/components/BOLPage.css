@@ -8,19 +8,6 @@
   margin-bottom: 1.5rem;
 }
 
-.bol-page .back-button {
-  background: none;
-  border: none;
-  color: #4a90e2;
-  cursor: pointer;
-  font-size: 0.95rem;
-  margin-bottom: 1rem;
-  padding: 0;
-}
-
-.bol-page .back-button:hover {
-  text-decoration: underline;
-}
 
 .bol-page .header-content h1 {
   font-size: 1.75rem;

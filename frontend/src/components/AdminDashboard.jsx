@@ -12,11 +12,13 @@ import {
   ListChecks,
   Printer,
   BarChart3,
-  Users,
   TrendingUp,
-  AlertCircle
+  AlertCircle,
+  ArrowRightLeft
 } from 'lucide-react';
+import { hasFeature } from '../utils/warehouseFeatures';
 import './AdminDashboard.css';
+import { RECEIPT_STATUS, TRANSFER_STATUS, ADJUSTMENT_STATUS, HOLD_STATUS } from '../constants';
 
 const AdminDashboard = () => {
   const navigate = useNavigate();
@@ -26,10 +28,10 @@ const AdminDashboard = () => {
   // Calculate pending approvals count with useMemo for reactivity
   // Receipts use 'recorded' or 'reviewed' as pending statuses, not 'pending'
   const totalPendingCount = React.useMemo(() => {
-    const pendingReceiptsCount = receipts?.filter(r => r.status === 'recorded' || r.status === 'reviewed')?.length || 0;
-    const pendingHoldsCount = inventoryHoldActions?.filter(h => h.status === 'pending')?.length || 0;
-    const pendingAdjustmentsCount = inventoryAdjustments?.filter(a => a.status === 'pending')?.length || 0;
-    const pendingTransfersCount = inventoryTransfers?.filter(t => t.status === 'pending')?.length || 0;
+    const pendingReceiptsCount = receipts?.filter(r => r.status === RECEIPT_STATUS.RECORDED || r.status === RECEIPT_STATUS.REVIEWED)?.length || 0;
+    const pendingHoldsCount = inventoryHoldActions?.filter(h => h.status === HOLD_STATUS.PENDING)?.length || 0;
+    const pendingAdjustmentsCount = inventoryAdjustments?.filter(a => a.status === ADJUSTMENT_STATUS.PENDING)?.length || 0;
+    const pendingTransfersCount = inventoryTransfers?.filter(t => t.status === TRANSFER_STATUS.PENDING)?.length || 0;
     return pendingReceiptsCount + pendingHoldsCount + pendingAdjustmentsCount + pendingTransfersCount;
   }, [receipts, inventoryHoldActions, inventoryAdjustments, inventoryTransfers]);
 
@@ -151,8 +153,8 @@ const AdminDashboard = () => {
               />
             </div>
             <ul className="metric-breakdown">
-              <li><strong>{rmOccupiedPallets ?? 0}</strong> occupied</li>
-              <li><strong>{rmAvailablePallets ?? 0}</strong> available</li>
+              <li><strong>{rmOccupiedPallets != null ? Number(rmOccupiedPallets).toFixed(2) : 0}</strong> occupied</li>
+              <li><strong>{rmAvailablePallets != null ? Number(rmAvailablePallets).toFixed(2) : 0}</strong> available</li>
               <li><strong>{rmHeldPallets ?? 0}</strong> on hold</li>
               <li><strong>{rmTotalPalletCapacity ?? 0}</strong> total</li>
             </ul>
@@ -238,9 +240,28 @@ const AdminDashboard = () => {
               <Printer size={18} />
               <span>Print Pallet Tags</span>
             </button>
-            <button className="nav-button" onClick={() => navigate('/admin/production-requests')} style={{ borderLeft: '3px solid #007bff' }}>
-              <ClipboardList size={18} />
-              <span>Production Staging Requests</span>
+            {hasFeature(user?.warehouse_type, 'productionRequests') && (
+              <button className="nav-button" onClick={() => navigate('/admin/production-requests')} style={{ borderLeft: '3px solid #007bff' }}>
+                <ClipboardList size={18} />
+                <span>Production Staging Requests</span>
+              </button>
+            )}
+          </div>
+        </section>
+
+        {/* Inter-Warehouse Transfers */}
+        <section className="dashboard-card card-gradient hover-lift">
+          <div className="card-icon">
+            <ArrowRightLeft size={32} />
+          </div>
+          <div className="card-content">
+            <h2 className="card-title">Inter-Warehouse Transfers</h2>
+            <p className="card-description">Track and manage inventory transfers between warehouse locations</p>
+          </div>
+          <div className="button-stack">
+            <button className="nav-button" onClick={() => navigate('/admin/inter-warehouse-transfers')}>
+              <ArrowRightLeft size={18} />
+              <span>View Transfers</span>
             </button>
           </div>
         </section>
@@ -266,22 +287,7 @@ const AdminDashboard = () => {
           </div>
         </section>
 
-        {/* People */}
-        <section className="dashboard-card card-gradient hover-lift">
-          <div className="card-icon">
-            <Users size={32} />
-          </div>
-          <div className="card-content">
-            <h2 className="card-title">People</h2>
-            <p className="card-description">Manage user access and permissions</p>
-          </div>
-          <div className="button-stack">
-            <button className="nav-button" onClick={() => navigate('/admin/users')}>
-              <Users size={18} />
-              <span>User Management</span>
-            </button>
-          </div>
-        </section>
+
       </div>
     </div>
   );

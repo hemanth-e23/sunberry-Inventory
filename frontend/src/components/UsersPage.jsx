@@ -1,35 +1,55 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
 import { getDashboardPath } from '../App';
 import { ChevronLeft, Users as UsersIcon, Plus, Filter, Edit2, Power } from 'lucide-react';
+import apiClient from '../api/client';
 import './Shared.css';
 import './UsersPage.css';
-import './UsersPageEnhanced.css';
+import { ROLES } from '../constants';
 
 const roleLabels = {
+  superadmin: 'Superadmin',
+  corporate_admin: 'Corporate Admin',
+  corporate_viewer: 'Corporate Viewer',
   admin: 'Admin',
   supervisor: 'Supervisor',
   warehouse: 'Warehouse',
-  forklift: 'Forklift'
+  forklift: 'Forklift',
 };
+
+const PLANT_ROLES = ['admin', 'supervisor', 'warehouse', 'forklift'];
+const CORPORATE_ROLES_LIST = ['superadmin', 'corporate_admin', 'corporate_viewer'];
 
 const UsersPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { users, addUser, updateUser, toggleUserStatus } = useAppData();
+  const { addToast } = useToast();
   const [filter, setFilter] = useState('all');
   const [showForm, setShowForm] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
+  const [warehouses, setWarehouses] = useState([]);
   const [formData, setFormData] = useState({
     name: '',
     username: '',
     email: '',
     role: 'warehouse',
     password: '',
-    badgeId: ''
+    badgeId: '',
+    warehouse_id: '',
   });
+
+  const isSuperadmin = user?.role === 'superadmin';
+  const needsWarehouse = (role) => PLANT_ROLES.includes(role);
+
+  useEffect(() => {
+    apiClient.get('/master-data/warehouses')
+      .then(r => setWarehouses(r.data))
+      .catch(() => {});
+  }, []);
 
   const filteredUsers = useMemo(() => {
     if (filter === 'all') return users;
@@ -37,22 +57,26 @@ const UsersPage = () => {
   }, [users, filter]);
 
   const resetForm = () => {
-    setFormData({ name: '', username: '', email: '', role: 'warehouse', password: '', badgeId: '' });
+    setFormData({ name: '', username: '', email: '', role: 'warehouse', password: '', badgeId: '', warehouse_id: '' });
     setEditingUser(null);
   };
 
   const handleSubmit = async (event) => {
     event.preventDefault();
     if (!formData.name.trim() || !formData.username.trim()) return;
-    const isForklift = formData.role === 'forklift';
+    const isForklift = formData.role === ROLES.FORKLIFT;
+    const isCorporateRole = CORPORATE_ROLES_LIST.includes(formData.role);
 
-    // Forklift users need badge ID; others need email
     if (isForklift && !formData.badgeId?.trim()) {
-      alert('Badge ID is required for forklift users (used for badge scan login).');
+      addToast('Badge ID is required for forklift users (used for badge scan login).', 'error');
       return;
     }
     if (!isForklift && !formData.email.trim()) {
-      alert('Email is required for this role.');
+      addToast('Email is required for this role.', 'error');
+      return;
+    }
+    if (!isCorporateRole && !formData.warehouse_id && !editingUser) {
+      addToast('Please assign this user to a warehouse.', 'error');
       return;
     }
 
@@ -62,15 +86,16 @@ const UsersPage = () => {
       email: isForklift && !editingUser
         ? `${formData.username.trim()}@forklift.sunberry.com`
         : (formData.email?.trim() || editingUser?.email || ''),
-      role: formData.role
+      role: formData.role,
+      warehouse_id: isCorporateRole ? null : (formData.warehouse_id || null),
     };
 
     if (formData.password.trim()) {
       payload.password = formData.password.trim();
     } else if (isForklift && !editingUser) {
-      payload.password = 'ChangeMe123!'; // Placeholder; forklift uses badge login
+      payload.password = 'ChangeMe123!';
     } else if (!isForklift && !editingUser) {
-      alert('Password is required for new users.');
+      addToast('Password is required for new users.', 'error');
       return;
     }
     if (isForklift && formData.badgeId?.trim()) {
@@ -87,19 +112,20 @@ const UsersPage = () => {
       setShowForm(false);
     } catch (error) {
       const msg = (error?.message && String(error.message) !== '[object Object]') ? error.message : 'Failed to save user. Please try again.';
-      alert(msg);
+      addToast(msg, 'error');
     }
   };
 
-  const handleEdit = (user) => {
-    setEditingUser(user);
+  const handleEdit = (u) => {
+    setEditingUser(u);
     setFormData({
-      name: user.name,
-      username: user.username,
-      email: user.email || '',
-      role: user.role,
+      name: u.name,
+      username: u.username,
+      email: u.email || '',
+      role: u.role,
       password: '',
-      badgeId: user.badgeId || user.badge_id || ''
+      badgeId: u.badgeId || u.badge_id || '',
+      warehouse_id: u.warehouse_id || '',
     });
     setShowForm(true);
   };
@@ -127,8 +153,13 @@ const UsersPage = () => {
                 <Filter size={16} style={{ position: 'absolute', left: '12px', color: 'var(--color-text-muted)', pointerEvents: 'none' }} />
                 <select value={filter} onChange={(e) => setFilter(e.target.value)} style={{ paddingLeft: '36px' }}>
                   <option value="all">All Roles</option>
-                  <option value="admin">Admins</option>
-                  <option value="supervisor">Supervisors</option>
+                  {isSuperadmin && <>
+                    <option value="superadmin">Superadmin</option>
+                    <option value="corporate_admin">Corporate Admin</option>
+                    <option value="corporate_viewer">Corporate Viewer</option>
+                  </>}
+                  <option value="admin">Admin</option>
+                  <option value="supervisor">Supervisor</option>
                   <option value="warehouse">Warehouse</option>
                   <option value="forklift">Forklift</option>
                 </select>
@@ -173,7 +204,7 @@ const UsersPage = () => {
                   />
                 </label>
 
-                {formData.role !== 'forklift' && (
+                {formData.role !== ROLES.FORKLIFT && (
                   <label>
                     <span>Email</span>
                     <input
@@ -185,7 +216,7 @@ const UsersPage = () => {
                   </label>
                 )}
 
-                {formData.role !== 'forklift' && (
+                {formData.role !== ROLES.FORKLIFT && (
                   <label>
                     <span>Password</span>
                     <input
@@ -202,17 +233,51 @@ const UsersPage = () => {
                   <span>Role</span>
                   <select
                     value={formData.role}
-                    onChange={(e) => setFormData(prev => ({ ...prev, role: e.target.value }))}
+                    onChange={(e) => setFormData(prev => ({ ...prev, role: e.target.value, warehouse_id: CORPORATE_ROLES_LIST.includes(e.target.value) ? '' : prev.warehouse_id }))}
                     required
                   >
-                    <option value="admin">Admin</option>
-                    <option value="supervisor">Supervisor</option>
-                    <option value="warehouse">Warehouse</option>
-                    <option value="forklift">Forklift</option>
+                    {isSuperadmin ? (
+                      <>
+                        <optgroup label="Corporate">
+                          <option value="superadmin">Superadmin</option>
+                          <option value="corporate_admin">Corporate Admin</option>
+                          <option value="corporate_viewer">Corporate Viewer</option>
+                        </optgroup>
+                        <optgroup label="Plant">
+                          <option value="admin">Admin</option>
+                          <option value="supervisor">Supervisor</option>
+                          <option value="warehouse">Warehouse</option>
+                          <option value="forklift">Forklift</option>
+                        </optgroup>
+                      </>
+                    ) : (
+                      <>
+                        <option value="admin">Admin</option>
+                        <option value="supervisor">Supervisor</option>
+                        <option value="warehouse">Warehouse</option>
+                        <option value="forklift">Forklift</option>
+                      </>
+                    )}
                   </select>
                 </label>
 
-                {formData.role === 'forklift' && (
+                {needsWarehouse(formData.role) && (
+                  <label>
+                    <span>Warehouse *</span>
+                    <select
+                      value={formData.warehouse_id}
+                      onChange={(e) => setFormData(prev => ({ ...prev, warehouse_id: e.target.value }))}
+                      required
+                    >
+                      <option value="">Select warehouse...</option>
+                      {warehouses.map(w => (
+                        <option key={w.id} value={w.id}>{w.name} ({w.code})</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
+                {formData.role === ROLES.FORKLIFT && (
                   <label>
                     <span>Badge ID</span>
                     <input
@@ -250,35 +315,37 @@ const UsersPage = () => {
                   <th>Name</th>
                   <th>Username</th>
                   <th>Role</th>
+                  <th>Warehouse</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredUsers.map(user => (
-                  <tr key={user.id}>
-                    <td>{user.name}</td>
-                    <td>{user.username}</td>
-                    <td>{roleLabels[user.role] || user.role}</td>
+                {filteredUsers.map(u => (
+                  <tr key={u.id}>
+                    <td>{u.name}</td>
+                    <td>{u.username}</td>
+                    <td>{roleLabels[u.role] || u.role}</td>
+                    <td>{u.warehouse_id ? (warehouses.find(w => w.id === u.warehouse_id)?.name || u.warehouse_id) : <span style={{ color: '#9ca3af' }}>Corporate</span>}</td>
                     <td>
-                      <span className={`chip status-${user.status}`}>{user.status}</span>
+                      <span className={`chip status-${u.status}`}>{u.status}</span>
                     </td>
                     <td>
                       <div className="row-actions">
-                        <button type="button" onClick={() => handleEdit(user)}>
+                        <button type="button" onClick={() => handleEdit(u)}>
                           <Edit2 size={14} />
                           <span>Edit</span>
                         </button>
                         <button type="button" onClick={async () => {
                           try {
-                            await toggleUserStatus(user.id);
+                            await toggleUserStatus(u.id);
                           } catch (error) {
                             const msg = (error?.message && String(error.message) !== '[object Object]') ? error.message : 'Failed to toggle user status. Please try again.';
-                            alert(msg);
+                            addToast(msg, 'error');
                           }
                         }}>
                           <Power size={14} />
-                          <span>{user.status === 'active' ? 'Deactivate' : 'Activate'}</span>
+                          <span>{u.status === 'active' ? 'Deactivate' : 'Activate'}</span>
                         </button>
                       </div>
                     </td>

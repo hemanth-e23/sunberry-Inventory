@@ -2,8 +2,10 @@ import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
 import { getDashboardPath } from '../App';
-import { ChevronLeft, Plus, Filter, Edit2, Power, Package } from 'lucide-react';
+import { ChevronLeft, Plus, Filter, Edit2, Power, Package, Search } from 'lucide-react';
+import TableSkeleton from './TableSkeleton';
 import './Shared.css';
 import './ProductsPage.css';
 
@@ -33,16 +35,19 @@ const ProductsPage = () => {
     productCategories,
     categoryGroups,
     products,
+    productsLoading,
     addProduct,
     updateProduct,
     toggleProductStatus
   } = useAppData();
-
+  const { addToast } = useToast();
   const requiredStar = <span className="required">*</span>;
 
   const [showForm, setShowForm] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
   const [formData, setFormData] = useState({
     name: '',
     shortCode: '',
@@ -58,9 +63,24 @@ const ProductsPage = () => {
   });
 
   const filteredProducts = useMemo(() => {
-    if (categoryFilter === 'all') return products;
-    return products.filter(product => product.categoryId === categoryFilter);
-  }, [products, categoryFilter]);
+    let result = products;
+    if (categoryFilter !== 'all') {
+      result = result.filter(product => product.categoryId === categoryFilter);
+    }
+    if (statusFilter !== 'all') {
+      result = result.filter(product => product.status === statusFilter);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      result = result.filter(product =>
+        product.name?.toLowerCase().includes(q) ||
+        product.fcc?.toLowerCase().includes(q) ||
+        product.sid?.toLowerCase().includes(q) ||
+        product.shortCode?.toLowerCase().includes(q)
+      );
+    }
+    return result;
+  }, [products, categoryFilter, statusFilter, searchQuery]);
 
   const resetForm = () => {
     setFormData({
@@ -110,7 +130,7 @@ const ProductsPage = () => {
     } catch (error) {
       console.error('Error saving product:', error);
       const errorMessage = getProductErrorMessage(error);
-      alert(errorMessage);
+      addToast(errorMessage, 'error');
     }
   };
 
@@ -134,22 +154,9 @@ const ProductsPage = () => {
 
   const formatCategoryLabel = (category) => {
     if (!category) return 'Unknown';
-    // Find the group name
     const group = categoryGroups.find(g => g.id === category.parentId);
     const groupName = group?.name || '';
-    const typeLabel = category.type === 'finished' ? 'Finished Good' : 'Raw Material';
-
-    // Determine subLabel based on group name (more reliable than subType field)
-    let subLabel = null;
-    if (category.type !== 'finished') {
-      if (groupName.toLowerCase().includes('packaging')) {
-        subLabel = 'Packaging';
-      } else if (groupName.toLowerCase().includes('raw') || category.subType === 'ingredient') {
-        subLabel = 'Ingredient';
-      }
-    }
-
-    return `${groupName ? groupName + ' → ' : ''}${category.name} (${typeLabel}${subLabel ? ` · ${subLabel}` : ''})`;
+    return groupName ? `${groupName} — ${category.name}` : category.name;
   };
 
   const selectedCategory = useMemo(
@@ -344,12 +351,59 @@ const ProductsPage = () => {
         </section>
 
         <section className="panel">
-          <div className="panel-header">
+          <div className="panel-header" style={{ flexWrap: 'wrap', gap: '12px' }}>
             <div className="panel-title">
               <h3>Product Catalog</h3>
               <span className="muted">{filteredProducts.length} items</span>
             </div>
-            <div className="panel-actions">
+            <div className="panel-actions" style={{ flexWrap: 'wrap', gap: '8px' }}>
+              {/* Search */}
+              <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                <Search size={16} style={{ position: 'absolute', left: '10px', color: 'var(--color-text-muted)', pointerEvents: 'none' }} />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search name, code…"
+                  aria-label="Search products"
+                  style={{ paddingLeft: '34px', paddingRight: '10px', height: '36px', borderRadius: '6px', border: '1px solid var(--color-border)', fontSize: '0.875rem', width: '200px' }}
+                />
+              </div>
+
+              {/* Status filter toggle */}
+              <div style={{ display: 'flex', gap: '4px', background: 'var(--color-bg-muted, #f3f4f6)', borderRadius: '8px', padding: '3px' }}>
+                {[
+                  { value: 'all', label: 'All' },
+                  { value: 'active', label: 'Active' },
+                  { value: 'inactive', label: 'Inactive' },
+                ].map(({ value, label }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setStatusFilter(value)}
+                    style={{
+                      padding: '4px 12px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontSize: '0.8rem',
+                      fontWeight: 500,
+                      transition: 'all 0.15s',
+                      background: statusFilter === value
+                        ? value === 'active' ? '#16a34a' : value === 'inactive' ? '#dc2626' : 'white'
+                        : 'transparent',
+                      color: statusFilter === value
+                        ? value === 'all' ? 'var(--color-text)' : 'white'
+                        : 'var(--color-text-muted)',
+                      boxShadow: statusFilter === value ? '0 1px 3px rgba(0,0,0,0.12)' : 'none',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Category filter */}
               <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
                 <Filter size={16} style={{ position: 'absolute', left: '12px', color: 'var(--color-text-muted)', pointerEvents: 'none' }} />
                 <select
@@ -366,11 +420,11 @@ const ProductsPage = () => {
               </div>
             </div>
           </div>
-          <div className="table-wrapper">
+          <div className="table-wrapper" style={{ maxHeight: '600px', overflowY: 'auto' }}>
             <table className="simple-table">
               <thead>
                 <tr>
-                  <th>ID</th>
+                  <th>S.No</th>
                   <th>Name</th>
                   <th>Short Code</th>
                   <th>Category</th>
@@ -380,59 +434,63 @@ const ProductsPage = () => {
                   <th>Actions</th>
                 </tr>
               </thead>
-              <tbody>
-                {filteredProducts.map(product => {
-                  const category = productCategories.find(cat => cat.id === product.categoryId);
-                  return (
-                    <tr key={product.id}>
-                      <td>{product.id}</td>
-                      <td>
-                        {product.name}
-                        {product.inventoryTracked === false && (
-                          <span style={{ marginLeft: '6px', fontSize: '0.7rem', color: '#856404', backgroundColor: '#fff3cd', padding: '1px 6px', borderRadius: '3px', border: '1px solid #ffc107', verticalAlign: 'middle' }}>
-                            Not Tracked
+              {productsLoading ? (
+                <TableSkeleton rows={8} columns={8} />
+              ) : (
+                <tbody>
+                  {filteredProducts.map((product, index) => {
+                    const category = productCategories.find(cat => cat.id === product.categoryId);
+                    return (
+                      <tr key={product.id}>
+                        <td style={{ color: 'var(--color-text-muted)', fontWeight: 500 }}>{index + 1}</td>
+                        <td>
+                          {product.name}
+                          {product.inventoryTracked === false && (
+                            <span style={{ marginLeft: '6px', fontSize: '0.7rem', color: '#856404', backgroundColor: '#fff3cd', padding: '1px 6px', borderRadius: '3px', border: '1px solid #ffc107', verticalAlign: 'middle' }}>
+                              Not Tracked
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          {product.shortCode ? (
+                            <span style={{ fontFamily: 'monospace', fontWeight: 600, fontSize: '0.9rem' }}>
+                              {product.shortCode}
+                            </span>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
+                        <td>{category ? formatCategoryLabel(category) : 'Unknown'}</td>
+                        <td>{product.fcc || product.sid || '—'}</td>
+                        <td>{product.description}</td>
+                        <td>
+                          <span className={`chip status-${product.status}`}>
+                            {product.status}
                           </span>
-                        )}
-                      </td>
-                      <td>
-                        {product.shortCode ? (
-                          <span style={{ fontFamily: 'monospace', fontWeight: 600, fontSize: '0.9rem' }}>
-                            {product.shortCode}
-                          </span>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </td>
-                      <td>{category ? formatCategoryLabel(category) : 'Unknown'}</td>
-                      <td>{product.fcc || product.sid || '—'}</td>
-                      <td>{product.description}</td>
-                      <td>
-                        <span className={`chip status-${product.status}`}>
-                          {product.status}
-                        </span>
-                      </td>
-                      <td>
-                        <div className="row-actions">
-                          <button type="button" onClick={() => handleEdit(product)}>
-                            <Edit2 size={14} />
-                            <span>Edit</span>
-                          </button>
-                          <button type="button" onClick={async () => {
-                            try {
-                              await toggleProductStatus(product.id);
-                            } catch (error) {
-                              alert('Failed to toggle product status. Please try again.');
-                            }
-                          }}>
-                            <Power size={14} />
-                            <span>{product.status === 'active' ? 'Deactivate' : 'Activate'}</span>
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
+                        </td>
+                        <td>
+                          <div className="row-actions">
+                            <button type="button" onClick={() => handleEdit(product)}>
+                              <Edit2 size={14} />
+                              <span>Edit</span>
+                            </button>
+                            <button type="button" onClick={async () => {
+                              try {
+                                await toggleProductStatus(product.id);
+                              } catch {
+                                addToast('Failed to toggle product status. Please try again.', 'error');
+                              }
+                            }}>
+                              <Power size={14} />
+                              <span>{product.status === 'active' ? 'Deactivate' : 'Activate'}</span>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              )}
             </table>
           </div>
         </section>

@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
+import { hasFeature } from '../utils/warehouseFeatures';
 import {
   TrendingUp,
   FileText,
@@ -164,8 +165,8 @@ const WarehouseDashboard = () => {
               />
             </div>
             <ul className="metric-breakdown">
-              <li><strong>{rmOccupiedPallets ?? 0}</strong> occupied</li>
-              <li><strong>{rmAvailablePallets ?? 0}</strong> available</li>
+              <li><strong>{rmOccupiedPallets != null ? Number(rmOccupiedPallets).toFixed(2) : 0}</strong> occupied</li>
+              <li><strong>{rmAvailablePallets != null ? Number(rmAvailablePallets).toFixed(2) : 0}</strong> available</li>
               <li><strong>{rmHeldPallets ?? 0}</strong> on hold</li>
               <li><strong>{rmTotalPalletCapacity ?? 0}</strong> total</li>
             </ul>
@@ -274,25 +275,18 @@ const WarehouseDashboard = () => {
           </div>
         </button>
 
-        <button className="action-button" onClick={() => navigate('/warehouse/bol')}>
-          <div className="action-icon">
-            <FileText size={24} />
-          </div>
-          <div className="action-content">
-            <h3>BOL Report</h3>
-            <p>Batch output vs logged finished goods</p>
-          </div>
-        </button>
 
-        <button className="action-button" onClick={() => navigate('/warehouse/production-requests')} style={{ borderLeft: '3px solid #007bff' }}>
-          <div className="action-icon">
-            <Layers size={24} />
-          </div>
-          <div className="action-content">
-            <h3>Production Staging Requests</h3>
-            <p>View batch staging requests from Production</p>
-          </div>
-        </button>
+        {hasFeature(user?.warehouse_type, 'productionRequests') && (
+          <button className="action-button" onClick={() => navigate('/warehouse/production-requests')} style={{ borderLeft: '3px solid #007bff' }}>
+            <div className="action-icon">
+              <Layers size={24} />
+            </div>
+            <div className="action-content">
+              <h3>Production Staging Requests</h3>
+              <p>View batch staging requests from Production</p>
+            </div>
+          </button>
+        )}
       </section>
 
       {/* Helpful Reminders */}

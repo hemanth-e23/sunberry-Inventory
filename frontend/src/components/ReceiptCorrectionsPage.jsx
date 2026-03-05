@@ -3,12 +3,14 @@ import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
 import { getDashboardPath } from '../App';
+import { formatDateTime } from '../utils/dateUtils';
+import './Shared.css';
 import './ReceiptCorrectionsPage.css';
 
 const ReceiptCorrectionsPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { receipts, products, categories, vendors, locations, subLocationMap, updateReceipt, updateReceiptStatus } = useAppData();
+  const { receipts, products, categories, vendors, updateReceipt, updateReceiptStatus } = useAppData();
   
   const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [draft, setDraft] = useState({});
@@ -89,12 +91,6 @@ const ReceiptCorrectionsPage = () => {
     return match ? match[1].trim() : '';
   };
 
-  const formatDateTime = (value) => {
-    if (!value) return "—";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleString();
-  };
 
   const formatReceiptLabel = (receipt) => {
     const product = productLookup[receipt.productId];

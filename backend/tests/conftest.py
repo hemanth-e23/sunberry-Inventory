@@ -112,7 +112,7 @@ def admin_user(db_session):
         name="Admin User",
         email="admin@sunberry.com",
         hashed_password=get_password_hash("adminpassword123"),
-        role="admin",
+        role="superadmin",
         is_active=True,
     )
     db_session.add(user)

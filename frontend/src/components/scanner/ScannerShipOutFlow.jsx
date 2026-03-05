@@ -1,14 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
+import { formatDateTime } from '../../utils/dateUtils';
 import {
   Truck, Scan, CheckCircle2, Circle, AlertTriangle, XCircle,
   ChevronRight, Package, MapPin, Hash, Send, SkipForward, RefreshCw
 } from 'lucide-react';
 import './ScannerShipOutFlow.css';
-
-const API_BASE = '/api';
 
 const POLL_INTERVAL = 3000;
 
@@ -31,15 +30,11 @@ const ScannerShipOutFlow = () => {
   const [pollTimer, setPollTimer] = useState(null);
   const inputRef = useRef(null);
 
-  const token = localStorage.getItem('token');
-  const headers = { Authorization: `Bearer ${token}` };
-
   const loadOrders = useCallback(async () => {
     setLoadingOrders(true);
     try {
-      const r = await axios.get(`${API_BASE}/inventory/transfers`, {
+      const r = await apiClient.get('/inventory/transfers', {
         params: { status: 'pending' },
-        headers,
       });
       const shipOut = (r.data || []).filter(
         (t) => t.transfer_type === 'shipped-out' && (t.pallet_licence_ids || []).length > 0
@@ -58,7 +53,7 @@ const ScannerShipOutFlow = () => {
 
   const loadPickProgress = useCallback(async (transferId) => {
     try {
-      const r = await axios.get(`${API_BASE}/inventory/transfers/${transferId}/scan-progress`, { headers });
+      const r = await apiClient.get(`/inventory/transfers/${transferId}/scan-progress`);
       const data = r.data;
       setPickList(data.pick_list || []);
       setExceptions(data.exceptions || []);
@@ -87,6 +82,16 @@ const ScannerShipOutFlow = () => {
     return () => { if (pollTimer) clearInterval(pollTimer); };
   }, [pollTimer]);
 
+  useEffect(() => {
+    if (!selectedTransfer || step !== 'pick') return;
+    const onVisibility = () => {
+      if (document.hidden) stopPolling();
+      else startPolling(selectedTransfer.id);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [selectedTransfer, step, startPolling, stopPolling]);
+
   const selectTransfer = async (transfer) => {
     setSelectedTransfer(transfer);
     setStep('pick');
@@ -107,10 +112,9 @@ const ScannerShipOutFlow = () => {
     setLoading(true);
 
     try {
-      const r = await axios.post(
-        `${API_BASE}/inventory/transfers/${selectedTransfer.id}/scan-pick`,
-        { licence_number: lic },
-        { headers }
+      const r = await apiClient.post(
+        `/inventory/transfers/${selectedTransfer.id}/scan-pick`,
+        { licence_number: lic }
       );
       const data = r.data;
 
@@ -176,10 +180,9 @@ const ScannerShipOutFlow = () => {
     setSubmitting(true);
     try {
       const skippedIds = mergedPickList.filter((p) => p.is_skipped).map((p) => p.pallet_id);
-      await axios.post(
-        `${API_BASE}/inventory/transfers/${selectedTransfer.id}/forklift-submit`,
-        { notes: submitNotes || null, skipped_pallet_ids: skippedIds },
-        { headers }
+      await apiClient.post(
+        `/inventory/transfers/${selectedTransfer.id}/forklift-submit`,
+        { notes: submitNotes || null, skipped_pallet_ids: skippedIds }
       );
       stopPolling();
       setStep('done');
@@ -366,7 +369,7 @@ const ScannerShipOutFlow = () => {
                   </span>
                   {pallet.is_scanned && pallet.scanned_at && (
                     <span className="sso-pallet-time">
-                      Scanned {new Date(pallet.scanned_at).toLocaleTimeString()}
+                      Scanned {formatDateTime(pallet.scanned_at)}
                     </span>
                   )}
                   {isLocallySkipped && (

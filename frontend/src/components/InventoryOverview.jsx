@@ -1,26 +1,14 @@
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect, useCallback, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useNavigate } from "react-router-dom";
 import { useAppData } from "../context/AppDataContext";
 import { useAuth } from "../context/AuthContext";
 import { getDashboardPath } from "../App";
-import axios from "axios";
+import apiClient from "../api/client";
+import { formatDateTime as formatDate, escapeHtml } from "../utils/dateUtils";
+import "./Shared.css";
 import "./InventoryOverview.css";
-import "./InventoryOverviewEnhanced.css";
-
-const API_BASE_URL = '/api';
-
-const formatDate = (value) => {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-};
+import { CATEGORY_TYPES, RECEIPT_STATUS } from '../constants';
 
 const parseDate = (value) => {
   if (!value) return null;
@@ -74,14 +62,18 @@ const InventoryOverview = () => {
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [holdFilter, setHoldFilter] = useState("all");
   const [sortOption, setSortOption] = useState("recent");
-  const [searchTerm, setSearchTerm] = useState("");
+  const [searchTerm] = useState("");
   const [productFilter, setProductFilter] = useState("all");
   const [recentSearch, setRecentSearch] = useState("");
 
   const [locationFilter, setLocationFilter] = useState("all");
   const [areaFilter, setAreaFilter] = useState("all");
-  const [showEmptyOnly, setShowEmptyOnly] = useState(false);
+  const [occupancyFilter, setOccupancyFilter] = useState("all");
   const [locationProductFilter, setLocationProductFilter] = useState("all");
+  const [locationSearch, setLocationSearch] = useState("");
+  // Derived from occupancyFilter for backward compat
+  const showEmptyOnly = occupancyFilter === "empty";
+
   const [inventoryStartDate, setInventoryStartDate] = useState("");
   const [inventoryEndDate, setInventoryEndDate] = useState("");
   const [showZeroInventory, setShowZeroInventory] = useState(false);
@@ -98,15 +90,19 @@ const InventoryOverview = () => {
   const [expiryEndDate, setExpiryEndDate] = useState("");
   const [quantityThreshold, setQuantityThreshold] = useState("");
   const [quantityOperator, setQuantityOperator] = useState("above");
-  const [supplierFilter, setSupplierFilter] = useState("all");
+  const [_supplierFilter] = useState("all");
   const [ageFilter, setAgeFilter] = useState("all");
 
   // Smart search
   const [smartSearchTerm, setSmartSearchTerm] = useState("");
   const [searchFields, setSearchFields] = useState(["name", "sid", "fcc", "lot"]);
 
-  // Dashboard widgets state (hidden by default)
-  const [showWidgets, setShowWidgets] = useState(false);
+  // Recent entries filters
+  const [recentStatusFilter, setRecentStatusFilter] = useState("all");
+  const [recentTypeFilter, setRecentTypeFilter] = useState("all");
+
+  // Dashboard widgets state (visible by default)
+  const [showWidgets, setShowWidgets] = useState(true);
 
   // Filters visibility (hidden by default)
   const [showFilters, setShowFilters] = useState(false);
@@ -126,9 +122,8 @@ const InventoryOverview = () => {
     description: true
   });
 
-  // Bulk operations
-  const [selectedItems, setSelectedItems] = useState(new Set());
-  const [bulkAction, setBulkAction] = useState("");
+  // Virtual table ref
+  const tableParentRef = useRef(null);
 
   // Print options
   const [showPrintModal, setShowPrintModal] = useState(false);
@@ -199,7 +194,7 @@ const InventoryOverview = () => {
     const totalProducts = products.length;
     const activeProducts = products.filter(p => p.status === 'active').length;
     const onHoldProducts = receipts.filter(r => r.hold).length;
-    const pendingReceipts = receipts.filter(r => r.status === 'recorded').length;
+    const pendingReceipts = receipts.filter(r => r.status === RECEIPT_STATUS.RECORDED).length;
 
     // Calculate expiring soon (next 6 months)
     const expiringSoon = receipts.filter(r => {
@@ -217,7 +212,7 @@ const InventoryOverview = () => {
     const totalValue = receipts.reduce((sum, r) => {
       // Rough estimate: $5 per case for finished goods, $2 for raw materials
       const category = categoriesById[productsById[r.productId]?.categoryId];
-      const pricePerCase = category?.parentId === 'group-finished' ? 5 : 2;
+      const pricePerCase = category?.type === CATEGORY_TYPES.FINISHED ? 5 : 2;
       return sum + (r.quantity * pricePerCase);
     }, 0);
 
@@ -263,37 +258,6 @@ const InventoryOverview = () => {
       .filter(area => area.totalCapacity > 0); // Only show areas with defined capacity
   }, [storageAreas]);
 
-  // Raw materials graph data
-  const rawMaterialsData = useMemo(() => {
-    const rawCategories = productCategories.filter(cat => cat.parentId === 'group-raw');
-    return rawCategories.map(category => {
-      const categoryReceipts = receipts.filter(r => {
-        const product = productsById[r.productId];
-        return product?.categoryId === category.id && r.status === 'approved';
-      });
-
-      const totalQuantity = categoryReceipts.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0);
-      const onHold = categoryReceipts.filter(r => r.hold).length;
-
-      // Get the most common unit from receipts
-      const unitCounts = {};
-      categoryReceipts.forEach(r => {
-        const unit = r.quantityUnits || 'units';
-        unitCounts[unit] = (unitCounts[unit] || 0) + 1;
-      });
-      const mostCommonUnit = Object.keys(unitCounts).reduce((a, b) =>
-        unitCounts[a] > unitCounts[b] ? a : b, 'units');
-
-      return {
-        name: category.name,
-        quantity: totalQuantity,
-        unit: mostCommonUnit,
-        onHold,
-        lots: categoryReceipts.length
-      };
-    }).sort((a, b) => b.quantity - a.quantity);
-  }, [receipts, productsById, productCategories]);
-
   // Print function
   const handlePrint = () => {
     // Filter data based on print options
@@ -304,9 +268,9 @@ const InventoryOverview = () => {
         const product = productsById[row.id];
         const category = categoriesById[product?.categoryId];
 
-        if (printOptions.includeRawMaterials && category?.parentId === 'group-raw') return true;
-        if (printOptions.includePackaging && category?.parentId === 'group-packaging') return true;
-        if (printOptions.includeFinishedGoods && category?.parentId === 'group-finished') return true;
+        if (printOptions.includeRawMaterials && category?.type === 'raw') return true;
+        if (printOptions.includePackaging && category?.type === CATEGORY_TYPES.PACKAGING) return true;
+        if (printOptions.includeFinishedGoods && category?.type === CATEGORY_TYPES.FINISHED) return true;
 
         return false;
       });
@@ -317,7 +281,7 @@ const InventoryOverview = () => {
       <!DOCTYPE html>
       <html>
         <head>
-          <title>Inventory Report - ${new Date().toLocaleDateString()}</title>
+          <title>Inventory Report - ${formatDate(new Date().toISOString())}</title>
           <style>
             body { font-family: Arial, sans-serif; margin: 20px; }
             h1 { color: #333; border-bottom: 2px solid #4a90e2; padding-bottom: 10px; }
@@ -335,7 +299,7 @@ const InventoryOverview = () => {
         <body>
           <h1>Sunberry Inventory Report</h1>
           <div class="report-info">
-            <p><strong>Report Date:</strong> ${new Date().toLocaleDateString()}</p>
+            <p><strong>Report Date:</strong> ${formatDate(new Date().toISOString())}</p>
             <p><strong>Total Items:</strong> ${dataToPrint.length}</p>
             <p><strong>Categories Included:</strong> 
               ${printOptions.includeAllCategories ? 'All Categories' : ''}
@@ -362,22 +326,22 @@ const InventoryOverview = () => {
             <tbody>
               ${dataToPrint.map(row => `
                 <tr class="${row.quantity === 0 ? 'zero-inventory' : row.quantity < 100 ? 'low-stock' : ''} ${row.holdActive ? 'hold-active' : ''}">
-                  <td>${row.name}</td>
-                  <td>${row.category}</td>
-                  <td>${row.type}</td>
+                  <td>${escapeHtml(row.name)}</td>
+                  <td>${escapeHtml(row.category)}</td>
+                  <td>${escapeHtml(row.type)}</td>
                   <td class="quantity">${row.quantity.toLocaleString()}</td>
-                  <td>${row.holdLabel}</td>
+                  <td>${escapeHtml(row.holdLabel)}</td>
                   <td>${row.lotCount}</td>
                   <td>${row.pendingCount}</td>
-                  <td>${row.lastSubmittedBy}<br><small>${row.lastSubmittedAt}</small></td>
-                  <td>${row.lastApprovedBy}<br><small>${row.lastApprovedAt}</small></td>
+                  <td>${escapeHtml(row.lastSubmittedBy)}<br><small>${row.lastSubmittedAt}</small></td>
+                  <td>${escapeHtml(row.lastApprovedBy)}<br><small>${row.lastApprovedAt}</small></td>
                 </tr>
               `).join('')}
             </tbody>
           </table>
           
           <div class="footer">
-            <p>Generated on ${new Date().toLocaleString()} | Sunberry Inventory Management System</p>
+            <p>Generated on ${formatDate(new Date().toISOString())} | Sunberry Inventory Management System</p>
           </div>
         </body>
       </html>
@@ -426,17 +390,12 @@ const InventoryOverview = () => {
   }, [locations, storageAreas, rowNameCache]);
 
   // Helper function to fetch row name from backend if not in lookup
-  const fetchRowName = async (rowId) => {
+  const fetchRowName = useCallback(async (rowId) => {
     if (!rowId || rowNameCache[rowId]) return rowNameCache[rowId];
-    
+
     try {
-      const token = localStorage.getItem('token');
-      if (!token) return null;
-      
-      const response = await axios.get(`${API_BASE_URL}/master-data/storage-rows/${rowId}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      
+      const response = await apiClient.get(`/master-data/storage-rows/${rowId}`);
+
       if (response.data?.name) {
         setRowNameCache(prev => ({ ...prev, [rowId]: response.data.name }));
         return response.data.name;
@@ -445,7 +404,7 @@ const InventoryOverview = () => {
       console.warn(`Failed to fetch row name for ${rowId}:`, error);
     }
     return null;
-  };
+  }, [rowNameCache]);
 
   // Pre-fetch row names for receipts that have storageRowId but no name in lookup
   useEffect(() => {
@@ -475,12 +434,12 @@ const InventoryOverview = () => {
         fetchRowName(rowId);
       });
     }
-  }, [receipts, rowLookup, rowNameCache]);
+  }, [receipts, rowLookup, rowNameCache, fetchRowName]);
 
   const getReceiptLocations = (receipt) => {
     // Check if this is a finished goods receipt with allocation plan
     const category = productCategories.find(c => c.id === receipt.categoryId);
-    const isFinishedGood = category?.parentId === 'group-finished' || category?.type === 'finished';
+    const isFinishedGood = category?.type === CATEGORY_TYPES.FINISHED;
 
     // Parse allocation if it's a string
     let allocation = receipt?.allocation;
@@ -627,23 +586,34 @@ const InventoryOverview = () => {
     });
 
     const term = recentSearch.trim().toLowerCase();
+    const isFiltered = term || recentStatusFilter !== "all" || recentTypeFilter !== "all";
 
     return sorted
       .filter((receipt) => {
-        if (!term) return true;
-        const product = productsById[receipt.productId];
-        const productName = (product?.name || "").toLowerCase();
-        const lot = (receipt.lotNo || "").toLowerCase();
-        const submitted = formatDate(receipt.submittedAt || receipt.receiptDate).toLowerCase();
-        const approved = formatDate(receipt.approvedAt).toLowerCase();
-        return (
-          productName.includes(term) ||
-          lot.includes(term) ||
-          submitted.includes(term) ||
-          approved.includes(term)
-        );
+        if (term) {
+          const product = productsById[receipt.productId];
+          const productName = (product?.name || "").toLowerCase();
+          const lot = (receipt.lotNo || "").toLowerCase();
+          const submitted = formatDate(receipt.submittedAt || receipt.receiptDate).toLowerCase();
+          const approved = formatDate(receipt.approvedAt).toLowerCase();
+          if (
+            !productName.includes(term) &&
+            !lot.includes(term) &&
+            !submitted.includes(term) &&
+            !approved.includes(term)
+          ) return false;
+        }
+        if (recentStatusFilter !== "all" && receipt.status !== recentStatusFilter) return false;
+        if (recentTypeFilter !== "all") {
+          const product = productsById[receipt.productId];
+          const category = categoriesById[product?.categoryId];
+          if (recentTypeFilter === "finished" && category?.type !== CATEGORY_TYPES.FINISHED) return false;
+          if (recentTypeFilter === "ingredient" && category?.type !== "ingredient") return false;
+          if (recentTypeFilter === "packaging" && category?.type !== CATEGORY_TYPES.PACKAGING) return false;
+        }
+        return true;
       })
-      .slice(0, 30)
+      .slice(0, isFiltered ? 100 : 30)
       .map((receipt) => {
         const product = productsById[receipt.productId];
         const category = categoriesById[product?.categoryId];
@@ -652,7 +622,7 @@ const InventoryOverview = () => {
         const qty = Number(receipt.quantity) || 0;
         const qtyUnits = receipt.quantityUnits || '';
         const derivedPallets =
-          productType === 'finished' && qtyUnits === 'cases' && defaultCPP > 0
+          productType === CATEGORY_TYPES.FINISHED && qtyUnits === 'cases' && defaultCPP > 0
             ? Math.round((qty / defaultCPP) * 100) / 100
             : null;
         return {
@@ -660,6 +630,7 @@ const InventoryOverview = () => {
           status: receipt.status,
           productName: product?.name || "Unknown product",
           categoryName: category?.name || "—",
+          categoryType: category?.type || null,
           quantity: qty,
           quantityUnits: qtyUnits,
           pallets: derivedPallets,
@@ -669,7 +640,7 @@ const InventoryOverview = () => {
             userLookup[receipt.submittedBy] || receipt.submittedBy || "—",
           approvedBy: receipt.approvedBy
             ? userLookup[receipt.approvedBy] || receipt.approvedBy
-            : "Pending",
+            : "—",
           timestamp:
             formatDate(receipt.approvedAt) ||
             formatDate(receipt.submittedAt) ||
@@ -682,7 +653,7 @@ const InventoryOverview = () => {
           note: receipt.note || "",
         };
       });
-  }, [receipts, productsById, categoriesById, userLookup, locationLookup, recentSearch]);
+  }, [receipts, productsById, categoriesById, userLookup, locationLookup, recentSearch, recentStatusFilter, recentTypeFilter]);
 
   const inventoryRows = useMemo(() => {
     const totals = {};
@@ -712,7 +683,7 @@ const InventoryOverview = () => {
       }
       productReceiptsMap[productId].push(receipt);
 
-      if (receipt.status === "approved") {
+      if (receipt.status === RECEIPT_STATUS.APPROVED) {
         if (!totals[productId]) {
           totals[productId] = { quantity: 0, lots: new Set() };
         }
@@ -761,7 +732,7 @@ const InventoryOverview = () => {
         }, null);
 
         const lastApproval = productReceipts
-          .filter((receipt) => receipt.status === "approved")
+          .filter((receipt) => receipt.status === RECEIPT_STATUS.APPROVED)
           .reduce((latest, current) => {
             const latestTime = latest ? parseDate(latest.approvedAt) || -Infinity : -Infinity;
             const currentTime = parseDate(current.approvedAt) || -Infinity;
@@ -777,7 +748,7 @@ const InventoryOverview = () => {
         const holdCount = productReceipts.filter((receipt) => receipt.hold).length;
 
         // Determine unit label for quantity: finished goods default to cases; for others use last receipt units
-        const quantityUnitLabel = (lastApproval?.quantityUnits || lastSubmission?.quantityUnits || (category?.type === 'finished' ? 'cases' : ''));
+        const quantityUnitLabel = (lastApproval?.quantityUnits || lastSubmission?.quantityUnits || (category?.type === CATEGORY_TYPES.FINISHED ? 'cases' : ''));
 
         // Build container info string for display (e.g. "40 barrels @ 500 lbs ea.")
         const refReceipt = lastApproval || lastSubmission;
@@ -875,6 +846,9 @@ const InventoryOverview = () => {
             case "older":
               if (daysSinceLastReceipt <= 90) return false;
               break;
+            case "none":
+              if (row.lastEntryTimestamp !== 0) return false;
+              break;
           }
         }
 
@@ -936,6 +910,24 @@ const InventoryOverview = () => {
     searchFields,
   ]);
 
+  const categoryProductCounts = useMemo(() => {
+    const counts = {};
+    inventoryRows.forEach(row => {
+      const product = productsById[row.id];
+      if (product?.categoryId) {
+        counts[product.categoryId] = (counts[product.categoryId] || 0) + 1;
+      }
+    });
+    return counts;
+  }, [inventoryRows, productsById]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: inventoryRows.length,
+    getScrollElement: () => tableParentRef.current,
+    estimateSize: () => 52,
+    overscan: 10,
+  });
+
   const generalLocationData = useMemo(() => {
     const map = {};
 
@@ -961,7 +953,7 @@ const InventoryOverview = () => {
     });
 
     receipts
-      .filter((receipt) => receipt.status === "approved")
+      .filter((receipt) => receipt.status === RECEIPT_STATUS.APPROVED)
       .forEach((receipt) => {
         const targetId = receipt.subLocation || receipt.location;
         if (!targetId) return;
@@ -1044,7 +1036,7 @@ const InventoryOverview = () => {
 
     const floorMap = {};
     receipts
-      .filter((receipt) => receipt.status === "approved")
+      .filter((receipt) => receipt.status === RECEIPT_STATUS.APPROVED)
       .forEach((receipt) => {
         const floor = receipt.allocation?.floorAllocation;
         if (floor && (floor.pallets > 0 || floor.cases > 0)) {
@@ -1087,7 +1079,7 @@ const InventoryOverview = () => {
         // Attach unit label for each product using latest approved receipt as source of truth
         const productUnitMap = {};
         receipts
-          .filter(r => r.status === 'approved')
+          .filter(r => r.status === RECEIPT_STATUS.APPROVED)
           .forEach(r => {
             if (!productUnitMap[r.productId] && r.quantityUnits) {
               productUnitMap[r.productId] = r.quantityUnits;
@@ -1109,8 +1101,15 @@ const InventoryOverview = () => {
           location.parentId === locationFilter;
         if (!inSelectedLocation) return false;
 
-        if (showEmptyOnly) {
+        if (occupancyFilter === "empty") {
           return location.totalQuantity === 0;
+        }
+        if (occupancyFilter === "occupied") {
+          if (location.totalQuantity === 0) return false;
+        }
+        // "near-capacity" not applicable to general locations — show all
+        if (occupancyFilter === "near-capacity") {
+          return location.totalQuantity > 0;
         }
 
         if (
@@ -1120,13 +1119,27 @@ const InventoryOverview = () => {
           return false;
         }
 
+        if (locationSearch) {
+          const needle = locationSearch.toLowerCase();
+          const locationName = (
+            location.parentName
+              ? `${location.parentName} / ${location.name}`
+              : location.name
+          ).toLowerCase();
+          const hasMatchingProduct = location.displayProducts.some(p =>
+            (p.name || "").toLowerCase().includes(needle)
+          );
+          if (!locationName.includes(needle) && !hasMatchingProduct) return false;
+        }
+
         return location.totalQuantity > 0 || location.displayProducts.length > 0;
       });
   }, [
     generalLocationData,
     locationFilter,
     locationProductFilter,
-    showEmptyOnly,
+    occupancyFilter,
+    locationSearch,
   ]);
 
   const filteredFinishedRows = useMemo(() => {
@@ -1136,25 +1149,40 @@ const InventoryOverview = () => {
         if (areaFilter !== "floor" && row.areaId !== areaFilter) return false;
       }
 
-      if (showEmptyOnly) {
+      if (occupancyFilter === "empty") {
         if (row.occupiedPallets > 0 || row.occupiedCases > 0) return false;
-      } else if (!row.productId && row.areaId !== "floor") {
-        if (row.occupiedPallets === 0 && row.occupiedCases === 0) {
-          return false;
-        }
-      }
-
-      if (locationProductFilter !== "all") {
-        if (row.productId !== locationProductFilter) {
-          if (!(showEmptyOnly && !row.productId)) {
+      } else if (occupancyFilter === "occupied") {
+        if (row.occupiedPallets === 0 && row.occupiedCases === 0) return false;
+      } else if (occupancyFilter === "near-capacity") {
+        const pct = row.palletCapacity > 0 ? row.occupiedPallets / row.palletCapacity : 0;
+        if (pct <= 0.8) return false;
+      } else {
+        // "all" — hide completely empty rows that have no product (unless near capacity is selected)
+        if (!row.productId && row.areaId !== "floor") {
+          if (row.occupiedPallets === 0 && row.occupiedCases === 0) {
             return false;
           }
         }
       }
 
+      if (locationProductFilter !== "all") {
+        if (row.productId !== locationProductFilter) {
+          if (!(occupancyFilter === "empty" && !row.productId)) {
+            return false;
+          }
+        }
+      }
+
+      if (locationSearch) {
+        const needle = locationSearch.toLowerCase();
+        const areaRow = `${row.areaName || ""} ${row.rowName || ""}`.toLowerCase();
+        const product = (row.productName || "").toLowerCase();
+        if (!areaRow.includes(needle) && !product.includes(needle)) return false;
+      }
+
       return true;
     });
-  }, [finishedRowsData, areaFilter, locationProductFilter, showEmptyOnly]);
+  }, [finishedRowsData, areaFilter, locationProductFilter, occupancyFilter, locationSearch]);
 
   return (
     <div className="inventory-page">
@@ -1208,20 +1236,63 @@ const InventoryOverview = () => {
                 />
               </label>
             </div>
+            <div className="recent-filter-chips">
+              <span className="chip-group-label">Status:</span>
+              {[
+                { value: "all", label: "All" },
+                { value: "approved", label: "Approved" },
+                { value: "recorded", label: "Recorded" },
+                { value: "pending", label: "Pending" },
+              ].map(opt => (
+                <button
+                  key={opt.value}
+                  className={`recent-filter-chip${recentStatusFilter === opt.value ? " active" : ""}`}
+                  onClick={() => setRecentStatusFilter(opt.value)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+              <span className="chip-group-label" style={{ marginLeft: 12 }}>Type:</span>
+              {[
+                { value: "all", label: "All" },
+                { value: "finished", label: "FG" },
+                { value: "ingredient", label: "Ingredients" },
+                { value: "packaging", label: "Packaging" },
+              ].map(opt => (
+                <button
+                  key={opt.value}
+                  className={`recent-filter-chip${recentTypeFilter === opt.value ? " active" : ""}`}
+                  onClick={() => setRecentTypeFilter(opt.value)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <div className="recent-entry-count muted" style={{ fontSize: 13, padding: "4px 0 8px 0" }}>
+              Showing {recentEntries.length} {recentEntries.length === 1 ? "entry" : "entries"}
+            </div>
             <div className="recent-list">
               {(() => {
                 const groups = recentEntries.reduce((acc, e) => {
                   const d = new Date(e.timestampMs);
                   const today = new Date(); today.setHours(0, 0, 0, 0);
                   const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
-                  const key = d >= today ? 'Today' : d >= yesterday ? 'Yesterday' : 'Earlier';
+                  const thisWeekStart = new Date(today); thisWeekStart.setDate(today.getDate() - 7);
+                  let key;
+                  if (d >= today) key = 'Today';
+                  else if (d >= yesterday) key = 'Yesterday';
+                  else if (d >= thisWeekStart) key = 'This Week';
+                  else key = 'Earlier';
                   (acc[key] = acc[key] || []).push(e);
                   return acc;
                 }, {});
-                return Object.entries(groups).map(([label, items]) => (
+                const groupOrder = ['Today', 'Yesterday', 'This Week', 'Earlier'];
+                return groupOrder
+                  .filter(label => groups[label])
+                  .map(label => (
                   <div key={label} className="recent-group">
                     <div className="group-header sticky">{label}</div>
-                    {items.map(entry => (
+                    {groups[label].map(entry => (
                       <article key={entry.id} className="recent-card">
                         <header>
                           <div>
@@ -1288,7 +1359,7 @@ const InventoryOverview = () => {
                           .filter((category) => category.parentId === group.id)
                           .map((category) => (
                             <option key={category.id} value={category.id}>
-                              {category.name}
+                              {category.name}{categoryProductCounts[category.id] !== undefined ? ` (${categoryProductCounts[category.id]})` : ""}
                             </option>
                           ))}
                       </optgroup>
@@ -1364,7 +1435,7 @@ const InventoryOverview = () => {
                         <div className="chart-container">
                           <h3>Finished Goods Capacity</h3>
                           <div className="capacity-chart">
-                            {finishedGoodsCapacity.map((area, index) => (
+                            {finishedGoodsCapacity.map((area) => (
                               <div key={area.name} className="capacity-bar">
                                 <div className="capacity-label">
                                   <span>{area.name}</span>
@@ -1553,6 +1624,7 @@ const InventoryOverview = () => {
                               <option value="30days">Last 30 days</option>
                               <option value="90days">Last 90 days</option>
                               <option value="older">Older than 90 days</option>
+                              <option value="none">No activity ever</option>
                             </select>
                           </label>
                           <label>
@@ -1622,50 +1694,19 @@ const InventoryOverview = () => {
               </div>
             </section>
 
+            {/* Always-visible smart search */}
+            <div className="inventory-search-bar">
+              <input
+                type="text"
+                value={smartSearchTerm}
+                onChange={(e) => setSmartSearchTerm(e.target.value)}
+                placeholder="Search by name, SID, FCC, or lot…"
+              />
+              <span className="inventory-result-count muted">{inventoryRows.length} product{inventoryRows.length !== 1 ? "s" : ""}</span>
+            </div>
+
             {/* Table Section - Shown after filters */}
             <section className="panel">
-              {/* Bulk Actions */}
-              {selectedItems.size > 0 && (
-                <div className="bulk-actions">
-                  <span className="bulk-selection">
-                    {selectedItems.size} item{selectedItems.size !== 1 ? 's' : ''} selected
-                  </span>
-                  <div className="bulk-buttons">
-                    <select
-                      value={bulkAction}
-                      onChange={(e) => setBulkAction(e.target.value)}
-                      className="bulk-select"
-                    >
-                      <option value="">Choose Action</option>
-                      <option value="hold">Set on Hold</option>
-                      <option value="release">Release from Hold</option>
-                      <option value="print">Print Selected</option>
-                    </select>
-                    <button
-                      onClick={() => {
-                        if (bulkAction === "print") {
-                          setShowPrintModal(true);
-                        } else {
-                          alert(`Bulk action "${bulkAction}" for ${selectedItems.size} items`);
-                        }
-                        setBulkAction("");
-                        setSelectedItems(new Set());
-                      }}
-                      disabled={!bulkAction}
-                      className="bulk-execute-btn"
-                    >
-                      Execute
-                    </button>
-                    <button
-                      onClick={() => setSelectedItems(new Set())}
-                      className="bulk-clear-btn"
-                    >
-                      Clear Selection
-                    </button>
-                  </div>
-                </div>
-              )}
-
               {/* Column Visibility Toggle */}
               <div className="column-controls">
                 <span>Columns:</span>
@@ -1692,153 +1733,138 @@ const InventoryOverview = () => {
                 </button>
               </div>
 
-              <div className="table-wrapper">
+              <div ref={tableParentRef} className="table-wrapper virtual-table-container">
                 <table className="simple-table enhanced-table">
                   <thead>
                     <tr>
-                      {visibleColumns.product && <th>
-                        <input
-                          type="checkbox"
-                          checked={selectedItems.size === inventoryRows.length && inventoryRows.length > 0}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedItems(new Set(inventoryRows.map(row => row.id)));
-                            } else {
-                              setSelectedItems(new Set());
-                            }
-                          }}
-                        />
-                      </th>}
                       {visibleColumns.product && <th>Product</th>}
-                      {visibleColumns.category && <th>Category</th>}
+                      {visibleColumns.category && <th className="hide-tablet">Category</th>}
                       {visibleColumns.type && <th>Type</th>}
-                      {visibleColumns.locations && <th>Location(s)</th>}
+                      {visibleColumns.locations && <th className="hide-tablet">Location(s)</th>}
                       {visibleColumns.holdStatus && <th>Hold Status</th>}
                       {visibleColumns.availableQty && <th>Available Qty</th>}
-                      {visibleColumns.lotsTracked && <th>Lots Tracked</th>}
-                      {visibleColumns.pendingReceipts && <th>Pending Receipts</th>}
-                      {visibleColumns.lastReceipt && <th>Last Receipt</th>}
-                      {visibleColumns.lastApproval && <th>Last Approval</th>}
-                      {visibleColumns.description && <th>Description</th>}
+                      {visibleColumns.lotsTracked && <th className="hide-tablet">Lots Tracked</th>}
+                      {visibleColumns.pendingReceipts && <th className="hide-tablet">Pending Receipts</th>}
+                      {visibleColumns.lastReceipt && <th className="hide-mobile">Last Receipt</th>}
+                      {visibleColumns.lastApproval && <th className="hide-mobile">Last Approval</th>}
+                      {visibleColumns.description && <th className="hide-mobile">Description</th>}
                     </tr>
                   </thead>
                   <tbody>
-                    {inventoryRows.map((row) => {
-                      // Color coding logic
-                      const getRowClass = () => {
-                        let classes = [];
-                        if (row.quantity === 0) classes.push('zero-inventory');
-                        if (row.holdActive) classes.push('on-hold');
-                        if (row.pendingCount > 0) classes.push('has-pending');
-                        if (row.quantity < 100) classes.push('low-stock');
-                        return classes.join(' ');
-                      };
-
-                      const getQuantityClass = () => {
-                        if (row.quantity === 0) return 'qty-zero';
-                        if (row.quantity < 100) return 'qty-low';
-                        if (row.quantity > 1000) return 'qty-high';
-                        return 'qty-normal';
-                      };
-
-                      return (
-                        <tr key={row.id} className={getRowClass()}>
-                          {visibleColumns.product && <td>
-                            <input
-                              type="checkbox"
-                              checked={selectedItems.has(row.id)}
-                              onChange={(e) => {
-                                if (e.target.checked) {
-                                  setSelectedItems(prev => new Set([...prev, row.id]));
-                                } else {
-                                  setSelectedItems(prev => {
-                                    const newSet = new Set(prev);
-                                    newSet.delete(row.id);
-                                    return newSet;
-                                  });
-                                }
-                              }}
-                            />
-                          </td>}
-                          {visibleColumns.product && <td>
-                            <div className="product-cell">
-                              <button
-                                type="button"
-                                className="link-plain"
-                                onClick={() => setDetailProductId(row.id)}
-                                title="View details"
-                              >
-                                <strong>{row.name}</strong>
-                              </button>
-                              {row.pendingCount > 0 && <span className="pending-badge">{row.pendingCount}</span>}
-                            </div>
-                          </td>}
-                          {visibleColumns.category && <td>{row.category}</td>}
-                          {visibleColumns.type && <td className="capitalize">{row.type}</td>}
-                          {visibleColumns.locations && <td>
-                            {row.locations.length ? (
-                              <ul className="location-list compact">
-                                {row.locations.map((loc, index) => (
-                                  <li key={`${row.id}-loc-${index}`}>
-                                    <strong>{loc.label}</strong>
-                                    {loc.detail && <span>{loc.detail}</span>}
-                                  </li>
-                                ))}
-                              </ul>
-                            ) : (
-                              <span className="muted">—</span>
-                            )}
-                          </td>}
-                          {visibleColumns.holdStatus && <td>
-                            <span
-                              className={`chip ${row.holdActive ? "chip-hold" : "chip-clear"}`}
-                            >
-                              {row.holdLabel}
-                            </span>
-                          </td>}
-                          {visibleColumns.availableQty && <td>
-                            <span className={`quantity-cell ${getQuantityClass()}`}>
-                              {row.quantity.toLocaleString()} {row.unitLabel ? row.unitLabel : ''}
-                            </span>
-                            {row.containerInfo && (
-                              <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '2px' }}>
-                                {row.containerInfo}
-                              </div>
-                            )}
-                          </td>}
-                          {visibleColumns.lotsTracked && <td>{row.lotCount}</td>}
-                          {visibleColumns.pendingReceipts && <td>
-                            {row.pendingCount > 0 ? (
-                              <span className="pending-count">{row.pendingCount}</span>
-                            ) : (
-                              <span className="muted">0</span>
-                            )}
-                          </td>}
-                          {visibleColumns.lastReceipt && <td>
-                            <div className="cell-stack">
-                              <span className="cell-main">{row.lastSubmittedBy}</span>
-                              <span className="cell-sub">{row.lastSubmittedAt}</span>
-                            </div>
-                          </td>}
-                          {visibleColumns.lastApproval && <td>
-                            <div className="cell-stack">
-                              <span className="cell-main">{row.lastApprovedBy}</span>
-                              <span className="cell-sub">{row.lastApprovedAt}</span>
-                            </div>
-                          </td>}
-                          {visibleColumns.description && <td>
-                            <span className="muted">{row.description}</span>
-                          </td>}
-                        </tr>
-                      );
-                    })}
-                    {!inventoryRows.length && (
+                    {inventoryRows.length === 0 ? (
                       <tr>
                         <td colSpan={11} className="empty">
                           No inventory found with the current filters.
                         </td>
                       </tr>
-                    )}
+                    ) : (() => {
+                      const virtualItems = rowVirtualizer.getVirtualItems();
+                      const totalSize = rowVirtualizer.getTotalSize();
+                      const firstItem = virtualItems[0];
+                      const lastItem = virtualItems[virtualItems.length - 1];
+                      const paddingTop = firstItem ? firstItem.start : 0;
+                      const paddingBottom = lastItem ? totalSize - lastItem.end : 0;
+                      const colCount = Object.values(visibleColumns).filter(Boolean).length;
+
+                      return (
+                        <>
+                          {paddingTop > 0 && (
+                            <tr><td colSpan={colCount} style={{ height: paddingTop, padding: 0 }} /></tr>
+                          )}
+                          {virtualItems.map(vRow => {
+                            const row = inventoryRows[vRow.index];
+                            const getRowClass = () => {
+                              const classes = [];
+                              if (row.quantity === 0) classes.push('zero-inventory');
+                              if (row.holdActive) classes.push('on-hold');
+                              if (row.pendingCount > 0) classes.push('has-pending');
+                              if (row.quantity < 100) classes.push('low-stock');
+                              return classes.join(' ');
+                            };
+                            const getQuantityClass = () => {
+                              if (row.quantity === 0) return 'qty-zero';
+                              if (row.quantity < 100) return 'qty-low';
+                              if (row.quantity > 1000) return 'qty-high';
+                              return 'qty-normal';
+                            };
+                            return (
+                              <tr key={row.id} className={getRowClass()}>
+                                {visibleColumns.product && <td>
+                                  <div className="product-cell">
+                                    <button
+                                      type="button"
+                                      className="link-plain"
+                                      onClick={() => setDetailProductId(row.id)}
+                                      title="View details"
+                                    >
+                                      <strong>{row.name}</strong>
+                                    </button>
+                                    {row.pendingCount > 0 && <span className="pending-badge">{row.pendingCount}</span>}
+                                  </div>
+                                </td>}
+                                {visibleColumns.category && <td className="hide-tablet">{row.category}</td>}
+                                {visibleColumns.type && <td className="capitalize">{row.type}</td>}
+                                {visibleColumns.locations && <td className="hide-tablet">
+                                  {row.locations.length ? (
+                                    <ul className="location-list compact">
+                                      {row.locations.map((loc, index) => (
+                                        <li key={`${row.id}-loc-${index}`}>
+                                          <strong>{loc.label}</strong>
+                                          {loc.detail && <span>{loc.detail}</span>}
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  ) : (
+                                    <span className="muted">—</span>
+                                  )}
+                                </td>}
+                                {visibleColumns.holdStatus && <td>
+                                  <span className={`chip ${row.holdActive ? "chip-hold" : "chip-clear"}`}>
+                                    {row.holdLabel}
+                                  </span>
+                                </td>}
+                                {visibleColumns.availableQty && <td>
+                                  <span className={`quantity-cell ${getQuantityClass()}`}>
+                                    {row.quantity.toLocaleString()} {row.unitLabel ? row.unitLabel : ''}
+                                  </span>
+                                  {row.containerInfo && (
+                                    <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '2px' }}>
+                                      {row.containerInfo}
+                                    </div>
+                                  )}
+                                </td>}
+                                {visibleColumns.lotsTracked && <td className="hide-tablet">{row.lotCount}</td>}
+                                {visibleColumns.pendingReceipts && <td className="hide-tablet">
+                                  {row.pendingCount > 0 ? (
+                                    <span className="pending-count">{row.pendingCount}</span>
+                                  ) : (
+                                    <span className="muted">0</span>
+                                  )}
+                                </td>}
+                                {visibleColumns.lastReceipt && <td className="hide-mobile">
+                                  <div className="cell-stack">
+                                    <span className="cell-main">{row.lastSubmittedBy}</span>
+                                    <span className="cell-sub">{row.lastSubmittedAt}</span>
+                                  </div>
+                                </td>}
+                                {visibleColumns.lastApproval && <td className="hide-mobile">
+                                  <div className="cell-stack">
+                                    <span className="cell-main">{row.lastApprovedBy}</span>
+                                    <span className="cell-sub">{row.lastApprovedAt}</span>
+                                  </div>
+                                </td>}
+                                {visibleColumns.description && <td className="hide-mobile">
+                                  <span className="muted">{row.description}</span>
+                                </td>}
+                              </tr>
+                            );
+                          })}
+                          {paddingBottom > 0 && (
+                            <tr><td colSpan={colCount} style={{ height: paddingBottom, padding: 0 }} /></tr>
+                          )}
+                        </>
+                      );
+                    })()}
                   </tbody>
                 </table>
               </div>
@@ -2011,14 +2037,15 @@ const InventoryOverview = () => {
                         <table className="simple-table compact">
                           <thead>
                             <tr>
-                              <th>Lot</th>
-                              <th>Location</th>
-                              <th>Row</th>
+                              <th className="hide-mobile">Lot</th>
+                              <th className="hide-tablet">Location</th>
+                              <th className="hide-tablet">Row</th>
                               <th>Quantity</th>
                               <th>Status</th>
-                              <th>Hold</th>
-                              <th>Receipt Date</th>
+                              <th className="hide-mobile">Hold</th>
+                              <th className="hide-mobile">Receipt Date</th>
                               <th
+                                className="hide-mobile"
                                 style={{ cursor: 'pointer', userSelect: 'none' }}
                                 onClick={() => setExpirySortDirection(prev => prev === "desc" ? "asc" : "desc")}
                                 title={`Click to sort ${expirySortDirection === "desc" ? "ascending" : "descending"}`}
@@ -2057,9 +2084,9 @@ const InventoryOverview = () => {
                               
                               return (
                                 <tr key={r.id}>
-                                  <td>{r.lotNo || '—'}</td>
-                                  <td>{locationLabel}</td>
-                                  <td>{rowDisplay}</td>
+                                  <td className="hide-mobile">{r.lotNo || '—'}</td>
+                                  <td className="hide-tablet">{locationLabel}</td>
+                                  <td className="hide-tablet">{rowDisplay}</td>
                                   <td>
                                     {Number(r.quantity || 0).toLocaleString()} {r.quantityUnits || ''}
                                     {r.containerCount && r.containerUnit && r.weightPerContainer && r.weightUnit && (
@@ -2069,7 +2096,7 @@ const InventoryOverview = () => {
                                     )}
                                   </td>
                                   <td className="capitalize">{r.status}</td>
-                                  <td>
+                                  <td className="hide-mobile">
                                     {(() => {
                                       const heldQty = Number(r.heldQuantity || r.held_quantity || 0);
                                       const holdLoc = r.holdLocation || r.hold_location || null;
@@ -2083,8 +2110,8 @@ const InventoryOverview = () => {
                                       }
                                     })()}
                                   </td>
-                                  <td>{formatDate(r.approvedAt) || formatDate(r.submittedAt) || formatDate(r.receiptDate)}</td>
-                                  <td>{formatDate(r.expiration) || formatDate(r.expirationDate) || '—'}</td>
+                                  <td className="hide-mobile">{formatDate(r.approvedAt) || formatDate(r.submittedAt) || formatDate(r.receiptDate)}</td>
+                                  <td className="hide-mobile">{formatDate(r.expiration) || formatDate(r.expirationDate) || '—'}</td>
                                 </tr>
                               );
                             })}
@@ -2166,20 +2193,44 @@ const InventoryOverview = () => {
                     ))}
                   </select>
                 </label>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={showEmptyOnly}
-                    onChange={(event) => setShowEmptyOnly(event.target.checked)}
-                  />
-                  <span>Show empty slots only</span>
+                <label>
+                  <span>Occupancy</span>
+                  <select
+                    value={occupancyFilter}
+                    onChange={(event) => setOccupancyFilter(event.target.value)}
+                  >
+                    <option value="all">All</option>
+                    <option value="occupied">Occupied</option>
+                    <option value="empty">Empty slots only</option>
+                    <option value="near-capacity">Near capacity (&gt;80%)</option>
+                  </select>
                 </label>
+                <div className="location-search-bar">
+                  <input
+                    type="text"
+                    value={locationSearch}
+                    onChange={(event) => setLocationSearch(event.target.value)}
+                    placeholder="Search location or product…"
+                  />
+                </div>
+                <button
+                  className="clear-filters-btn"
+                  onClick={() => {
+                    setLocationFilter("all");
+                    setAreaFilter("all");
+                    setLocationProductFilter("all");
+                    setOccupancyFilter("all");
+                    setLocationSearch("");
+                  }}
+                >
+                  Clear Filters
+                </button>
               </div>
             </section>
 
             <section className="panel">
               <div className="panel-header">
-                <h3>Warehouse Locations</h3>
+                <h3>Warehouse Locations <span className="count-badge">{filteredGeneralLocations.length}</span></h3>
                 <span className="muted">
                   Totals include approved raw and packaging materials
                 </span>
@@ -2210,7 +2261,13 @@ const InventoryOverview = () => {
                                 <span className="tag tag-hold" style={{ marginLeft: 6 }}>{product.holdCount} hold</span>
                               )}
                             </td>
-                            <td className="muted">{product.lots.length ? product.lots.join(', ') : '—'}</td>
+                            <td className="muted">
+                              {product.lots.length ? (
+                                <span title={product.lots.join(', ')}>
+                                  {product.lots.length} lot{product.lots.length !== 1 ? 's' : ''}
+                                </span>
+                              ) : '—'}
+                            </td>
                             <td style={{ textAlign: 'right' }}>{product.totalQuantity.toLocaleString()} {product.quantityUnits}</td>
                           </tr>
                         ))
@@ -2238,7 +2295,7 @@ const InventoryOverview = () => {
 
             <section className="panel">
               <div className="panel-header">
-                <h3>Finished Goods Rows</h3>
+                <h3>Finished Goods Rows <span className="count-badge">{filteredFinishedRows.length}</span></h3>
                 <span className="muted">
                   Capacity includes pallet and case occupancy for racks and floor staging
                 </span>
@@ -2259,9 +2316,18 @@ const InventoryOverview = () => {
                       <tr key={row.rowId} className={row.hold ? 'on-hold' : ''}>
                         <td>{row.areaName}{row.rowName ? ` / ${row.rowName}` : ''}</td>
                         <td style={{ textAlign: 'right' }}>
-                          {row.palletCapacity !== null
-                            ? `${row.occupiedPallets}/${row.palletCapacity}`
-                            : row.occupiedPallets}
+                          {row.palletCapacity > 0 ? (() => {
+                            const pct = Math.min((row.occupiedPallets / row.palletCapacity) * 100, 100);
+                            const barColor = pct > 80 ? '#ef4444' : pct > 60 ? '#f59e0b' : '#22c55e';
+                            return (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' }}>
+                                <span>{row.occupiedPallets}/{row.palletCapacity}</span>
+                                <div style={{ width: 40, height: 6, background: '#e5e7eb', borderRadius: 3, overflow: 'hidden' }}>
+                                  <div style={{ width: `${pct}%`, height: '100%', background: barColor, borderRadius: 3 }} />
+                                </div>
+                              </div>
+                            );
+                          })() : row.occupiedPallets}
                         </td>
                         <td>{row.productName || <span className="muted">Empty slot</span>}</td>
                         <td style={{ textAlign: 'right' }}>{row.productName ? row.occupiedCases.toLocaleString() : '—'}</td>

@@ -1,11 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
-import { MapPin, ArrowRight, Package, Scan } from 'lucide-react';
+import { MapPin, ArrowRight, Package, Scan, X, Send } from 'lucide-react';
 import './ScannerTransferFlow.css';
-
-const API_BASE = '/api';
 
 const ScannerTransferFlow = () => {
   const navigate = useNavigate();
@@ -20,11 +18,8 @@ const ScannerTransferFlow = () => {
   const inputRef = useRef(null);
   const destInputRef = useRef(null);
 
-  const token = localStorage.getItem('token');
-  const headers = { Authorization: `Bearer ${token}` };
-
   useEffect(() => {
-    axios.get(`${API_BASE}/scanner/storage-rows`, { headers })
+    apiClient.get('/scanner/storage-rows')
       .then((r) => setStorageRows(r.data || []))
       .catch(() => setStorageRows([]));
   }, []);
@@ -45,15 +40,18 @@ const ScannerTransferFlow = () => {
     setLoading(true);
 
     try {
-      const r = await axios.get(`${API_BASE}/pallet-licences/`, {
+      const r = await apiClient.get('/pallet-licences/', {
         params: { licence_number: lic, status: 'in_stock' },
-        headers,
       });
       if (!r.data || r.data.length === 0) {
         setError('Pallet not found or not in stock');
         return;
       }
       const pl = r.data[0];
+      if (pl.is_held) {
+        setError('This pallet is on hold — release the hold before moving it.');
+        return;
+      }
       setCurrentLicence(pl);
       setLicenceInput('');
       setSelectedDestId('');
@@ -65,7 +63,6 @@ const ScannerTransferFlow = () => {
     }
   };
 
-  // Destination rows with capacity only
   const availableDestRows = storageRows.filter((r) => (r.available ?? 0) > 0);
 
   const handleScanDestination = (e) => {
@@ -84,14 +81,20 @@ const ScannerTransferFlow = () => {
       setSelectedDestId(match.id);
       setDestScanInput('');
     } else {
-      setError(`Row "${destScanInput.trim()}" not found or no capacity. Scan row name only.`);
+      setError(`Row "${destScanInput.trim()}" not found or no capacity.`);
       setDestScanInput('');
     }
   };
 
   const handleConfirmMove = () => {
     if (!currentLicence || !selectedDestId) return;
-    setMoves((prev) => [...prev, { licence_id: currentLicence.id, licence_number: currentLicence.licence_number, to_row_id: selectedDestId }]);
+    setMoves((prev) => [...prev, {
+      licence_id: currentLicence.id,
+      licence_number: currentLicence.licence_number,
+      product_name: currentLicence.product?.name || currentLicence.product_name || null,
+      cases: currentLicence.cases || 0,
+      to_row_id: selectedDestId,
+    }]);
     setCurrentLicence(null);
     setSelectedDestId('');
   };
@@ -103,6 +106,10 @@ const ScannerTransferFlow = () => {
     setError('');
   };
 
+  const handleRemoveMove = (idx) => {
+    setMoves((prev) => prev.filter((_, i) => i !== idx));
+  };
+
   const handleSubmit = async () => {
     if (moves.length === 0) return;
     setLoading(true);
@@ -110,7 +117,7 @@ const ScannerTransferFlow = () => {
 
     try {
       const payload = { moves: moves.map((m) => ({ licence_id: m.licence_id, to_row_id: m.to_row_id })) };
-      await axios.post(`${API_BASE}/scanner/internal-transfer`, payload, { headers });
+      await apiClient.post('/scanner/internal-transfer', payload);
       navigate('/forklift');
     } catch (err) {
       setError(err.response?.data?.detail || 'Submit failed');
@@ -120,43 +127,52 @@ const ScannerTransferFlow = () => {
   };
 
   const destRow = storageRows.find((r) => r.id === selectedDestId);
+  const currentRow = currentLicence
+    ? storageRows.find((r) => r.id === currentLicence.storage_row_id)
+    : null;
 
   return (
     <ScannerLayout title="Internal Transfer" showBack>
       <div className="scanner-transfer-flow">
         {!currentLicence ? (
           <>
-            <p className="scanner-transfer-instruction">Scan pallet to move</p>
+            <p className="scanner-transfer-instruction">Scan the pallet to move</p>
             <form onSubmit={handleScanPallet} className="scanner-transfer-form">
               <input
                 ref={inputRef}
                 type="text"
                 value={licenceInput}
                 onChange={(e) => setLicenceInput(e.target.value)}
-                placeholder="Scan licence number"
+                placeholder="Scan licence plate…"
                 className="scanner-transfer-input"
                 autoComplete="off"
               />
-              <button type="submit" disabled={loading} className="scanner-transfer-btn">
-                {loading ? '…' : 'Lookup'}
+              <button type="submit" disabled={loading || !licenceInput.trim()} className="scanner-transfer-btn">
+                {loading ? '…' : <Scan size={22} />}
               </button>
             </form>
           </>
         ) : (
           <>
+            {/* Pallet info card */}
             <div className="scanner-transfer-current">
-              <Package size={24} />
-              <div>
-                <strong>{currentLicence.licence_number}</strong>
-                <p>
-                  <MapPin size={14} /> {(() => {
-                    const r = storageRows.find((x) => x.id === currentLicence.storage_row_id);
-                    return r ? r.name : 'Unknown';
-                  })()}
-                </p>
+              <div className="scanner-transfer-current-icon">
+                <Package size={22} />
+              </div>
+              <div className="scanner-transfer-current-info">
+                <div className="scanner-transfer-current-lic">{currentLicence.licence_number}</div>
+                <div className="scanner-transfer-current-meta">
+                  {(currentLicence.product?.name || currentLicence.product_name) && (
+                    <span>{currentLicence.product?.name || currentLicence.product_name}</span>
+                  )}
+                  {currentLicence.lot_number && <span>Lot: {currentLicence.lot_number}</span>}
+                  <span><Package size={12} /> {currentLicence.cases || 0} cases</span>
+                  {currentRow && <span><MapPin size={12} /> {currentRow.name}</span>}
+                </div>
               </div>
             </div>
-            <p className="scanner-transfer-instruction">Scan destination row (row name only)</p>
+
+            <p className="scanner-transfer-instruction">Scan the destination row</p>
             {!selectedDestId ? (
               <form onSubmit={handleScanDestination} className="scanner-transfer-form">
                 <input
@@ -164,18 +180,23 @@ const ScannerTransferFlow = () => {
                   type="text"
                   value={destScanInput}
                   onChange={(e) => setDestScanInput(e.target.value)}
-                  placeholder="Scan row name"
+                  placeholder="Scan row name…"
                   className="scanner-transfer-input"
                   autoComplete="off"
                 />
                 <button type="submit" disabled={!destScanInput.trim()} className="scanner-transfer-btn">
-                  <Scan size={24} />
+                  <Scan size={22} />
                 </button>
               </form>
             ) : (
               <div className="scanner-transfer-dest-confirm">
                 <p className="scanner-transfer-dest-name">
-                  <MapPin size={18} /> {destRow?.name ?? 'Unknown'}
+                  <MapPin size={18} /> {destRow?.name ?? 'Unknown row'}
+                  {destRow?.available !== undefined && (
+                    <span style={{ fontSize: '0.8rem', fontWeight: 400, marginLeft: 'auto', opacity: 0.7 }}>
+                      {destRow.available} free
+                    </span>
+                  )}
                 </p>
                 <div className="scanner-transfer-actions">
                   <button type="button" className="scanner-transfer-btn secondary" onClick={() => setSelectedDestId('')}>
@@ -189,22 +210,36 @@ const ScannerTransferFlow = () => {
                     className="scanner-transfer-btn"
                     onClick={handleConfirmMove}
                   >
-                    <ArrowRight size={20} /> Add
+                    <ArrowRight size={18} /> Add
                   </button>
                 </div>
               </div>
             )}
           </>
         )}
+
         {error && <div className="scanner-transfer-error">{error}</div>}
+
         {moves.length > 0 && (
           <div className="scanner-transfer-moves">
-            <h3>Moves ({moves.length})</h3>
+            <div className="scanner-transfer-moves-header">
+              <h3>Queued moves ({moves.length})</h3>
+            </div>
             {moves.map((m, i) => {
               const toRow = storageRows.find((r) => r.id === m.to_row_id);
               return (
                 <div key={i} className="scanner-transfer-move-item">
-                  {m.licence_number} → {toRow?.name ?? 'Row'}
+                  <span className="scanner-transfer-move-lic">{m.licence_number}</span>
+                  <ArrowRight size={14} className="scanner-transfer-move-arrow" />
+                  <span className="scanner-transfer-move-dest">{toRow?.name ?? '?'}</span>
+                  <button
+                    type="button"
+                    className="scanner-transfer-move-remove"
+                    title="Remove this move"
+                    onClick={() => handleRemoveMove(i)}
+                  >
+                    <X size={14} />
+                  </button>
                 </div>
               );
             })}
@@ -214,7 +249,8 @@ const ScannerTransferFlow = () => {
               onClick={handleSubmit}
               disabled={loading}
             >
-              Submit for Approval
+              <Send size={18} />
+              {loading ? 'Submitting…' : `Submit ${moves.length} move${moves.length !== 1 ? 's' : ''} for Approval`}
             </button>
           </div>
         )}

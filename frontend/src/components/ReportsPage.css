@@ -26,23 +26,6 @@
   font-size: 15px;
 }
 
-.back-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: #f97316;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  padding: 9px 16px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  margin-bottom: 14px;
-  transition: background-color 0.2s;
-  text-decoration: none;
-}
-.back-button:hover { background: #ea6c00; color: white; }
 
 /* ─────────────────────────────────────────────
    Tab Navigation
@@ -151,7 +134,8 @@
   font-size: 13px;
   font-weight: 500;
   color: #374151;
-  min-width: 160px;
+  flex: 1 1 160px;
+  min-width: 0;
 }
 
 .filter-row input[type="date"],
@@ -271,7 +255,7 @@
 .reports-summary-grid,
 .expiry-buckets {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 16px;
 }
 
@@ -336,7 +320,6 @@
 .report-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 640px;
 }
 
 .report-table th,
@@ -475,7 +458,8 @@
   font-size: 13px;
   font-weight: 500;
   color: #374151;
-  min-width: 150px;
+  flex: 1 1 150px;
+  min-width: 0;
 }
 
 .snap-pit-controls input[type="date"] {
@@ -1079,4 +1063,116 @@
   .lot-trace-header {
     flex-direction: column;
   }
+}
+
+/* ========================================
+   REPORTS PAGE - ENHANCED STYLES
+   (merged from ReportsPageEnhanced.css)
+   ======================================== */
+
+.reports-page { animation: slideIn 0.3s ease-out; }
+@keyframes slideIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.reports-page .back-button {
+    background: var(--gradient-primary) !important;
+    border: none !important;
+    box-shadow: var(--shadow-sm) !important;
+    font-weight: 600 !important;
+    transition: all var(--transition-base) !important;
+}
+.reports-page .back-button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: var(--shadow-md) !important;
+}
+
+.reports-page .reports-filter-bar {
+    background: white;
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-xl);
+    padding: var(--spacing-xl);
+    margin-bottom: var(--spacing-lg);
+    box-shadow: var(--shadow-md);
+}
+
+.reports-page .reports-tabs button.active {
+    background: var(--gradient-primary);
+    color: white;
+    box-shadow: var(--shadow-primary);
+    font-weight: 700;
+}
+.reports-page .reports-tabs button:hover:not(.active) {
+    background: var(--color-surface);
+    color: var(--color-text);
+}
+
+.reports-page .summary-card {
+    background: white;
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--spacing-lg);
+    box-shadow: var(--shadow-sm);
+    transition: all var(--transition-base);
+}
+.reports-page .summary-card:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--shadow-md);
+    border-color: var(--color-primary);
+}
+.reports-page .summary-value {
+    background: var(--gradient-primary);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 800 !important;
+    font-size: 2rem !important;
+}
+
+.reports-page .reports-panel {
+    background: white;
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-xl);
+    padding: var(--spacing-xl);
+    box-shadow: var(--shadow-lg);
+}
+
+.reports-page .report-table {
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    border: 2px solid var(--color-border);
+}
+.reports-page .report-table thead {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.08) 0%, rgba(255, 210, 63, 0.08) 100%) !important;
+    border-bottom: 2px solid var(--color-primary) !important;
+}
+.reports-page .report-table th {
+    color: var(--color-text) !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+    font-size: 0.75rem !important;
+    padding: 1rem !important;
+}
+.reports-page .report-table tbody tr:hover {
+    background: var(--color-primary-soft) !important;
+    transform: scale(1.001);
+}
+.reports-page .report-table td { padding: 1rem !important; }
+
+.reports-page .chart-wrapper {
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.02) 0%, rgba(255, 210, 63, 0.02) 100%);
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--spacing-lg);
+}
+
+.reports-page .empty-state {
+    background: var(--color-surface);
+    border: 2px dashed var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--spacing-xl);
+    text-align: center;
+    color: var(--color-text-muted);
 }

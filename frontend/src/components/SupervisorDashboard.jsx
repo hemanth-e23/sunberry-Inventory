@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import {
@@ -15,6 +15,7 @@ import {
   BarChart3
 } from 'lucide-react';
 import './SupervisorDashboard.css';
+import { RECEIPT_STATUS, TRANSFER_STATUS, ADJUSTMENT_STATUS, HOLD_STATUS } from '../constants';
 
 const SupervisorDashboard = () => {
   const navigate = useNavigate();
@@ -23,10 +24,10 @@ const SupervisorDashboard = () => {
   // Calculate pending approvals count with useMemo for reactivity
   // Receipts use 'recorded' or 'reviewed' as pending statuses, not 'pending'
   const totalPendingCount = React.useMemo(() => {
-    const pendingReceiptsCount = receipts?.filter(r => r.status === 'recorded' || r.status === 'reviewed')?.length || 0;
-    const pendingHoldsCount = inventoryHoldActions?.filter(h => h.status === 'pending')?.length || 0;
-    const pendingAdjustmentsCount = inventoryAdjustments?.filter(a => a.status === 'pending')?.length || 0;
-    const pendingTransfersCount = inventoryTransfers?.filter(t => t.status === 'pending')?.length || 0;
+    const pendingReceiptsCount = receipts?.filter(r => r.status === RECEIPT_STATUS.RECORDED || r.status === RECEIPT_STATUS.REVIEWED)?.length || 0;
+    const pendingHoldsCount = inventoryHoldActions?.filter(h => h.status === HOLD_STATUS.PENDING)?.length || 0;
+    const pendingAdjustmentsCount = inventoryAdjustments?.filter(a => a.status === ADJUSTMENT_STATUS.PENDING)?.length || 0;
+    const pendingTransfersCount = inventoryTransfers?.filter(t => t.status === TRANSFER_STATUS.PENDING)?.length || 0;
     return pendingReceiptsCount + pendingHoldsCount + pendingAdjustmentsCount + pendingTransfersCount;
   }, [receipts, inventoryHoldActions, inventoryAdjustments, inventoryTransfers]);
 
@@ -134,8 +135,8 @@ const SupervisorDashboard = () => {
               />
             </div>
             <ul className="metric-breakdown">
-              <li><strong>{rmOccupiedPallets ?? 0}</strong> occupied</li>
-              <li><strong>{rmAvailablePallets ?? 0}</strong> available</li>
+              <li><strong>{rmOccupiedPallets != null ? Number(rmOccupiedPallets).toFixed(2) : 0}</strong> occupied</li>
+              <li><strong>{rmAvailablePallets != null ? Number(rmAvailablePallets).toFixed(2) : 0}</strong> available</li>
               <li><strong>{rmHeldPallets ?? 0}</strong> on hold</li>
               <li><strong>{rmTotalPalletCapacity ?? 0}</strong> total</li>
             </ul>
@@ -229,23 +230,6 @@ const SupervisorDashboard = () => {
           </div>
         </div>
 
-        <div className="supervisor-dashboard-card card-gradient">
-          <div className="card-icon">
-            <BarChart3 size={28} />
-          </div>
-          <div className="card-content">
-            <h3 className="card-title">Analytics & Reporting</h3>
-            <p className="card-description">
-              BOL report — batch output vs logged finished goods.
-            </p>
-          </div>
-          <div className="button-stack">
-            <button className="nav-button" onClick={() => navigate('/supervisor/bol')}>
-              <BarChart3 size={18} />
-              <span>BOL</span>
-            </button>
-          </div>
-        </div>
       </section>
     </div>
   );

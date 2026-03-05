@@ -91,3 +91,16 @@
         padding: var(--spacing-lg);
     }
 }
+
+@media (max-width: 480px) {
+    .modal-backdrop {
+        padding: 0;
+        align-items: flex-end;
+    }
+
+    .modal {
+        margin: 0;
+        border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+        max-height: 92vh;
+    }
+}

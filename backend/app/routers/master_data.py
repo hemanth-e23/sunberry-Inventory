@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import (
     Location, SubLocation, StorageArea, StorageRow,
-    ProductionShift, ProductionLine
+    ProductionShift, ProductionLine, Warehouse, WarehouseCategoryAccess, CategoryGroup,
 )
 from app.schemas import (
     Location as LocationSchema, LocationCreate, LocationUpdate,
@@ -13,11 +13,145 @@ from app.schemas import (
     StorageArea as StorageAreaSchema, StorageAreaCreate, StorageAreaUpdate,
     StorageRow as StorageRowSchema, StorageRowCreate, StorageRowUpdate,
     ProductionShift as ProductionShiftSchema, ProductionShiftCreate, ProductionShiftUpdate,
-    ProductionLine as ProductionLineSchema, ProductionLineCreate, ProductionLineUpdate
+    ProductionLine as ProductionLineSchema, ProductionLineCreate, ProductionLineUpdate,
+    WarehouseFull, WarehouseCreate, WarehouseUpdate,
+    WarehouseCategoryAccessOut, WarehouseCategoryAccessCreate,
 )
-from app.utils.auth import get_current_active_user, require_role
+from app.utils.auth import get_current_active_user, require_role, warehouse_filter, require_superadmin
+from app.constants import ROLE_SUPERADMIN
 
 router = APIRouter()
+
+
+# Warehouse endpoints
+@router.get("/warehouses", response_model=List[WarehouseFull])
+async def get_warehouses(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """List all warehouses (active + inactive for superadmin, active-only for others)."""
+    query = db.query(Warehouse)
+    if current_user.role != ROLE_SUPERADMIN:
+        query = query.filter(Warehouse.is_active == True)
+    return query.order_by(Warehouse.name).all()
+
+
+@router.post("/warehouses", response_model=WarehouseFull)
+async def create_warehouse(
+    data: WarehouseCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_superadmin),
+):
+    """Create a new warehouse (superadmin only)."""
+    if db.query(Warehouse).filter(Warehouse.id == data.id).first():
+        raise HTTPException(status_code=400, detail="Warehouse ID already exists")
+    if db.query(Warehouse).filter(Warehouse.code == data.code).first():
+        raise HTTPException(status_code=400, detail="Warehouse code already in use")
+    wh = Warehouse(**data.model_dump())
+    db.add(wh)
+    db.commit()
+    db.refresh(wh)
+    return wh
+
+
+@router.put("/warehouses/{warehouse_id}", response_model=WarehouseFull)
+async def update_warehouse(
+    warehouse_id: str,
+    data: WarehouseUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_superadmin),
+):
+    """Update a warehouse (superadmin only)."""
+    wh = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
+    if not wh:
+        raise HTTPException(status_code=404, detail="Warehouse not found")
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(wh, field, value)
+    db.commit()
+    db.refresh(wh)
+    return wh
+
+
+# Warehouse category access endpoints (superadmin only)
+@router.get("/warehouses/{warehouse_id}/category-access", response_model=List[WarehouseCategoryAccessOut])
+async def get_warehouse_category_access(
+    warehouse_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_superadmin),
+):
+    """List category groups assigned to a warehouse."""
+    wh = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
+    if not wh:
+        raise HTTPException(status_code=404, detail="Warehouse not found")
+    return db.query(WarehouseCategoryAccess).filter(
+        WarehouseCategoryAccess.warehouse_id == warehouse_id
+    ).all()
+
+
+@router.post("/warehouses/{warehouse_id}/category-access", response_model=WarehouseCategoryAccessOut)
+async def assign_category_access(
+    warehouse_id: str,
+    data: WarehouseCategoryAccessCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_superadmin),
+):
+    """Assign a category group to a warehouse (superadmin only)."""
+    wh = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
+    if not wh:
+        raise HTTPException(status_code=404, detail="Warehouse not found")
+    grp = db.query(CategoryGroup).filter(CategoryGroup.id == data.category_group_id).first()
+    if not grp:
+        raise HTTPException(status_code=404, detail="Category group not found")
+    existing = db.query(WarehouseCategoryAccess).filter(
+        WarehouseCategoryAccess.warehouse_id == warehouse_id,
+        WarehouseCategoryAccess.category_group_id == data.category_group_id,
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Category group already assigned to this warehouse")
+    access = WarehouseCategoryAccess(
+        warehouse_id=warehouse_id,
+        category_group_id=data.category_group_id,
+    )
+    db.add(access)
+    db.commit()
+    db.refresh(access)
+    return access
+
+
+@router.delete("/warehouses/{warehouse_id}/category-access/{category_group_id}")
+async def remove_category_access(
+    warehouse_id: str,
+    category_group_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_superadmin),
+):
+    """Remove a category group assignment from a warehouse (superadmin only)."""
+    access = db.query(WarehouseCategoryAccess).filter(
+        WarehouseCategoryAccess.warehouse_id == warehouse_id,
+        WarehouseCategoryAccess.category_group_id == category_group_id,
+    ).first()
+    if not access:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    db.delete(access)
+    db.commit()
+    return {"message": "Category access removed"}
+
+
+@router.post("/warehouses/{warehouse_id}/toggle-product-creation", response_model=WarehouseFull)
+async def toggle_product_creation(
+    warehouse_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_superadmin),
+):
+    """Toggle allow_product_creation flag on a warehouse (superadmin only)."""
+    wh = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
+    if not wh:
+        raise HTTPException(status_code=404, detail="Warehouse not found")
+    wh.allow_product_creation = not wh.allow_product_creation
+    db.commit()
+    db.refresh(wh)
+    return wh
+
 
 # Location endpoints
 @router.get("/locations", response_model=List[LocationSchema])
@@ -26,8 +160,11 @@ async def get_locations(
     current_user = Depends(get_current_active_user)
 ):
     """Get all locations"""
-    locations = db.query(Location).all()
-    return locations
+    query = db.query(Location)
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(Location.warehouse_id == wh_id)
+    return query.all()
 
 @router.post("/locations", response_model=LocationSchema)
 async def create_location(
@@ -43,7 +180,7 @@ async def create_location(
             detail="Location with this ID already exists"
         )
     
-    db_location = Location(**location_data.dict())
+    db_location = Location(**location_data.dict(), warehouse_id=current_user.warehouse_id)
     db.add(db_location)
     db.commit()
     db.refresh(db_location)
@@ -82,10 +219,14 @@ async def get_sub_locations(
     """Get all sub-locations with their rows"""
     from sqlalchemy.orm import joinedload
     query = db.query(SubLocation).options(joinedload(SubLocation.rows))
-    
+
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.join(Location, SubLocation.location_id == Location.id).filter(Location.warehouse_id == wh_id)
+
     if location_id:
         query = query.filter(SubLocation.location_id == location_id)
-    
+
     sub_locations = query.all()
     return sub_locations
 
@@ -141,10 +282,14 @@ async def get_storage_areas(
 ):
     """Get all storage areas"""
     query = db.query(StorageArea)
-    
+
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.join(Location, StorageArea.location_id == Location.id).filter(Location.warehouse_id == wh_id)
+
     if sub_location_id:
         query = query.filter(StorageArea.sub_location_id == sub_location_id)
-    
+
     storage_areas = query.all()
     return storage_areas
 

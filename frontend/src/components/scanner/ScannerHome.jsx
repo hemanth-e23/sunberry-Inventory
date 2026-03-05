@@ -8,34 +8,40 @@ const ScannerHome = () => {
 
   return (
     <div className="scanner-home">
-      <h2 className="scanner-home-title">What would you like to do?</h2>
+      <h2 className="scanner-home-title">Select Operation</h2>
       <div className="scanner-home-buttons">
         <button
           type="button"
-          className="scanner-home-btn primary"
+          className="scanner-home-btn receipt"
           onClick={() => navigate('/forklift/receipt')}
         >
-          <Package size={40} />
-          <span>Receipt Scan</span>
-          <span className="scanner-home-desc">Scan pallets into storage</span>
+          <div className="scanner-home-icon"><Package size={26} /></div>
+          <div className="scanner-home-text">
+            <span>Receipt Scan</span>
+            <span className="scanner-home-desc">Scan pallets from production into storage</span>
+          </div>
         </button>
         <button
           type="button"
-          className="scanner-home-btn"
+          className="scanner-home-btn transfer"
           onClick={() => navigate('/forklift/transfer')}
         >
-          <ArrowRightLeft size={40} />
-          <span>Transfer</span>
-          <span className="scanner-home-desc">Move pallets between rows</span>
+          <div className="scanner-home-icon"><ArrowRightLeft size={26} /></div>
+          <div className="scanner-home-text">
+            <span>Internal Transfer</span>
+            <span className="scanner-home-desc">Move pallets between storage rows</span>
+          </div>
         </button>
         <button
           type="button"
-          className="scanner-home-btn"
+          className="scanner-home-btn shipout"
           onClick={() => navigate('/forklift/ship-out')}
         >
-          <Truck size={40} />
-          <span>Ship-out</span>
-          <span className="scanner-home-desc">Pick pallets for shipping</span>
+          <div className="scanner-home-icon"><Truck size={26} /></div>
+          <div className="scanner-home-text">
+            <span>Ship-out Picking</span>
+            <span className="scanner-home-desc">Pick pallets for approved shipments</span>
+          </div>
         </button>
       </div>
     </div>

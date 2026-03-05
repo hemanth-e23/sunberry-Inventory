@@ -97,6 +97,16 @@
   --spacing-2xl: 48px;
   --spacing-3xl: 64px;
 
+  /* Space scale (used by App.css utility classes) */
+  --space-4: 16px;
+  --space-8: 32px;
+
+  /* Text size scale (used by App.css utility classes) */
+  --text-sm: 0.875rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-3xl: 1.875rem;
+
   /* Typography */
   --font-heading: 'Poppins', sans-serif;
   --font-body: 'Inter', sans-serif;
@@ -215,7 +225,7 @@ select:focus,
 textarea:focus {
   outline: none;
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+  box-shadow: 0 0 0 3px var(--color-primary-soft);
 }
 
 select {

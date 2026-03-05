@@ -33,11 +33,6 @@ const Login = () => {
     }
   };
 
-  const handleDemoLogin = (demoUsername, demoPassword) => {
-    setUsername(demoUsername);
-    setPassword(demoPassword);
-  };
-
   const handleUsernameKeyDown = (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();

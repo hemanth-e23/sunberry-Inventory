@@ -1,6 +1,7 @@
 import React, { useMemo, useState, useCallback, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import axios from "axios";
+import apiClient from "../api/client";
+import { formatDate, formatDateTime } from "../utils/dateUtils";
 import {
   ResponsiveContainer,
   BarChart,
@@ -13,29 +14,23 @@ import {
 } from "recharts";
 import jsPDF from "jspdf";
 import "jspdf-autotable";
-import { utils as XLSXUtils, writeFile as writeXLSXFile } from "xlsx";
+import ExcelJS from "exceljs";
 import { useAppData } from "../context/AppDataContext";
 import { useAuth } from "../context/AuthContext";
 import { getDashboardPath } from "../App";
 import SearchableSelect from "./SearchableSelect";
+import "./Shared.css";
 import "./ReportsPage.css";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Utility helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-const API_BASE = "/api";
-
 const apiFetch = async (path, params = {}) => {
-  const token = localStorage.getItem("token");
-  if (!token) throw new Error("Session expired. Please refresh the page.");
   const cleanParams = Object.fromEntries(
     Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ""),
   );
-  const response = await axios.get(`${API_BASE}${path}`, {
-    params: cleanParams,
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const response = await apiClient.get(path, { params: cleanParams });
   return response.data;
 };
 
@@ -59,19 +54,6 @@ const formatNumber = (value, fractionDigits = 0) =>
     maximumFractionDigits: fractionDigits,
   });
 
-const formatDate = (value) => {
-  if (!value) return "—";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleDateString();
-};
-
-const formatDateTime = (value) => {
-  if (!value) return "—";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString();
-};
 
 const sanitizeFileName = (name) =>
   name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "report";
@@ -116,12 +98,22 @@ const ExportButtons = ({ columns, rows, fileBaseName }) => {
     document.body.removeChild(link);
   };
 
-  const handleExcel = () => {
+  const handleExcel = async () => {
     if (disabled) return;
-    const ws = XLSXUtils.aoa_to_sheet([headers, ...body]);
-    const wb = XLSXUtils.book_new();
-    XLSXUtils.book_append_sheet(wb, ws, "Report");
-    writeXLSXFile(wb, `${fileName}.xlsx`);
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Report");
+    ws.addRow(headers);
+    body.forEach((row) => ws.addRow(row));
+    const buffer = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${fileName}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const handlePDF = () => {
@@ -157,7 +149,7 @@ const ReportTable = ({ columns, rows, emptyMessage = "No data for the selected f
   <div className="table-wrapper">
     <table className="report-table">
       <thead>
-        <tr>{columns.map((c) => <th key={c.label}>{c.label}</th>)}</tr>
+        <tr>{columns.map((c) => <th key={c.label} className={c.className}>{c.label}</th>)}</tr>
       </thead>
       <tbody>
         {rows.length === 0 ? (
@@ -165,7 +157,7 @@ const ReportTable = ({ columns, rows, emptyMessage = "No data for the selected f
         ) : (
           rows.map((row, i) => (
             <tr key={row.id || i}>
-              {columns.map((c) => <td key={c.label}>{(c.renderValue || c.value)(row)}</td>)}
+              {columns.map((c) => <td key={c.label} className={c.className}>{(c.renderValue || c.value)(row)}</td>)}
             </tr>
           ))
         )}
@@ -243,6 +235,12 @@ const TABS = [
   { id: "vendors", label: "Vendor Receipts" },
   { id: "lot-trace", label: "Lot Traceability" },
   { id: "cycle-counts", label: "Cycle Counts" },
+];
+
+const GROUP_ORDER = [
+  { groupId: "finished",   label: "Finished Goods",      color: "#f97316" },
+  { groupId: "raw",        label: "Raw Materials",        color: "#6366f1" },
+  { groupId: "packaging",  label: "Packaging Materials",  color: "#22c55e" },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -397,18 +395,12 @@ const ReportsPage = () => {
   // Current snapshot (from AppDataContext)
   // ─────────────────────────────────────────────────────────────────────────────
 
-  // Build a lookup: categoryId → parentId (group-finished / group-raw / group-packaging)
+  // Build a lookup: categoryId → type (finished / raw / packaging)
   const categoryParentMap = useMemo(() => {
     const map = {};
-    (categories || []).forEach((c) => { if (c.id && c.parentId) map[c.id] = c.parentId; });
+    (categories || []).forEach((c) => { if (c.id && c.type) map[c.id] = c.type; });
     return map;
   }, [categories]);
-
-  const GROUP_ORDER = [
-    { groupId: "group-finished",   label: "Finished Goods",      color: "#f97316" },
-    { groupId: "group-raw",        label: "Raw Materials",        color: "#6366f1" },
-    { groupId: "group-packaging",  label: "Packaging Materials",  color: "#22c55e" },
-  ];
 
   const currentSnapshotRows = useMemo(() => {
     return receiptReportingRows.filter((row) => {
@@ -473,7 +465,7 @@ const ReportsPage = () => {
       groups[bucket].push(row);
     });
     return groups;
-  }, [currentSnapshotByProduct]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentSnapshotByProduct]);
 
   const groupTotals = useMemo(() => {
     const totals = {};
@@ -486,7 +478,7 @@ const ReportsPage = () => {
     return totals;
   }, [snapshotByGroup]);
 
-  const categorySummary = useMemo(() => {
+  const _categorySummary = useMemo(() => {
     const agg = {};
     currentSnapshotRows.forEach((row) => {
       if (!agg[row.categoryName]) agg[row.categoryName] = { category: row.categoryName, cases: 0, lots: 0 };
@@ -675,7 +667,7 @@ const ReportsPage = () => {
     if (activeTab === "expiry" && !expiryData && !expiryLoading) {
       fetchExpiry();
     }
-  }, [activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeTab, expiryData, expiryLoading, fetchExpiry]);
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Column definitions
@@ -901,7 +893,7 @@ const ReportsPage = () => {
               {GROUP_ORDER.map(({ groupId, label, color }) => {
                 const rows = snapshotByGroup[groupId] || [];
                 const totals = groupTotals[groupId] || { cases: 0, pallets: 0, floor: 0, hold: 0 };
-                const isFG = groupId === "group-finished";
+                const isFG = groupId === "finished";
 
                 // For raw/packaging, compute unit-aware totals
                 const unitTotals = {};
@@ -1499,7 +1491,7 @@ const ReportsPage = () => {
                     const isShipped = event.event_type === "shipped-out";
                     const isTransfer = event.event_type === "warehouse-transfer" || event.event_type === "staging";
                     const isHold = event.event_type?.startsWith("hold-");
-                    const isAdj = !isReceived && !isShipped && !isTransfer && !isHold;
+                    const _isAdj = !isReceived && !isShipped && !isTransfer && !isHold;
                     const dotClass = isReceived ? "timeline-dot--received"
                       : isShipped ? "timeline-dot--shipped"
                       : isTransfer ? "timeline-dot--transfer"

@@ -1,19 +1,21 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAppData } from "../context/AppDataContext";
 import { useAuth } from "../context/AuthContext";
 import { getDashboardPath } from "../App";
-import { isDateInPast, isDateValid } from "../utils/dateUtils";
+import { isDateInPast, isDateValid, getTodayDateKey } from "../utils/dateUtils";
 import { validateLotNumber } from "../utils/sanitizeUtils";
 import SearchableSelect from "./SearchableSelect";
+import ReceiptConfirmModal from "./receipt/ReceiptConfirmModal";
+import "./Shared.css";
 import "./ReceiptPage.css";
-import "./ReceiptPageEnhanced.css";
+import { CATEGORY_TYPES } from '../constants';
 
 const defaultFormState = {
   categoryGroupId: "",
   categoryId: "",
   productId: "",
-  receiptDate: new Date().toISOString().slice(0, 10),
+  receiptDate: getTodayDateKey(),
   lotNo: "",
   expiration: "",
   quantity: "",
@@ -61,14 +63,6 @@ const unitOptions = [
   { value: "units", label: "Units" },
 ];
 
-const packagingUnitOptions = [
-  { value: "boxes", label: "Boxes" },
-  { value: "bottles", label: "Bottles" },
-  { value: "cases", label: "Cases" },
-  { value: "pallets", label: "Pallets" },
-  { value: "unit", label: "Unit" },
-  { value: "units", label: "Units" },
-];
 
 const weightUnitOptions = [
   { value: "kg", label: "Kilograms" },
@@ -99,11 +93,20 @@ const buildLicenceNote = (receipt, products = []) => {
   return `${totalPallets} pallet licence numbers generated (e.g. ${lot}-${productCode}-001 through ${productCode}-${lastSeq})`;
 };
 
+// Helper function to calculate day of year (1-365/366)
+const getDayOfYear = (date) => {
+  if (!date) return null;
+  const d = new Date(date);
+  const start = new Date(d.getFullYear(), 0, 0);
+  const diff = d - start;
+  const oneDay = 1000 * 60 * 60 * 24;
+  return Math.floor(diff / oneDay);
+};
+
 const ReceiptPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const {
-    categories,
     categoryGroups,
     productCategories,
     products,
@@ -112,7 +115,6 @@ const ReceiptPage = () => {
     vendors,
     locations,
     subLocationMap,
-    subLocationsUnifiedMap,
     productionShifts,
     productionLines,
     storageAreas,
@@ -122,7 +124,7 @@ const ReceiptPage = () => {
 
   const [formData, setFormData] = useState(defaultFormState);
   const [feedback, setFeedback] = useState(null);
-  const [allocationPreview, setAllocationPreview] = useState(null);
+  const [_allocationPreview, setAllocationPreview] = useState(null);
   const [autoQuantity, setAutoQuantity] = useState(null);
   const [manualAllocations, setManualAllocations] = useState([]);
   const [floorPallets, setFloorPallets] = useState("0");
@@ -131,44 +133,34 @@ const ReceiptPage = () => {
   const [lotNumberManuallyEdited, setLotNumberManuallyEdited] = useState(false);
   const formRef = useRef(null);
   
-  // Helper function to calculate day of year (1-365/366)
-  const getDayOfYear = (date) => {
-    if (!date) return null;
-    const d = new Date(date);
-    const start = new Date(d.getFullYear(), 0, 0);
-    const diff = d - start;
-    const oneDay = 1000 * 60 * 60 * 24;
-    return Math.floor(diff / oneDay);
-  };
-  
   // Helper function to extract line number from line name (e.g., "Line 1" -> "1", "L1" -> "1")
-  const extractLineNumber = (lineId) => {
+  const extractLineNumber = useCallback((lineId) => {
     if (!lineId) return null;
     const line = productionLines.find(l => l.id === lineId);
     if (!line) return null;
-    
+
     // Try to extract number from name (e.g., "Line 1", "L1", "1", "Line Number 1")
     const match = line.name.match(/\d+/);
     return match ? match[0] : null;
-  };
-  
+  }, [productionLines]);
+
   // Generate lot number: MP[day_of_year][year]L[line_number]
-  const generateLotNumber = (productionDate, lineNumber) => {
+  const generateLotNumber = useCallback((productionDate, lineNumber) => {
     if (!productionDate || !lineNumber) return "";
-    
+
     const dayOfYear = getDayOfYear(productionDate);
     if (!dayOfYear) return "";
-    
+
     const lineNum = extractLineNumber(lineNumber);
     if (!lineNum) return "";
-    
+
     const date = new Date(productionDate);
     const year = date.getFullYear().toString().slice(-2); // Last 2 digits of year
-    
+
     // Format: MP + 3-digit day of year + 2-digit year + L + line number
     return `MP${String(dayOfYear).padStart(3, '0')}${year}L${lineNum}`;
-  };
-  
+  }, [extractLineNumber]);
+
   // State for raw materials/packaging multi-row allocation
   const [rawMaterialRowAllocations, setRawMaterialRowAllocations] = useState([]);
 
@@ -182,9 +174,7 @@ const ReceiptPage = () => {
 
   useEffect(() => {
     const next = totalWeight > 0 ? String(totalWeight) : "";
-    if (formData.weight !== next) {
-      setFormData((prev) => ({ ...prev, weight: next }));
-    }
+    setFormData((prev) => prev.weight === next ? prev : { ...prev, weight: next });
   }, [totalWeight]);
 
   const selectedCategory = useMemo(
@@ -194,13 +184,12 @@ const ReceiptPage = () => {
 
   const productLabel = useMemo(() => {
     if (!selectedCategory) return "Product";
-    if (selectedCategory.type === "finished") return "Finished Good";
-    // Check if it's packaging by category group
-    if (formData.categoryGroupId === "group-packaging") return "Packaging Material";
+    if (selectedCategory.type === CATEGORY_TYPES.FINISHED) return "Finished Good";
+    if (selectedCategory.type === CATEGORY_TYPES.PACKAGING) return "Packaging Material";
     return "Raw Material";
-  }, [selectedCategory, formData.categoryGroupId]);
+  }, [selectedCategory]);
 
-  const isFinishedGood = selectedCategory?.type === "finished";
+  const isFinishedGood = selectedCategory?.type === CATEGORY_TYPES.FINISHED;
 
   const addManualAllocation = () => {
     setManualAllocations((prev) => [
@@ -227,7 +216,7 @@ const ReceiptPage = () => {
         // Recompute pallets from full pallets only
         const fullVal = Number(nextFull);
         const derivedPallets = Number.isFinite(fullVal) ? Math.max(0, fullVal) : palletsValue;
-        const finalPallets = updates.hasOwnProperty('pallets') ? palletsValue : derivedPallets;
+        const finalPallets = Object.prototype.hasOwnProperty.call(updates, 'pallets') ? palletsValue : derivedPallets;
         const casesValue = Number.isFinite(finalPallets) && Number.isFinite(casesPer)
           ? finalPallets * casesPer
           : entry.cases;
@@ -297,7 +286,7 @@ const ReceiptPage = () => {
   }, [isFinishedGood, formData.casesPerPallet, formData.fullPallets, formData.partialCases]);
 
   // Expected pallets = full pallets + partial cases / cases-per-pallet
-  const expectedPallets = useMemo(() => {
+  const _expectedPallets = useMemo(() => {
     if (!isFinishedGood) return 0;
     const cpp = Number(formData.casesPerPallet);
     const full = Number(formData.fullPallets);
@@ -358,21 +347,17 @@ const ReceiptPage = () => {
     return Math.abs(totalCasesExpected - actual) > 0.5;
   }, [isFinishedGood, totalCasesExpected, manualTotals]);
 
-  // Detect packaging: either via subType OR via categoryGroupId
-  const isPackaging =
-    formData.categoryGroupId === "group-packaging" ||
-    (selectedCategory?.type === "raw" && selectedCategory?.subType === "packaging");
+  // Detect packaging and ingredients purely by category type
+  const isPackaging = selectedCategory?.type === CATEGORY_TYPES.PACKAGING;
 
   const showPackagingFields = isPackaging;
 
-  // Detect ingredients: must be raw materials AND NOT packaging
-  const isIngredient =
-    formData.categoryGroupId === "group-raw" ||
-    (selectedCategory?.type === "raw" && selectedCategory?.subType === "ingredient" && !isPackaging);
+  // Detect ingredients: type=raw (ingredients category)
+  const isIngredient = selectedCategory?.type === "raw" && !isPackaging;
 
-  const showLocationField =
-    selectedCategory?.type === "finished" || isPackaging || isIngredient;
-  const showBrixField = isIngredient;
+  const _showLocationField =
+    selectedCategory?.type === CATEGORY_TYPES.FINISHED || isPackaging || isIngredient;
+  const _showBrixField = isIngredient;
 
   // Determine if row selection is required (for raw materials and packaging)
   const requiresRowSelection = isIngredient || isPackaging;
@@ -545,7 +530,7 @@ const ReceiptPage = () => {
       return products
         .filter((product) => {
           const category = productCategories.find((cat) => cat.id === product.categoryId);
-          return category?.subType === "ingredient"
+          return category?.type === "raw"
             && product.categoryId === formData.categoryId
             && product.status === "active";
         })
@@ -615,14 +600,11 @@ const ReceiptPage = () => {
   useEffect(() => {
     if (isFinishedGood && !lotNumberManuallyEdited && formData.productionDate && formData.lineNumber) {
       const generatedLotNo = generateLotNumber(formData.productionDate, formData.lineNumber);
-      if (generatedLotNo && generatedLotNo !== formData.lotNo) {
-        setFormData((prev) => ({
-          ...prev,
-          lotNo: generatedLotNo,
-        }));
+      if (generatedLotNo) {
+        setFormData((prev) => prev.lotNo === generatedLotNo ? prev : { ...prev, lotNo: generatedLotNo });
       }
     }
-  }, [isFinishedGood, formData.productionDate, formData.lineNumber, lotNumberManuallyEdited]);
+  }, [isFinishedGood, formData.productionDate, formData.lineNumber, lotNumberManuallyEdited, generateLotNumber]);
 
   useEffect(() => {
     const form = formRef.current;
@@ -650,8 +632,8 @@ const ReceiptPage = () => {
     if (Number.isFinite(qty) && Number.isFinite(perUnit) && qty >= 0 && perUnit >= 0) {
       const total = qty * perUnit;
       setFormData((prev) => ({ ...prev, weight: total ? total.toFixed(2) : "" }));
-    } else if (formData.weight) {
-      setFormData((prev) => ({ ...prev, weight: "" }));
+    } else {
+      setFormData((prev) => prev.weight ? { ...prev, weight: "" } : prev);
     }
   }, [formData.quantity, formData.weightPerUnit, isIngredient]);
 
@@ -727,12 +709,14 @@ const ReceiptPage = () => {
       return;
     }
 
-    // Validate lot number (required for finished goods; optional for packaging/raw materials)
-    const lotRequired = isFinishedGood;
+    // Validate lot number (required for finished goods and raw material ingredients)
+    const lotRequired = isFinishedGood || isIngredient;
     if (lotRequired && !(formData.lotNo && formData.lotNo.trim())) {
       setFeedback({
         type: "error",
-        message: "Lot number is required for finished goods.",
+        message: isIngredient
+          ? "Lot number is required for raw material receipts."
+          : "Lot number is required for finished goods.",
       });
       return;
     }
@@ -744,6 +728,18 @@ const ReceiptPage = () => {
           type: "error",
           message: lotValidation.error,
         });
+        return;
+      }
+    }
+
+    // Validate weight fields are filled for ingredients
+    if (isIngredient) {
+      if (!formData.weightPerUnit || parseFloat(formData.weightPerUnit) <= 0) {
+        setFeedback({ type: "error", message: "Weight per container is required for raw material receipts." });
+        return;
+      }
+      if (!formData.weightUnits) {
+        setFeedback({ type: "error", message: "Weight unit is required for raw material receipts." });
         return;
       }
     }
@@ -905,8 +901,7 @@ const ReceiptPage = () => {
             pallets: Number(alloc.pallets) || 0,
           }))
         : null,
-      autoAssignSubLocation:
-        !isFinishedGood && selectedCategory?.subType === "packaging",
+      autoAssignSubLocation: isPackaging,
       productionDate: formData.productionDate,
       fccCode: formData.fccCode,
       shift: formData.shift,
@@ -1290,97 +1285,97 @@ const ReceiptPage = () => {
                   )}
 
                   <label>
-                    <span>Lot Number {isFinishedGood ? requiredStar : null}</span>
+                    <span>Lot Number {(isFinishedGood || isIngredient) ? requiredStar : null}</span>
                     <input
                       type="text"
                       name="lotNo"
                       value={formData.lotNo}
                       onChange={handleChange}
-                      required={isFinishedGood}
+                      required={isFinishedGood || isIngredient}
                       aria-label="Lot number"
-                      aria-describedby="lot-number-help"
                     />
-                    <span id="lot-number-help" className="sr-only">
-                      Unique lot number for this inventory item {!isFinishedGood && "(optional for packaging/raw materials)"}
-                    </span>
                   </label>
 
                   {(isIngredient || showPackagingFields) && (
                     <React.Fragment>
-                      <label>
-                        <span>Container Count {requiredStar}</span>
-                        <input
-                          type="number"
-                          name="quantity"
-                          value={formData.quantity}
-                          onChange={handleChange}
-                          min="0"
-                          step="0.01"
-                          required
-                          placeholder="e.g. 40"
-                        />
-                      </label>
-
-                      <label>
-                        <span>Container Type {requiredStar}</span>
-                        <select
-                          name="quantityUnits"
-                          value={formData.quantityUnits}
-                          onChange={handleChange}
-                          required
-                        >
-                          <option value="">Select container type</option>
-                          {unitOptions.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      {isIngredient && (
-                        <label>
-                          <span>Weight per Container</span>
-                          <div className="two-col">
-                            <input
-                              type="number"
-                              name="weightPerUnit"
-                              value={formData.weightPerUnit}
-                              onChange={handleChange}
-                              min="0"
-                              step="0.01"
-                              placeholder="e.g. 500"
-                            />
-                            <select
-                              name="weightUnits"
-                              value={formData.weightUnits}
-                              onChange={handleChange}
-                            >
-                              <option value="">Weight unit</option>
-                              {weightUnitOptions.map((option) => (
-                                <option key={option.value} value={option.value}>
-                                  {option.label}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        </label>
-                      )}
-
-                      {isIngredient && totalWeight > 0 && (
-                        <label>
-                          <span>Total Weight (auto-calculated)</span>
+                      {/* Inline container row: count [type] × weight [unit] */}
+                      <label className="full-width">
+                        <span>Received As {requiredStar}</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                           <input
-                            type="text"
-                            value={`${Number(formData.weight).toLocaleString()} ${formData.weightUnits || ''}`}
-                            readOnly
-                            style={{ backgroundColor: '#f0f8ff', fontWeight: 'bold', color: '#1a5276' }}
+                            type="number"
+                            name="quantity"
+                            value={formData.quantity}
+                            onChange={handleChange}
+                            min="0"
+                            step="0.01"
+                            required
+                            placeholder="Count"
+                            style={{ width: 90 }}
                           />
-                          <span style={{ fontSize: '0.8rem', color: '#666', marginTop: '2px' }}>
-                            {formData.quantity} {formData.quantityUnits} × {formData.weightPerUnit} {formData.weightUnits} = {Number(formData.weight).toLocaleString()} {formData.weightUnits}
-                          </span>
-                        </label>
-                      )}
+                          <select
+                            name="quantityUnits"
+                            value={formData.quantityUnits}
+                            onChange={handleChange}
+                            required
+                            style={{ width: 130 }}
+                          >
+                            <option value="">Type…</option>
+                            {unitOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+
+                          {isIngredient && (
+                            <>
+                              <span style={{ color: '#9ca3af', fontWeight: 600 }}>×</span>
+                              <input
+                                type="number"
+                                name="weightPerUnit"
+                                value={formData.weightPerUnit}
+                                onChange={handleChange}
+                                min="0"
+                                step="0.01"
+                                required
+                                placeholder="Weight each"
+                                style={{ width: 110 }}
+                              />
+                              <select
+                                name="weightUnits"
+                                value={formData.weightUnits}
+                                onChange={handleChange}
+                                required
+                                style={{ width: 100 }}
+                              >
+                                <option value="">Unit…</option>
+                                {weightUnitOptions.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Summary: 15 Bags · 3,750 lbs total */}
+                        {isIngredient && formData.quantity && formData.quantityUnits && formData.weightPerUnit && formData.weightUnits && totalWeight > 0 && (
+                          <div style={{ marginTop: 8, padding: '8px 14px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, display: 'inline-flex', alignItems: 'center', gap: 12 }}>
+                            <span style={{ fontWeight: 700, color: '#15803d', fontSize: '0.95rem' }}>
+                              {formData.quantity} {formData.quantityUnits}
+                            </span>
+                            <span style={{ color: '#9ca3af' }}>·</span>
+                            <span style={{ fontWeight: 700, color: '#1a5276', fontSize: '0.95rem' }}>
+                              {Number(formData.weight).toLocaleString()} {formData.weightUnits} total
+                            </span>
+                            <span style={{ color: '#9ca3af', fontSize: '0.8rem' }}>
+                              ({formData.weightPerUnit} {formData.weightUnits} × {formData.quantity})
+                            </span>
+                          </div>
+                        )}
+                      </label>
 
                       {isIngredient && (
                         <label>
@@ -2034,87 +2029,14 @@ const ReceiptPage = () => {
           </form>
         </section>
 
-        {confirmation.open && confirmation.summary && (
-          <div className="modal-backdrop">
-            <div className="modal">
-              <div className="modal-header">
-                <h3>Review Finished-Good Receipt</h3>
-                <p className="muted">
-                  Confirm the lot details and pallet placements before submitting for approval.
-                </p>
-              </div>
-              <div className="modal-body">
-                <div className="modal-summary">
-                  <div>
-                    <strong>Product</strong>
-                    <span>{confirmation.summary.product}</span>
-                  </div>
-                  <div>
-                    <strong>Total Cases Produced</strong>
-                    <span>{formatNumber(confirmation.summary.totalCases)}</span>
-                  </div>
-                  <div>
-                    <strong>Rack Cases</strong>
-                    <span>{formatNumber(confirmation.summary.rackCases)}</span>
-                  </div>
-                  <div>
-                    <strong>Floor Cases</strong>
-                    <span>{formatNumber(confirmation.summary.floorCases)}</span>
-                  </div>
-                  {confirmation.summary.licencePreview && (
-                    <div style={{ gridColumn: "1 / -1", marginTop: "8px", fontSize: "0.9rem" }}>
-                      <strong>Pallet licences:</strong> {confirmation.summary.licencePreview}
-                    </div>
-                  )}
-                </div>
-
-                <div className="table-wrapper mini">
-                  <table className="report-table confirmation-table">
-                    <thead>
-                      <tr>
-                        <th>Storage Area</th>
-                        <th>Row</th>
-                        <th>Pallets</th>
-                        <th>Cases</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {confirmation.summary.placements.length === 0 ? (
-                        <tr>
-                          <td colSpan={4} className="empty-state">
-                            All pallets staged on floor.
-                          </td>
-                        </tr>
-                      ) : (
-                        confirmation.summary.placements.map((placement, index) => (
-                          <tr key={`${placement.areaName}-${placement.rowName}-${index}`}>
-                            <td>{placement.areaName}</td>
-                            <td>{placement.rowName}</td>
-                            <td>{formatNumber(placement.pallets)}</td>
-                            <td>{formatNumber(placement.cases)}</td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-              <div className="modal-actions">
-                <button type="button" className="secondary-button" onClick={cancelConfirmation}>
-                  Go Back
-                </button>
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={finalizeFinishedGoodReceipt}
-                  disabled={isSubmitting}
-                >
-                  {isSubmitting ? 'Submitting...' : 'Submit Receipt'}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        <ReceiptConfirmModal
+          open={confirmation.open}
+          summary={confirmation.summary}
+          isSubmitting={isSubmitting}
+          onConfirm={finalizeFinishedGoodReceipt}
+          onCancel={cancelConfirmation}
+          formatNumber={formatNumber}
+        />
 
         {/* Removed auto allocation card because placements are now manual */}
 

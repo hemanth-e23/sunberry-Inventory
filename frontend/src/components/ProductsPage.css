@@ -253,7 +253,7 @@
 
 /* Table Wrapper Enhancement */
 .products-page .table-wrapper {
-  overflow: hidden;
+  overflow-x: auto;
   border-radius: var(--radius-lg);
 }
 

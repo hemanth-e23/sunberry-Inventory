@@ -11,7 +11,10 @@ from app.schemas import (
     Receipt as ReceiptSchema, ReceiptCreate, ReceiptUpdate,
     ReceiptAllocation as ReceiptAllocationSchema
 )
-from app.utils.auth import get_current_active_user, require_role
+from app.utils.auth import get_current_active_user, require_role, warehouse_filter
+from app.enums import ReceiptStatus, PalletStatus
+from app.services import receipt_service
+from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED, DEFAULT_CASES_PER_PALLET
 
 router = APIRouter()
 
@@ -27,14 +30,18 @@ async def get_receipts(
 ):
     """Get all receipts"""
     query = db.query(Receipt)
-    
+
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(Receipt.warehouse_id == wh_id)
+
     if status:
         query = query.filter(Receipt.status == status)
     if product_id:
         query = query.filter(Receipt.product_id == product_id)
     if submitted_by:
         query = query.filter(Receipt.submitted_by == submitted_by)
-    
+
     receipts = query.offset(skip).limit(limit).all()
     return receipts
 
@@ -44,16 +51,20 @@ async def get_pending_approvals(
     current_user = Depends(get_current_active_user)
 ):
     """Get receipts pending approval
-    
+
     - Admin/supervisor can see all pending receipts
     - Warehouse worker can only see receipts submitted by OTHER users (not their own)
     """
     query = db.query(Receipt).filter(
-        Receipt.status.in_(["recorded", "reviewed"])
+        Receipt.status.in_([ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED])
     )
-    
+
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        query = query.filter(Receipt.warehouse_id == wh_id)
+
     # Warehouse workers can only see receipts submitted by others
-    if current_user.role == "warehouse":
+    if current_user.role == ROLE_WAREHOUSE:
         query = query.filter(Receipt.submitted_by != str(current_user.id))
     
     receipts = query.all()
@@ -106,7 +117,8 @@ async def create_receipt(
     db_receipt = Receipt(
         **receipt_dict,
         submitted_by=str(current_user.id),
-        status="recorded"
+        warehouse_id=current_user.warehouse_id,
+        status=ReceiptStatus.RECORDED
     )
     
     db.add(db_receipt)
@@ -203,7 +215,7 @@ async def create_receipt(
     
     # Generate pallet licences for finished goods receipts
     category = db.query(Category).filter(Category.id == db_receipt.category_id).first()
-    is_finished_goods = category and category.type == "finished"
+    is_finished_goods = category and category.type == CATEGORY_FINISHED
     if is_finished_goods and db_receipt.allocation and db_receipt.lot_number and db_receipt.product_id:
         alloc = db_receipt.allocation if isinstance(db_receipt.allocation, dict) else json.loads(db_receipt.allocation or "{}")
         plan = alloc.get("plan") or []
@@ -216,7 +228,7 @@ async def create_receipt(
             area_id = item.get("areaId")
             pallets = int(item.get("pallets", 0))
             item_cases = float(item.get("cases", 0))
-            cases_per_pallet = (item_cases / pallets) if pallets > 0 else (db_receipt.cases_per_pallet or 40)
+            cases_per_pallet = (item_cases / pallets) if pallets > 0 else (db_receipt.cases_per_pallet or DEFAULT_CASES_PER_PALLET)
             for p in range(pallets):
                 is_last = seq == total_plan_pallets
                 is_partial = is_last and (db_receipt.partial_cases or 0) > 0
@@ -233,7 +245,8 @@ async def create_receipt(
                     cases=cases,
                     is_partial=is_partial,
                     sequence=seq,
-                    status="pending",
+                    status=PalletStatus.PENDING,
+                    warehouse_id=current_user.warehouse_id,
                 )
                 db.add(pl)
                 seq += 1
@@ -273,7 +286,7 @@ async def update_receipt(
         )
     
     # Check permissions
-    if current_user.role == "warehouse" and receipt.submitted_by != str(current_user.id):
+    if current_user.role == ROLE_WAREHOUSE and receipt.submitted_by != str(current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only edit your own receipts"
@@ -305,38 +318,10 @@ async def approve_receipt(
             detail="Receipt not found"
         )
     
-    if receipt.status not in ["recorded", "reviewed"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Receipt is not in a state that can be approved"
-        )
-    
-    # Check permissions: warehouse workers cannot approve their own receipts
-    if current_user.role == "warehouse" and receipt.submitted_by == str(current_user.id):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You cannot approve your own receipts. Only other users' receipts can be approved."
-        )
-    
-    # Check if receipt was already approved (to avoid double-counting)
-    was_already_approved = receipt.status == "approved"
-    
-    receipt.status = "approved"
-    receipt.approved_by = str(current_user.id)
-    receipt.approved_at = datetime.utcnow()
-
-    # Update pallet licence statuses to in_stock
-    db.query(PalletLicence).filter(
-        PalletLicence.receipt_id == receipt_id,
-        PalletLicence.status == "pending"
-    ).update({"status": "in_stock"}, synchronize_session=False)
-    
-    # Note: Storage rows are already updated when receipt is created (status: "recorded")
-    # So we don't need to update again on approval - it's already reserved
-    
+    receipt_service.approve_receipt(db, receipt, current_user)
     db.commit()
     db.refresh(receipt)
-    
+
     return {"message": "Receipt approved successfully", "receipt": receipt}
 
 @router.post("/{receipt_id}/reject")
@@ -358,67 +343,10 @@ async def reject_receipt(
             detail="Receipt not found"
         )
     
-    if receipt.status not in ["recorded", "reviewed"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Receipt is not in a state that can be rejected"
-        )
-    
-    # Check permissions: warehouse workers cannot reject their own receipts
-    if current_user.role == "warehouse" and receipt.submitted_by == str(current_user.id):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You cannot reject your own receipts. Only other users' receipts can be rejected."
-        )
-    
-    # Clear storage row occupancy for rejected receipts (free up reserved capacity)
-    # Handle finished goods (allocation-based)
-    if receipt.allocation:
-        if isinstance(receipt.allocation, str):
-            allocation_data = json.loads(receipt.allocation)
-        else:
-            allocation_data = receipt.allocation
-        
-        if allocation_data.get("success") and allocation_data.get("plan"):
-            plan = allocation_data["plan"]
-            for item in plan:
-                row_id = item.get("rowId")
-                pallets = float(item.get("pallets", 0))
-                cases = float(item.get("cases", 0))
-                
-                if row_id and pallets > 0:
-                    storage_row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
-                    if storage_row:
-                        # Subtract from occupancy (free up capacity)
-                        storage_row.occupied_pallets = max(0, (storage_row.occupied_pallets or 0) - pallets)
-                        storage_row.occupied_cases = max(0, (storage_row.occupied_cases or 0) - cases)
-                        # Clear product_id if occupancy is now zero
-                        if storage_row.occupied_pallets <= 0:
-                            storage_row.product_id = None
-    
-    # Handle raw materials/packaging (direct pallet count)
-    if receipt.storage_row_id and receipt.pallets:
-        pallets_to_free = float(receipt.pallets)
-        if pallets_to_free > 0:
-            storage_row = db.query(StorageRow).filter(StorageRow.id == receipt.storage_row_id).first()
-            if storage_row:
-                # Subtract from occupancy (free up capacity)
-                storage_row.occupied_pallets = max(0, (storage_row.occupied_pallets or 0) - pallets_to_free)
-                # Clear product_id if occupancy is now zero
-                if storage_row.occupied_pallets <= 0:
-                    storage_row.product_id = None
-    
-    receipt.status = "rejected"
-    receipt.note = f"{receipt.note or ''}\n[Rejected by {current_user.name}]: {reason}".strip()
-
-    # Mark pallet licences as cancelled
-    db.query(PalletLicence).filter(PalletLicence.receipt_id == receipt_id).update(
-        {"status": "cancelled"}, synchronize_session=False
-    )
-    
+    receipt_service.reject_receipt(db, receipt, reason, current_user)
     db.commit()
     db.refresh(receipt)
-    
+
     return {"message": "Receipt rejected successfully", "receipt": receipt}
 
 @router.post("/{receipt_id}/send-back")
@@ -440,65 +368,10 @@ async def send_back_receipt(
             detail="Receipt not found"
         )
     
-    if receipt.status not in ["recorded", "reviewed"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Receipt is not in a state that can be sent back"
-        )
-    
-    # Check permissions: only admin and supervisor can send back
-    if current_user.role == "warehouse":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Warehouse workers cannot send back receipts. Only admins and supervisors can send back for correction."
-        )
-    
-    # Clear storage row occupancy for sent-back receipts (free up reserved capacity for correction)
-    # Handle finished goods (allocation-based)
-    if receipt.allocation:
-        if isinstance(receipt.allocation, str):
-            allocation_data = json.loads(receipt.allocation)
-        else:
-            allocation_data = receipt.allocation
-        
-        if allocation_data.get("success") and allocation_data.get("plan"):
-            plan = allocation_data["plan"]
-            for item in plan:
-                row_id = item.get("rowId")
-                pallets = float(item.get("pallets", 0))
-                cases = float(item.get("cases", 0))
-                
-                if row_id and pallets > 0:
-                    storage_row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
-                    if storage_row:
-                        # Subtract from occupancy (free up capacity)
-                        storage_row.occupied_pallets = max(0, (storage_row.occupied_pallets or 0) - pallets)
-                        storage_row.occupied_cases = max(0, (storage_row.occupied_cases or 0) - cases)
-                        # Clear product_id if occupancy is now zero
-                        if storage_row.occupied_pallets <= 0:
-                            storage_row.product_id = None
-    
-    # Handle raw materials/packaging (direct pallet count)
-    if receipt.storage_row_id and receipt.pallets:
-        pallets_to_free = float(receipt.pallets)
-        if pallets_to_free > 0:
-            storage_row = db.query(StorageRow).filter(StorageRow.id == receipt.storage_row_id).first()
-            if storage_row:
-                # Subtract from occupancy (free up capacity)
-                storage_row.occupied_pallets = max(0, (storage_row.occupied_pallets or 0) - pallets_to_free)
-                # Clear product_id if occupancy is now zero
-                if storage_row.occupied_pallets <= 0:
-                    storage_row.product_id = None
-    
-    receipt.status = "sent-back"  # Distinct status so it leaves approval queue and shows in Receipt Corrections
-    receipt.note = f"{receipt.note or ''}\n[Sent Back by {current_user.name}]: {reason}".strip()
-
-    # Delete pallet licences so they get regenerated when receipt is resubmitted
-    db.query(PalletLicence).filter(PalletLicence.receipt_id == receipt_id).delete(synchronize_session=False)
-    
+    receipt_service.send_back_receipt(db, receipt, reason, current_user)
     db.commit()
     db.refresh(receipt)
-    
+
     return {"message": "Receipt sent back for correction", "receipt": receipt}
 
 @router.get("/{receipt_id}/allocations", response_model=List[ReceiptAllocationSchema])

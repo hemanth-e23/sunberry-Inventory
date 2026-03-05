@@ -1,16 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
-import { Scan, MapPin, Package, Check, RefreshCw } from 'lucide-react';
+import { Scan, MapPin, Package, Check, RefreshCw, CheckCircle2 } from 'lucide-react';
 import './ScannerReceiptFlow.css';
 
-const API_BASE = '/api';
 const MAX_ROW_SCAN_ATTEMPTS = 3;
 
 const ScannerReceiptFlow = () => {
   const navigate = useNavigate();
-  const [step, setStep] = useState('scan-first');
+  const [step, setStep] = useState('checking');
   const [firstLicence, setFirstLicence] = useState('');
   const [requestId, setRequestId] = useState(null);
   const [productName, setProductName] = useState('');
@@ -28,10 +27,23 @@ const ScannerReceiptFlow = () => {
   const [rowScanInput, setRowScanInput] = useState('');
   const [rowScanAttempts, setRowScanAttempts] = useState(0);
   const [showManualRows, setShowManualRows] = useState(false);
+  const [resumeData, setResumeData] = useState(null);
   const inputRef = useRef(null);
 
-  const token = localStorage.getItem('token');
-  const headers = { Authorization: `Bearer ${token}` };
+  // On mount: check for an active (interrupted) session for THIS user only.
+  // Multiple forklift users can scan simultaneously — each has their own session.
+  useEffect(() => {
+    apiClient.get('/scanner/requests/active')
+      .then((r) => {
+        if (r.data && r.data.pallet_count > 0) {
+          setResumeData(r.data);
+          setStep('resume-prompt');
+        } else {
+          setStep('scan-first');
+        }
+      })
+      .catch(() => setStep('scan-first'));
+  }, []);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -40,7 +52,7 @@ const ScannerReceiptFlow = () => {
   useEffect(() => {
     if (requestId && (step === 'select-location' || step === 'scan')) {
       setLoadingRows(true);
-      axios.get(`${API_BASE}/scanner/storage-rows`, { headers })
+      apiClient.get('/scanner/storage-rows')
         .then((r) => setStorageRows(r.data || []))
         .catch(() => setStorageRows([]))
         .finally(() => setLoadingRows(false));
@@ -55,9 +67,9 @@ const ScannerReceiptFlow = () => {
     setLoading(true);
 
     try {
-      const r = await axios.post(`${API_BASE}/scanner/requests`, { licence_number: lic }, { headers });
+      const r = await apiClient.post('/scanner/requests', { licence_number: lic });
       setRequestId(r.data.id);
-      const detail = await axios.get(`${API_BASE}/scanner/requests/${r.data.id}`, { headers });
+      const detail = await apiClient.get(`/scanner/requests/${r.data.id}`);
       setProductName(detail.data.product?.name || 'Product');
       setStep('select-location');
       setFirstLicence('');
@@ -79,7 +91,6 @@ const ScannerReceiptFlow = () => {
 
     const match = storageRows.find((r) => {
       const rowName = (r.name || '').toUpperCase();
-      // Match by row name only (with optional FG- prefix stripped so "A1" matches "FG-A1")
       const nameOnly = rowName.replace(/^FG[- ]?/, '');
       return nameOnly === scanned || rowName === scanned || r.id === rowScanInput.trim();
     });
@@ -135,7 +146,7 @@ const ScannerReceiptFlow = () => {
         is_partial: isPartial,
         partial_cases: isPartial && partialCases ? parseInt(partialCases, 10) : null,
       };
-      const r = await axios.post(`${API_BASE}/scanner/requests/${requestId}/scan`, payload, { headers });
+      const r = await apiClient.post(`/scanner/requests/${requestId}/scan`, payload);
 
       if (r.data.status === 'duplicate') {
         setError(r.data.message || 'Already scanned this pallet.');
@@ -165,17 +176,14 @@ const ScannerReceiptFlow = () => {
     }
   };
 
-  const handleSkipGaps = () => {
-    setStep('scan');
-  };
+  const handleSkipGaps = () => setStep('scan');
 
   const handleMarkMissing = async () => {
     if (gapMissing.length === 0) return;
     setLoading(true);
     try {
-      await axios.post(`${API_BASE}/scanner/requests/${requestId}/mark-missing`,
-        { licence_numbers: gapMissing }, { headers });
-      const fr = await axios.get(`${API_BASE}/scanner/requests/${requestId}`, { headers });
+      await apiClient.post(`/scanner/requests/${requestId}/mark-missing`, { licence_numbers: gapMissing });
+      const fr = await apiClient.get(`/scanner/requests/${requestId}`);
       setPallets(fr.data.pallet_licences?.filter((p) => p.status !== 'cancelled') || []);
       setGapMissing([]);
       setStep('scan');
@@ -189,7 +197,7 @@ const ScannerReceiptFlow = () => {
   const handleSubmit = async () => {
     setLoading(true);
     try {
-      await axios.post(`${API_BASE}/scanner/requests/${requestId}/submit`, {}, { headers });
+      await apiClient.post(`/scanner/requests/${requestId}/submit`, {});
       setStep('done');
     } catch (err) {
       setError(err.response?.data?.detail || 'Submit failed');
@@ -198,44 +206,115 @@ const ScannerReceiptFlow = () => {
     }
   };
 
+  const handleResume = () => {
+    if (!resumeData) return;
+    setRequestId(resumeData.id);
+    setProductName(resumeData.product_name || 'Product');
+    setPallets(resumeData.pallets || []);
+    setSelectedRowId(resumeData.last_row_id || '');
+    setResumeData(null);
+    setStep('scan');
+  };
+
+  const handleStartAnother = () => {
+    setStep('scan-first');
+    setFirstLicence('');
+    setRequestId(null);
+    setProductName('');
+    setStorageRows([]);
+    setSelectedRowId('');
+    setLicenceInput('');
+    setIsPartial(false);
+    setPartialCases('');
+    setPallets([]);
+    setGapMissing([]);
+    setRowAvailable(null);
+    setError('');
+    setRowScanInput('');
+    setRowScanAttempts(0);
+    setShowManualRows(false);
+    setResumeData(null);
+  };
+
   const getOnBack = () => {
     switch (step) {
-      case 'scan-first':
-        return () => navigate('/forklift');
-      case 'select-location':
-        return () => setStep('scan-first');
-      case 'scan':
-        return () => handleChangeRow();
-      case 'gap-prompt':
-        return () => setStep('scan');
-      case 'summary':
-        return () => setStep('scan');
-      case 'done':
-        return () => navigate('/forklift');
-      default:
-        return () => navigate('/forklift');
+      case 'resume-prompt': return () => navigate('/forklift');
+      case 'scan-first': return () => navigate('/forklift');
+      case 'select-location': return () => setStep('scan-first');
+      case 'scan': return () => handleChangeRow();
+      case 'gap-prompt': return () => setStep('scan');
+      case 'summary': return () => setStep('scan');
+      case 'done': return () => navigate('/forklift');
+      default: return () => navigate('/forklift');
     }
   };
 
   const selectedRow = storageRows.find((r) => r.id === selectedRowId);
+  const totalCases = pallets.reduce((s, p) => s + (p.cases || 0), 0);
 
+  // ── Checking for active session ──────────────────────────────────────────
+  if (step === 'checking') {
+    return (
+      <ScannerLayout title="Receipt Scan">
+        <div className="scanner-receipt-flow">
+          <p className="scanner-receipt-instruction">Checking for active session…</p>
+        </div>
+      </ScannerLayout>
+    );
+  }
+
+  // ── Resume prompt ────────────────────────────────────────────────────────
+  if (step === 'resume-prompt' && resumeData) {
+    return (
+      <ScannerLayout title="Resume Session" showBack onBack={getOnBack()}>
+        <div className="scanner-receipt-flow">
+          <p className="scanner-receipt-instruction">You have an unfinished scan session:</p>
+          <div className="scanner-receipt-resume-card">
+            <div className="scanner-receipt-product">{resumeData.product_name}</div>
+            <div className="scanner-receipt-resume-stats">
+              <span><strong>{resumeData.pallet_count}</strong> pallets scanned</span>
+              <span><strong>{(resumeData.total_cases || 0).toLocaleString()}</strong> cases</span>
+            </div>
+          </div>
+          <div className="scanner-receipt-gap-btns">
+            <button
+              type="button"
+              className="scanner-receipt-btn"
+              onClick={handleResume}
+            >
+              Resume Session
+            </button>
+            <button
+              type="button"
+              className="scanner-receipt-btn secondary"
+              onClick={handleStartAnother}
+            >
+              Start New
+            </button>
+          </div>
+        </div>
+      </ScannerLayout>
+    );
+  }
+
+  // ── Scan first pallet ────────────────────────────────────────────────────
   if (step === 'scan-first') {
     return (
       <ScannerLayout title="Receipt Scan" showBack onBack={getOnBack()}>
         <div className="scanner-receipt-flow">
-          <p className="scanner-receipt-instruction">Scan the first pallet to start</p>
+          <p className="scanner-receipt-instruction">Scan the first pallet to identify the product</p>
           <form onSubmit={handleCreateRequest} className="scanner-receipt-form">
             <input
               ref={inputRef}
               type="text"
               value={firstLicence}
               onChange={(e) => setFirstLicence(e.target.value)}
-              placeholder="Scan licence (e.g. LOT-XXX-MANGO-001)"
+              placeholder="Scan licence plate…"
               className="scanner-receipt-input"
               autoComplete="off"
             />
             <button type="submit" disabled={loading || !firstLicence.trim()} className="scanner-receipt-btn">
-              {loading ? 'Starting…' : 'Start'}
+              {loading ? '…' : 'Start'}
             </button>
           </form>
           {error && <div className="scanner-receipt-error">{error}</div>}
@@ -244,16 +323,17 @@ const ScannerReceiptFlow = () => {
     );
   }
 
+  // ── Select location ──────────────────────────────────────────────────────
   if (step === 'select-location') {
     const availableRows = storageRows.filter((r) => r.available > 0);
     return (
-      <ScannerLayout title="Select Location" showBack onBack={getOnBack()}>
+      <ScannerLayout title="Select Row" showBack onBack={getOnBack()}>
         <div className="scanner-receipt-flow">
-          <p className="scanner-receipt-product">{productName}</p>
+          <div className="scanner-receipt-product">{productName}</div>
 
           {!showManualRows ? (
             <>
-              <p className="scanner-receipt-instruction">Scan the storage row (row name only)</p>
+              <p className="scanner-receipt-instruction">Scan the destination row barcode</p>
               {loadingRows ? (
                 <p className="scanner-receipt-loading">Loading storage rows…</p>
               ) : (
@@ -268,7 +348,7 @@ const ScannerReceiptFlow = () => {
                     autoComplete="off"
                   />
                   <button type="submit" disabled={!rowScanInput.trim()} className="scanner-receipt-btn">
-                    <Scan size={24} />
+                    <Scan size={22} />
                   </button>
                 </form>
               )}
@@ -285,7 +365,7 @@ const ScannerReceiptFlow = () => {
             </>
           ) : (
             <>
-              <p className="scanner-receipt-instruction">Choose storage row</p>
+              <p className="scanner-receipt-instruction">Choose a storage row</p>
               <button
                 type="button"
                 className="scanner-receipt-try-scan-btn"
@@ -309,7 +389,7 @@ const ScannerReceiptFlow = () => {
                       className="scanner-receipt-row-btn"
                       onClick={() => handleSelectLocation(row.id)}
                     >
-                      <MapPin size={20} />
+                      <MapPin size={20} color="#1a472a" />
                       <span>{row.name}</span>
                       <span className="scanner-receipt-available">{row.available} free</span>
                     </button>
@@ -324,11 +404,12 @@ const ScannerReceiptFlow = () => {
     );
   }
 
+  // ── Gap detected ─────────────────────────────────────────────────────────
   if (step === 'gap-prompt') {
     return (
       <ScannerLayout title="Gap Detected" showBack onBack={getOnBack()}>
         <div className="scanner-receipt-flow">
-          <p className="scanner-receipt-instruction">Missing pallet(s):</p>
+          <p className="scanner-receipt-instruction">Missing pallet(s) in sequence:</p>
           <ul className="scanner-receipt-gap-list">
             {gapMissing.map((ln) => (
               <li key={ln}>{ln}</li>
@@ -336,10 +417,10 @@ const ScannerReceiptFlow = () => {
           </ul>
           <div className="scanner-receipt-gap-btns">
             <button type="button" className="scanner-receipt-btn secondary" onClick={handleSkipGaps}>
-              Skip
+              Skip — continue scanning
             </button>
             <button type="button" className="scanner-receipt-btn" onClick={handleMarkMissing} disabled={loading}>
-              Mark Missing
+              Mark as Missing
             </button>
           </div>
         </div>
@@ -347,13 +428,14 @@ const ScannerReceiptFlow = () => {
     );
   }
 
+  // ── Scan pallets ─────────────────────────────────────────────────────────
   if (step === 'scan') {
     return (
       <ScannerLayout title="Scan Pallets" showBack onBack={getOnBack()}>
         <div className="scanner-receipt-flow">
           <div className="scanner-receipt-location-bar">
             <p className="scanner-receipt-location">
-              <MapPin size={18} /> {selectedRow?.name}
+              <MapPin size={16} /> {selectedRow?.name}
               {rowAvailable !== null && <span className="scanner-receipt-capacity">({rowAvailable} left)</span>}
             </p>
             <button
@@ -361,23 +443,24 @@ const ScannerReceiptFlow = () => {
               className="scanner-receipt-change-row-btn"
               onClick={handleChangeRow}
             >
-              <RefreshCw size={16} /> Change Row
+              <RefreshCw size={14} /> Change Row
             </button>
           </div>
+
           <div className="scanner-receipt-toggle">
             <button
               type="button"
               className={!isPartial ? 'active' : ''}
               onClick={() => setIsPartial(false)}
             >
-              Full
+              Full pallet
             </button>
             <button
               type="button"
               className={isPartial ? 'active' : ''}
               onClick={() => setIsPartial(true)}
             >
-              Partial
+              Partial pallet
             </button>
           </div>
           {isPartial && (
@@ -387,7 +470,7 @@ const ScannerReceiptFlow = () => {
               max={999}
               value={partialCases}
               onChange={(e) => setPartialCases(e.target.value)}
-              placeholder="Cases"
+              placeholder="Number of cases"
               className="scanner-receipt-partial-input"
             />
           )}
@@ -397,7 +480,7 @@ const ScannerReceiptFlow = () => {
               type="text"
               value={licenceInput}
               onChange={(e) => setLicenceInput(e.target.value)}
-              placeholder="Scan pallet"
+              placeholder="Scan pallet licence…"
               className="scanner-receipt-input"
               autoComplete="off"
             />
@@ -406,42 +489,69 @@ const ScannerReceiptFlow = () => {
               disabled={loading || !licenceInput.trim() || (isPartial && !partialCases)}
               className="scanner-receipt-btn"
             >
-              {loading ? '…' : <Scan size={24} />}
+              {loading ? '…' : <Scan size={22} />}
             </button>
           </form>
           {error && <div className="scanner-receipt-error">{error}</div>}
+
           <div className="scanner-receipt-pallets">
-            <h3>Scanned ({pallets.length})</h3>
+            <div className="scanner-receipt-pallets-header">
+              <h3>Scanned ({pallets.length})</h3>
+              {pallets.length > 0 && (
+                <span className="scanner-receipt-pallets-total">{totalCases.toLocaleString()} cases</span>
+              )}
+            </div>
             {pallets.slice(-10).reverse().map((p) => (
               <div key={p.id} className="scanner-receipt-pallet-item">
-                <Package size={16} /> {p.licence_number} – {p.cases} cases
+                <Check size={14} color="#16a34a" />
+                <span className="pallet-lic">{p.licence_number}</span>
+                <span className="pallet-cases">{p.cases} cs</span>
               </div>
             ))}
           </div>
+
           <button
             type="button"
             className="scanner-receipt-submit-btn"
             onClick={() => setStep('summary')}
             disabled={pallets.length === 0}
           >
-            Review & Submit
+            Review & Submit ({pallets.length})
           </button>
         </div>
       </ScannerLayout>
     );
   }
 
+  // ── Summary ──────────────────────────────────────────────────────────────
   if (step === 'summary') {
-    const totalCases = pallets.reduce((s, p) => s + (p.cases || 0), 0);
     return (
       <ScannerLayout title="Review" showBack onBack={getOnBack()}>
         <div className="scanner-receipt-flow">
-          <p className="scanner-receipt-product">{productName}</p>
-          <p className="scanner-receipt-summary">{pallets.length} pallets, {totalCases} cases</p>
+          <div className="scanner-receipt-product">{productName}</div>
+          <div className="scanner-receipt-summary-stats">
+            <div className="scanner-receipt-stat">
+              <span className="scanner-receipt-stat-value">{pallets.length}</span>
+              <span className="scanner-receipt-stat-label">Pallets</span>
+            </div>
+            <div className="scanner-receipt-stat">
+              <span className="scanner-receipt-stat-value">{totalCases.toLocaleString()}</span>
+              <span className="scanner-receipt-stat-label">Cases</span>
+            </div>
+            <div className="scanner-receipt-stat">
+              <span className="scanner-receipt-stat-value">{selectedRow?.name || '—'}</span>
+              <span className="scanner-receipt-stat-label">Row</span>
+            </div>
+          </div>
           <div className="scanner-receipt-pallets">
+            <div className="scanner-receipt-pallets-header">
+              <h3>All Pallets</h3>
+            </div>
             {pallets.map((p) => (
               <div key={p.id} className="scanner-receipt-pallet-item">
-                {p.licence_number} – {p.cases}
+                <Package size={14} color="#6b7280" />
+                <span className="pallet-lic">{p.licence_number}</span>
+                <span className="pallet-cases">{p.cases} cs</span>
               </div>
             ))}
           </div>
@@ -450,7 +560,7 @@ const ScannerReceiptFlow = () => {
               Back
             </button>
             <button type="button" className="scanner-receipt-btn" onClick={handleSubmit} disabled={loading}>
-              {loading ? 'Submitting…' : <><Check size={20} /> Submit</>}
+              {loading ? 'Submitting…' : <><Check size={18} /> Submit</>}
             </button>
           </div>
         </div>
@@ -458,15 +568,25 @@ const ScannerReceiptFlow = () => {
     );
   }
 
+  // ── Done ─────────────────────────────────────────────────────────────────
   if (step === 'done') {
     return (
       <ScannerLayout title="Submitted" showBack onBack={getOnBack()}>
         <div className="scanner-receipt-flow done">
-          <Check size={48} className="scanner-receipt-done-icon" />
-          <p>Receipt scan submitted for approval.</p>
-          <button type="button" className="scanner-receipt-btn" onClick={() => navigate('/forklift')}>
-            Home
-          </button>
+          <CheckCircle2 size={64} className="scanner-receipt-done-icon" />
+          <h2 className="scanner-receipt-done-title">Submitted!</h2>
+          <p className="scanner-receipt-done-sub">
+            {pallets.length} pallet{pallets.length !== 1 ? 's' : ''} · {totalCases.toLocaleString()} cases<br />
+            Sent to supervisor for approval.
+          </p>
+          <div className="scanner-receipt-done-actions">
+            <button type="button" className="scanner-receipt-btn" onClick={handleStartAnother}>
+              <Package size={18} /> Scan Another Receipt
+            </button>
+            <button type="button" className="scanner-receipt-btn secondary" onClick={() => navigate('/forklift')}>
+              Back to Home
+            </button>
+          </div>
         </div>
       </ScannerLayout>
     );
