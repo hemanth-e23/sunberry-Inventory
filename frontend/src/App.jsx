@@ -572,7 +572,7 @@ function App() {
                 <InventoryProvider>
                   <ReportingProvider>
                     <AppDataProvider>
-                      <Router>
+                      <Router basename={import.meta.env.BASE_URL}>
                         <div className="App">
                           <SessionWarningBanner />
                           <AppRoutes />
