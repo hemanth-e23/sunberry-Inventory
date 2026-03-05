@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Sunberry Inventory</title>
+    <script>
+      // GitHub Pages SPA redirect
+      // Encodes the path into a query string so index.html can restore it
+      var path = window.location.pathname;
+      var base = '/sunberry-Inventory';
+      var rest = path.startsWith(base) ? path.slice(base.length) : path;
+      window.location.replace(
+        window.location.origin + base + '/?p=' + encodeURIComponent(rest) +
+        (window.location.search ? '&' + window.location.search.slice(1) : '') +
+        window.location.hash
+      );
+    </script>
+  </head>
+  <body></body>
+</html>
