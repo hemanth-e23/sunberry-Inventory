@@ -39,8 +39,6 @@ services:
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-True}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
       RATE_LIMIT_LOGIN_PER_MINUTE: ${RATE_LIMIT_LOGIN_PER_MINUTE:-5}
-    ports:
-      - "${BACKEND_PORT:-8001}:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -50,6 +48,16 @@ services:
       - sunberry-network
     restart: unless-stopped
 
+  # Cloudflare Tunnel - exposes backend to the internet
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: sunberry-tunnel
+    command: tunnel --url http://backend:8000
+    depends_on:
+      - backend
+    networks:
+      - sunberry-network
+    restart: unless-stopped
 
 volumes:
   postgres_data:
