@@ -60,7 +60,7 @@ services:
   tunnel:
     image: cloudflare/cloudflared:latest
     container_name: sunberry-tunnel
-    command: tunnel --url http://backend:8000
+    command: tunnel --protocol http2 --url http://backend:8000
     depends_on:
       - backend
     networks:
