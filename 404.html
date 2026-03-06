@@ -4,15 +4,14 @@
     <meta charset="utf-8">
     <title>Sunberry Inventory</title>
     <script>
-      // GitHub Pages SPA redirect
-      // Encodes the path into a query string so index.html can restore it
-      var path = window.location.pathname;
+      var l = window.location;
       var base = '/sunberry-Inventory';
-      var rest = path.startsWith(base) ? path.slice(base.length) : path;
-      window.location.replace(
-        window.location.origin + base + '/?p=' + encodeURIComponent(rest) +
-        (window.location.search ? '&' + window.location.search.slice(1) : '') +
-        window.location.hash
+      var path = l.pathname.slice(base.length) || '/';
+      l.replace(
+        l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') +
+        base + '/?p=' + encodeURIComponent(path) +
+        (l.search ? '&' + l.search.slice(1) : '') +
+        l.hash
       );
     </script>
   </head>
