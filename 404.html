@@ -5,11 +5,10 @@
     <title>Sunberry Inventory</title>
     <script>
       var l = window.location;
-      var base = '/sunberry-Inventory';
-      var path = l.pathname.slice(base.length) || '/';
+      var path = l.pathname || '/';
       l.replace(
         l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') +
-        base + '/?p=' + encodeURIComponent(path) +
+        '/?p=' + encodeURIComponent(path) +
         (l.search ? '&' + l.search.slice(1) : '') +
         l.hash
       );
