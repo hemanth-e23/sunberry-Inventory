@@ -63,7 +63,7 @@ services:
   tunnel:
     image: cloudflare/cloudflared:latest
     container_name: sunberry-tunnel
-    command: tunnel --protocol http2 --url http://backend:8000
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
     depends_on:
       - backend
     networks:
