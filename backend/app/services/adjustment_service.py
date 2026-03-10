@@ -14,6 +14,7 @@ DEDUCTION_TYPES = frozenset({
     "donation",
     "trash-disposal",
     "quality-rejection",
+    "used-in-production",
 })
 
 

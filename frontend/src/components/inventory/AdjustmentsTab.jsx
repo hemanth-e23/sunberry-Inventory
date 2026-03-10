@@ -13,6 +13,7 @@ const ADJUSTMENT_TYPES = [
   { value: 'donation', label: 'Donation' },
   { value: 'trash-disposal', label: 'Trash / Disposal' },
   { value: 'quality-rejection', label: 'Quality Rejection' },
+  { value: 'used-in-production', label: 'Used in Production' },
 ];
 
 const AdjustmentsTab = () => {
