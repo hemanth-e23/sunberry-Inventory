@@ -17,7 +17,7 @@ from app.schemas import (
     InventoryTransfer as InventoryTransferSchema, InventoryTransferCreate, InventoryTransferUpdate,
     ShipOutPickListCreate, ScanPickRequest, ForkliftSubmitRequest,
 )
-from app.utils.auth import get_current_active_user, warehouse_filter
+from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus
 from app.services import transfer_service
 from app.constants import ROLE_FORKLIFT, ROLE_WAREHOUSE
@@ -154,7 +154,7 @@ async def create_transfer(
         id=transfer_id,
         **transfer_dict,
         requested_by=str(current_user.id),
-        warehouse_id=current_user.warehouse_id,
+        warehouse_id=resolve_warehouse_for_write(current_user),
         status=TransferStatus.PENDING
     )
 
@@ -216,7 +216,7 @@ async def create_ship_out_pick_list(
         source_breakdown=source_breakdown,
         pallet_licence_ids=data.pallet_licence_ids,
         requested_by=str(current_user.id),
-        warehouse_id=current_user.warehouse_id,
+        warehouse_id=resolve_warehouse_for_write(current_user),
         status=TransferStatus.PENDING
     )
     receipt.hold = True

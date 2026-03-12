@@ -160,7 +160,7 @@ function NotificationBell() {
 // ---------------------------------------------------------------------------
 
 function WarehouseSelector() {
-  const { selectedWarehouse, setSelectedWarehouse } = useAuth();
+  const { selectedWarehouse, setSelectedWarehouse, setSelectedWarehouseName } = useAuth();
   const [warehouses, setWarehouses] = useState([]);
 
   useEffect(() => {
@@ -178,6 +178,7 @@ function WarehouseSelector() {
           const warehouseId = e.target.value || null;
           setSelectedWarehouse(warehouseId);
           const wh = warehouses.find(w => w.id === warehouseId);
+          setSelectedWarehouseName(wh?.name || null);
           setAppTimezone(wh?.timezone || null);
         }}
         className="warehouse-selector-select"

@@ -29,6 +29,7 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const [sessionWarning, setSessionWarning] = useState(null);
   const [selectedWarehouse, setSelectedWarehouse] = useState(null);
+  const [selectedWarehouseName, setSelectedWarehouseName] = useState(null);
   const isForklift = useRef(false);
   const queryClient = useQueryClient();
 
@@ -51,7 +52,7 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     setUnauthorizedHandler(() => {
       logoutRef.current();
-      window.location.href = '/login';
+      window.location.href = import.meta.env.BASE_URL + 'login';
     });
     return () => setUnauthorizedHandler(null);
   }, []);
@@ -81,7 +82,7 @@ export const AuthProvider = ({ children }) => {
     setSessionWarning('Your session has expired. Please log in again.');
     setTimeout(() => {
       logout();
-      window.location.href = '/login';
+      window.location.href = import.meta.env.BASE_URL + 'login';
     }, 4000);
   }, [logout]);
 
@@ -217,7 +218,9 @@ export const AuthProvider = ({ children }) => {
     sessionWarning,
     clearSessionWarning,
     selectedWarehouse,
+    selectedWarehouseName,
     setSelectedWarehouse: isCorporateUser ? setSelectedWarehouse : undefined,
+    setSelectedWarehouseName: isCorporateUser ? setSelectedWarehouseName : undefined,
     isCorporateUser: !!isCorporateUser,
   };
 

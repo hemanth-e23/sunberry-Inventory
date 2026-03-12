@@ -11,7 +11,7 @@ from app.schemas import (
     InventoryAdjustmentCreate,
     InventoryAdjustmentUpdate,
 )
-from app.utils.auth import get_current_active_user, warehouse_filter
+from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write
 from app.enums import AdjustmentStatus
 from app.services import adjustment_service
 from app.constants import ROLE_WAREHOUSE
@@ -77,7 +77,7 @@ async def create_adjustment(
         id=f"adj-{uuid.uuid4().hex[:12]}",
         **adjustment_dict,
         submitted_by=str(current_user.id),
-        warehouse_id=current_user.warehouse_id,
+        warehouse_id=resolve_warehouse_for_write(current_user),
         status=AdjustmentStatus.PENDING
     )
 

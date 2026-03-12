@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useAppData } from '../../context/AppDataContext';
+import { useAuth } from '../../context/AuthContext';
+import { useConfirm } from '../../context/ConfirmContext';
 import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import { formatDate, formatDateTime, escapeHtml } from '../../utils/dateUtils';
@@ -8,6 +10,8 @@ import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
 const ShipOutTab = () => {
   const { addToast } = useToast();
+  const { isCorporateUser, selectedWarehouse, selectedWarehouseName } = useAuth();
+  const { confirm } = useConfirm();
   const {
     products,
     categories,
@@ -206,6 +210,12 @@ const ShipOutTab = () => {
       setShipOutError('All selected pallets must be from the same receipt');
       return;
     }
+
+    if (isCorporateUser && selectedWarehouse) {
+      const ok = await confirm(`You are about to log this ship-out to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
+      if (!ok) return;
+    }
+
     setIsCreatingPickList(true);
     setShipOutError('');
     try {

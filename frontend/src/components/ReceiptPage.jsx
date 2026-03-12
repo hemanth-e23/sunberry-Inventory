@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom";
 import { useAppData } from "../context/AppDataContext";
 import { useAuth } from "../context/AuthContext";
+import { useConfirm } from "../context/ConfirmContext";
 import { getDashboardPath } from "../App";
 import { isDateInPast, isDateValid, getTodayDateKey } from "../utils/dateUtils";
 import { validateLotNumber } from "../utils/sanitizeUtils";
@@ -105,7 +106,8 @@ const getDayOfYear = (date) => {
 
 const ReceiptPage = () => {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, isCorporateUser, selectedWarehouse, selectedWarehouseName } = useAuth();
+  const { confirm } = useConfirm();
   const {
     categoryGroups,
     productCategories,
@@ -952,6 +954,12 @@ const ReceiptPage = () => {
       return;
     }
 
+    // Corporate admin confirmation: verify they intend to log to the selected warehouse
+    if (isCorporateUser && selectedWarehouse) {
+      const ok = await confirm(`You are about to log this receipt to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
+      if (!ok) return;
+    }
+
     setIsSubmitting(true);
     try {
       const result = await submitReceipt(receiptPayload);
@@ -996,6 +1004,13 @@ const ReceiptPage = () => {
 
   const finalizeFinishedGoodReceipt = async () => {
     if (!confirmation.payload) return;
+
+    // Corporate admin confirmation: verify they intend to log to the selected warehouse
+    if (isCorporateUser && selectedWarehouse) {
+      const ok = await confirm(`You are about to log this receipt to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
+      if (!ok) return;
+    }
+
     setIsSubmitting(true);
     try {
       const result = await submitReceipt(confirmation.payload);

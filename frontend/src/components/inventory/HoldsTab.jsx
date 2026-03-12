@@ -1,6 +1,7 @@
 import React, { useMemo, useState, useCallback } from 'react';
 import { useAppData } from '../../context/AppDataContext';
 import { useAuth } from '../../context/AuthContext';
+import { useConfirm } from '../../context/ConfirmContext';
 import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
@@ -11,7 +12,8 @@ import { CATEGORY_TYPES, HOLD_STATUS, RECEIPT_STATUS } from '../../constants';
 
 const HoldsTab = () => {
   const { addToast } = useToast();
-  const { user } = useAuth();
+  const { user, isCorporateUser, selectedWarehouse, selectedWarehouseName } = useAuth();
+  const { confirm } = useConfirm();
   const {
     products,
     categories,
@@ -140,6 +142,11 @@ const HoldsTab = () => {
     if (fgSelectedIds.length === 0) { setFgError('Select at least one pallet.'); return; }
     if (!fgReason.trim()) { setFgError('Provide a reason.'); return; }
 
+    if (isCorporateUser && selectedWarehouse) {
+      const ok = await confirm(`You are about to log this hold to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
+      if (!ok) return;
+    }
+
     setFgSubmitting(true);
     const result = await submitHoldAction({
       action: fgMode,
@@ -176,6 +183,11 @@ const HoldsTab = () => {
     if (pendingHold) {
       setRmError(`This lot already has a pending ${pendingHold.action} request.`);
       return;
+    }
+
+    if (isCorporateUser && selectedWarehouse) {
+      const ok = await confirm(`You are about to log this hold to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
+      if (!ok) return;
     }
 
     const action = selectedRmReceipt.hold ? 'release' : 'hold';

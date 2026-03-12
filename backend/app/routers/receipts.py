@@ -11,7 +11,7 @@ from app.schemas import (
     Receipt as ReceiptSchema, ReceiptCreate, ReceiptUpdate,
     ReceiptAllocation as ReceiptAllocationSchema
 )
-from app.utils.auth import get_current_active_user, require_role, warehouse_filter
+from app.utils.auth import get_current_active_user, require_role, warehouse_filter, resolve_warehouse_for_write
 from app.enums import ReceiptStatus, PalletStatus
 from app.services import receipt_service
 from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED, DEFAULT_CASES_PER_PALLET
@@ -114,10 +114,12 @@ async def create_receipt(
         receipt_dict["quantity"] = float(container_count)
         receipt_dict["unit"] = container_unit
     
+    wh_id_for_write = resolve_warehouse_for_write(current_user)
+
     db_receipt = Receipt(
         **receipt_dict,
         submitted_by=str(current_user.id),
-        warehouse_id=current_user.warehouse_id,
+        warehouse_id=wh_id_for_write,
         status=ReceiptStatus.RECORDED
     )
     
@@ -246,7 +248,7 @@ async def create_receipt(
                     is_partial=is_partial,
                     sequence=seq,
                     status=PalletStatus.PENDING,
-                    warehouse_id=current_user.warehouse_id,
+                    warehouse_id=wh_id_for_write,
                 )
                 db.add(pl)
                 seq += 1

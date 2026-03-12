@@ -31,6 +31,25 @@ def warehouse_filter(user) -> Optional[str]:
     # Corporate users: respect the per-request warehouse override if set
     return getattr(user, '_view_warehouse_id', None)
 
+def resolve_warehouse_for_write(user) -> str:
+    """
+    Returns the warehouse_id to use when a user creates inventory records.
+    - Plant users: their own warehouse_id.
+    - Corporate users: the warehouse selected via X-View-Warehouse header.
+    Raises 400 if a corporate user hasn't selected a specific warehouse.
+    """
+    if user.role not in CORPORATE_ROLES:
+        return user.warehouse_id
+
+    view_wh = getattr(user, '_view_warehouse_id', None)
+    if not view_wh:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please select a specific warehouse location before creating records. You currently have 'All Warehouses' selected."
+        )
+    return view_wh
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against its hash"""
     if isinstance(hashed_password, str):

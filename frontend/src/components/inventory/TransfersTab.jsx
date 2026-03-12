@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useAppData } from '../../context/AppDataContext';
+import { useAuth } from '../../context/AuthContext';
+import { useConfirm } from '../../context/ConfirmContext';
 import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
@@ -9,6 +11,8 @@ import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
 const TransfersTab = () => {
   const { addToast } = useToast();
+  const { isCorporateUser, selectedWarehouse, selectedWarehouseName } = useAuth();
+  const { confirm } = useConfirm();
   const {
     products,
     categories,
@@ -130,6 +134,11 @@ const TransfersTab = () => {
     if (fgSelectedIds.length === 0) { setFgError('Select at least one pallet.'); return; }
     if (!fgToRowId) { setFgError('Select a destination row.'); return; }
 
+    if (isCorporateUser && selectedWarehouse) {
+      const ok = await confirm(`You are about to log this transfer to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
+      if (!ok) return;
+    }
+
     setIsSubmittingFg(true);
     setFgError('');
 
@@ -215,6 +224,11 @@ const TransfersTab = () => {
     if (rmForm.transferType !== 'shipped-out' && !rmForm.toSubLocation) {
       setRmError('Choose a destination sub location.');
       return;
+    }
+
+    if (isCorporateUser && selectedWarehouse) {
+      const ok = await confirm(`You are about to log this transfer to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
+      if (!ok) return;
     }
 
     setIsSubmittingRm(true);

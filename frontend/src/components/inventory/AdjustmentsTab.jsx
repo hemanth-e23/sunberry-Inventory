@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useAppData } from '../../context/AppDataContext';
+import { useAuth } from '../../context/AuthContext';
+import { useConfirm } from '../../context/ConfirmContext';
 import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
@@ -18,6 +20,8 @@ const ADJUSTMENT_TYPES = [
 
 const AdjustmentsTab = () => {
   const { addToast } = useToast();
+  const { isCorporateUser, selectedWarehouse, selectedWarehouseName } = useAuth();
+  const { confirm } = useConfirm();
   const {
     products,
     categories,
@@ -131,6 +135,11 @@ const AdjustmentsTab = () => {
     if (fgSelectedIds.length === 0) { setFgError('Select at least one pallet.'); return; }
     if (!fgReason.trim()) { setFgError('Reason is required.'); return; }
 
+    if (isCorporateUser && selectedWarehouse) {
+      const ok = await confirm(`You are about to log this adjustment to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
+      if (!ok) return;
+    }
+
     const product = productLookup[fgProductId];
     setIsSubmittingFg(true);
     setFgError('');
@@ -162,6 +171,11 @@ const AdjustmentsTab = () => {
     if (!rmForm.productId || !rmForm.receiptId) { setRmError('Select a product and lot.'); return; }
     if (!rmForm.quantity || Number(rmForm.quantity) <= 0) { setRmError('Enter a valid quantity.'); return; }
     if (!rmForm.reason.trim()) { setRmError('Reason is required.'); return; }
+
+    if (isCorporateUser && selectedWarehouse) {
+      const ok = await confirm(`You are about to log this adjustment to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
+      if (!ok) return;
+    }
 
     setIsSubmittingRm(true);
     setRmError('');
