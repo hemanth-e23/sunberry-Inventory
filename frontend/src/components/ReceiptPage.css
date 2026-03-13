@@ -2,7 +2,7 @@
 
 .receipt-page {
   width: 100%;
-  background: #f5f5f5;
+  background: var(--color-canvas, #f5f5f5);
   padding: 20px;
   box-sizing: border-box;
   min-height: calc(100vh - 60px); /* Account for fixed header */
@@ -16,12 +16,12 @@
   margin: 0 0 8px 0;
   font-size: 24px;
   font-weight: 700;
-  color: #1f2933;
+  color: var(--color-text, #1f2937);
 }
 
 .page-header p {
   margin: 0;
-  color: #6b7280;
+  color: var(--color-text-muted, #6b7280);
   font-size: 14px;
 }
 
@@ -33,11 +33,11 @@
 }
 
 .panel {
-  background: white;
+  background: var(--color-surface, #ffffff);
   border-radius: 8px;
   padding: 16px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--color-border, #e5e7eb);
 }
 
 .panel + .panel {
@@ -56,12 +56,12 @@
   margin: 0;
   font-size: 18px;
   font-weight: 600;
-  color: #1f2933;
+  color: var(--color-text, #1f2937);
 }
 
 .panel-header p {
   margin: 0;
-  color: #6b7280;
+  color: var(--color-text-muted, #6b7280);
   font-size: 14px;
 }
 
@@ -72,13 +72,13 @@
 }
 
 .alert.success {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--success-100, #dcfce7);
+  color: var(--success-800, #166534);
 }
 
 .alert.error {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--error-100, #fee2e2);
+  color: var(--error-800, #991b1b);
 }
 
 .simple-form {
@@ -110,7 +110,7 @@
   flex-direction: column;
   gap: 6px;
   font-size: 14px;
-  color: #1f2933;
+  color: var(--color-text, #1f2937);
 }
 
 .combobox {
@@ -122,7 +122,7 @@
 .combobox input {
   padding: 10px;
   border-radius: 4px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--color-border-strong, #d1d5db);
   font-size: 14px;
 }
 
@@ -133,8 +133,8 @@
   right: 0;
   max-height: 220px;
   overflow-y: auto;
-  background: white;
-  border: 1px solid #d1d5db;
+  background: var(--color-surface, #ffffff);
+  border: 1px solid var(--color-border-strong, #d1d5db);
   border-radius: 4px;
   box-shadow: 0 10px 20px rgba(15, 23, 42, 0.15);
   z-index: 10;
@@ -150,13 +150,13 @@
 
 .combobox-list li.active,
 .combobox-list li:hover {
-  background: #eef2ff;
-  color: #1d4ed8;
+  background: var(--info-50, #eef2ff);
+  color: var(--info-700, #1d4ed8);
 }
 
 
 .form-grid .required {
-  color: #dc2626;
+  color: var(--color-danger, #dc2626);
   margin-left: 4px;
   font-weight: 600;
 }
@@ -166,7 +166,7 @@
 .form-grid textarea {
   padding: 10px;
   border-radius: 4px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--color-border-strong, #d1d5db);
   font-size: 14px;
 }
 
@@ -185,11 +185,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #f1f5f9;
+  background: var(--color-bg-subtle, #f1f5f9);
   border-radius: 10px;
   border: 1px solid rgba(148, 163, 184, 0.35);
   font-weight: 600;
-  color: #475569;
+  color: var(--color-text-label, #475569);
 }
 
 .partial-layout {
@@ -207,7 +207,7 @@
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid rgba(148, 163, 184, 0.35);
-  background: #f8fafc;
+  background: var(--color-bg-subtle, #f8fafc);
 }
 
 .partial-layout .partial-cases {
@@ -221,16 +221,16 @@
 }
 
 .manual-allocation-entry {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--color-border, #e2e8f0);
   border-radius: 12px;
   padding: 20px;
   margin-bottom: 16px;
-  background: #f8fafc;
+  background: var(--color-bg-subtle, #f8fafc);
   transition: all 0.2s ease;
 }
 
 .manual-allocation-entry:hover {
-  border-color: #cbd5e1;
+  border-color: var(--color-border-strong, #cbd5e1);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
 }
 
@@ -246,7 +246,7 @@
   align-items: center;
   margin-bottom: 20px;
   padding-bottom: 12px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
 }
 
 .allocation-title {
@@ -258,7 +258,7 @@
 .allocation-label {
   font-size: 12px;
   font-weight: 600;
-  color: #64748b;
+  color: var(--color-text-muted, #64748b);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -266,13 +266,13 @@
 .allocation-location {
   font-size: 14px;
   font-weight: 500;
-  color: #334155;
+  color: var(--color-text, #334155);
 }
 
 .remove-allocation-btn {
-  background: #fef2f2;
-  color: #dc2626;
-  border: 1px solid #fecaca;
+  background: var(--error-50, #fef2f2);
+  color: var(--color-danger, #dc2626);
+  border: 1px solid var(--error-200, #fecaca);
   border-radius: 8px;
   padding: 8px;
   cursor: pointer;
@@ -283,9 +283,9 @@
 }
 
 .remove-allocation-btn:hover {
-  background: #fee2e2;
-  border-color: #fca5a5;
-  color: #b91c1c;
+  background: var(--error-100, #fee2e2);
+  border-color: var(--error-300, #fca5a5);
+  color: var(--error-700, #b91c1c);
   transform: scale(1.05);
 }
 
@@ -302,9 +302,9 @@
   align-items: center;
   gap: 8px;
   padding: 12px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--color-border-strong, #d1d5db);
   border-radius: 4px;
-  background: #f9fafb;
+  background: var(--color-bg-page, #f9fafb);
 }
 
 .hold-toggle input {
@@ -313,8 +313,8 @@
 
 .form-hint {
   padding: 12px;
-  background: #eef2ff;
-  color: #4338ca;
+  background: var(--info-50, #eef2ff);
+  color: var(--primary-700, #4338ca);
   border-radius: 4px;
   font-size: 14px;
 }
@@ -335,14 +335,14 @@
 }
 
 .simple-table thead {
-  background: #e5effc;
-  color: #1f2933;
+  background: var(--info-100, #e5effc);
+  color: var(--color-text, #1f2937);
 }
 
 .simple-table th,
 .simple-table td {
   padding: 10px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
   font-size: 14px;
   text-align: left;
 }
@@ -357,12 +357,12 @@
 }
 
 .status-active {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--success-100, #dcfce7);
+  color: var(--success-800, #166534);
 }
 
 .muted {
-  color: #6b7280;
+  color: var(--color-text-muted, #6b7280);
   font-size: 14px;
 }
 
@@ -398,7 +398,7 @@
   padding: 18px;
   border-radius: 10px;
   background: rgba(99, 102, 241, 0.06);
-  color: #475569;
+  color: var(--color-text-label, #475569);
   font-size: 14px;
 }
 
@@ -408,7 +408,7 @@
   gap: 16px;
   padding: 16px;
   border-radius: 12px;
-  background: white;
+  background: var(--color-surface, #ffffff);
   border: 1px solid rgba(148, 163, 184, 0.18);
   box-shadow: 0 6px 12px rgba(148, 163, 184, 0.14);
 }
@@ -420,7 +420,7 @@
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #4c1d95;
+  color: var(--primary-800, #4c1d95);
 }
 
 .manual-allocation-row input,
@@ -434,14 +434,14 @@
 .capacity-hint {
   margin: 6px 0 0;
   font-size: 12px;
-  color: #475569;
+  color: var(--color-text-label, #475569);
 }
 
 .manual-allocation-row .link-button {
   align-self: center;
   background: transparent;
   border: none;
-  color: #dc2626;
+  color: var(--color-danger, #dc2626);
   font-weight: 600;
   cursor: pointer;
 }
@@ -473,9 +473,9 @@
   grid-column: 1 / -1;
   padding: 12px;
   border-radius: 10px;
-  background: #fef3c7; /* soft amber */
-  border: 1px solid #fde68a; /* amber border */
-  color: #92400e; /* amber-700 text */
+  background: var(--warning-100, #fef3c7);
+  border: 1px solid var(--warning-200, #fde68a);
+  color: var(--warning-700, #92400e);
   font-size: 13px;
 }
 
@@ -498,7 +498,7 @@
 }
 
 .modal {
-  background: #ffffff;
+  background: var(--color-surface, #ffffff);
   border-radius: 16px;
   padding: 24px;
   width: min(720px, 92vw);
@@ -514,12 +514,12 @@
   margin: 0;
   font-size: 22px;
   font-weight: 600;
-  color: #1e1b4b;
+  color: var(--primary-900, #1e1b4b);
 }
 
 .modal-header p {
   margin: 4px 0 0;
-  color: #475569;
+  color: var(--color-text-label, #475569);
   font-size: 14px;
 }
 
@@ -536,14 +536,14 @@
 .modal-summary strong {
   display: block;
   font-size: 12px;
-  color: #4c1d95;
+  color: var(--primary-800, #4c1d95);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
 .modal-summary span {
   font-size: 16px;
-  color: #0f172a;
+  color: var(--gray-900, #0f172a);
   font-weight: 600;
 }
 
@@ -641,9 +641,9 @@
 .receipt-page .panel-header {
     background: linear-gradient(135deg, rgba(255, 107, 53, 0.05) 0%, rgba(255, 210, 63, 0.05) 100%);
     position: relative;
-    padding: var(--spacing-lg) !important;
-    border-bottom: 2px solid var(--color-border) !important;
-    margin: 0 !important;
+    padding: var(--spacing-lg);
+    border-bottom: 2px solid var(--color-border);
+    margin: 0;
 }
 .receipt-page .panel-header::before {
     content: '';
@@ -654,82 +654,82 @@
 }
 .receipt-page .panel-header h2,
 .receipt-page .panel-header h3 {
-    color: var(--color-primary) !important;
-    font-weight: 700 !important;
-    font-size: 1.5rem !important;
-    margin: 0 !important;
+    color: var(--color-primary);
+    font-weight: 700;
+    font-size: 1.5rem;
+    margin: 0;
 }
 
 .receipt-page .panel {
-    border: 2px solid var(--color-border) !important;
-    box-shadow: var(--shadow-md) !important;
-    border-radius: var(--radius-lg) !important;
+    border: 2px solid var(--color-border);
+    box-shadow: var(--shadow-md);
+    border-radius: var(--radius-lg);
 }
 
 .receipt-page .primary-button {
-    background: var(--gradient-primary) !important;
-    border: none !important;
-    color: white !important;
-    padding: 0.875rem 2rem !important;
-    font-weight: 700 !important;
-    font-size: 1rem !important;
-    border-radius: var(--radius-md) !important;
-    box-shadow: var(--shadow-primary) !important;
-    transition: all var(--transition-base) !important;
+    background: var(--gradient-primary);
+    border: none;
+    color: var(--color-surface, #ffffff);
+    padding: 0.875rem 2rem;
+    font-weight: 700;
+    font-size: 1rem;
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-primary);
+    transition: all var(--transition-base);
 }
 .receipt-page .primary-button:hover {
-    transform: translateY(-2px) !important;
-    box-shadow: var(--shadow-glow) !important;
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-glow);
 }
 .receipt-page .secondary-button {
-    border: 2px solid var(--color-border) !important;
-    background: white !important;
-    color: var(--color-text) !important;
-    padding: 0.875rem 2rem !important;
-    font-weight: 600 !important;
-    border-radius: var(--radius-md) !important;
-    transition: all var(--transition-base) !important;
+    border: 2px solid var(--color-border);
+    background: var(--color-surface, #ffffff);
+    color: var(--color-text);
+    padding: 0.875rem 2rem;
+    font-weight: 600;
+    border-radius: var(--radius-md);
+    transition: all var(--transition-base);
 }
 .receipt-page .secondary-button:hover {
-    border-color: var(--color-primary) !important;
-    background: var(--color-primary-soft) !important;
-    color: var(--color-primary-dark) !important;
+    border-color: var(--color-primary);
+    background: var(--color-primary-soft);
+    color: var(--color-primary-dark);
 }
 
 .receipt-page input,
 .receipt-page select,
 .receipt-page textarea {
-    border: 2px solid var(--color-border) !important;
-    border-radius: var(--radius-md) !important;
-    padding: 0.75rem 1rem !important;
-    transition: all var(--transition-base) !important;
-    font-size: 0.9375rem !important;
-    background: white !important;
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 0.75rem 1rem;
+    transition: all var(--transition-base);
+    font-size: 0.9375rem;
+    background: var(--color-surface, #ffffff);
     width: 100%;
     min-width: 0;
 }
 .receipt-page input:hover,
-.receipt-page select:hover { border-color: #cbd5e1 !important; }
+.receipt-page select:hover { border-color: var(--color-border-strong, #cbd5e1); }
 .receipt-page input:focus,
 .receipt-page select:focus,
 .receipt-page textarea:focus {
-    border-color: var(--color-primary) !important;
-    box-shadow: 0 0 0 3px var(--color-primary-soft) !important;
-    outline: none !important;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-primary-soft);
+    outline: none;
 }
 .receipt-page input:disabled,
 .receipt-page select:disabled {
-    background: var(--color-surface) !important;
+    background: var(--color-surface);
     opacity: 0.6;
     cursor: not-allowed;
 }
 
 .receipt-page .manual-allocation-entry {
-    border: 2px solid var(--color-border) !important;
-    border-radius: var(--radius-lg) !important;
-    box-shadow: var(--shadow-sm) !important;
-    transition: all var(--transition-base) !important;
-    background: white !important;
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    transition: all var(--transition-base);
+    background: var(--color-surface, #ffffff);
     position: relative;
     overflow: visible;
 }
@@ -741,15 +741,15 @@
     background: var(--gradient-primary);
 }
 .receipt-page .manual-allocation-entry:hover {
-    border-color: var(--color-primary) !important;
-    box-shadow: var(--shadow-md) !important;
+    border-color: var(--color-primary);
+    box-shadow: var(--shadow-md);
     transform: translateY(-2px);
 }
 
 .receipt-page .chip.status-active {
-    background: var(--gradient-secondary) !important;
-    color: white !important;
-    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.3) !important;
+    background: var(--gradient-secondary);
+    color: var(--color-surface, #ffffff);
+    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.3);
 }
 
 .receipt-page .simple-table {
@@ -758,19 +758,19 @@
     border: 2px solid var(--color-border);
 }
 .receipt-page .simple-table thead {
-    background: linear-gradient(135deg, rgba(255, 107, 53, 0.08) 0%, rgba(255, 210, 63, 0.08) 100%) !important;
-    border-bottom: 2px solid var(--color-primary) !important;
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.08) 0%, rgba(255, 210, 63, 0.08) 100%);
+    border-bottom: 2px solid var(--color-primary);
 }
 .receipt-page .simple-table th {
-    color: var(--color-text) !important;
-    font-weight: 700 !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.05em !important;
-    font-size: 0.75rem !important;
-    padding: 1rem !important;
+    color: var(--color-text);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 0.75rem;
+    padding: 1rem;
 }
 .receipt-page .simple-table tbody tr:hover {
-    background: var(--color-primary-soft) !important;
+    background: var(--color-primary-soft);
 }
 
 .receipt-page .form-actions {
@@ -781,33 +781,33 @@
 }
 
 .receipt-page .manual-allocation-panel {
-    background: linear-gradient(135deg, rgba(255, 107, 53, 0.03) 0%, rgba(255, 210, 63, 0.03) 100%) !important;
-    border: 2px solid var(--color-border) !important;
-    border-left: 4px solid var(--color-primary) !important;
-    border-radius: var(--radius-lg) !important;
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.03) 0%, rgba(255, 210, 63, 0.03) 100%);
+    border: 2px solid var(--color-border);
+    border-left: 4px solid var(--color-primary);
+    border-radius: var(--radius-lg);
 }
 
 .receipt-page .combobox-list {
-    border: 2px solid var(--color-border) !important;
-    border-radius: var(--radius-md) !important;
-    box-shadow: var(--shadow-lg) !important;
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
 }
 .receipt-page .combobox-list li.active,
 .receipt-page .combobox-list li:hover {
-    background: var(--color-primary-soft) !important;
-    color: var(--color-primary-dark) !important;
-    font-weight: 600 !important;
+    background: var(--color-primary-soft);
+    color: var(--color-primary-dark);
+    font-weight: 600;
 }
 
 .receipt-page .form-hint {
-    background: linear-gradient(135deg, rgba(255, 107, 53, 0.05) 0%, rgba(255, 210, 63, 0.05) 100%) !important;
-    border-left: 4px solid var(--color-primary) !important;
-    border-radius: var(--radius-md) !important;
-    padding: 1rem 1.25rem !important;
-    font-weight: 600 !important;
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.05) 0%, rgba(255, 210, 63, 0.05) 100%);
+    border-left: 4px solid var(--color-primary);
+    border-radius: var(--radius-md);
+    padding: 1rem 1.25rem;
+    font-weight: 600;
 }
 
 .receipt-page .allocation-label {
-    color: var(--color-primary) !important;
-    font-weight: 700 !important;
+    color: var(--color-primary);
+    font-weight: 700;
 }

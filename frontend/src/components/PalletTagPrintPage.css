@@ -18,7 +18,7 @@
 }
 
 .muted {
-  color: #666;
+  color: var(--color-text-muted, #6b7280);
   margin: 4px 0 0 0;
 }
 
@@ -30,10 +30,10 @@
 }
 
 .filters-panel {
-  background: #f9fafb;
+  background: var(--color-bg-page, #f9fafb);
   padding: 20px;
   border-radius: 8px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--color-border, #e5e7eb);
 }
 
 .filter-row {
@@ -51,13 +51,13 @@
 .filter-row label span {
   font-size: 13px;
   font-weight: 500;
-  color: #374151;
+  color: var(--color-text-body, #374151);
 }
 
 .filter-row select,
 .filter-row input {
   padding: 8px 12px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--color-border-strong, #d1d5db);
   border-radius: 4px;
   font-size: 14px;
 }
@@ -67,8 +67,8 @@
   justify-content: space-between;
   align-items: center;
   padding: 16px;
-  background: white;
-  border: 1px solid #e5e7eb;
+  background: var(--color-surface, #ffffff);
+  border: 1px solid var(--color-border, #e5e7eb);
   border-radius: 8px;
 }
 
@@ -77,13 +77,13 @@
   align-items: center;
   gap: 12px;
   font-size: 14px;
-  color: #374151;
+  color: var(--color-text-body, #374151);
 }
 
 .link-button {
   background: none;
   border: none;
-  color: #2563eb;
+  color: var(--color-info, #2563eb);
   cursor: pointer;
   text-decoration: underline;
   font-size: 14px;
@@ -91,14 +91,14 @@
 }
 
 .link-button:hover {
-  color: #1d4ed8;
+  color: var(--color-info-dark, #1d4ed8);
 }
 
 
 
 .receipts-list {
-  background: white;
-  border: 1px solid #e5e7eb;
+  background: var(--color-surface, #ffffff);
+  border: 1px solid var(--color-border, #e5e7eb);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -109,7 +109,7 @@
 }
 
 .receipts-list thead {
-  background: #f9fafb;
+  background: var(--color-bg-page, #f9fafb);
 }
 
 .receipts-list th {
@@ -117,19 +117,19 @@
   text-align: left;
   font-size: 13px;
   font-weight: 600;
-  color: #374151;
-  border-bottom: 2px solid #e5e7eb;
+  color: var(--color-text-body, #374151);
+  border-bottom: 2px solid var(--color-border, #e5e7eb);
 }
 
 .receipts-list td {
   padding: 12px;
   font-size: 14px;
-  color: #1f2937;
-  border-bottom: 1px solid #f3f4f6;
+  color: var(--color-text, #1f2937);
+  border-bottom: 1px solid var(--color-bg-muted, #f3f4f6);
 }
 
 .receipts-list tbody tr:hover {
-  background: #f9fafb;
+  background: var(--color-bg-page, #f9fafb);
 }
 
 .receipts-list input[type="checkbox"] {
@@ -141,7 +141,7 @@
 .empty-state {
   padding: 40px;
   text-align: center;
-  color: #6b7280;
+  color: var(--color-text-muted, #6b7280);
 }
 
 /* Preview Section */
@@ -156,8 +156,8 @@
   justify-content: space-between;
   align-items: center;
   padding: 16px;
-  background: white;
-  border: 1px solid #e5e7eb;
+  background: var(--color-surface, #ffffff);
+  border: 1px solid var(--color-border, #e5e7eb);
   border-radius: 8px;
 }
 
@@ -177,7 +177,7 @@
 .preview-options input[type="number"] {
   width: 60px;
   padding: 6px 8px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--color-border-strong, #d1d5db);
   border-radius: 4px;
 }
 
@@ -186,14 +186,14 @@
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 20px;
   padding: 20px;
-  background: #f9fafb;
+  background: var(--color-bg-page, #f9fafb);
   border-radius: 8px;
 }
 
 /* Pallet Tag Design */
 .pallet-tag {
-  background: white;
-  border: 1px solid #1f2937;
+  background: var(--color-surface, #ffffff);
+  border: 1px solid var(--color-text, #1f2937);
   border-radius: 0;
   padding: 8px 10px;
   width: 100%;
@@ -210,7 +210,7 @@
 
 .tag-divider {
   height: 1px;
-  background: #1f2937;
+  background: var(--color-text, #1f2937);
   width: 100%;
   margin: 5px 0;
 }
@@ -218,7 +218,7 @@
 .tag-product-name {
   font-size: 18px;
   font-weight: 700;
-  color: #1f2937;
+  color: var(--color-text, #1f2937);
   line-height: 1.2;
   text-transform: uppercase;
   text-align: center;
@@ -247,7 +247,7 @@
 .tag-fcc-code {
   font-size: 22px;
   font-weight: 700;
-  color: #1f2937;
+  color: var(--color-text, #1f2937);
   text-align: center;
   text-transform: uppercase;
   margin: 8px 0;
@@ -274,14 +274,14 @@
 
 .quantity-label {
   font-size: 14px;
-  color: #1f2937;
+  color: var(--color-text, #1f2937);
   font-weight: 600;
 }
 
 .quantity-value {
   font-size: 18px;
   font-weight: 700;
-  color: #1f2937;
+  color: var(--color-text, #1f2937);
 }
 
 .tag-dates-row {
@@ -302,14 +302,14 @@
 
 .date-label {
   font-size: 14px;
-  color: #1f2937;
+  color: var(--color-text, #1f2937);
   font-weight: 600;
 }
 
 .date-value {
   font-size: 16px;
   font-weight: 700;
-  color: #1f2937;
+  color: var(--color-text, #1f2937);
 }
 
 .tag-bbd-section {
@@ -322,14 +322,14 @@
 
 .bbd-label {
   font-size: 12px;
-  color: #1f2937;
+  color: var(--color-text, #1f2937);
   font-weight: 600;
 }
 
 .bbd-value {
   font-size: 14px;
   font-weight: 700;
-  color: #1f2937;
+  color: var(--color-text, #1f2937);
 }
 
 .tag-lot-section {
@@ -342,14 +342,14 @@
 
 .lot-label {
   font-size: 12px;
-  color: #1f2937;
+  color: var(--color-text, #1f2937);
   font-weight: 600;
 }
 
 .lot-value {
   font-size: 16px;
   font-weight: 700;
-  color: #1f2937;
+  color: var(--color-text, #1f2937);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -581,13 +581,13 @@
 
 /* Enhanced Headers */
 .pallet-tag-print-page h2 {
-    color: var(--color-primary) !important;
-    font-weight: 700 !important;
+    color: var(--color-primary);
+    font-weight: 700;
 }
 
 /* Enhanced Filters Panel */
 .pallet-tag-print-page .filters-panel {
-    background: white;
+    background: var(--color-surface, #ffffff);
     border: 2px solid var(--color-border);
     border-radius: var(--radius-xl);
     padding: var(--spacing-xl);
@@ -596,28 +596,28 @@
 }
 
 .pallet-tag-print-page .filters-panel label {
-    font-weight: 600 !important;
-    color: var(--color-text) !important;
+    font-weight: 600;
+    color: var(--color-text);
 }
 
 .pallet-tag-print-page .filter-row select,
 .pallet-tag-print-page .filter-row input[type="text"] {
-    border: 2px solid var(--color-border) !important;
-    border-radius: var(--radius-md) !important;
-    padding: 0.75rem 1rem !important;
-    transition: all var(--transition-base) !important;
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 0.75rem 1rem;
+    transition: all var(--transition-base);
 }
 
 .pallet-tag-print-page .filter-row select:hover,
 .pallet-tag-print-page .filter-row input[type="text"]:hover {
-    border-color: #cbd5e1 !important;
+    border-color: var(--color-border-strong, #cbd5e1);
 }
 
 .pallet-tag-print-page .filter-row select:focus,
 .pallet-tag-print-page .filter-row input[type="text"]:focus {
-    border-color: var(--color-primary) !important;
-    box-shadow: 0 0 0 3px var(--color-primary-soft) !important;
-    outline: none !important;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-primary-soft);
+    outline: none;
 }
 
 /* Enhanced Selection Controls */
@@ -639,45 +639,45 @@
 
 /* Enhanced Buttons */
 .pallet-tag-print-page .primary-button {
-    background: var(--gradient-primary) !important;
-    border: none !important;
-    box-shadow: var(--shadow-primary) !important;
-    font-weight: 700 !important;
-    padding: 0.75rem 1.5rem !important;
-    transition: all var(--transition-base) !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.05em !important;
+    background: var(--gradient-primary);
+    border: none;
+    box-shadow: var(--shadow-primary);
+    font-weight: 700;
+    padding: 0.75rem 1.5rem;
+    transition: all var(--transition-base);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
 }
 
 .pallet-tag-print-page .primary-button:hover:not(:disabled) {
-    transform: translateY(-2px) !important;
-    box-shadow: var(--shadow-glow) !important;
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-glow);
 }
 
 .pallet-tag-print-page .secondary-button {
-    border: 2px solid var(--color-border) !important;
-    background: white !important;
-    color: var(--color-text) !important;
-    font-weight: 600 !important;
-    padding: 0.75rem 1.5rem !important;
-    transition: all var(--transition-base) !important;
+    border: 2px solid var(--color-border);
+    background: var(--color-surface, #ffffff);
+    color: var(--color-text);
+    font-weight: 600;
+    padding: 0.75rem 1.5rem;
+    transition: all var(--transition-base);
 }
 
 .pallet-tag-print-page .secondary-button:hover {
-    border-color: var(--color-primary) !important;
-    background: var(--color-primary-soft) !important;
-    color: var(--color-primary-dark) !important;
+    border-color: var(--color-primary);
+    background: var(--color-primary-soft);
+    color: var(--color-primary-dark);
     transform: translateY(-2px);
 }
 
 .pallet-tag-print-page .link-button {
-    color: var(--color-primary) !important;
-    font-weight: 600 !important;
+    color: var(--color-primary);
+    font-weight: 600;
     transition: color var(--transition-base);
 }
 
 .pallet-tag-print-page .link-button:hover {
-    color: var(--color-primary-dark) !important;
+    color: var(--color-primary-dark);
 }
 
 /* Enhanced Table */
@@ -689,17 +689,17 @@
 }
 
 .pallet-tag-print-page .receipts-list thead {
-    background: linear-gradient(135deg, rgba(255, 107, 53, 0.08) 0%, rgba(255, 210, 63, 0.08) 100%) !important;
-    border-bottom: 2px solid var(--color-primary) !important;
+    background: linear-gradient(135deg, rgba(255, 107, 53, 0.08) 0%, rgba(255, 210, 63, 0.08) 100%);
+    border-bottom: 2px solid var(--color-primary);
 }
 
 .pallet-tag-print-page .receipts-list th {
-    color: var(--color-text) !important;
-    font-weight: 700 !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.05em !important;
-    font-size: 0.75rem !important;
-    padding: 1rem !important;
+    color: var(--color-text);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 0.75rem;
+    padding: 1rem;
 }
 
 .pallet-tag-print-page .receipts-list tbody tr {
@@ -708,17 +708,17 @@
 }
 
 .pallet-tag-print-page .receipts-list tbody tr:hover {
-    background: var(--color-primary-soft) !important;
+    background: var(--color-primary-soft);
     transform: scale(1.001);
 }
 
 .pallet-tag-print-page .receipts-list td {
-    padding: 1rem !important;
+    padding: 1rem;
 }
 
 /* Enhanced Preview Controls */
 .pallet-tag-print-page .preview-controls {
-    background: white;
+    background: var(--color-surface, #ffffff);
     border: 2px solid var(--color-border);
     border-radius: var(--radius-md);
     padding: var(--spacing-md) var(--spacing-lg);

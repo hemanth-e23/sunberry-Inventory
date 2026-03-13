@@ -4,7 +4,7 @@ import { useAutoLogout } from '../hooks/useAutoLogout';
 import { useTokenRefresh } from '../hooks/useTokenRefresh';
 import { setViewWarehouse, setUnauthorizedHandler } from '../api/client';
 import * as authService from '../api/authService';
-import { setAppTimezone } from '../utils/dateUtils';
+import { setAppTimezone, getTodayDateKey } from '../utils/dateUtils';
 import { ROLES } from '../constants';
 
 const CORPORATE_ROLES = ['superadmin', 'corporate_admin', 'corporate_viewer'];
@@ -99,7 +99,7 @@ export const AuthProvider = ({ children }) => {
   // Forklift: check day-change and force re-login
   useEffect(() => {
     if (!isAuthenticated || user?.role !== ROLES.FORKLIFT) return;
-    const today = new Date().toDateString();
+    const today = getTodayDateKey();
     if (getLoginDate() && getLoginDate() !== today) {
       logout();
     }
@@ -163,7 +163,7 @@ export const AuthProvider = ({ children }) => {
       setUser(userData);
       setIsAuthenticated(true);
       localStorage.setItem('user', JSON.stringify(userData));
-      setLoginDate(new Date().toDateString());
+      setLoginDate(getTodayDateKey());
 
       return { success: true, user: userData };
     } catch (error) {
@@ -196,7 +196,7 @@ export const AuthProvider = ({ children }) => {
       setUser(userData);
       setIsAuthenticated(true);
       localStorage.setItem('user', JSON.stringify(userData));
-      setLoginDate(new Date().toDateString());
+      setLoginDate(getTodayDateKey());
 
       return { success: true, user: userData };
     } catch (error) {

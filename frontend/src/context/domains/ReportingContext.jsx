@@ -3,20 +3,10 @@ import { useFoundationContext as useFoundation } from './FoundationContext';
 import { useLocationContext as useLocation } from './LocationContext';
 import { useReceipt } from './ReceiptContext';
 import { useInventory } from './InventoryContext';
+import { numberFrom } from '../../utils/allocationUtils';
+import { toDateKey } from '../../utils/dateUtils';
 
 // ─── Pure helper functions ────────────────────────────────────────────────────
-
-const numberFrom = (value, fallback = 0) => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-};
-
-const toDateKey = (value) => {
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toISOString().slice(0, 10);
-};
 
 const buildReceiptReportingRows = (receipts, products, categories, locationLookup) => {
   const productsById = products.reduce((map, product) => {

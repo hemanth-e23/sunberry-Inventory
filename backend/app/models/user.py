@@ -15,7 +15,7 @@ class Warehouse(Base):
     contact_person = Column(String(100), nullable=True)
     email = Column(String(100), nullable=True)
     phone = Column(String(20), nullable=True)
-    timezone = Column(String(50), default="America/Los_Angeles")
+    timezone = Column(String(50), default="America/New_York")
     is_active = Column(Boolean, default=True)
     allow_product_creation = Column(Boolean, default=False, nullable=False, server_default="false")
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -10,8 +10,17 @@ import {
 } from 'lucide-react';
 
 const TIMEZONES = [
-  'America/Los_Angeles', 'America/Denver', 'America/Chicago',
-  'America/New_York', 'America/Phoenix', 'Pacific/Honolulu',
+  'America/New_York',      // Eastern US - Detroit
+  'America/Toronto',       // Eastern Canada
+  'America/Chicago',       // Central US
+  'America/Winnipeg',      // Central Canada
+  'America/Denver',        // Mountain US
+  'America/Edmonton',      // Mountain Canada
+  'America/Los_Angeles',   // Pacific US
+  'America/Vancouver',     // Pacific Canada
+  'America/Halifax',       // Atlantic Canada
+  'America/Phoenix',       // Arizona - no DST
+  'Pacific/Honolulu',      // Hawaii
 ];
 const TYPE_OPTIONS = [
   { value: 'owned', label: 'Owned Plant', desc: 'Full features — staging, forklift, production integration' },
@@ -22,7 +31,7 @@ const TYPE_OPTIONS = [
 const EMPTY_FORM = {
   id: '', name: '', code: '', type: 'owned',
   address: '', contact_person: '', email: '', phone: '',
-  timezone: 'America/Los_Angeles',
+  timezone: 'America/New_York',
 };
 
 // ---------------------------------------------------------------------------
