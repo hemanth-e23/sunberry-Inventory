@@ -121,7 +121,7 @@ const LotTraceReport = () => {
             <div className="timeline-list">
               {(receipt.timeline || []).map((event, idx) => {
                 const isReceived = event.event_type === "received";
-                const isShipped = event.event_type === "shipped-out";
+                const isShipped = event.event_type === "shipped-out" || event.event_type === "inter-warehouse-transfer";
                 const isTransfer = event.event_type === "warehouse-transfer" || event.event_type === "staging";
                 const isHold = event.event_type?.startsWith("hold-");
                 const dotClass = isReceived ? "timeline-dot--received"

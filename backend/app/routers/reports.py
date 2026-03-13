@@ -138,7 +138,7 @@ async def lot_trace(
     current_user=Depends(get_current_active_user),
 ):
     """Full life-cycle history for any lot number."""
-    return build_lot_trace(db, lot_number=lot_number)
+    return build_lot_trace(db, lot_number=lot_number, warehouse_id=warehouse_filter(current_user))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

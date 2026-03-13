@@ -60,12 +60,14 @@ export const formatTimeAgo = (dateValue) => {
 
 export const getDaysAgo = (dateValue) => {
   if (!dateValue) return 0;
-  const date = new Date(ensureUtc(dateValue));
-  if (Number.isNaN(date.getTime())) return 0;
-  const now = new Date();
-  const diffTime = Math.abs(now - date);
-  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-  return diffDays;
+  const dateKey = toDateKey(dateValue);
+  if (!dateKey) return 0;
+  const todayKey = getTodayDateKey();
+  // Compare calendar dates in warehouse timezone
+  const dateMs = new Date(dateKey + 'T00:00:00').getTime();
+  const todayMs = new Date(todayKey + 'T00:00:00').getTime();
+  const diffDays = Math.round((todayMs - dateMs) / (1000 * 60 * 60 * 24));
+  return Math.max(0, diffDays);
 };
 
 // Returns YYYY-MM-DD in the warehouse timezone (or browser local if not set)

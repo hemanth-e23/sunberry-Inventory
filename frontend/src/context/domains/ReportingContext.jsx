@@ -174,7 +174,7 @@ export const ReportingProvider = ({ children }) => {
   const locationLookup = locationCtx?.locationLookup ?? {};
   const storageAreasState = locationCtx?.storageAreas ?? [];
   const locationsState = locationCtx?.locationsTree ?? [];
-  const { receipts } = useReceipt();
+  const { activeReceipts: receipts } = useReceipt();
   const { inventoryTransfers, inventoryAdjustments, inventoryHoldActions } = useInventory();
 
   // ─── receiptReportingRows ───────────────────────────────────────────────────

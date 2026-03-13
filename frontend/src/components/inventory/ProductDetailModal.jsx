@@ -234,7 +234,16 @@ const ProductDetailModal = ({
                         {Number(r.quantity || 0).toLocaleString()} {r.quantityUnits || ''}
                         {r.containerCount && r.containerUnit && r.weightPerContainer && r.weightUnit && (
                           <div style={{ fontSize: '0.75rem', color: '#666' }}>
-                            ({r.containerCount} {r.containerUnit} × {r.weightPerContainer} {r.weightUnit})
+                            {(() => {
+                              const wpc = Number(r.weightPerContainer);
+                              const currentContainers = wpc > 0
+                                ? Math.round((Number(r.quantity || 0) / wpc) * 100) / 100
+                                : null;
+                              if (currentContainers != null && currentContainers !== Number(r.containerCount)) {
+                                return `(~${currentContainers} ${r.containerUnit} remaining (${r.containerCount} received) × ${r.weightPerContainer} ${r.weightUnit})`;
+                              }
+                              return `(${r.containerCount} ${r.containerUnit} × ${r.weightPerContainer} ${r.weightUnit})`;
+                            })()}
                           </div>
                         )}
                       </td>

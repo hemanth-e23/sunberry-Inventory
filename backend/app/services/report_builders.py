@@ -13,8 +13,9 @@ from sqlalchemy.orm import Session
 from app.models import (
     Receipt, InventoryTransfer, InventoryAdjustment, InventoryHoldAction,
     Category, Product, Vendor, User, CycleCount, Location, SubLocation, StorageRow,
+    InterWarehouseTransfer, Warehouse,
 )
-from app.enums import TransferStatus, AdjustmentStatus, HoldStatus
+from app.enums import TransferStatus, AdjustmentStatus, HoldStatus, InterWarehouseStatus, ReceiptStatus
 from app.constants import CATEGORY_FINISHED
 
 
@@ -158,10 +159,19 @@ def initial_receipt_qty(receipt: Receipt, db: Session) -> float:
         InventoryAdjustment.receipt_id == receipt.id,
         InventoryAdjustment.status == AdjustmentStatus.APPROVED,
     ).all()
+    # Inter-warehouse transfers where this receipt was the source
+    iw_transfers = db.query(InterWarehouseTransfer).filter(
+        InterWarehouseTransfer.source_receipt_id == receipt.id,
+        InterWarehouseTransfer.status.in_([
+            InterWarehouseStatus.RECEIVED,
+            InterWarehouseStatus.COMPLETED,
+        ]),
+    ).all()
     return (
         float(receipt.quantity or 0)
         + sum(float(t.quantity or 0) for t in shipped)
         + sum(float(a.quantity or 0) for a in adjs)
+        + sum(float(iwt.quantity or 0) for iwt in iw_transfers)
     )
 
 
@@ -189,7 +199,10 @@ def build_point_in_time_snapshot(
 ) -> dict:
     as_of_dt = parse_dt_end(as_of_date)
 
-    query = db.query(Receipt).filter(Receipt.receipt_date <= as_of_dt)
+    query = db.query(Receipt).filter(
+        Receipt.receipt_date <= as_of_dt,
+        Receipt.status.in_([ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED]),
+    )
     if warehouse_id:
         query = query.filter(Receipt.warehouse_id == warehouse_id)
     if product_id:
@@ -549,10 +562,13 @@ def build_movement_ledger(
 # 5. Lot Traceability
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_lot_trace(db: Session, lot_number: str) -> dict:
-    receipts = db.query(Receipt).filter(
+def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = None) -> dict:
+    query = db.query(Receipt).filter(
         Receipt.lot_number.ilike(f"%{lot_number}%")
-    ).all()
+    )
+    if warehouse_id:
+        query = query.filter(Receipt.warehouse_id == warehouse_id)
+    receipts = query.all()
 
     if not receipts:
         return {"lot_number": lot_number, "receipts": []}
@@ -577,6 +593,14 @@ def build_lot_trace(db: Session, lot_number: str) -> dict:
             InventoryHoldAction.receipt_id == r.id,
             InventoryHoldAction.status == HoldStatus.APPROVED,
         ).order_by(InventoryHoldAction.approved_at).all()
+
+        iw_transfers = db.query(InterWarehouseTransfer).filter(
+            InterWarehouseTransfer.source_receipt_id == r.id,
+            InterWarehouseTransfer.status.in_([
+                InterWarehouseStatus.RECEIVED,
+                InterWarehouseStatus.COMPLETED,
+            ]),
+        ).order_by(InterWarehouseTransfer.received_at).all()
 
         init_qty = initial_receipt_qty(r, db)
 
@@ -656,6 +680,27 @@ def build_lot_trace(db: Session, lot_number: str) -> dict:
                 "to_location": None,
                 "to_rows": [],
                 "order_number": None,
+                "purchase_order": None,
+                "bol": None,
+                "recipient": None,
+            })
+        for iwt in iw_transfers:
+            to_wh = db.query(Warehouse).filter(Warehouse.id == iwt.to_warehouse_id).first()
+            timeline.append({
+                "event": "Inter-Warehouse Transfer",
+                "event_type": "inter-warehouse-transfer",
+                "date": iwt.received_at or iwt.confirmed_at or iwt.initiated_at,
+                "qty": round(float(iwt.quantity or 0), 2),
+                "notes": iwt.notes or None,
+                "submitted_by": user_name(db, iwt.initiated_by),
+                "submitted_at": iwt.initiated_at,
+                "approved_by": user_name(db, iwt.received_by),
+                "approved_at": iwt.received_at,
+                "from_location": None,
+                "from_rows": breakdown_rows(db, iwt.source_breakdown, r.unit or "cases"),
+                "to_location": to_wh.name if to_wh else iwt.to_warehouse_id,
+                "to_rows": [],
+                "order_number": iwt.reference_number,
                 "purchase_order": None,
                 "bol": None,
                 "recipient": None,
