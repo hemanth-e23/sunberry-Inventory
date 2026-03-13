@@ -8,7 +8,7 @@ import uuid
 from app.database import get_db
 from app.models import Receipt, ReceiptAllocation, User, StorageRow, PalletLicence, Product, Category
 from app.schemas import (
-    Receipt as ReceiptSchema, ReceiptCreate, ReceiptUpdate,
+    Receipt as ReceiptSchema, ReceiptCreate, ReceiptUpdate, ReceiptAssignStorage,
     ReceiptAllocation as ReceiptAllocationSchema
 )
 from app.utils.auth import get_current_active_user, require_role, warehouse_filter, resolve_warehouse_for_write
@@ -375,6 +375,96 @@ async def send_back_receipt(
     db.refresh(receipt)
 
     return {"message": "Receipt sent back for correction", "receipt": receipt}
+
+@router.post("/{receipt_id}/assign-storage", response_model=ReceiptSchema)
+async def assign_storage(
+    receipt_id: str,
+    data: ReceiptAssignStorage,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """
+    Assign storage location to a receipt that doesn't have one yet
+    (e.g. destination receipts from inter-warehouse transfers).
+    """
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+
+    # Warehouse users can only assign storage to receipts at their warehouse
+    wh_id = resolve_warehouse_for_write(current_user)
+    if wh_id and receipt.warehouse_id != wh_id:
+        raise HTTPException(status_code=403, detail="Cannot assign storage for a different warehouse's receipt")
+
+    # Update location fields
+    if data.location_id:
+        receipt.location_id = data.location_id
+    if data.sub_location_id:
+        receipt.sub_location_id = data.sub_location_id
+    if data.cases_per_pallet:
+        receipt.cases_per_pallet = data.cases_per_pallet
+
+    # Handle multi-row RM allocations
+    if data.raw_material_row_allocations and isinstance(data.raw_material_row_allocations, list):
+        receipt.raw_material_row_allocations = data.raw_material_row_allocations
+        total_pallets = 0
+        first_row_id = None
+        for alloc in data.raw_material_row_allocations:
+            row_id = alloc.get("rowId")
+            pallets_to_add = float(alloc.get("pallets", 0))
+            if not row_id or pallets_to_add <= 0:
+                continue
+            if not first_row_id:
+                first_row_id = row_id
+            total_pallets += pallets_to_add
+            storage_row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
+            if storage_row:
+                current_occupied = storage_row.occupied_pallets or 0
+                capacity = storage_row.pallet_capacity or 0
+                if capacity > 0 and (current_occupied + pallets_to_add) > capacity:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Adding {pallets_to_add} pallets to row {storage_row.name} would exceed capacity ({capacity}). Currently occupied: {current_occupied}"
+                    )
+                storage_row.occupied_pallets = current_occupied + pallets_to_add
+                if data.cases_per_pallet:
+                    storage_row.occupied_cases = (storage_row.occupied_cases or 0) + pallets_to_add * data.cases_per_pallet
+                if not storage_row.product_id:
+                    storage_row.product_id = receipt.product_id
+        receipt.pallets = total_pallets
+        if len(data.raw_material_row_allocations) == 1 and first_row_id:
+            receipt.storage_row_id = first_row_id
+
+    # Handle single-row allocation
+    elif data.storage_row_id and data.pallets:
+        receipt.storage_row_id = data.storage_row_id
+        receipt.pallets = data.pallets
+        storage_row = db.query(StorageRow).filter(StorageRow.id == data.storage_row_id).first()
+        if storage_row:
+            pallets_to_add = float(data.pallets)
+            current_occupied = storage_row.occupied_pallets or 0
+            capacity = storage_row.pallet_capacity or 0
+            if capacity > 0 and (current_occupied + pallets_to_add) > capacity:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Adding {pallets_to_add} pallets would exceed row capacity ({capacity}). Currently occupied: {current_occupied}"
+                )
+            storage_row.occupied_pallets = current_occupied + pallets_to_add
+            if data.cases_per_pallet:
+                storage_row.occupied_cases = (storage_row.occupied_cases or 0) + pallets_to_add * data.cases_per_pallet
+            if not storage_row.product_id:
+                storage_row.product_id = receipt.product_id
+
+    # Auto-derive sub_location_id from storage_row if missing
+    if not receipt.sub_location_id and receipt.storage_row_id:
+        row = db.query(StorageRow).filter(StorageRow.id == receipt.storage_row_id).first()
+        if row and row.sub_location_id:
+            receipt.sub_location_id = row.sub_location_id
+
+    db.commit()
+    db.refresh(receipt)
+    return receipt
+
 
 @router.get("/{receipt_id}/allocations", response_model=List[ReceiptAllocationSchema])
 async def get_receipt_allocations(

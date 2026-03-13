@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Text, ForeignKey, Float
+from sqlalchemy import Column, String, DateTime, Text, ForeignKey, Float, Boolean, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -34,6 +34,9 @@ class InterWarehouseTransfer(Base):
     confirmed_at = Column(DateTime(timezone=True), nullable=True)
     shipped_at = Column(DateTime(timezone=True), nullable=True)
     received_at = Column(DateTime(timezone=True), nullable=True)
+    inventory_deducted = Column(Boolean, default=False, server_default="false")
+    source_breakdown = Column(JSON, nullable=True)
+    pallet_licence_ids = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

@@ -17,7 +17,7 @@ from app.schemas.product import (
 )
 from app.schemas.receipt import (
     ReceiptAllocationBase, ReceiptAllocationCreate, ReceiptAllocation,
-    ReceiptBase, ReceiptCreate, ReceiptUpdate, Receipt,
+    ReceiptBase, ReceiptCreate, ReceiptUpdate, ReceiptAssignStorage, Receipt,
 )
 from app.schemas.location import (
     LocationBase, LocationCreate, LocationUpdate, Location,
@@ -50,8 +50,9 @@ from app.schemas.warehouse import (
     WarehouseFull, WarehouseCreate, WarehouseUpdate,
     WarehouseCategoryAccessOut, WarehouseCategoryAccessCreate,
     InterWarehouseTransferCreate, InterWarehouseTransferAction,
+    InterWarehouseTransferConfirmAction,
     InterWarehouseTransferDisputeAction, WarehouseInfo, ProductBasic,
-    InterWarehouseTransferOut,
+    InitiatorInfo, InterWarehouseTransferOut, ReceiptSummary,
 )
 from app.schemas.notifications import NotificationOut
 
@@ -96,8 +97,9 @@ __all__ = [
     "WarehouseFull", "WarehouseCreate", "WarehouseUpdate",
     "WarehouseCategoryAccessOut", "WarehouseCategoryAccessCreate",
     "InterWarehouseTransferCreate", "InterWarehouseTransferAction",
+    "InterWarehouseTransferConfirmAction",
     "InterWarehouseTransferDisputeAction", "WarehouseInfo", "ProductBasic",
-    "InterWarehouseTransferOut",
+    "InitiatorInfo", "InterWarehouseTransferOut", "ReceiptSummary",
     # Notifications
     "NotificationOut",
 ]

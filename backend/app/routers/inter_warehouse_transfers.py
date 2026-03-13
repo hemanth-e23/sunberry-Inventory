@@ -11,15 +11,18 @@ from sqlalchemy.orm import Session, joinedload
 import uuid
 
 from app.database import get_db
-from app.models import InterWarehouseTransfer, Notification, Warehouse, Product
+from app.models import InterWarehouseTransfer, Notification, Warehouse, Product, Receipt, PalletLicence, StorageRow
 from app.schemas import (
     InterWarehouseTransferCreate,
     InterWarehouseTransferAction,
+    InterWarehouseTransferConfirmAction,
     InterWarehouseTransferDisputeAction,
     InterWarehouseTransferOut,
+    ReceiptSummary,
 )
 from app.utils.auth import get_current_active_user, CORPORATE_ROLES
-from app.enums import InterWarehouseStatus
+from app.enums import InterWarehouseStatus, ReceiptStatus
+from app.services import inter_warehouse_transfer_service as iwt_service
 
 router = APIRouter()
 
@@ -62,6 +65,8 @@ def _load(db: Session, transfer_id: str) -> InterWarehouseTransfer:
             joinedload(InterWarehouseTransfer.from_warehouse),
             joinedload(InterWarehouseTransfer.to_warehouse),
             joinedload(InterWarehouseTransfer.product),
+            joinedload(InterWarehouseTransfer.initiator),
+            joinedload(InterWarehouseTransfer.source_receipt),
         )
         .filter(InterWarehouseTransfer.id == transfer_id)
         .first()
@@ -86,6 +91,50 @@ def _check_warehouse_access(current_user, transfer: InterWarehouseTransfer, side
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@router.get("/available-products")
+async def list_available_products(
+    warehouse_id: str = Query(..., description="Source warehouse ID"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """List products that have available inventory at a given warehouse."""
+    results = (
+        db.query(Product)
+        .join(Receipt, Receipt.product_id == Product.id)
+        .filter(
+            Receipt.warehouse_id == warehouse_id,
+            Receipt.status.in_([ReceiptStatus.APPROVED, ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED]),
+            Receipt.quantity > 0,
+            Receipt.is_deleted == False,
+        )
+        .distinct()
+        .order_by(Product.name)
+        .all()
+    )
+    return [{"id": p.id, "name": p.name, "fcc_code": p.fcc_code} for p in results]
+
+
+@router.get("/available-receipts", response_model=List[ReceiptSummary])
+async def list_available_receipts(
+    warehouse_id: str = Query(..., description="Source warehouse ID"),
+    product_id: str = Query(..., description="Product ID"),
+    lot_number: Optional[str] = Query(None, description="Filter by lot number"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """List receipts available for inter-warehouse transfer at a given warehouse."""
+    query = db.query(Receipt).filter(
+        Receipt.product_id == product_id,
+        Receipt.warehouse_id == warehouse_id,
+        Receipt.status.in_([ReceiptStatus.APPROVED, ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED]),
+        Receipt.quantity > 0,
+        Receipt.is_deleted == False,
+    )
+    if lot_number:
+        query = query.filter(Receipt.lot_number == lot_number)
+    return query.order_by(Receipt.receipt_date.asc()).all()
+
+
 @router.get("/", response_model=List[InterWarehouseTransferOut])
 async def list_transfers(
     status: Optional[str] = Query(None, description="Filter by status"),
@@ -97,6 +146,8 @@ async def list_transfers(
         joinedload(InterWarehouseTransfer.from_warehouse),
         joinedload(InterWarehouseTransfer.to_warehouse),
         joinedload(InterWarehouseTransfer.product),
+        joinedload(InterWarehouseTransfer.initiator),
+        joinedload(InterWarehouseTransfer.source_receipt),
     )
     if current_user.warehouse_id:
         query = query.filter(
@@ -140,6 +191,18 @@ async def initiate_transfer(
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    # Validate source receipt if provided
+    source_receipt_id = None
+    if data.source_receipt_id:
+        receipt = db.query(Receipt).filter(Receipt.id == data.source_receipt_id).first()
+        if not receipt:
+            raise HTTPException(status_code=404, detail="Source receipt not found")
+        if receipt.warehouse_id != data.from_warehouse_id:
+            raise HTTPException(status_code=400, detail="Source receipt does not belong to the sender warehouse")
+        if receipt.product_id != data.product_id:
+            raise HTTPException(status_code=400, detail="Source receipt product does not match")
+        source_receipt_id = receipt.id
+
     transfer = InterWarehouseTransfer(
         id=f"iwt-{uuid.uuid4().hex[:12]}",
         from_warehouse_id=data.from_warehouse_id,
@@ -148,6 +211,7 @@ async def initiate_transfer(
         lot_number=data.lot_number,
         quantity=data.quantity,
         unit=data.unit,
+        source_receipt_id=source_receipt_id,
         reference_number=data.reference_number,
         expected_arrival_date=data.expected_arrival_date,
         notes=data.notes,
@@ -190,17 +254,59 @@ async def get_transfer(
 @router.post("/{transfer_id}/confirm", response_model=InterWarehouseTransferOut)
 async def confirm_transfer(
     transfer_id: str,
-    data: InterWarehouseTransferAction = None,
+    data: InterWarehouseTransferConfirmAction = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    """Sender warehouse confirms they are ready to ship."""
+    """Sender warehouse confirms they are ready to ship. Links source receipt."""
     transfer = _load(db, transfer_id)
     if transfer.status != InterWarehouseStatus.INITIATED:
         raise HTTPException(status_code=400, detail=f"Cannot confirm from status '{transfer.status}'")
     _check_warehouse_access(current_user, transfer, "sender")
 
-    transfer.status = "confirmed_by_sender"
+    # Link source receipt (validate inventory availability)
+    source_receipt_id = data.source_receipt_id if data else None
+    receipt = iwt_service.link_source_receipt(db, transfer, source_receipt_id)
+
+    # Validate and save pallet_licence_ids (FG)
+    if data and data.pallet_licence_ids:
+        pl_ids = data.pallet_licence_ids
+        licences = db.query(PalletLicence).filter(
+            PalletLicence.id.in_(pl_ids),
+            PalletLicence.receipt_id == receipt.id,
+        ).all()
+        found_ids = {pl.id for pl in licences}
+        missing = [pid for pid in pl_ids if pid not in found_ids]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Pallet licence(s) not found on this receipt: {missing}")
+        not_in_stock = [pl.id for pl in licences if pl.status != "in_stock"]
+        if not_in_stock:
+            raise HTTPException(status_code=400, detail=f"Pallet(s) not in stock: {not_in_stock}")
+        held = [pl.id for pl in licences if pl.is_held]
+        if held:
+            raise HTTPException(status_code=400, detail=f"Pallet(s) currently on hold: {held}")
+        transfer.pallet_licence_ids = pl_ids
+
+    # Validate and save source_breakdown (RM)
+    if data and data.source_breakdown:
+        breakdown = data.source_breakdown
+        total = sum(float(entry.get("quantity", 0)) for entry in breakdown)
+        if abs(total - transfer.quantity) > 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source breakdown quantities ({total}) must equal transfer quantity ({transfer.quantity})"
+            )
+        for entry in breakdown:
+            source_id = entry.get("id", "")
+            if not source_id.startswith("row-"):
+                raise HTTPException(status_code=400, detail=f"Invalid row ID format: {source_id}")
+            row_id = source_id.removeprefix("row-")
+            row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
+            if not row:
+                raise HTTPException(status_code=400, detail=f"Storage row not found: {row_id}")
+        transfer.source_breakdown = breakdown
+
+    transfer.status = InterWarehouseStatus.CONFIRMED_BY_SENDER
     transfer.confirmed_by = current_user.id
     transfer.confirmed_at = _now()
     if data and data.notes:
@@ -224,11 +330,14 @@ async def ship_transfer(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    """Sender marks goods as dispatched (in transit)."""
+    """Sender marks goods as dispatched (in transit). Deducts inventory from source."""
     transfer = _load(db, transfer_id)
-    if transfer.status != "confirmed_by_sender":
+    if transfer.status != InterWarehouseStatus.CONFIRMED_BY_SENDER:
         raise HTTPException(status_code=400, detail=f"Cannot mark as shipped from status '{transfer.status}'")
     _check_warehouse_access(current_user, transfer, "sender")
+
+    # Deduct inventory from source warehouse
+    iwt_service.deduct_source_inventory(db, transfer)
 
     transfer.status = InterWarehouseStatus.IN_TRANSIT
     transfer.shipped_at = _now()
@@ -253,11 +362,14 @@ async def receive_transfer(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    """Receiver warehouse confirms goods have arrived."""
+    """Receiver warehouse confirms goods have arrived. Creates destination receipt."""
     transfer = _load(db, transfer_id)
     if transfer.status != InterWarehouseStatus.IN_TRANSIT:
         raise HTTPException(status_code=400, detail=f"Cannot receive from status '{transfer.status}'")
     _check_warehouse_access(current_user, transfer, "receiver")
+
+    # Create receipt at destination warehouse
+    iwt_service.create_destination_receipt(db, transfer, str(current_user.id))
 
     transfer.status = InterWarehouseStatus.RECEIVED
     transfer.received_by = current_user.id
@@ -270,15 +382,15 @@ async def receive_transfer(
         db, transfer.from_warehouse_id, "inter_warehouse_transfer",
         "Transfer Received",
         f"{transfer.to_warehouse.name} has confirmed receipt of {transfer.quantity}"
-        f" {transfer.unit} of {transfer.product.name}. Please update your inventory records.",
+        f" {transfer.unit} of {transfer.product.name}.",
         transfer.id,
     )
-    # Notify corporate (NULL warehouse = all corporate users)
     _notify(
         db, None, "inter_warehouse_transfer",
         "Transfer Received",
         f"Transfer of {transfer.product.name} ({transfer.quantity} {transfer.unit}) from"
-        f" {transfer.from_warehouse.name} to {transfer.to_warehouse.name} has been received.",
+        f" {transfer.from_warehouse.name} to {transfer.to_warehouse.name} has been received."
+        f" Destination receipt created.",
         transfer.id,
     )
     db.commit()
@@ -296,7 +408,7 @@ async def complete_transfer(
     if transfer.status != InterWarehouseStatus.RECEIVED:
         raise HTTPException(status_code=400, detail=f"Cannot complete from status '{transfer.status}'")
 
-    transfer.status = "completed"
+    transfer.status = InterWarehouseStatus.COMPLETED
     db.commit()
     return _load(db, transfer_id)
 
@@ -308,12 +420,15 @@ async def cancel_transfer(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    """Cancel a transfer (not allowed once in transit or later)."""
+    """Cancel a transfer. Restores inventory if already shipped."""
     transfer = _load(db, transfer_id)
-    if transfer.status in (InterWarehouseStatus.IN_TRANSIT, InterWarehouseStatus.RECEIVED, "completed"):
+    if transfer.status in (InterWarehouseStatus.RECEIVED, InterWarehouseStatus.COMPLETED):
         raise HTTPException(
             status_code=400, detail=f"Cannot cancel a transfer that is '{transfer.status}'"
         )
+
+    # Restore source inventory if it was already deducted
+    iwt_service.restore_source_inventory(db, transfer)
 
     transfer.status = InterWarehouseStatus.CANCELLED
     if data and data.notes:

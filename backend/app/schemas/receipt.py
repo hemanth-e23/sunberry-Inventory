@@ -73,6 +73,15 @@ class ReceiptUpdate(BaseSchema):
     note: Optional[str] = None
     status: Optional[str] = None
 
+class ReceiptAssignStorage(BaseSchema):
+    location_id: Optional[str] = None
+    sub_location_id: Optional[str] = None
+    storage_row_id: Optional[str] = None
+    pallets: Optional[float] = None
+    cases_per_pallet: Optional[int] = None
+    raw_material_row_allocations: Optional[List[dict]] = None
+
+
 class Receipt(ReceiptBase):
     id: str
     status: str
