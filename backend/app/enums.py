@@ -32,9 +32,10 @@ class HoldStatus(str, Enum):
 
 class InterWarehouseStatus(str, Enum):
     INITIATED = "initiated"
-    CONFIRMED = "confirmed"
+    CONFIRMED_BY_SENDER = "confirmed_by_sender"
     IN_TRANSIT = "in_transit"
     RECEIVED = "received"
+    COMPLETED = "completed"
     DISPUTED = "disputed"
     CANCELLED = "cancelled"
 
