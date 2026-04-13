@@ -59,24 +59,23 @@ describe('sanitizeUtils', () => {
 
   describe('validateLotNumber', () => {
     it('validates correct lot number', () => {
-      const result = validateLotNumber('LOT123', [])
+      const result = validateLotNumber('LOT123')
       expect(result.valid).toBe(true)
     })
 
     it('rejects empty lot number', () => {
-      const result = validateLotNumber('', [])
+      const result = validateLotNumber('')
       expect(result.valid).toBe(false)
       expect(result.error).toBe('Lot number cannot be empty')
     })
 
-    it('rejects duplicate lot number', () => {
-      const result = validateLotNumber('LOT123', ['LOT123'])
-      expect(result.valid).toBe(false)
-      expect(result.error).toBe('Lot number already exists')
+    it('allows duplicate lot number', () => {
+      const result = validateLotNumber('LOT123')
+      expect(result.valid).toBe(true)
     })
 
     it('rejects non-string input', () => {
-      const result = validateLotNumber(null, [])
+      const result = validateLotNumber(null)
       expect(result.valid).toBe(false)
     })
   })

@@ -23,20 +23,16 @@ export const sanitizeForDisplay = (text) => {
     .replace(/'/g, '&#x27;');
 };
 
-export const validateLotNumber = (lotNumber, existingLotNumbers = []) => {
+export const validateLotNumber = (lotNumber) => {
   if (lotNumber === null || lotNumber === undefined || typeof lotNumber !== 'string') {
     return { valid: false, error: 'Lot number is required' };
   }
-  
+
   const trimmed = lotNumber.trim();
   if (trimmed.length === 0) {
     return { valid: false, error: 'Lot number cannot be empty' };
   }
-  
-  if (existingLotNumbers.includes(trimmed)) {
-    return { valid: false, error: 'Lot number already exists' };
-  }
-  
+
   return { valid: true };
 };
 

@@ -4,7 +4,6 @@ import { useAppData } from "../../context/AppDataContext";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { isDateInPast, isDateValid, getTodayDateKey } from "../../utils/dateUtils";
-import { validateLotNumber } from "../../utils/sanitizeUtils";
 import { CATEGORY_TYPES } from "../../constants";
 
 const defaultFormState = {
@@ -685,18 +684,6 @@ const useReceiptForm = () => {
       });
       return;
     }
-    if (formData.lotNo && formData.lotNo.trim()) {
-      const existingLotNumbers = receipts.map(r => r.lotNo).filter(Boolean);
-      const lotValidation = validateLotNumber(formData.lotNo, existingLotNumbers);
-      if (!lotValidation.valid) {
-        setFeedback({
-          type: "error",
-          message: lotValidation.error,
-        });
-        return;
-      }
-    }
-
     if (isIngredient) {
       if (!formData.weightPerUnit || parseFloat(formData.weightPerUnit) <= 0) {
         setFeedback({ type: "error", message: "Weight per container is required for raw material receipts." });
