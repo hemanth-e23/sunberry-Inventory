@@ -7,6 +7,7 @@ from app.models import User
 from app.schemas import User as UserSchema, UserCreate, UserUpdate
 from app.utils.auth import get_current_active_user, require_role, require_superadmin, warehouse_filter, get_password_hash
 import uuid
+import secrets
 
 router = APIRouter()
 
@@ -44,7 +45,29 @@ async def create_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already exists"
         )
-    
+
+    # Check if badge_id already exists (badge_id has a unique DB constraint)
+    if user_data.badge_id:
+        existing_badge = db.query(User).filter(User.badge_id == user_data.badge_id).first()
+        if existing_badge:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Badge ID '{user_data.badge_id}' is already assigned to user '{existing_badge.username}'"
+            )
+
+    # Resolve password: forklift workers login via badge scan, so a missing password
+    # is replaced with a high-entropy server-generated value (only satisfies the NOT NULL
+    # constraint — never returned, never logged). Non-forklift roles must supply one.
+    raw_password = user_data.password
+    if not raw_password:
+        if user_data.role == "forklift":
+            raw_password = secrets.token_urlsafe(24)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password is required for non-forklift users"
+            )
+
     # Create new user
     user_kwargs = dict(
         id=f"user-{uuid.uuid4().hex[:12]}",
@@ -52,7 +75,7 @@ async def create_user(
         name=user_data.name,
         email=user_data.email,
         role=user_data.role,
-        hashed_password=get_password_hash(user_data.password),
+        hashed_password=get_password_hash(raw_password),
         is_active=True
     )
     if user_data.badge_id:
@@ -134,6 +157,18 @@ async def update_user(
     # Exclude badge_id from generic setattr if it's being cleared
     if "badge_id" in update_data and update_data["badge_id"] == "":
         update_data["badge_id"] = None
+
+    # Check badge_id uniqueness when assigning a non-empty value to a different user
+    if update_data.get("badge_id"):
+        existing_badge = db.query(User).filter(
+            User.badge_id == update_data["badge_id"],
+            User.id != user_id,
+        ).first()
+        if existing_badge:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Badge ID '{update_data['badge_id']}' is already assigned to user '{existing_badge.username}'"
+            )
 
     for field, value in update_data.items():
         setattr(user, field, value)

@@ -90,11 +90,11 @@ const UsersPage = () => {
       warehouse_id: isCorporateRole ? null : (formData.warehouse_id || null),
     };
 
-    if (formData.password.trim()) {
+    if (isForklift && !editingUser) {
+      // Backend generates a random password for forklift users (badge scan login).
+    } else if (formData.password.trim()) {
       payload.password = formData.password.trim();
-    } else if (isForklift && !editingUser) {
-      payload.password = 'ChangeMe123!';
-    } else if (!isForklift && !editingUser) {
+    } else if (!editingUser) {
       addToast('Password is required for new users.', 'error');
       return;
     }
@@ -106,7 +106,7 @@ const UsersPage = () => {
       if (editingUser) {
         await updateUser(editingUser.id, payload);
       } else {
-        await addUser({ ...payload, password: payload.password || 'ChangeMe123!' });
+        await addUser(payload);
       }
       resetForm();
       setShowForm(false);
@@ -221,6 +221,7 @@ const UsersPage = () => {
                     <span>Password</span>
                     <input
                       type="password"
+                      autoComplete="new-password"
                       value={formData.password}
                       onChange={(e) => setFormData(prev => ({ ...prev, password: e.target.value }))}
                       placeholder={editingUser ? 'Leave blank to keep current password' : 'Set initial password'}
@@ -233,7 +234,19 @@ const UsersPage = () => {
                   <span>Role</span>
                   <select
                     value={formData.role}
-                    onChange={(e) => setFormData(prev => ({ ...prev, role: e.target.value, warehouse_id: CORPORATE_ROLES_LIST.includes(e.target.value) ? '' : prev.warehouse_id }))}
+                    onChange={(e) => {
+                      const newRole = e.target.value;
+                      const newIsForklift = newRole === ROLES.FORKLIFT;
+                      const newIsCorporate = CORPORATE_ROLES_LIST.includes(newRole);
+                      setFormData(prev => ({
+                        ...prev,
+                        role: newRole,
+                        warehouse_id: newIsCorporate ? '' : prev.warehouse_id,
+                        password: newIsForklift ? '' : prev.password,
+                        email: newIsForklift ? '' : prev.email,
+                        badgeId: newIsForklift ? prev.badgeId : '',
+                      }));
+                    }}
                     required
                   >
                     {isSuperadmin ? (

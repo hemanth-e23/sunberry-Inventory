@@ -66,8 +66,8 @@ export const UserProvider = ({ children }) => {
       username: user.username,
       name: user.name,
       role: user.role,
-      password: user.password,
       email: user.email || null,
+      ...(user.password ? { password: user.password } : {}),
       ...(user.badgeId ? { badge_id: user.badgeId } : {}),
       ...(user.warehouse_id !== undefined ? { warehouse_id: user.warehouse_id || null } : {}),
     };

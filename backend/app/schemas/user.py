@@ -38,7 +38,7 @@ class UserBase(BaseSchema):
 
 
 class UserCreate(UserBase):
-    password: str = Field(..., min_length=8, max_length=128, description="Password (minimum 8 characters)")
+    password: Optional[str] = Field(None, min_length=8, max_length=128, description="Password (min 8 chars). Optional for forklift role — server generates a random one used only as a NOT NULL placeholder; forklift workers login via badge scan.")
     badge_id: Optional[str] = Field(None, max_length=50, description="Badge ID for forklift users")
     warehouse_id: Optional[str] = Field(None, max_length=50, description="Warehouse to assign user to (null = corporate)")
 

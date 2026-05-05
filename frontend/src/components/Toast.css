@@ -14,8 +14,14 @@
 
 .toast-container {
     position: fixed;
+    top: var(--spacing-lg);
+    right: var(--spacing-lg);
     z-index: var(--z-tooltip);
     pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    max-width: calc(100vw - var(--spacing-lg) * 2);
 }
 
 .toast-top-right {
