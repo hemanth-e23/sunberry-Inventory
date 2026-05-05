@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 import { useQueryClient } from '@tanstack/react-query';
 import { useAutoLogout } from '../hooks/useAutoLogout';
 import { useTokenRefresh } from '../hooks/useTokenRefresh';
-import { setViewWarehouse, setUnauthorizedHandler } from '../api/client';
+import { setViewWarehouse, setUnauthorizedHandler, setRefreshTokenHandler } from '../api/client';
 import * as authService from '../api/authService';
 import { setAppTimezone, getTodayDateKey } from '../utils/dateUtils';
 import { ROLES } from '../constants';
@@ -76,6 +76,12 @@ export const AuthProvider = ({ children }) => {
       return false;
     }
   }, []);
+
+  // Wire refresh into apiClient so 401 interceptor can refresh+retry transparently
+  useEffect(() => {
+    setRefreshTokenHandler(refreshToken);
+    return () => setRefreshTokenHandler(null);
+  }, [refreshToken]);
 
   // Called when token is expired and refresh failed — warn then force logout
   const handleTokenExpired = useCallback(() => {

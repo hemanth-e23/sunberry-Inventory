@@ -1,120 +1,80 @@
 import { useEffect, useRef, useCallback } from 'react';
 
 /**
- * Custom hook for auto-logout functionality
- * Logs out user after 30 minutes of inactivity
- * Resets timer on user activity (mouse movement, clicks, keyboard, scroll, etc.)
- * 
- * @param {Function} logout - Logout function from AuthContext
- * @param {boolean} isAuthenticated - Whether user is authenticated
- * @param {number} timeoutMinutes - Timeout in minutes (default: 30)
+ * Auto-logout after `timeoutMinutes` of true inactivity (no mouse / key / touch / scroll).
+ * - Real throttle: first activity in a window resets the timer immediately, subsequent
+ *   events are ignored for 1s (cheap; reset is the same operation either way).
+ * - Activity is tracked by a wall-clock timestamp so a tab going to background
+ *   doesn't get a "free" 30 minutes when it returns — we logout if real elapsed
+ *   idle exceeded the timeout while hidden.
+ * - Disabled when timeoutMinutes is null/0 (used for forklift role).
  */
 export const useAutoLogout = (logout, isAuthenticated, timeoutMinutes = 30) => {
-  const timeoutRef = useRef(null);
+  const timerRef = useRef(null);
   const lastActivityRef = useRef(Date.now());
-  const throttleTimerRef = useRef(null);
+  const logoutRef = useRef(logout);
 
-  // Clear timeout function
-  const clearTimeout = useCallback(() => {
-    if (timeoutRef.current) {
-      window.clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
+  useEffect(() => { logoutRef.current = logout; }, [logout]);
+
+  const cancelTimer = useCallback(() => {
+    if (timerRef.current) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
     }
   }, []);
 
-  // Reset timer function
-  const resetTimer = useCallback(() => {
-    clearTimeout();
-    
+  const doLogout = useCallback(() => {
+    logoutRef.current?.();
+    window.location.href = '/login';
+  }, []);
+
+  const armTimer = useCallback((delayMs) => {
+    cancelTimer();
+    timerRef.current = window.setTimeout(doLogout, delayMs);
+  }, [cancelTimer, doLogout]);
+
+  useEffect(() => {
     if (!isAuthenticated || timeoutMinutes == null || timeoutMinutes <= 0) {
+      cancelTimer();
       return;
     }
 
-    // Set new timeout
-    const timeoutMs = timeoutMinutes * 60 * 1000; // Convert minutes to milliseconds
+    const timeoutMs = timeoutMinutes * 60 * 1000;
+
+    // Initial arm
     lastActivityRef.current = Date.now();
-    
-    timeoutRef.current = window.setTimeout(() => {
-      // Timeout expired - logout user and redirect to login
-      logout();
-      // Use window.location for navigation since we're outside Router context
-      window.location.href = '/login';
-    }, timeoutMs);
-  }, [isAuthenticated, logout, timeoutMinutes, clearTimeout]);
+    armTimer(timeoutMs);
 
-  // Handle user activity
-  const handleActivity = useCallback(() => {
-    if (isAuthenticated) {
-      resetTimer();
-    }
-  }, [isAuthenticated, resetTimer]);
-
-  // Setup activity listeners
-  useEffect(() => {
-    if (!isAuthenticated) {
-      clearTimeout();
-      return;
-    }
-
-    // Initial timer setup
-    resetTimer();
-
-    // List of events that indicate user activity
-    const events = [
-      'mousedown',
-      'mousemove',
-      'keypress',
-      'scroll',
-      'touchstart',
-      'click',
-      'keydown'
-    ];
-
-    // Add event listeners with throttling to avoid excessive resets
-    const throttledHandleActivity = () => {
-      if (throttleTimerRef.current) {
-        return;
-      }
-      
-      throttleTimerRef.current = setTimeout(() => {
-        handleActivity();
-        throttleTimerRef.current = null;
-      }, 1000); // Throttle to once per second
+    // Real throttle — reset immediately on the first event in each 1s window
+    let throttleUntil = 0;
+    const onActivity = () => {
+      const now = Date.now();
+      if (now < throttleUntil) return;
+      throttleUntil = now + 1000;
+      lastActivityRef.current = now;
+      armTimer(timeoutMs);
     };
 
-    events.forEach(event => {
-      document.addEventListener(event, throttledHandleActivity, { passive: true });
-    });
+    const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart', 'click', 'keydown'];
+    events.forEach((e) => document.addEventListener(e, onActivity, { passive: true }));
 
-    // Also listen for visibility change (tab focus)
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && isAuthenticated) {
-        resetTimer();
+    // On tab return: don't grant a fresh 30 min — compute remaining time from
+    // last real activity. If we already passed the threshold while hidden, log out.
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      const elapsed = Date.now() - lastActivityRef.current;
+      if (elapsed >= timeoutMs) {
+        doLogout();
+      } else {
+        armTimer(timeoutMs - elapsed);
       }
     };
+    document.addEventListener('visibilitychange', onVisibility);
 
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    // Cleanup
     return () => {
-      clearTimeout();
-      events.forEach(event => {
-        document.removeEventListener(event, throttledHandleActivity);
-      });
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      if (throttleTimerRef.current) {
-        clearTimeout(throttleTimerRef.current);
-        throttleTimerRef.current = null;
-      }
+      cancelTimer();
+      events.forEach((e) => document.removeEventListener(e, onActivity));
+      document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [isAuthenticated, resetTimer, handleActivity, clearTimeout]);
-
-  // Reset timer when authentication state changes
-  useEffect(() => {
-    if (isAuthenticated) {
-      resetTimer();
-    } else {
-      clearTimeout();
-    }
-  }, [isAuthenticated, resetTimer, clearTimeout]);
+  }, [isAuthenticated, timeoutMinutes, armTimer, cancelTimer, doLogout]);
 };

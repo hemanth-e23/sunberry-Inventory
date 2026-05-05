@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 
 const REFRESH_BEFORE_MS = 10 * 60 * 1000; // attempt refresh 10 min before expiry
+const RETRY_DELAYS_MS = [2_000, 5_000, 15_000]; // 3 retries, then give up
 
 function getTokenExpiry(token) {
   try {
@@ -11,15 +12,14 @@ function getTokenExpiry(token) {
   }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * Silently refreshes the JWT token before it expires.
  * - Schedules a refresh 10 minutes before token expiry.
- * - On successful refresh: reschedules for the new token.
- * - On failed refresh (token already expired): calls onExpired().
- *
- * @param {boolean} isAuthenticated
- * @param {Function} onRefresh - async fn that refreshes the token, returns true/false
- * @param {Function} onExpired - called when token is expired and refresh failed
+ * - On failed refresh, retries 3 times with backoff (2s / 5s / 15s).
+ * - On final failure (or token already expired), calls onExpired().
+ * - On success, reschedules for the new token.
  */
 export const useTokenRefresh = (isAuthenticated, onRefresh, onExpired) => {
   const timerRef = useRef(null);
@@ -27,9 +27,18 @@ export const useTokenRefresh = (isAuthenticated, onRefresh, onExpired) => {
   const onExpiredRef = useRef(onExpired);
   const scheduleRef = useRef(null);
 
-  // Keep refs up to date so callbacks never go stale
   useEffect(() => { onRefreshRef.current = onRefresh; }, [onRefresh]);
   useEffect(() => { onExpiredRef.current = onExpired; }, [onExpired]);
+
+  const tryRefreshWithRetry = useCallback(async () => {
+    // First attempt + retries
+    if (await onRefreshRef.current()) return true;
+    for (const delay of RETRY_DELAYS_MS) {
+      await sleep(delay);
+      if (await onRefreshRef.current()) return true;
+    }
+    return false;
+  }, []);
 
   const schedule = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -51,14 +60,14 @@ export const useTokenRefresh = (isAuthenticated, onRefresh, onExpired) => {
     const delay = Math.max(0, msUntilExpiry - REFRESH_BEFORE_MS);
 
     timerRef.current = setTimeout(async () => {
-      const success = await onRefreshRef.current();
+      const success = await tryRefreshWithRetry();
       if (success) {
-        scheduleRef.current?.(); // reschedule with the new token
+        scheduleRef.current?.();
       } else {
         onExpiredRef.current();
       }
     }, delay);
-  }, []);
+  }, [tryRefreshWithRetry]);
 
   scheduleRef.current = schedule;
 
