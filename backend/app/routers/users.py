@@ -13,10 +13,12 @@ router = APIRouter()
 @router.get("/directory", response_model=List[dict])
 async def get_user_directory(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("supervisor"))
+    current_user: User = Depends(get_current_active_user)
 ):
-    """Lightweight name directory — returns id, username, name for all users.
-    Used for resolving submitter names in approvals across warehouses."""
+    """Lightweight name directory — id, username, name for all users.
+    Open to any authenticated user so the UI can resolve submitter / approver
+    names everywhere (receipts, transfers, holds, adjustments, reports).
+    Returns no sensitive fields (no email / role / badge / warehouse / password)."""
     users = db.query(User.id, User.username, User.name).all()
     return [{"id": u.id, "username": u.username, "name": u.name} for u in users]
 

@@ -1,5 +1,7 @@
 import React, { useState, useCallback } from "react";
 import { formatDate } from "../../utils/dateUtils";
+import { formatUserName } from "../../utils/userDisplay";
+import { useAppData } from "../../context/AppDataContext";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
@@ -15,6 +17,7 @@ const adjTypeOptions = [
 ];
 
 const AdjustmentsReport = ({ productOptions }) => {
+  const { userNameMap } = useAppData();
   const [adjStart, setAdjStart] = useState(monthStart());
   const [adjEnd, setAdjEnd] = useState(today());
   const [adjType, setAdjType] = useState("all");
@@ -50,8 +53,8 @@ const AdjustmentsReport = ({ productOptions }) => {
     { label: "Qty Before", value: (r) => r.qty_before != null ? formatNumber(r.qty_before) : "—" },
     { label: "Qty After", value: (r) => r.qty_after != null ? formatNumber(r.qty_after) : "—" },
     { label: "Reason", value: (r) => r.reason || "—" },
-    { label: "Submitted By", value: (r) => r.submitted_by || "—" },
-    { label: "Approved By", value: (r) => r.approved_by || "—" },
+    { label: "Submitted By", value: (r) => r.submitted_by ? formatUserName(r.submitted_by, userNameMap) : "—" },
+    { label: "Approved By", value: (r) => r.approved_by ? formatUserName(r.approved_by, userNameMap) : "—" },
   ];
 
   return (

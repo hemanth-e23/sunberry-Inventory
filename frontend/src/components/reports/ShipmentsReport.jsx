@@ -1,10 +1,13 @@
 import React, { useState, useCallback } from "react";
 import { formatDate } from "../../utils/dateUtils";
+import { formatUserName } from "../../utils/userDisplay";
+import { useAppData } from "../../context/AppDataContext";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
 
 const ShipmentsReport = ({ productOptions }) => {
+  const { userNameMap } = useAppData();
   const [shipStart, setShipStart] = useState(monthStart());
   const [shipEnd, setShipEnd] = useState(today());
   const [shipProduct, setShipProduct] = useState("");
@@ -36,7 +39,7 @@ const ShipmentsReport = ({ productOptions }) => {
     { label: "Code", value: (r) => r.product_code },
     { label: "Lot #", value: (r) => r.lot_number || "—" },
     { label: "Cases", value: (r) => formatNumber(r.cases) },
-    { label: "Approved By", value: (r) => r.approved_by || "—" },
+    { label: "Approved By", value: (r) => r.approved_by ? formatUserName(r.approved_by, userNameMap) : "—" },
   ];
 
   return (

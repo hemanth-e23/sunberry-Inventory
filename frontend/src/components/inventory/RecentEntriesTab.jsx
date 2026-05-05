@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { formatDateTime as formatDate } from "../../utils/dateUtils";
+import { formatUserName } from "../../utils/userDisplay";
 import { CATEGORY_TYPES } from '../../constants';
 
 const parseDate = (value) => {
@@ -79,10 +80,9 @@ const RecentEntriesTab = ({
           pallets: derivedPallets,
           lot: receipt.lotNo || "—",
           hold: Boolean(receipt.hold),
-          submittedBy:
-            userLookup[receipt.submittedBy] || receipt.submittedBy || "—",
+          submittedBy: formatUserName(receipt.submittedBy, userLookup),
           approvedBy: receipt.approvedBy
-            ? userLookup[receipt.approvedBy] || receipt.approvedBy
+            ? formatUserName(receipt.approvedBy, userLookup)
             : "—",
           timestamp:
             formatDate(receipt.approvedAt) ||

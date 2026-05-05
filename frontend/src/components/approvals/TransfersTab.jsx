@@ -3,6 +3,7 @@ import { useAuth } from "../../context/AuthContext";
 import { useAppData } from "../../context/AppDataContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { formatDateTime, formatTime, formatTimeAgo, getDaysAgo } from "../../utils/dateUtils";
+import { formatUserName } from "../../utils/userDisplay";
 
 const getPriorityLevel = (days) => {
   if (days === 0) return { level: 'low', label: 'New', color: '#10b981' };
@@ -306,7 +307,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                 {lastScan && (
                   <div style={{ marginTop: '8px', padding: '6px 10px', background: '#eff6ff', borderRadius: '6px', fontSize: '12px', color: '#1e40af' }}>
                     <strong>Last scan:</strong> {lastScan.licence_number}
-                    {lastScan.scanned_by && ` · by ${lastScan.scanned_by}`}
+                    {lastScan.scanned_by && ` · by ${formatUserName(lastScan.scanned_by, userNameMap)}`}
                     {lastScan.scanned_at && ` · ${formatTime(lastScan.scanned_at)}`}
                   </div>
                 )}
@@ -318,7 +319,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                       {exceptions.map((ex, i) => (
                         <span key={i} style={{ background: '#fde68a', padding: '2px 8px', borderRadius: '999px', fontFamily: 'monospace', fontSize: '11px' }}>
-                          {ex.licence_number}{ex.scanned_by ? ` (${ex.scanned_by})` : ''}
+                          {ex.licence_number}{ex.scanned_by ? ` (${formatUserName(ex.scanned_by, userNameMap)})` : ''}
                         </span>
                       ))}
                     </div>

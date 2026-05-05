@@ -1,9 +1,12 @@
 import React, { useState, useCallback } from "react";
 import { formatDate, formatDateTime } from "../../utils/dateUtils";
+import { formatUserName } from "../../utils/userDisplay";
+import { useAppData } from "../../context/AppDataContext";
 import { LoadingBox, ErrorBox, RunButton } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber } from "./reportUtils";
 
 const LotTraceReport = () => {
+  const { userNameMap } = useAppData();
   const [lotNumber, setLotNumber] = useState("");
   const [lotData, setLotData] = useState(null);
   const [lotLoading, setLotLoading] = useState(false);
@@ -76,14 +79,14 @@ const LotTraceReport = () => {
                 {receipt.submitted_by && (
                   <span className="trail-item trail-submitted">
                     <span className="trail-icon">✏</span>
-                    Submitted by <strong>{receipt.submitted_by}</strong>
+                    Submitted by <strong>{formatUserName(receipt.submitted_by, userNameMap)}</strong>
                     {receipt.submitted_at && <span className="trail-time">{formatDateTime(receipt.submitted_at)}</span>}
                   </span>
                 )}
                 {receipt.approved_by && (
                   <span className="trail-item trail-approved">
                     <span className="trail-icon">✓</span>
-                    Approved by <strong>{receipt.approved_by}</strong>
+                    Approved by <strong>{formatUserName(receipt.approved_by, userNameMap)}</strong>
                     {receipt.approved_at && <span className="trail-time">{formatDateTime(receipt.approved_at)}</span>}
                   </span>
                 )}
@@ -216,13 +219,13 @@ const LotTraceReport = () => {
                       <div className="timeline-people-row">
                         {event.submitted_by && (
                           <span className="people-chip people-chip--submitted">
-                            ✏ {event.submitted_by}
+                            ✏ {formatUserName(event.submitted_by, userNameMap)}
                             {event.submitted_at && <span className="people-time">{formatDateTime(event.submitted_at)}</span>}
                           </span>
                         )}
                         {event.approved_by && (
                           <span className="people-chip people-chip--approved">
-                            ✓ {event.approved_by}
+                            ✓ {formatUserName(event.approved_by, userNameMap)}
                             {event.approved_at && <span className="people-time">{formatDateTime(event.approved_at)}</span>}
                           </span>
                         )}

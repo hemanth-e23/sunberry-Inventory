@@ -7,6 +7,7 @@ import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import apiClient from '../../api/client';
 import { formatDateTime } from '../../utils/dateUtils';
+import { formatUserName } from '../../utils/userDisplay';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, HOLD_STATUS, RECEIPT_STATUS } from '../../constants';
 
@@ -400,7 +401,7 @@ const HoldsTab = () => {
                     }
                     <span>Requested: {formatDateTime(action.submittedAt)}</span>
                     {action.approvedBy && (
-                      <span>Approved by: {userLookup[action.approvedBy] || action.approvedBy}</span>
+                      <span>Approved by: {formatUserName(action.approvedBy, userLookup)}</span>
                     )}
                   </div>
                 </li>
@@ -423,7 +424,7 @@ const HoldsTab = () => {
               <div key={receipt.id} className="hold-card">
                 <span className="title">{formatReceiptLabel(receipt)}</span>
                 <span className="meta">Since: {lastHold ? formatDateTime(lastHold.approvedAt || lastHold.submittedAt) : 'Pending'}</span>
-                <span className="meta">Placed By: {lastHold ? (userLookup[lastHold.submittedBy] || lastHold.submittedBy) : '-'}</span>
+                <span className="meta">Placed By: {lastHold ? formatUserName(lastHold.submittedBy, userLookup) : '-'}</span>
                 {receipt.heldQuantity > 0 && (
                   <span className="meta">Held: {receipt.heldQuantity} {receipt.quantityUnits || 'cases'}</span>
                 )}

@@ -5,6 +5,7 @@ import { useAuth } from "../context/AuthContext";
 import { getDashboardPath } from "../App";
 import apiClient from "../api/client";
 import { formatDateTime as formatDate } from "../utils/dateUtils";
+import { formatUserName } from "../utils/userDisplay";
 import "./Shared.css";
 import "./InventoryOverview.css";
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../constants';
@@ -438,15 +439,11 @@ const InventoryOverview = () => {
           lotCount: summary.lots.size,
           pendingCount: pending,
           description: product.description,
-          lastSubmittedBy:
-            userLookup[lastSubmission?.submittedBy] ||
-            lastSubmission?.submittedBy ||
-            "—",
+          lastSubmittedBy: formatUserName(lastSubmission?.submittedBy, userLookup),
           lastSubmittedAt: formatDate(
             lastSubmission?.submittedAt || lastSubmission?.receiptDate,
           ),
-          lastApprovedBy:
-            userLookup[lastApproval?.approvedBy] || lastApproval?.approvedBy || "—",
+          lastApprovedBy: formatUserName(lastApproval?.approvedBy, userLookup),
           lastApprovedAt: formatDate(lastApproval?.approvedAt),
           lastEntryTimestamp:
             parseDate(lastApproval?.approvedAt) ||
