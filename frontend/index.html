@@ -6,15 +6,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Sunberry Inventory</title>
     <script>
-      // Restore path after GitHub Pages 404 redirect
+      // Restore path after GitHub Pages 404 redirect.
+      // 404.html sends visitors to /?p=<original-path>&...query — this turns
+      // /?p=/palletizer&warehouse_id=...&api_key=... back into
+      // /palletizer?warehouse_id=...&api_key=... so React Router can match.
       (function() {
         var p = new URLSearchParams(window.location.search).get('p');
-        if (p) {
-          var url = window.location.pathname + p +
-            window.location.search.replace(/[?&]p=[^&]*/, '').replace(/^&/, '?') +
-            window.location.hash;
-          window.history.replaceState(null, null, url);
-        }
+        if (!p) return;
+        var search = window.location.search
+          .replace(/[?&]p=[^&]*/, '')
+          .replace(/^&/, '?');
+        var url = p + search + window.location.hash;
+        window.history.replaceState(null, '', url);
       })();
     </script>
   </head>
