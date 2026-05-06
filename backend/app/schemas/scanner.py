@@ -9,6 +9,10 @@ class ScanPalletRequest(BaseSchema):
     storage_row_id: str = Field(..., min_length=1, max_length=50)
     is_partial: bool = False
     partial_cases: Optional[int] = Field(None, ge=0)
+    # Idempotency key set by the offline-resilient scan queue: when the
+    # client retries a request after a network drop, the server returns
+    # the original pallet instead of creating a duplicate.
+    idempotency_key: Optional[str] = Field(None, min_length=8, max_length=64)
 
 
 class MarkMissingRequest(BaseSchema):

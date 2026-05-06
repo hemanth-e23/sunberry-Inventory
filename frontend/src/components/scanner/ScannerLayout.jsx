@@ -4,7 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import { ChevronLeft, LogOut } from 'lucide-react';
 import './ScannerLayout.css';
 
-const ScannerLayout = ({ children, title, showBack = false, onBack }) => {
+const ScannerLayout = ({ children, title, showBack = false, onBack, headerExtra }) => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -34,6 +34,7 @@ const ScannerLayout = ({ children, title, showBack = false, onBack }) => {
         )}
         <h1 className="scanner-header-title">{title || 'Forklift'}</h1>
         <div className="scanner-header-actions">
+          {headerExtra}
           <span className="scanner-user">{user?.name || user?.username}</span>
           <button
             type="button"

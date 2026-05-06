@@ -42,6 +42,7 @@ class PalletLicence(Base):
 
     id = Column(String(50), primary_key=True)
     licence_number = Column(String(100), unique=True, index=True)
+    idempotency_key = Column(String(64), unique=True, index=True, nullable=True)
     receipt_id = Column(String(50), ForeignKey("receipts.id"), nullable=True)
     forklift_request_id = Column(String(50), ForeignKey("forklift_requests.id"), nullable=True)
     product_id = Column(String(50), ForeignKey("products.id"))

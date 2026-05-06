@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
-import { Scan, MapPin, Package, Check, RefreshCw, CheckCircle2 } from 'lucide-react';
+import NetworkStatus from './NetworkStatus';
+import { useScanQueue } from '../../hooks/useScanQueue';
+import { Scan, MapPin, Package, Check, RefreshCw, CheckCircle2, Cloud, CloudOff, AlertTriangle } from 'lucide-react';
 import './ScannerReceiptFlow.css';
 
 const MAX_ROW_SCAN_ATTEMPTS = 3;
@@ -29,6 +31,38 @@ const ScannerReceiptFlow = () => {
   const [showManualRows, setShowManualRows] = useState(false);
   const [resumeData, setResumeData] = useState(null);
   const inputRef = useRef(null);
+
+  // Scan queue: every scan goes through here so a Wi-Fi blip doesn't lose
+  // anything. When online, drain is immediate. When offline, the operator
+  // keeps scanning and items flush when network returns.
+  const onScanSynced = useCallback((item, resp) => {
+    setPallets((prev) => prev.map((p) => (
+      p._idempotency_key === item.idempotency_key
+        ? { ...resp.pallet, _pending: false, _idempotency_key: undefined }
+        : p
+    )));
+    if (resp.row_available != null) setRowAvailable(resp.row_available);
+    if (resp.gap_detected && resp.gap_missing?.length) {
+      setGapMissing(resp.gap_missing);
+    }
+  }, []);
+  const onScanFailed = useCallback((item, err) => {
+    if (!err.response) return; // transient — leave optimistic entry alone
+    setPallets((prev) => prev.map((p) => (
+      p._idempotency_key === item.idempotency_key
+        ? { ...p, _pending: false, _failed: true, _failError: err.response?.data?.detail || 'Rejected' }
+        : p
+    )));
+  }, []);
+  const {
+    online,
+    pendingCount,
+    failedCount,
+    enqueueScan,
+    retryFailed,
+    dropFailed,
+    drainNow,
+  } = useScanQueue({ onSynced: onScanSynced, onFailed: onScanFailed });
 
   // On mount: check for an active (interrupted) session for THIS user only.
   // Multiple forklift users can scan simultaneously — each has their own session.
@@ -132,48 +166,50 @@ const ScannerReceiptFlow = () => {
     setError('');
   };
 
-  const handleScanPallet = async (e) => {
+  const handleScanPallet = (e) => {
     e?.preventDefault?.();
     const lic = licenceInput.trim();
     if (!lic || !selectedRowId) return;
     setError('');
-    setLoading(true);
 
-    try {
-      const payload = {
+    // Reject obvious duplicates client-side so an offline operator gets
+    // immediate feedback instead of a delayed server error after sync.
+    const alreadyHere = pallets.some((p) => p.licence_number === lic);
+    if (alreadyHere) {
+      setError('Already scanned this pallet.');
+      setLicenceInput('');
+      return;
+    }
+
+    const payload = {
+      licence_number: lic,
+      storage_row_id: selectedRowId,
+      is_partial: isPartial,
+      partial_cases: isPartial && partialCases ? parseInt(partialCases, 10) : null,
+    };
+
+    const item = enqueueScan({ requestId, payload });
+
+    // Optimistic entry — appears immediately whether online or not. The
+    // useScanQueue callbacks will replace/mark this row when sync resolves.
+    setPallets((prev) => [
+      ...prev,
+      {
+        id: `local-${item.id}`,
         licence_number: lic,
         storage_row_id: selectedRowId,
         is_partial: isPartial,
-        partial_cases: isPartial && partialCases ? parseInt(partialCases, 10) : null,
-      };
-      const r = await apiClient.post(`/scanner/requests/${requestId}/scan`, payload);
-
-      if (r.data.status === 'duplicate') {
-        setError(r.data.message || 'Already scanned this pallet.');
-        setLicenceInput('');
-        setLoading(false);
-        return;
-      }
-      if (r.data.status === 'updated') {
-        setError(r.data.message || 'Pallet moved to this row.');
-        setLicenceInput('');
-        setLoading(false);
-        return;
-      }
-
-      setPallets((prev) => [...prev, r.data.pallet]);
-      setGapMissing(r.data.gap_missing || []);
-      setRowAvailable(r.data.row_available ?? 0);
-      setLicenceInput('');
-      setPartialCases('');
-      if (r.data.gap_detected && r.data.gap_missing?.length) {
-        setStep('gap-prompt');
-      }
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Scan failed');
-    } finally {
-      setLoading(false);
-    }
+        cases: isPartial && partialCases ? parseInt(partialCases, 10) : null,
+        sequence: null,
+        status: 'pending',
+        _pending: true,
+        _failed: false,
+        _idempotency_key: item.idempotency_key,
+      },
+    ]);
+    setLicenceInput('');
+    setPartialCases('');
+    if (rowAvailable != null) setRowAvailable(Math.max(0, rowAvailable - 1));
   };
 
   const handleSkipGaps = () => setStep('scan');
@@ -252,6 +288,23 @@ const ScannerReceiptFlow = () => {
   const selectedRow = storageRows.find((r) => r.id === selectedRowId);
   const totalCases = pallets.reduce((s, p) => s + (p.cases || 0), 0);
 
+  const netStatus = (
+    <NetworkStatus
+      online={online}
+      pendingCount={pendingCount}
+      failedCount={failedCount}
+      onRetry={retryFailed}
+      onDropFailed={dropFailed}
+      onForceSync={drainNow}
+    />
+  );
+
+  const palletStatusIcon = (p) => {
+    if (p._failed) return <AlertTriangle size={14} color="#b91c1c" />;
+    if (p._pending) return online ? <Cloud size={14} color="#92400e" /> : <CloudOff size={14} color="#92400e" />;
+    return <Check size={14} color="#16a34a" />;
+  };
+
   // ── Checking for active session ──────────────────────────────────────────
   if (step === 'checking') {
     return (
@@ -266,7 +319,7 @@ const ScannerReceiptFlow = () => {
   // ── Resume prompt ────────────────────────────────────────────────────────
   if (step === 'resume-prompt' && resumeData) {
     return (
-      <ScannerLayout title="Resume Session" showBack onBack={getOnBack()}>
+      <ScannerLayout title="Resume Session" showBack onBack={getOnBack()} headerExtra={netStatus}>
         <div className="scanner-receipt-flow">
           <p className="scanner-receipt-instruction">You have an unfinished scan session:</p>
           <div className="scanner-receipt-resume-card">
@@ -300,7 +353,7 @@ const ScannerReceiptFlow = () => {
   // ── Scan first pallet ────────────────────────────────────────────────────
   if (step === 'scan-first') {
     return (
-      <ScannerLayout title="Receipt Scan" showBack onBack={getOnBack()}>
+      <ScannerLayout title="Receipt Scan" showBack onBack={getOnBack()} headerExtra={netStatus}>
         <div className="scanner-receipt-flow">
           <p className="scanner-receipt-instruction">Scan the first pallet to identify the product</p>
           <form onSubmit={handleCreateRequest} className="scanner-receipt-form">
@@ -502,10 +555,14 @@ const ScannerReceiptFlow = () => {
               )}
             </div>
             {pallets.slice(-10).reverse().map((p) => (
-              <div key={p.id} className="scanner-receipt-pallet-item">
-                <Check size={14} color="#16a34a" />
+              <div
+                key={p.id}
+                className={`scanner-receipt-pallet-item${p._pending ? ' pallet-pending' : ''}${p._failed ? ' pallet-failed' : ''}`}
+                title={p._failed ? p._failError : (p._pending ? (online ? 'Syncing…' : 'Pending sync (offline)') : 'Synced')}
+              >
+                {palletStatusIcon(p)}
                 <span className="pallet-lic">{p.licence_number}</span>
-                <span className="pallet-cases">{p.cases} cs</span>
+                <span className="pallet-cases">{p.cases != null ? `${p.cases} cs` : '—'}</span>
               </div>
             ))}
           </div>
@@ -526,7 +583,7 @@ const ScannerReceiptFlow = () => {
   // ── Summary ──────────────────────────────────────────────────────────────
   if (step === 'summary') {
     return (
-      <ScannerLayout title="Review" showBack onBack={getOnBack()}>
+      <ScannerLayout title="Review" showBack onBack={getOnBack()} headerExtra={netStatus}>
         <div className="scanner-receipt-flow">
           <div className="scanner-receipt-product">{productName}</div>
           <div className="scanner-receipt-summary-stats">
@@ -548,10 +605,13 @@ const ScannerReceiptFlow = () => {
               <h3>All Pallets</h3>
             </div>
             {pallets.map((p) => (
-              <div key={p.id} className="scanner-receipt-pallet-item">
-                <Package size={14} color="#6b7280" />
+              <div
+                key={p.id}
+                className={`scanner-receipt-pallet-item${p._pending ? ' pallet-pending' : ''}${p._failed ? ' pallet-failed' : ''}`}
+              >
+                {p._pending || p._failed ? palletStatusIcon(p) : <Package size={14} color="#6b7280" />}
                 <span className="pallet-lic">{p.licence_number}</span>
-                <span className="pallet-cases">{p.cases} cs</span>
+                <span className="pallet-cases">{p.cases != null ? `${p.cases} cs` : '—'}</span>
               </div>
             ))}
           </div>
@@ -559,8 +619,20 @@ const ScannerReceiptFlow = () => {
             <button type="button" className="scanner-receipt-btn secondary" onClick={() => setStep('scan')}>
               Back
             </button>
-            <button type="button" className="scanner-receipt-btn" onClick={handleSubmit} disabled={loading}>
-              {loading ? 'Submitting…' : <><Check size={18} /> Submit</>}
+            <button
+              type="button"
+              className="scanner-receipt-btn"
+              onClick={handleSubmit}
+              disabled={loading || pendingCount > 0 || failedCount > 0}
+              title={
+                pendingCount > 0
+                  ? 'Wait for all scans to sync before submitting'
+                  : failedCount > 0
+                    ? 'Resolve failed scans before submitting'
+                    : ''
+              }
+            >
+              {loading ? 'Submitting…' : (pendingCount > 0 ? `Syncing… (${pendingCount})` : <><Check size={18} /> Submit</>)}
             </button>
           </div>
         </div>

@@ -503,3 +503,14 @@
   width: 100%;
   margin-top: 0.5rem;
 }
+
+/* Offline-queue pallet status decorations */
+.scanner-receipt-pallet-item.pallet-pending {
+  background: #fef3c7;
+  border-left: 3px solid #f59e0b;
+}
+
+.scanner-receipt-pallet-item.pallet-failed {
+  background: #fee2e2;
+  border-left: 3px solid #dc2626;
+}

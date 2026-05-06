@@ -70,6 +70,7 @@ async def scan_pallet(
         data.is_partial,
         data.partial_cases,
         current_user,
+        idempotency_key=data.idempotency_key,
     )
 
 

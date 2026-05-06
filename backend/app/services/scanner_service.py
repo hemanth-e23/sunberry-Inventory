@@ -334,6 +334,7 @@ def scan_pallet(
     is_partial: bool,
     partial_cases: Optional[int],
     current_user: User,
+    idempotency_key: Optional[str] = None,
 ) -> dict:
     """Scan a pallet into an active forklift request. Handles duplicates, gaps, and capacity."""
     fr = _get_forklift_request(db, request_id)
@@ -341,6 +342,37 @@ def scan_pallet(
 
     if current_user.role == ROLE_FORKLIFT and str(fr.scanned_by) != str(current_user.id):
         raise ForbiddenError("You can only scan into your own request")
+
+    # Idempotency check: if the offline scan queue has retried a request
+    # whose original write actually succeeded, return that pallet instead
+    # of erroring or double-creating. (See scanQueue.js on the frontend.)
+    if idempotency_key:
+        prior = db.query(PalletLicence).filter(
+            PalletLicence.idempotency_key == idempotency_key
+        ).first()
+        if prior is not None:
+            row_available = _row_available_capacity(
+                db,
+                _validate_storage_row(db, prior.storage_row_id) if prior.storage_row_id else None,
+                request_id,
+            ) if prior.storage_row_id else 0
+            return {
+                "status": "ok",
+                "message": "Already recorded (idempotent replay).",
+                "pallet": {
+                    "id": prior.id,
+                    "licence_number": prior.licence_number,
+                    "storage_row_id": prior.storage_row_id,
+                    "cases": prior.cases,
+                    "is_partial": prior.is_partial,
+                    "sequence": prior.sequence,
+                    "status": prior.status,
+                    "scanned_at": prior.scanned_at,
+                },
+                "row_available": row_available,
+                "gap_detected": False,
+                "gap_missing": [],
+            }
 
     lot_number, product_code, sequence = parse_licence_number(licence_number)
     if not lot_number or not product_code:
@@ -421,6 +453,7 @@ def scan_pallet(
     pl = PalletLicence(
         id=pl_id,
         licence_number=licence_number,
+        idempotency_key=idempotency_key,
         receipt_id=None,
         forklift_request_id=request_id,
         product_id=product.id,
