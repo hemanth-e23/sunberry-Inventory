@@ -275,17 +275,19 @@ function Sidebar({ isOpen, isCollapsed, onToggleCollapse, onClose }) {
     // --- Production (feature-gated) ---
     const hasStaging = hasFeature(warehouseType, 'staging');
     const hasProdReqs = hasFeature(warehouseType, 'productionRequests');
-    if (hasStaging || hasProdReqs) {
-      const prodItems = [];
-      if (isAdmin && hasStaging) {
-        prodItems.push({ label: 'Staging Overview', icon: Layers, to: `${prefix}/staging` });
-      }
-      if (hasProdReqs) {
-        prodItems.push({ label: 'Production Requests', icon: Layers, to: `${prefix}/production-requests` });
-      }
-      if (prodItems.length > 0) {
-        sections.push({ group: 'Production', items: prodItems });
-      }
+    const prodItems = [];
+    // Active Production is available for admin + supervisor on all warehouse types.
+    if (role === 'admin' || role === 'supervisor' || role === 'superadmin' || role === 'corporate_admin') {
+      prodItems.push({ label: 'Active Production', icon: Layers, to: `${prefix}/active-production` });
+    }
+    if (isAdmin && hasStaging) {
+      prodItems.push({ label: 'Staging Overview', icon: Layers, to: `${prefix}/staging` });
+    }
+    if (hasProdReqs) {
+      prodItems.push({ label: 'Production Requests', icon: Layers, to: `${prefix}/production-requests` });
+    }
+    if (prodItems.length > 0) {
+      sections.push({ group: 'Production', items: prodItems });
     }
 
     // --- Transfers (admin+) ---

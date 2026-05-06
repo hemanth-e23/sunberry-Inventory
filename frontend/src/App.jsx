@@ -31,6 +31,8 @@ const ReportsPage = lazy(() => import('./components/ReportsPage'));
 const ReceiptCorrectionsPage = lazy(() => import('./components/ReceiptCorrectionsPage'));
 const CycleCountingPage = lazy(() => import('./components/CycleCountingPage'));
 const PalletTagPrintPage = lazy(() => import('./components/PalletTagPrintPage'));
+const ActiveProductionPage = lazy(() => import('./components/palletizer/ActiveProductionPage'));
+const PalletizerKioskPage = lazy(() => import('./components/palletizer/PalletizerKioskPage'));
 const StagingOverview = lazy(() => import('./components/StagingOverview'));
 const ProductionStagingRequests = lazy(() => import('./components/ProductionStagingRequests'));
 const BOLPage = lazy(() => import('./components/BOLPage'));
@@ -503,6 +505,25 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
+        <Route path="/supervisor/active-production" element={
+          <ProtectedRoute requiredRole="supervisor">
+            <Layout>
+              {page(<ActiveProductionPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/admin/active-production" element={
+          <ProtectedRoute requiredRole="admin">
+            <Layout>
+              {page(<ActiveProductionPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        {/* Palletizer kiosk: PUBLIC route — no auth, protected by X-Api-Key in URL.
+            Bookmarked on a kiosk system at the production line. */}
+        <Route path="/palletizer" element={page(<PalletizerKioskPage />)} />
 
         <Route
           path="/"

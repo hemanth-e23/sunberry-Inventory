@@ -14,7 +14,8 @@ import {
   BarChart3,
   TrendingUp,
   AlertCircle,
-  ArrowRightLeft
+  ArrowRightLeft,
+  Layers
 } from 'lucide-react';
 import { hasFeature } from '../utils/warehouseFeatures';
 import './AdminDashboard.css';
@@ -239,6 +240,10 @@ const AdminDashboard = () => {
             <button className="nav-button" onClick={() => navigate('/admin/pallet-tags')}>
               <Printer size={18} />
               <span>Print Pallet Tags</span>
+            </button>
+            <button className="nav-button" onClick={() => navigate('/admin/active-production')}>
+              <Layers size={18} />
+              <span>Active Production</span>
             </button>
             {hasFeature(user?.warehouse_type, 'productionRequests') && (
               <button className="nav-button" onClick={() => navigate('/admin/production-requests')} style={{ borderLeft: '3px solid #007bff' }}>

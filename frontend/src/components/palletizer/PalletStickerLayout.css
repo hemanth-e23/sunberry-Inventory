@@ -1,0 +1,239 @@
+/* Pallet sticker — 4" × 5.75" (101.6 × 146.05 mm) per the physical label
+   stock. Two layouts:
+     portrait  → vertical stack (4 wide × 5.75 tall)
+     landscape → 2 columns (5.75 wide × 4 tall): info on left, QR on right
+*/
+
+.pallet-tag {
+  background: #ffffff;
+  color: #1f2937;
+  border: 2px solid #000000;
+  border-radius: 0;
+  box-sizing: border-box;
+  margin: 0 auto;
+  page-break-inside: avoid;
+  overflow: hidden;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* ─── Portrait ──────────────────────────────────────────────────────────── */
+
+.pallet-tag--portrait {
+  width: 4in;
+  height: 5.75in;
+  padding: 0.18in 0.18in 0.14in;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ─── Landscape (two columns) ───────────────────────────────────────────── */
+
+.pallet-tag--landscape {
+  width: 5.75in;
+  height: 4in;
+  padding: 0.14in 0.16in;
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+}
+
+.pallet-tag__col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.pallet-tag__col--left {
+  flex: 1 1 auto;
+  padding-right: 0.12in;
+}
+
+.pallet-tag__col--right {
+  flex: 0 0 2.4in;
+  padding-left: 0.12in;
+  align-items: stretch;
+}
+
+.pallet-tag__col-divider {
+  width: 1px;
+  background: #1f2937;
+  flex-shrink: 0;
+}
+
+/* ─── Shared section styles ─────────────────────────────────────────────── */
+
+.tag-divider {
+  height: 1px;
+  background: #1f2937;
+  width: 100%;
+  margin: 0.06in 0;
+  flex-shrink: 0;
+}
+
+.tag-product-name {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.15;
+  text-transform: uppercase;
+  text-align: center;
+  margin: 0 0 2px;
+  letter-spacing: 0.4px;
+  padding: 2px 4px 0;
+  flex-shrink: 0;
+}
+
+.tag-barcode-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 0;
+  flex: 0 0 auto;
+  height: 0.5in;
+  overflow: hidden;
+}
+
+.tag-barcode {
+  max-width: 100%;
+  height: 100%;
+}
+
+.tag-fcc-code {
+  font-size: 17px;
+  font-weight: 700;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  line-height: 1.1;
+  margin: 2px 0 0;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+
+.tag-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: stretch;
+  gap: 6px;
+  margin: 0;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+
+.tag-info-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+
+.info-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.info-value {
+  font-size: 13px;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.info-value--lot {
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.tag-pallet-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+
+.pallet-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.pallet-value {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  word-break: break-all;
+}
+
+/* QR — fills remaining vertical space and stays square */
+.tag-qr-container {
+  flex: 1 1 auto;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 4px 0 0;
+  min-height: 0;
+}
+
+.tag-qr {
+  display: block;
+  height: 100%;
+  width: auto;
+  max-height: 100%;
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+}
+
+/* ─── Print ─────────────────────────────────────────────────────────────── */
+
+@media print {
+  .pallet-tag,
+  .pallet-tag * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+  }
+
+  .pallet-tag {
+    border: 2px solid #000 !important;
+    box-shadow: none !important;
+    overflow: hidden !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+    max-width: none;
+    aspect-ratio: auto;
+  }
+
+  .pallet-tag--portrait {
+    width: 4in !important;
+    height: 5.75in !important;
+    padding: 0.18in 0.18in 0.14in !important;
+  }
+
+  .pallet-tag--landscape {
+    width: 5.75in !important;
+    height: 4in !important;
+    padding: 0.14in 0.16in !important;
+  }
+
+  .tag-product-name,
+  .tag-fcc-code,
+  .info-label,
+  .info-value,
+  .pallet-label,
+  .pallet-value {
+    color: #000 !important;
+  }
+
+  .tag-divider,
+  .pallet-tag__col-divider {
+    background: #000 !important;
+  }
+}

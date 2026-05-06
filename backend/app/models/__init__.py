@@ -39,6 +39,9 @@ from app.models.notifications import Notification
 # 9. Audit log (FK: users)
 from app.models.audit import AuditLog
 
+# 10. Active line production (FK: production_lines, products, users)
+from app.models.active_production import ActiveLineProduction
+
 __all__ = [
     "Warehouse", "User",
     "CategoryGroup", "Category", "Vendor", "Product", "WarehouseCategoryAccess",
@@ -52,4 +55,5 @@ __all__ = [
     "InterWarehouseTransfer",
     "Notification",
     "AuditLog",
+    "ActiveLineProduction",
 ]

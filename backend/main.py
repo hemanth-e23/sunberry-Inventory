@@ -15,6 +15,7 @@ from app.config import settings
 from app.database import engine, Base
 from app.routers import auth, users, products, receipts, inventory, master_data, service, scanner, pallet_licences, reports, inter_warehouse_transfers, notifications
 from app.routers import transfers, adjustments, holds, cycle_counts, staging
+from app.routers import active_production, palletizer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO if settings.DEBUG else logging.WARNING)
@@ -196,6 +197,8 @@ app.include_router(service.router, prefix="/api/service", tags=["Service-to-Serv
 app.include_router(reports.router, prefix="/api/reports", tags=["Reports"])
 app.include_router(inter_warehouse_transfers.router, prefix="/api/inter-warehouse-transfers", tags=["Inter-Warehouse Transfers"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
+app.include_router(active_production.router, prefix="/api/active-production", tags=["Active Production"])
+app.include_router(palletizer.router, prefix="/api/palletizer", tags=["Palletizer Kiosk"])
 
 @app.get("/")
 async def root():

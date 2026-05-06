@@ -55,6 +55,13 @@ from app.schemas.warehouse import (
     InitiatorInfo, InterWarehouseTransferOut, ReceiptSummary,
 )
 from app.schemas.notifications import NotificationOut
+from app.schemas.active_production import (
+    ProductMini, ProductionLineMini,
+    ActiveLineProductionRead, ProductionLineWithActive,
+    SetActiveProductionRequest,
+    MintPalletsRequest, MintedPallet, MintPalletsResponse,
+    RecentPalletsResponse,
+)
 
 __all__ = [
     "BaseSchema",
@@ -102,4 +109,10 @@ __all__ = [
     "InitiatorInfo", "InterWarehouseTransferOut", "ReceiptSummary",
     # Notifications
     "NotificationOut",
+    # Active production
+    "ProductMini", "ProductionLineMini",
+    "ActiveLineProductionRead", "ProductionLineWithActive",
+    "SetActiveProductionRequest",
+    "MintPalletsRequest", "MintedPallet", "MintPalletsResponse",
+    "RecentPalletsResponse",
 ]

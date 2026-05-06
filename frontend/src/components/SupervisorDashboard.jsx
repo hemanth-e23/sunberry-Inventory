@@ -223,6 +223,10 @@ const SupervisorDashboard = () => {
               <Printer size={18} />
               <span>Print Pallet Tags</span>
             </button>
+            <button className="nav-button" onClick={() => navigate('/supervisor/active-production')}>
+              <Layers size={18} />
+              <span>Active Production</span>
+            </button>
             <button className="nav-button" onClick={() => navigate('/supervisor/cycle-counting')}>
               <ClipboardList size={18} />
               <span>Cycle Counting</span>

@@ -4,6 +4,7 @@ import { useAppData } from "../../context/AppDataContext";
 import { useAuth } from "../../context/AuthContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { isDateInPast, isDateValid, getTodayDateKey } from "../../utils/dateUtils";
+import { generateLotNumberFromLine } from "../../utils/lotNumber";
 import { CATEGORY_TYPES } from "../../constants";
 
 const defaultFormState = {
@@ -40,16 +41,6 @@ const defaultFormState = {
   expirationTouched: false,
   expireYears: null,
   pallets: "",
-};
-
-// Helper function to calculate day of year (1-365/366)
-const getDayOfYear = (date) => {
-  if (!date) return null;
-  const d = new Date(date);
-  const start = new Date(d.getFullYear(), 0, 0);
-  const diff = d - start;
-  const oneDay = 1000 * 60 * 60 * 24;
-  return Math.floor(diff / oneDay);
 };
 
 export const buildLicenceNote = (receipt, products = []) => {
@@ -165,24 +156,11 @@ const useReceiptForm = () => {
 
   // --- Helper functions ---
 
-  const extractLineNumber = useCallback((lineId) => {
-    if (!lineId) return null;
+  const generateLotNumber = useCallback((productionDate, lineId) => {
     const line = productionLines.find(l => l.id === lineId);
-    if (!line) return null;
-    const match = line.name.match(/\d+/);
-    return match ? match[0] : null;
+    if (!line) return "";
+    return generateLotNumberFromLine(productionDate, line.name);
   }, [productionLines]);
-
-  const generateLotNumber = useCallback((productionDate, lineNumber) => {
-    if (!productionDate || !lineNumber) return "";
-    const dayOfYear = getDayOfYear(productionDate);
-    if (!dayOfYear) return "";
-    const lineNum = extractLineNumber(lineNumber);
-    if (!lineNum) return "";
-    const date = new Date(productionDate);
-    const year = date.getFullYear().toString().slice(-2);
-    return `MP${String(dayOfYear).padStart(3, '0')}${year}L${lineNum}`;
-  }, [extractLineNumber]);
 
   // --- Computed/memoized values ---
 
