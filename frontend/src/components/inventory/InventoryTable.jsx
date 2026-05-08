@@ -25,8 +25,12 @@ const InventoryTable = ({
   const rowVirtualizer = useVirtualizer({
     count: inventoryRows.length,
     getScrollElement: () => tableParentRef.current,
-    estimateSize: () => 52,
+    estimateSize: () => 120,
     overscan: 10,
+    measureElement:
+      typeof window !== 'undefined' && !navigator.userAgent.includes('Firefox')
+        ? (el) => el?.getBoundingClientRect().height
+        : undefined,
   });
 
   return (
@@ -112,7 +116,12 @@ const InventoryTable = ({
                       return 'qty-normal';
                     };
                     return (
-                      <tr key={row.id} className={getRowClass()}>
+                      <tr
+                        key={row.id}
+                        ref={rowVirtualizer.measureElement}
+                        data-index={vRow.index}
+                        className={getRowClass()}
+                      >
                         {visibleColumns.product && <td>
                           <div className="product-cell">
                             <button
