@@ -1649,3 +1649,166 @@
   margin-left: 6px;
   vertical-align: middle;
 }
+
+/* Location Explorer — hierarchical tree */
+.loc-tree {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--color-border, #e5e7eb);
+}
+
+.loc-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  padding-right: 16px;
+  border-bottom: 1px solid var(--color-border, #f3f4f6);
+  font-size: 14px;
+  min-height: 36px;
+  transition: background 0.1s;
+}
+
+.loc-tree-row:hover {
+  background: var(--color-surface-subtle, #f9fafb);
+}
+
+.loc-tree-row-location {
+  font-weight: 700;
+  font-size: 15px;
+  background: var(--color-surface-subtle, #f9fafb);
+}
+
+.loc-tree-row-sub-rm,
+.loc-tree-row-sub-fg {
+  font-weight: 600;
+}
+
+.loc-tree-row-row {
+  font-weight: 500;
+}
+
+.loc-tree-row.is-empty {
+  opacity: 0.5;
+}
+
+.loc-tree-row.has-hold {
+  background: rgba(239, 68, 68, 0.04);
+}
+
+.loc-tree-disclosure {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  padding: 2px 4px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.loc-tree-disclosure-leaf {
+  cursor: default;
+  color: var(--color-text-tertiary, #d1d5db);
+}
+
+.loc-tree-name {
+  color: var(--color-text-primary, #111827);
+  flex-shrink: 0;
+}
+
+.loc-tree-meta {
+  font-size: 12px;
+  flex: 1;
+}
+
+.loc-tree-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+}
+
+.tag-sub-fg {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.loc-tree-cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.loc-tree-cap-bar {
+  display: inline-block;
+  width: 60px;
+  height: 6px;
+  background: #e5e7eb;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.loc-tree-cap-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+}
+
+.loc-tree-product {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px 6px 0;
+  border-bottom: 1px solid var(--color-border, #f3f4f6);
+  font-size: 13px;
+  background: var(--color-surface, #fff);
+}
+
+.loc-tree-product:hover {
+  background: var(--color-surface-subtle, #f9fafb);
+}
+
+.loc-tree-product-name {
+  font-weight: 600;
+  color: var(--color-text-primary, #111827);
+}
+
+.loc-tree-product-meta {
+  font-size: 12px;
+  flex: 1;
+}
+
+.loc-tree-product-qty {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--color-text-primary, #111827);
+}
+
+.loc-tree-btn {
+  background: var(--color-surface, #fff);
+  color: var(--color-text-primary, #111827);
+  border: 1px solid var(--color-border, #d1d5db);
+  border-radius: var(--radius-md, 6px);
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.loc-tree-btn:hover {
+  background: var(--color-surface-subtle, #f9fafb);
+  border-color: var(--color-text-secondary, #9ca3af);
+}
+
+.loc-tree-btn-clear {
+  color: var(--color-error, #dc2626);
+  border-color: var(--color-error, #fca5a5);
+}
+
+.loc-tree-btn-clear:hover {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: var(--color-error, #ef4444);
+}
