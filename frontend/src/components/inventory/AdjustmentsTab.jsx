@@ -6,6 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
+import { buildEntriesForProduct, dominantDisplayUnit } from '../../utils/rowSources';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
@@ -28,6 +29,9 @@ const AdjustmentsTab = () => {
     categoryGroups,
     productCategories,
     receipts,
+    locations,
+    subLocationMap,
+    storageAreas,
     inventoryAdjustments,
     submitAdjustment,
     fetchPalletLicences,
@@ -47,17 +51,18 @@ const AdjustmentsTab = () => {
   const [isLoadingFg, setIsLoadingFg] = useState(false);
   const [isSubmittingFg, setIsSubmittingFg] = useState(false);
 
-  // ─── RM / Packaging (lot-based) state ───────────────────────────────────────
+  // ─── RM / Packaging (product-first) state ────────────────────────────────────
   const [rmForm, setRmForm] = useState({
     categoryGroupId: '',
     categoryId: '',
     productId: '',
-    receiptId: '',
     adjustmentType: 'stock-correction',
     quantity: '',
     reason: '',
     recipient: '',
   });
+  // Map of entry.key -> qty string the operator typed
+  const [rmEntrySelections, setRmEntrySelections] = useState({});
   const [rmError, setRmError] = useState('');
   const [isSubmittingRm, setIsSubmittingRm] = useState(false);
 
@@ -104,6 +109,25 @@ const AdjustmentsTab = () => {
   });
 
   const rmAvailableProducts = products.filter(p => p.categoryId === rmForm.categoryId);
+
+  // Product-wide breakdown: every place this product physically sits
+  const rmEntries = useMemo(() => {
+    if (!rmForm.productId) return [];
+    return buildEntriesForProduct({
+      productId: rmForm.productId,
+      approvedReceipts,
+      storageAreas,
+      locations,
+      subLocationMap,
+    });
+  }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap]);
+
+  // Top-of-form unit: most common display unit across entries (barrels if
+  // most lots came in barrels; lbs/cases if mostly stored that way).
+  const rmGlobal = useMemo(() => dominantDisplayUnit(rmEntries), [rmEntries]);
+  const rmGlobalUnit = rmGlobal?.unit || 'cases';
+  const rmGlobalFactor = rmGlobal?.factor || 1;
+  const rmEntriesAvailStorage = rmEntries.reduce((s, e) => s + e.available, 0);
 
   // ─── FG: load pallets ────────────────────────────────────────────────────────
   const loadFgPallets = async (productId) => {
@@ -168,33 +192,105 @@ const AdjustmentsTab = () => {
   // ─── RM submit ───────────────────────────────────────────────────────────────
   const handleRmSubmit = async (e) => {
     e.preventDefault();
-    if (!rmForm.productId || !rmForm.receiptId) { setRmError('Select a product and lot.'); return; }
-    if (!rmForm.quantity || Number(rmForm.quantity) <= 0) { setRmError('Enter a valid quantity.'); return; }
+    if (!rmForm.productId) { setRmError('Select a product.'); return; }
+    const requestedGlobal = Number(rmForm.quantity);
+    if (!requestedGlobal || requestedGlobal <= 0) { setRmError('Enter a valid total quantity to adjust.'); return; }
     if (!rmForm.reason.trim()) { setRmError('Reason is required.'); return; }
+
+    // Convert global qty into storage units (lbs/cases). Per-entry inputs
+    // are in each entry's own display unit; convert each to storage too.
+    const requestedStorage = requestedGlobal * rmGlobalFactor;
+
+    const picks = rmEntries
+      .map(entry => {
+        const displayQty = Number(rmEntrySelections[entry.key] || 0);
+        const storageQty = displayQty * entry.displayFactor;
+        return { entry, displayQty, storageQty };
+      })
+      .filter(p => p.storageQty > 0);
+    const pickedStorage = picks.reduce((s, p) => s + p.storageQty, 0);
+
+    if (picks.length === 0) {
+      setRmError('Pick which lot/location(s) the adjustment comes from in the breakdown below.');
+      return;
+    }
+    if (Math.abs(pickedStorage - requestedStorage) > 0.01) {
+      setRmError(
+        `Total selection (${pickedStorage.toLocaleString()} ${rmGlobal?.unit === 'cases' || rmGlobal?.unit === 'lbs' ? rmGlobal.unit : 'storage units'}) must equal ${requestedStorage.toLocaleString()}.`,
+      );
+      return;
+    }
+    // Per-receipt cap: sum of picks against a receipt mustn't exceed receipt total
+    const perReceipt = new Map();
+    for (const p of picks) {
+      perReceipt.set(p.entry.receiptId, (perReceipt.get(p.entry.receiptId) || 0) + p.storageQty);
+    }
+    for (const p of picks) {
+      const receiptSum = perReceipt.get(p.entry.receiptId) || 0;
+      if (receiptSum > p.entry.receiptTotal + 0.01) {
+        setRmError(`Lot ${p.entry.lotNumber}: total picked ${receiptSum.toLocaleString()} > ${p.entry.receiptTotal.toLocaleString()} on the lot.`);
+        return;
+      }
+      if (p.storageQty > p.entry.available + 0.01) {
+        setRmError(`${p.entry.locationLabel}: ${p.displayQty.toLocaleString()} ${p.entry.displayUnit} > ${(p.entry.available / p.entry.displayFactor).toLocaleString()} ${p.entry.displayUnit} avail.`);
+        return;
+      }
+    }
 
     if (isCorporateUser && selectedWarehouse) {
       const ok = await confirm(`You are about to log this adjustment to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
       if (!ok) return;
     }
 
+    // Group picks by receiptId — each receipt gets its own InventoryAdjustment row
+    const groups = new Map();
+    for (const p of picks) {
+      const list = groups.get(p.entry.receiptId) || [];
+      list.push(p);
+      groups.set(p.entry.receiptId, list);
+    }
+
     setIsSubmittingRm(true);
     setRmError('');
-    const result = await submitAdjustment({
-      productId: rmForm.productId,
-      categoryId: rmForm.categoryId,
-      receiptId: rmForm.receiptId,
-      adjustmentType: rmForm.adjustmentType,
-      quantity: Number(rmForm.quantity),
-      reason: rmForm.reason.trim(),
-      recipient: rmForm.recipient.trim() || null,
-    });
+    const failures = [];
+    for (const [receiptId, items] of groups.entries()) {
+      const sourceBreakdown = items.map(({ entry, storageQty }) => ({
+        id: entry.sourceId,
+        quantity: storageQty,
+      }));
+      const groupQty = items.reduce((s, it) => s + it.storageQty, 0);
+      const result = await submitAdjustment({
+        productId: rmForm.productId,
+        categoryId: rmForm.categoryId,
+        receiptId,
+        adjustmentType: rmForm.adjustmentType,
+        quantity: groupQty,
+        reason: rmForm.reason.trim(),
+        recipient: rmForm.recipient.trim() || null,
+        sourceBreakdown,
+      });
+      if (!result.success) {
+        failures.push(result.error || 'Submit failed');
+      }
+    }
     setIsSubmittingRm(false);
-    if (result.success) {
-      setRmForm({ categoryGroupId: '', categoryId: '', productId: '', receiptId: '', adjustmentType: 'stock-correction', quantity: '', reason: '', recipient: '' });
-      addToast('Adjustment submitted successfully.', 'success');
+
+    if (failures.length === 0) {
+      const count = groups.size;
+      setRmForm({ categoryGroupId: '', categoryId: '', productId: '', adjustmentType: 'stock-correction', quantity: '', reason: '', recipient: '' });
+      setRmEntrySelections({});
+      addToast(
+        count === 1
+          ? 'Adjustment submitted successfully.'
+          : `${count} adjustments submitted (one per lot).`,
+        'success',
+      );
     } else {
-      setRmError(result.error || 'Failed to submit adjustment.');
-      addToast(result.error || 'Failed to submit adjustment.', 'error');
+      const msg = failures.length === groups.size
+        ? `Failed to submit: ${failures[0]}`
+        : `${failures.length} of ${groups.size} adjustments failed: ${failures[0]}`;
+      setRmError(msg);
+      addToast(msg, 'error');
     }
   };
 
@@ -363,48 +459,77 @@ const AdjustmentsTab = () => {
                 <SearchableSelect
                   options={rmAvailableProducts.map(p => ({ value: p.id, label: p.name }))}
                   value={rmForm.productId}
-                  onChange={id => setRmForm(prev => ({ ...prev, productId: id, receiptId: '' }))}
+                  onChange={id => {
+                    setRmForm(prev => ({ ...prev, productId: id, quantity: '' }));
+                    setRmEntrySelections({});
+                  }}
                   placeholder="Select product"
                   searchPlaceholder="Search products..."
                 />
               </label>
             )}
 
-            {rmForm.productId && (() => {
-              const lots = approvedReceipts.filter(r => r.productId === rmForm.productId && r.quantity > 0);
-              return (
-                <label>
-                  <span>Inventory Lot <span className="required">*</span></span>
-                  <SearchableSelect
-                    options={lots.map(r => ({
-                      value: r.id,
-                      label: `Lot ${r.lotNo || '-'} · ${r.quantity.toLocaleString()} ${r.quantityUnits || 'cases'}`
-                    }))}
-                    value={rmForm.receiptId}
-                    onChange={id => {
-                      const r = lots.find(x => x.id === id);
-                      setRmForm(prev => ({ ...prev, receiptId: id, availableQuantity: r?.quantity || 0 }));
-                    }}
-                    placeholder="Select lot"
-                    searchPlaceholder="Search lots..."
-                  />
-                </label>
-              );
-            })()}
+            {rmForm.productId && rmEntries.length === 0 && (
+              <div className="alert info">No on-hand inventory found for this product.</div>
+            )}
 
-            {rmForm.receiptId && (
+            {rmForm.productId && rmEntries.length > 0 && (
               <label>
-                <span>Quantity to Adjust <span className="required">*</span></span>
+                <span>Quantity to Adjust ({rmGlobalUnit}) <span className="required">*</span></span>
                 <input
                   type="number"
-                  min="1"
-                  step="1"
+                  min="0"
+                  step="any"
                   value={rmForm.quantity}
                   onChange={e => setRmForm(prev => ({ ...prev, quantity: e.target.value }))}
-                  placeholder="Enter quantity"
+                  placeholder={`Total ${rmGlobalUnit} to remove`}
                 />
+                <span className="muted small">
+                  {rmEntriesAvailStorage.toLocaleString()} {rmEntries[0]?.unit || 'units'} on hand across {rmEntries.length} location{rmEntries.length === 1 ? '' : 's'}.
+                </span>
               </label>
             )}
+
+            {rmForm.productId && rmEntries.length > 0 && Number(rmForm.quantity || 0) > 0 && (() => {
+              const requestedStorage = Number(rmForm.quantity || 0) * rmGlobalFactor;
+              const pickedStorage = rmEntries.reduce((s, e) => s + (Number(rmEntrySelections[e.key] || 0) * e.displayFactor), 0);
+              const summaryUnit = rmEntries[0]?.unit || 'units';
+              return (
+                <div className="panel" style={{ marginTop: 8 }}>
+                  <div className="panel-header horizontal">
+                    <strong>Source Breakdown</strong>
+                    <span className="muted small">{pickedStorage.toLocaleString()} / {requestedStorage.toLocaleString()} {summaryUnit}</span>
+                  </div>
+                  <p className="muted small" style={{ margin: '4px 0 8px' }}>
+                    Type how much to remove from each lot/location (each shown in its own unit). Total must equal the quantity above.
+                  </p>
+                  <div className="form-grid">
+                    {rmEntries.map(entry => {
+                      const availDisp = entry.available / entry.displayFactor;
+                      const showStorageHint = entry.displayUnit !== entry.unit;
+                      return (
+                        <label key={entry.key}>
+                          <span>
+                            Lot {entry.lotNumber} · {entry.locationLabel}
+                            {' — '}{availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} avail
+                            {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
+                          </span>
+                          <input
+                            type="number"
+                            min="0"
+                            max={availDisp}
+                            step="any"
+                            value={rmEntrySelections[entry.key] ?? ''}
+                            onChange={(e) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
+                            placeholder="0"
+                          />
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
 
             <label>
               <span>Adjustment Type <span className="required">*</span></span>

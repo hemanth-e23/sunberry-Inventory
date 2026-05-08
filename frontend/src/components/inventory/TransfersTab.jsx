@@ -6,6 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
+import { buildEntriesForProduct, dominantDisplayUnit } from '../../utils/rowSources';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
@@ -38,19 +39,17 @@ const TransfersTab = () => {
   const [fgError, setFgError] = useState('');
   const [isSubmittingFg, setIsSubmittingFg] = useState(false);
 
-  // ─── RM / Packaging state ────────────────────────────────────────────────────
+  // ─── RM / Packaging state (product-first) ───────────────────────────────────
   const [rmForm, setRmForm] = useState({
-    receiptId: '',
+    productId: '',
     quantity: '',
     toLocation: '',
     toSubLocation: '',
     reason: '',
-    availableQuantity: 0,
     transferType: 'warehouse-transfer',
     orderNumber: '',
   });
-  const [availableSources, setAvailableSources] = useState([]);
-  const [sourceSelections, setSourceSelections] = useState({});
+  const [rmEntrySelections, setRmEntrySelections] = useState({});
   const [rmError, setRmError] = useState('');
   const [isSubmittingRm, setIsSubmittingRm] = useState(false);
 
@@ -185,45 +184,83 @@ const TransfersTab = () => {
     }
   };
 
-  // ─── RM receipts (non-finished) ──────────────────────────────────────────────
-  const rmReceipts = useMemo(() =>
-    approvedReceipts.filter(r => {
+  // ─── RM products (non-finished products with stock) ──────────────────────────
+  const rmProducts = useMemo(() => {
+    const stockByProduct = new Map();
+    for (const r of approvedReceipts) {
       const cat = categoryLookup[r.categoryId];
-      return cat && cat.type !== CATEGORY_TYPES.FINISHED && cat.type !== 'group' && r.quantity > 0;
-    }),
-    [approvedReceipts, categoryLookup]
-  );
+      if (!cat || cat.type === CATEGORY_TYPES.FINISHED || cat.type === 'group') continue;
+      if (!(Number(r.quantity) > 0)) continue;
+      stockByProduct.set(r.productId, (stockByProduct.get(r.productId) || 0) + Number(r.quantity));
+    }
+    return products
+      .filter(p => stockByProduct.has(p.id))
+      .map(p => ({ value: p.id, label: p.name }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [approvedReceipts, categoryLookup, products]);
+
+  // Product-wide breakdown: every place this product physically sits
+  const rmEntries = useMemo(() => {
+    if (!rmForm.productId) return [];
+    return buildEntriesForProduct({
+      productId: rmForm.productId,
+      approvedReceipts,
+      storageAreas,
+      locations,
+      subLocationMap,
+    });
+  }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap]);
+
+  const rmGlobal = useMemo(() => dominantDisplayUnit(rmEntries), [rmEntries]);
+  const rmGlobalUnit = rmGlobal?.unit || 'cases';
+  const rmGlobalFactor = rmGlobal?.factor || 1;
+  const rmEntriesAvailStorage = rmEntries.reduce((s, e) => s + e.available, 0);
 
   // ─── RM: submit ──────────────────────────────────────────────────────────────
   const handleRmSubmit = async (event) => {
     event.preventDefault();
-    if (!rmForm.receiptId) { setRmError('Select an inventory lot.'); return; }
-    if (!rmForm.quantity || Number(rmForm.quantity) <= 0) { setRmError('Enter a valid quantity.'); return; }
+    if (!rmForm.productId) { setRmError('Select a product.'); return; }
+    const requestedGlobal = Number(rmForm.quantity);
+    if (!requestedGlobal || requestedGlobal <= 0) { setRmError('Enter a valid total quantity.'); return; }
     if (rmForm.transferType !== 'shipped-out' && !rmForm.toLocation) { setRmError('Select a destination location.'); return; }
-    if (rmForm.transferType === 'shipped-out' && !rmForm.orderNumber.trim()) { setRmError('Order number is required.'); return; }
-
-    const requested = Number(rmForm.quantity);
-    let picked = Object.values(sourceSelections).reduce((sum, v) => sum + (Number(v) || 0), 0);
-
-    // Auto-fill source if quantity matches total available
-    if (picked === 0 && requested > 0 && availableSources.length > 0) {
-      const totalAvailable = availableSources.reduce((sum, src) => sum + src.available, 0);
-      if (Math.abs(requested - totalAvailable) < 0.01) {
-        const autoSel = {};
-        availableSources.forEach(src => { autoSel[src.id] = src.available.toString(); });
-        setSourceSelections(autoSel);
-        picked = totalAvailable;
-      }
-    }
-
-    if (Math.abs(picked - requested) > 0.01) {
-      setRmError(`Selection must equal requested. Picked ${picked.toLocaleString()} of ${requested.toLocaleString()}.`);
-      return;
-    }
-
     if (rmForm.transferType !== 'shipped-out' && !rmForm.toSubLocation) {
       setRmError('Choose a destination sub location.');
       return;
+    }
+    if (rmForm.transferType === 'shipped-out' && !rmForm.orderNumber.trim()) { setRmError('Order number is required.'); return; }
+
+    const requestedStorage = requestedGlobal * rmGlobalFactor;
+    const picks = rmEntries
+      .map(entry => {
+        const displayQty = Number(rmEntrySelections[entry.key] || 0);
+        return { entry, displayQty, storageQty: displayQty * entry.displayFactor };
+      })
+      .filter(p => p.storageQty > 0);
+    const pickedStorage = picks.reduce((s, p) => s + p.storageQty, 0);
+
+    if (picks.length === 0) {
+      setRmError('Pick which lot/location(s) the transfer comes from in the breakdown.');
+      return;
+    }
+    if (Math.abs(pickedStorage - requestedStorage) > 0.01) {
+      const summaryUnit = rmEntries[0]?.unit || 'units';
+      setRmError(`Total selection (${pickedStorage.toLocaleString()} ${summaryUnit}) must equal ${requestedStorage.toLocaleString()}.`);
+      return;
+    }
+    const perReceipt = new Map();
+    for (const p of picks) {
+      perReceipt.set(p.entry.receiptId, (perReceipt.get(p.entry.receiptId) || 0) + p.storageQty);
+    }
+    for (const p of picks) {
+      const receiptSum = perReceipt.get(p.entry.receiptId) || 0;
+      if (receiptSum > p.entry.receiptTotal + 0.01) {
+        setRmError(`Lot ${p.entry.lotNumber}: total picked ${receiptSum.toLocaleString()} > ${p.entry.receiptTotal.toLocaleString()} on the lot.`);
+        return;
+      }
+      if (p.storageQty > p.entry.available + 0.01) {
+        setRmError(`${p.entry.locationLabel}: ${p.displayQty.toLocaleString()} ${p.entry.displayUnit} > ${(p.entry.available / p.entry.displayFactor).toLocaleString()} avail.`);
+        return;
+      }
     }
 
     if (isCorporateUser && selectedWarehouse) {
@@ -231,34 +268,55 @@ const TransfersTab = () => {
       if (!ok) return;
     }
 
+    // Group picks by receiptId; one InventoryTransfer per affected receipt
+    const groups = new Map();
+    for (const p of picks) {
+      const list = groups.get(p.entry.receiptId) || [];
+      list.push(p);
+      groups.set(p.entry.receiptId, list);
+    }
+
     setIsSubmittingRm(true);
-    try {
+    setRmError('');
+    const failures = [];
+    for (const [receiptId, items] of groups.entries()) {
+      const groupQty = items.reduce((s, it) => s + it.storageQty, 0);
+      const sourceBreakdown = items.map(({ entry, storageQty }) => ({
+        id: entry.sourceId,
+        quantity: storageQty,
+      }));
       const result = await submitTransfer({
-        receiptId: rmForm.receiptId,
-        quantity: Number(rmForm.quantity),
+        receiptId,
+        quantity: groupQty,
         toLocation: rmForm.transferType === 'shipped-out' ? null : rmForm.toLocation,
         toSubLocation: rmForm.transferType === 'shipped-out' ? null : (rmForm.toSubLocation || null),
         reason: rmForm.reason.trim(),
         transferType: rmForm.transferType,
         orderNumber: rmForm.transferType === 'shipped-out' ? rmForm.orderNumber.trim() : null,
-        sourceBreakdown: Object.entries(sourceSelections)
-          .filter(([, qty]) => Number(qty) > 0)
-          .map(([id, qty]) => ({ id, quantity: Number(qty) })),
+        sourceBreakdown,
       });
-
-      if (result.success) {
-        setRmForm({ receiptId: '', quantity: '', toLocation: '', toSubLocation: '', reason: '', availableQuantity: 0, transferType: 'warehouse-transfer', orderNumber: '' });
-        setRmError('');
-        setAvailableSources([]);
-        setSourceSelections({});
-        addToast('Transfer submitted successfully.', 'success');
-      } else {
-        setRmError(result.message || result.error || 'Failed to submit transfer.');
+      if (!result.success) {
+        failures.push(result.message || result.error || 'Submit failed');
       }
-    } catch {
-      setRmError('An unexpected error occurred.');
-    } finally {
-      setIsSubmittingRm(false);
+    }
+    setIsSubmittingRm(false);
+
+    if (failures.length === 0) {
+      const count = groups.size;
+      setRmForm({ productId: '', quantity: '', toLocation: '', toSubLocation: '', reason: '', transferType: 'warehouse-transfer', orderNumber: '' });
+      setRmEntrySelections({});
+      addToast(
+        count === 1
+          ? 'Transfer submitted successfully.'
+          : `${count} transfers submitted (one per lot).`,
+        'success',
+      );
+    } else {
+      const msg = failures.length === groups.size
+        ? `Failed to submit: ${failures[0]}`
+        : `${failures.length} of ${groups.size} transfers failed: ${failures[0]}`;
+      setRmError(msg);
+      addToast(msg, 'error');
     }
   };
 
@@ -418,81 +476,76 @@ const TransfersTab = () => {
             )}
 
             <label>
-              <span>Inventory Lot <span className="required">*</span></span>
+              <span>Product <span className="required">*</span></span>
               <SearchableSelect
-                options={rmReceipts.map(r => ({ value: r.id, label: formatReceiptLabel(r) }))}
-                value={rmForm.receiptId}
-                onChange={(receiptId) => {
-                  const sel = approvedReceipts.find(r => r.id === receiptId);
-                  const sources = [];
-                  if (sel) {
-                    const locId = sel.location || null;
-                    const subId = sel.subLocation || null;
-                    const locName = locations.find(l => l.id === locId)?.name || 'Location';
-                    const subName = (subLocationMap[locId] || []).find(s => s.id === subId)?.name || '';
-                    sources.push({
-                      id: subId || locId || 'unknown',
-                      label: `${locName}${subName ? ' / ' + subName : ''}`,
-                      available: Number(sel.quantity || 0),
-                      type: 'standard',
-                    });
-                  }
-                  setRmForm(prev => ({ ...prev, receiptId, availableQuantity: sel?.quantity || 0 }));
-                  setAvailableSources(sources);
-                  setSourceSelections({});
+                options={rmProducts}
+                value={rmForm.productId}
+                onChange={(id) => {
+                  setRmForm(prev => ({ ...prev, productId: id, quantity: '' }));
+                  setRmEntrySelections({});
                 }}
-                placeholder="Select inventory lot"
-                searchPlaceholder="Type to search lots..."
+                placeholder="Select raw material / packaging product"
+                searchPlaceholder="Type to search products..."
               />
             </label>
 
-            <label>
-              <span>Quantity to Move <span className="required">*</span></span>
-              <div className="quantity-input-container">
+            {rmForm.productId && rmEntries.length === 0 && (
+              <div className="alert info">No on-hand inventory found for this product.</div>
+            )}
+
+            {rmForm.productId && rmEntries.length > 0 && (
+              <label>
+                <span>Quantity to Move ({rmGlobalUnit}) <span className="required">*</span></span>
                 <input
                   type="number"
                   min="0"
-                  step="0.01"
+                  step="any"
                   value={rmForm.quantity}
                   onChange={(e) => setRmForm(prev => ({ ...prev, quantity: e.target.value }))}
+                  placeholder={`Total ${rmGlobalUnit} to move`}
                 />
-                {rmForm.availableQuantity > 0 && (
-                  <div className="quantity-helpers">
-                    <button type="button" className="link-button small" onClick={() => setRmForm(prev => ({ ...prev, quantity: prev.availableQuantity }))}>
-                      Move all ({rmForm.availableQuantity})
-                    </button>
-                    <button type="button" className="link-button small" onClick={() => setRmForm(prev => ({ ...prev, quantity: prev.availableQuantity / 2 }))}>
-                      Move half
-                    </button>
-                  </div>
-                )}
-              </div>
-            </label>
+                <span className="muted small">
+                  {rmEntriesAvailStorage.toLocaleString()} {rmEntries[0]?.unit || 'units'} on hand across {rmEntries.length} location{rmEntries.length === 1 ? '' : 's'}.
+                </span>
+              </label>
+            )}
 
-            {availableSources.length > 0 && Number(rmForm.quantity || 0) > 0 && (() => {
-              const requestedQty = Number(rmForm.quantity || 0);
-              const selectedQty = Object.values(sourceSelections).reduce((s, v) => s + (Number(v) || 0), 0);
+            {rmForm.productId && rmEntries.length > 0 && Number(rmForm.quantity || 0) > 0 && (() => {
+              const requestedStorage = Number(rmForm.quantity || 0) * rmGlobalFactor;
+              const pickedStorage = rmEntries.reduce((s, e) => s + (Number(rmEntrySelections[e.key] || 0) * e.displayFactor), 0);
+              const summaryUnit = rmEntries[0]?.unit || 'units';
               return (
                 <div className="panel" style={{ marginTop: 8 }}>
                   <div className="panel-header horizontal">
-                    <strong>Source Location</strong>
-                    <span className="muted small">{selectedQty.toLocaleString()} / {requestedQty.toLocaleString()} cases</span>
+                    <strong>Source Breakdown</strong>
+                    <span className="muted small">{pickedStorage.toLocaleString()} / {requestedStorage.toLocaleString()} {summaryUnit}</span>
                   </div>
+                  <p className="muted small" style={{ margin: '4px 0 8px' }}>
+                    Type how much to move from each lot/location (each shown in its own unit). Total must equal the quantity above.
+                  </p>
                   <div className="form-grid">
-                    {availableSources.map(src => (
-                      <label key={src.id}>
-                        <span>{src.label} — {src.available.toLocaleString()} avail</span>
-                        <input
-                          type="number"
-                          min="0"
-                          max={src.available}
-                          step="1"
-                          value={sourceSelections[src.id] ?? ''}
-                          onChange={(e) => setSourceSelections(prev => ({ ...prev, [src.id]: e.target.value }))}
-                          placeholder="0"
-                        />
-                      </label>
-                    ))}
+                    {rmEntries.map(entry => {
+                      const availDisp = entry.available / entry.displayFactor;
+                      const showStorageHint = entry.displayUnit !== entry.unit;
+                      return (
+                        <label key={entry.key}>
+                          <span>
+                            Lot {entry.lotNumber} · {entry.locationLabel}
+                            {' — '}{availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} avail
+                            {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
+                          </span>
+                          <input
+                            type="number"
+                            min="0"
+                            max={availDisp}
+                            step="any"
+                            value={rmEntrySelections[entry.key] ?? ''}
+                            onChange={(e) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
+                            placeholder="0"
+                          />
+                        </label>
+                      );
+                    })}
                   </div>
                 </div>
               );

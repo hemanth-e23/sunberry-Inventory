@@ -639,6 +639,9 @@ export const InventoryProvider = ({ children }) => {
       } else {
         payload.receipt_id = adjustment.receiptId;
         payload.quantity = adjustment.quantity;
+        if (adjustment.sourceBreakdown && adjustment.sourceBreakdown.length > 0) {
+          payload.source_breakdown = adjustment.sourceBreakdown;
+        }
       }
 
       const response = await apiClient.post('/inventory/adjustments', payload);
