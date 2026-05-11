@@ -3,8 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
 import NetworkStatus from './NetworkStatus';
+import ScanFeedback from './ScanFeedback';
 import { useScanQueue } from '../../hooks/useScanQueue';
-import { Scan, MapPin, Package, Check, RefreshCw, CheckCircle2, Cloud, CloudOff, AlertTriangle } from 'lucide-react';
+import { removeScan } from '../../utils/scanQueue';
+import { isValidLicenceFormat, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
+import { Scan, MapPin, Package, Check, RefreshCw, CheckCircle2, Cloud, CloudOff, AlertTriangle, Keyboard } from 'lucide-react';
 import './ScannerReceiptFlow.css';
 
 const MAX_ROW_SCAN_ATTEMPTS = 3;
@@ -30,7 +33,19 @@ const ScannerReceiptFlow = () => {
   const [rowScanAttempts, setRowScanAttempts] = useState(0);
   const [showManualRows, setShowManualRows] = useState(false);
   const [resumeData, setResumeData] = useState(null);
+  const [feedback, setFeedback] = useState(null); // { kind: 'success'|'error', message }
+  const [manualKeyboard, setManualKeyboard] = useState(false);
   const inputRef = useRef(null);
+
+  const showSuccess = useCallback((message) => {
+    playSuccessTone();
+    setFeedback({ kind: 'success', message });
+  }, []);
+  const showError = useCallback((message) => {
+    playErrorTone();
+    setFeedback({ kind: 'error', message });
+  }, []);
+  const dismissFeedback = useCallback(() => setFeedback(null), []);
 
   // Scan queue: every scan goes through here so a Wi-Fi blip doesn't lose
   // anything. When online, drain is immediate. When offline, the operator
@@ -44,16 +59,28 @@ const ScannerReceiptFlow = () => {
     if (resp.row_available != null) setRowAvailable(resp.row_available);
     if (resp.gap_detected && resp.gap_missing?.length) {
       setGapMissing(resp.gap_missing);
+      setStep('gap-prompt');
     }
-  }, []);
+    showSuccess(`Scanned ${resp.pallet?.licence_number || ''}`.trim());
+  }, [showSuccess]);
+
   const onScanFailed = useCallback((item, err) => {
-    if (!err.response) return; // transient — leave optimistic entry alone
-    setPallets((prev) => prev.map((p) => (
-      p._idempotency_key === item.idempotency_key
-        ? { ...p, _pending: false, _failed: true, _failError: err.response?.data?.detail || 'Rejected' }
-        : p
-    )));
-  }, []);
+    // No response = transient (offline, 5xx, timeout). Leave optimistic
+    // entry alone — the queue will keep retrying when the network returns.
+    if (!err?.response) return;
+    const status = err.response.status;
+    // 5xx / 408 / 429 are retryable; queue keeps them as pending. Same UX.
+    if (status >= 500 || status === 408 || status === 429) return;
+
+    // 4xx = server rejected this scan permanently (bad format slipped past
+    // client check, product mismatch, duplicate in another request, etc.).
+    // Drop both the optimistic row AND the failed queue entry so the
+    // operator's NetworkStatus chip stays clean and they don't have to
+    // manually "drop failed".
+    setPallets((prev) => prev.filter((p) => p._idempotency_key !== item.idempotency_key));
+    removeScan(item.id);
+    showError(err.response.data?.detail || 'Scan rejected');
+  }, [showError]);
   const {
     online,
     pendingCount,
@@ -79,9 +106,34 @@ const ScannerReceiptFlow = () => {
       .catch(() => setStep('scan-first'));
   }, []);
 
+  // Keep the scan input focused at all times. HID scanners type into
+  // whatever has focus, so a lost focus means the scanner's keystrokes
+  // go nowhere. Refocus whenever any state change might have dropped it
+  // (step transition, overlay dismiss, scan accepted, manual toggle).
   useEffect(() => {
-    inputRef.current?.focus();
-  }, [step, showManualRows]);
+    if (manualKeyboard) return; // user wants the soft keyboard; don't steal focus
+    const id = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [step, showManualRows, feedback, pallets.length, manualKeyboard]);
+
+  // Aggressive focus guard: if anything else takes focus (taps elsewhere,
+  // overlay click, dropdown), pull it back to the scan input on the next
+  // tick. The manual-keyboard toggle short-circuits this so the operator
+  // can actually type when they need to.
+  useEffect(() => {
+    if (manualKeyboard) return undefined;
+    const onFocusOut = () => {
+      // Don't fight interactive controls the operator legitimately tapped
+      // (buttons, links, the partial-cases input). Only refocus when the
+      // page-level focus has fallen back to body.
+      setTimeout(() => {
+        const ae = document.activeElement;
+        if (!ae || ae === document.body) inputRef.current?.focus();
+      }, 50);
+    };
+    document.addEventListener('focusout', onFocusOut);
+    return () => document.removeEventListener('focusout', onFocusOut);
+  }, [manualKeyboard]);
 
   useEffect(() => {
     if (requestId && (step === 'select-location' || step === 'scan')) {
@@ -98,8 +150,18 @@ const ScannerReceiptFlow = () => {
     const lic = firstLicence.trim();
     if (!lic) return;
     setError('');
-    setLoading(true);
 
+    // Client-side shape check — catches accidental row/FCC scans before
+    // they hit the server. Format: {LOT}-{PRODUCT}-{NNN}.
+    if (!isValidLicenceFormat(lic)) {
+      setFirstLicence('');
+      const msg = 'Not a pallet licence — did you scan a row or FCC code?';
+      setError(msg);
+      showError(msg);
+      return;
+    }
+
+    setLoading(true);
     try {
       const r = await apiClient.post('/scanner/requests', { licence_number: lic });
       setRequestId(r.data.id);
@@ -110,8 +172,12 @@ const ScannerReceiptFlow = () => {
       setRowScanAttempts(0);
       setShowManualRows(false);
       setRowScanInput('');
+      showSuccess(detail.data.product?.name || 'Session started');
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to create session');
+      const msg = err.response?.data?.detail || 'Failed to create session';
+      setFirstLicence('');
+      setError(msg);
+      showError(msg);
     } finally {
       setLoading(false);
     }
@@ -123,6 +189,16 @@ const ScannerReceiptFlow = () => {
     if (!scanned) return;
     setError('');
 
+    // If the operator scanned a pallet licence instead of a row barcode,
+    // tell them exactly that — much more useful than "Row not found".
+    if (isValidLicenceFormat(rowScanInput.trim())) {
+      const msg = "That's a pallet licence — scan the row barcode instead.";
+      setRowScanInput('');
+      setError(msg);
+      showError(msg);
+      return;
+    }
+
     const match = storageRows.find((r) => {
       const rowName = (r.name || '').toUpperCase();
       const nameOnly = rowName.replace(/^FG[- ]?/, '');
@@ -131,21 +207,28 @@ const ScannerReceiptFlow = () => {
 
     if (match) {
       if (match.available <= 0) {
-        setError(`${match.name} is full. Scan a different row.`);
+        const msg = `${match.name} is full. Scan a different row.`;
+        setError(msg);
         setRowScanInput('');
         setRowScanAttempts((prev) => prev + 1);
+        showError(msg);
       } else {
         handleSelectLocation(match.id);
+        showSuccess(`Row ${match.name}`);
       }
     } else {
       const newAttempts = rowScanAttempts + 1;
       setRowScanAttempts(newAttempts);
       setRowScanInput('');
       if (newAttempts >= MAX_ROW_SCAN_ATTEMPTS) {
-        setError('Scan not recognized. You can select the row manually below.');
+        const msg = 'Scan not recognized. Select the row manually below.';
+        setError(msg);
         setShowManualRows(true);
+        showError(msg);
       } else {
-        setError(`Row not found. Try again (${newAttempts}/${MAX_ROW_SCAN_ATTEMPTS} before manual).`);
+        const msg = `Row not found. Try again (${newAttempts}/${MAX_ROW_SCAN_ATTEMPTS} before manual).`;
+        setError(msg);
+        showError('Row not found');
       }
     }
   };
@@ -172,12 +255,22 @@ const ScannerReceiptFlow = () => {
     if (!lic || !selectedRowId) return;
     setError('');
 
+    // Shape check — accidental row/FCC scans never enter the list.
+    if (!isValidLicenceFormat(lic)) {
+      setLicenceInput('');
+      const msg = 'Not a pallet licence — did you scan a row or FCC code?';
+      setError(msg);
+      showError(msg);
+      return;
+    }
+
     // Reject obvious duplicates client-side so an offline operator gets
     // immediate feedback instead of a delayed server error after sync.
     const alreadyHere = pallets.some((p) => p.licence_number === lic);
     if (alreadyHere) {
-      setError('Already scanned this pallet.');
       setLicenceInput('');
+      setError('Already scanned this pallet.');
+      showError('Already scanned this pallet');
       return;
     }
 
@@ -299,6 +392,28 @@ const ScannerReceiptFlow = () => {
     />
   );
 
+  // HID scanners send keystrokes — suppress the on-screen keyboard so it
+  // doesn't cover half the screen on a tablet. `inputMode="none"` keeps the
+  // field focusable + receiving keystrokes from the scanner. The toggle
+  // below restores `inputMode="text"` for the rare case of manual entry.
+  const scanInputProps = {
+    inputMode: manualKeyboard ? 'text' : 'none',
+    autoCapitalize: 'characters',
+    autoCorrect: 'off',
+    spellCheck: false,
+  };
+  const manualToggle = (
+    <button
+      type="button"
+      className="scanner-receipt-manual-link"
+      onClick={() => setManualKeyboard((v) => !v)}
+      style={{ marginTop: '0.4rem' }}
+    >
+      <Keyboard size={14} style={{ verticalAlign: '-2px', marginRight: '4px' }} />
+      {manualKeyboard ? 'Hide keyboard (use scanner)' : 'Type manually'}
+    </button>
+  );
+
   const palletStatusIcon = (p) => {
     if (p._failed) return <AlertTriangle size={14} color="#b91c1c" />;
     if (p._pending) return online ? <Cloud size={14} color="#92400e" /> : <CloudOff size={14} color="#92400e" />;
@@ -365,13 +480,16 @@ const ScannerReceiptFlow = () => {
               placeholder="Scan licence plate…"
               className="scanner-receipt-input"
               autoComplete="off"
+              {...scanInputProps}
             />
             <button type="submit" disabled={loading || !firstLicence.trim()} className="scanner-receipt-btn">
               {loading ? '…' : 'Start'}
             </button>
           </form>
           {error && <div className="scanner-receipt-error">{error}</div>}
+          {manualToggle}
         </div>
+        <ScanFeedback {...(feedback || {})} onDismiss={dismissFeedback} />
       </ScannerLayout>
     );
   }
@@ -399,6 +517,7 @@ const ScannerReceiptFlow = () => {
                     placeholder="Scan row name"
                     className="scanner-receipt-input"
                     autoComplete="off"
+                    {...scanInputProps}
                   />
                   <button type="submit" disabled={!rowScanInput.trim()} className="scanner-receipt-btn">
                     <Scan size={22} />
@@ -453,6 +572,7 @@ const ScannerReceiptFlow = () => {
             </>
           )}
         </div>
+        <ScanFeedback {...(feedback || {})} onDismiss={dismissFeedback} />
       </ScannerLayout>
     );
   }
@@ -468,15 +588,20 @@ const ScannerReceiptFlow = () => {
               <li key={ln}>{ln}</li>
             ))}
           </ul>
+          <p className="scanner-receipt-instruction" style={{ marginTop: '0.5rem' }}>
+            If you just scanned the wrong code, choose <strong>Skip for now</strong> and rescan
+            the correct pallet — the gap will fill in automatically.
+          </p>
           <div className="scanner-receipt-gap-btns">
-            <button type="button" className="scanner-receipt-btn secondary" onClick={handleSkipGaps}>
-              Skip — continue scanning
+            <button type="button" className="scanner-receipt-btn" onClick={handleSkipGaps}>
+              Skip for now — I&apos;ll rescan it
             </button>
-            <button type="button" className="scanner-receipt-btn" onClick={handleMarkMissing} disabled={loading}>
-              Mark as Missing
+            <button type="button" className="scanner-receipt-btn secondary" onClick={handleMarkMissing} disabled={loading}>
+              Mark as Missing (sticker destroyed)
             </button>
           </div>
         </div>
+        <ScanFeedback {...(feedback || {})} onDismiss={dismissFeedback} />
       </ScannerLayout>
     );
   }
@@ -536,6 +661,7 @@ const ScannerReceiptFlow = () => {
               placeholder="Scan pallet licence…"
               className="scanner-receipt-input"
               autoComplete="off"
+              {...scanInputProps}
             />
             <button
               type="submit"
@@ -545,6 +671,7 @@ const ScannerReceiptFlow = () => {
               {loading ? '…' : <Scan size={22} />}
             </button>
           </form>
+          {manualToggle}
           {error && <div className="scanner-receipt-error">{error}</div>}
 
           <div className="scanner-receipt-pallets">
@@ -576,6 +703,7 @@ const ScannerReceiptFlow = () => {
             Review & Submit ({pallets.length})
           </button>
         </div>
+        <ScanFeedback {...(feedback || {})} onDismiss={dismissFeedback} />
       </ScannerLayout>
     );
   }

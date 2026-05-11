@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
+import ScanFeedback from './ScanFeedback';
 import { formatDateTime } from '../../utils/dateUtils';
+import { isValidLicenceFormat, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
 import {
   Truck, Scan, CheckCircle2, Circle, AlertTriangle, XCircle,
-  ChevronRight, Package, MapPin, Hash, Send, SkipForward, RefreshCw
+  ChevronRight, Package, MapPin, Hash, Send, SkipForward, RefreshCw, Keyboard
 } from 'lucide-react';
 import './ScannerShipOutFlow.css';
 
@@ -28,7 +30,26 @@ const ScannerShipOutFlow = () => {
   const [submitNotes, setSubmitNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [pollTimer, setPollTimer] = useState(null);
+  const [overlay, setOverlay] = useState(null); // full-screen feedback
+  const [manualKeyboard, setManualKeyboard] = useState(false);
   const inputRef = useRef(null);
+
+  const showOverlaySuccess = useCallback((message) => {
+    playSuccessTone();
+    setOverlay({ kind: 'success', message });
+  }, []);
+  const showOverlayError = useCallback((message) => {
+    playErrorTone();
+    setOverlay({ kind: 'error', message });
+  }, []);
+  const dismissOverlay = useCallback(() => setOverlay(null), []);
+
+  const scanInputProps = {
+    inputMode: manualKeyboard ? 'text' : 'none',
+    autoCapitalize: 'characters',
+    autoCorrect: 'off',
+    spellCheck: false,
+  };
 
   const loadOrders = useCallback(async () => {
     setLoadingOrders(true);
@@ -104,13 +125,42 @@ const ScannerShipOutFlow = () => {
     setTimeout(() => inputRef.current?.focus(), 300);
   };
 
+  // Keep the scan input focused — HID scanner keystrokes need a focus
+  // target. Re-asserts on every state change that might have dropped it.
+  useEffect(() => {
+    if (manualKeyboard || step !== 'pick') return;
+    const id = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [step, overlay, scanFeedback, pickList.length, manualKeyboard]);
+
+  useEffect(() => {
+    if (manualKeyboard || step !== 'pick') return undefined;
+    const onFocusOut = () => {
+      setTimeout(() => {
+        const ae = document.activeElement;
+        if (!ae || ae === document.body) inputRef.current?.focus();
+      }, 50);
+    };
+    document.addEventListener('focusout', onFocusOut);
+    return () => document.removeEventListener('focusout', onFocusOut);
+  }, [step, manualKeyboard]);
+
   const handleScan = async (e) => {
     e?.preventDefault?.();
     const lic = licenceInput.trim();
     if (!lic || !selectedTransfer) return;
     setScanFeedback(null);
-    setLoading(true);
 
+    if (!isValidLicenceFormat(lic)) {
+      setLicenceInput('');
+      const msg = 'Not a pallet licence — did you scan a row or FCC code?';
+      setScanFeedback({ type: 'err', msg });
+      showOverlayError(msg);
+      setTimeout(() => inputRef.current?.focus(), 100);
+      return;
+    }
+
+    setLoading(true);
     try {
       const r = await apiClient.post(
         `/inventory/transfers/${selectedTransfer.id}/scan-pick`,
@@ -119,7 +169,9 @@ const ScannerShipOutFlow = () => {
       const data = r.data;
 
       if (!data.success) {
-        setScanFeedback({ type: 'err', msg: `Pallet "${lic}" not found in system.` });
+        const msg = `Pallet "${lic}" not found in system.`;
+        setScanFeedback({ type: 'err', msg });
+        showOverlayError(msg);
         setLicenceInput('');
         inputRef.current?.focus();
         return;
@@ -127,6 +179,7 @@ const ScannerShipOutFlow = () => {
 
       if (data.on_list) {
         setScanFeedback({ type: 'ok', msg: `✓ ${lic} — on pick list` });
+        showOverlaySuccess(`${lic} — on pick list`);
         await loadPickProgress(selectedTransfer.id);
       } else {
         // Not on list — show exception dialog
@@ -134,7 +187,10 @@ const ScannerShipOutFlow = () => {
       }
       setLicenceInput('');
     } catch (err) {
-      setScanFeedback({ type: 'err', msg: err.response?.data?.detail || 'Scan failed' });
+      const msg = err.response?.data?.detail || 'Scan failed';
+      setScanFeedback({ type: 'err', msg });
+      showOverlayError(msg);
+      setLicenceInput('');
     } finally {
       setLoading(false);
       setTimeout(() => inputRef.current?.focus(), 100);
@@ -308,11 +364,21 @@ const ScannerShipOutFlow = () => {
             className="sso-scan-input"
             autoComplete="off"
             autoFocus
+            {...scanInputProps}
           />
           <button type="submit" disabled={loading || !licenceInput.trim()} className="sso-scan-btn">
             {loading ? <RefreshCw size={20} className="sso-spin" /> : <Scan size={20} />}
           </button>
         </form>
+        <button
+          type="button"
+          className="scanner-receipt-manual-link"
+          onClick={() => setManualKeyboard((v) => !v)}
+          style={{ marginTop: '0.2rem' }}
+        >
+          <Keyboard size={14} style={{ verticalAlign: '-2px', marginRight: '4px' }} />
+          {manualKeyboard ? 'Hide keyboard (use scanner)' : 'Type manually'}
+        </button>
 
         {/* Scan feedback */}
         {scanFeedback && (
@@ -445,6 +511,8 @@ const ScannerShipOutFlow = () => {
           </button>
         </div>
       </div>
+
+      <ScanFeedback {...(overlay || {})} onDismiss={dismissOverlay} />
 
       {/* Submit confirmation modal */}
       {step === 'submit' && (

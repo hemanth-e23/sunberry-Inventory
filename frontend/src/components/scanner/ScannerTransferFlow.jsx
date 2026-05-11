@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
-import { MapPin, ArrowRight, Package, Scan, X, Send } from 'lucide-react';
+import ScanFeedback from './ScanFeedback';
+import { isValidLicenceFormat, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
+import { MapPin, ArrowRight, Package, Scan, X, Send, Keyboard } from 'lucide-react';
 import './ScannerTransferFlow.css';
 
 const ScannerTransferFlow = () => {
@@ -15,8 +17,27 @@ const ScannerTransferFlow = () => {
   const [moves, setMoves] = useState([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+  const [manualKeyboard, setManualKeyboard] = useState(false);
   const inputRef = useRef(null);
   const destInputRef = useRef(null);
+
+  const showSuccess = useCallback((message) => {
+    playSuccessTone();
+    setFeedback({ kind: 'success', message });
+  }, []);
+  const showError = useCallback((message) => {
+    playErrorTone();
+    setFeedback({ kind: 'error', message });
+  }, []);
+  const dismissFeedback = useCallback(() => setFeedback(null), []);
+
+  const scanInputProps = {
+    inputMode: manualKeyboard ? 'text' : 'none',
+    autoCapitalize: 'characters',
+    autoCorrect: 'off',
+    spellCheck: false,
+  };
 
   useEffect(() => {
     apiClient.get('/scanner/storage-rows')
@@ -24,40 +45,76 @@ const ScannerTransferFlow = () => {
       .catch(() => setStorageRows([]));
   }, []);
 
+  // Keep the active scan input focused at all times so HID scanner
+  // keystrokes always land somewhere. The active input depends on whether
+  // we already have a pallet (then we want the destination input) or not
+  // (then we want the pallet input).
   useEffect(() => {
-    if (currentLicence) {
-      destInputRef.current?.focus();
-    } else {
-      inputRef.current?.focus();
-    }
-  }, [currentLicence]);
+    if (manualKeyboard) return;
+    const target = currentLicence ? destInputRef : inputRef;
+    const id = requestAnimationFrame(() => target.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [currentLicence, feedback, manualKeyboard, selectedDestId]);
+
+  useEffect(() => {
+    if (manualKeyboard) return undefined;
+    const onFocusOut = () => {
+      setTimeout(() => {
+        const ae = document.activeElement;
+        if (!ae || ae === document.body) {
+          const target = currentLicence ? destInputRef : inputRef;
+          target.current?.focus();
+        }
+      }, 50);
+    };
+    document.addEventListener('focusout', onFocusOut);
+    return () => document.removeEventListener('focusout', onFocusOut);
+  }, [currentLicence, manualKeyboard]);
 
   const handleScanPallet = async (e) => {
     e?.preventDefault?.();
     const lic = licenceInput.trim();
     if (!lic) return;
     setError('');
-    setLoading(true);
 
+    if (!isValidLicenceFormat(lic)) {
+      setLicenceInput('');
+      const msg = 'Not a pallet licence — did you scan a row or FCC code?';
+      setError(msg);
+      showError(msg);
+      return;
+    }
+
+    setLoading(true);
     try {
       const r = await apiClient.get('/pallet-licences/', {
         params: { licence_number: lic, status: 'in_stock' },
       });
       if (!r.data || r.data.length === 0) {
-        setError('Pallet not found or not in stock');
+        const msg = 'Pallet not found or not in stock';
+        setError(msg);
+        showError(msg);
+        setLicenceInput('');
         return;
       }
       const pl = r.data[0];
       if (pl.is_held) {
-        setError('This pallet is on hold — release the hold before moving it.');
+        const msg = 'This pallet is on hold — release the hold before moving it.';
+        setError(msg);
+        showError(msg);
+        setLicenceInput('');
         return;
       }
       setCurrentLicence(pl);
       setLicenceInput('');
       setSelectedDestId('');
       setDestScanInput('');
+      showSuccess(`Pallet ${pl.licence_number}`);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Lookup failed');
+      const msg = err.response?.data?.detail || 'Lookup failed';
+      setError(msg);
+      showError(msg);
+      setLicenceInput('');
     } finally {
       setLoading(false);
     }
@@ -71,6 +128,14 @@ const ScannerTransferFlow = () => {
     if (!scanned) return;
     setError('');
 
+    if (isValidLicenceFormat(destScanInput.trim())) {
+      const msg = "That's a pallet licence — scan the row barcode instead.";
+      setDestScanInput('');
+      setError(msg);
+      showError(msg);
+      return;
+    }
+
     const match = availableDestRows.find((r) => {
       const rowName = (r.name || '').toUpperCase();
       const nameOnly = rowName.replace(/^FG[- ]?/, '');
@@ -80,9 +145,12 @@ const ScannerTransferFlow = () => {
     if (match) {
       setSelectedDestId(match.id);
       setDestScanInput('');
+      showSuccess(`Row ${match.name}`);
     } else {
-      setError(`Row "${destScanInput.trim()}" not found or no capacity.`);
+      const msg = `Row "${destScanInput.trim()}" not found or no capacity.`;
+      setError(msg);
       setDestScanInput('');
+      showError('Row not found');
     }
   };
 
@@ -146,6 +214,7 @@ const ScannerTransferFlow = () => {
                 placeholder="Scan licence plate…"
                 className="scanner-transfer-input"
                 autoComplete="off"
+                {...scanInputProps}
               />
               <button type="submit" disabled={loading || !licenceInput.trim()} className="scanner-transfer-btn">
                 {loading ? '…' : <Scan size={22} />}
@@ -183,6 +252,7 @@ const ScannerTransferFlow = () => {
                   placeholder="Scan row name…"
                   className="scanner-transfer-input"
                   autoComplete="off"
+                  {...scanInputProps}
                 />
                 <button type="submit" disabled={!destScanInput.trim()} className="scanner-transfer-btn">
                   <Scan size={22} />
@@ -220,6 +290,16 @@ const ScannerTransferFlow = () => {
 
         {error && <div className="scanner-transfer-error">{error}</div>}
 
+        <button
+          type="button"
+          className="scanner-receipt-manual-link"
+          onClick={() => setManualKeyboard((v) => !v)}
+          style={{ marginTop: '0.4rem' }}
+        >
+          <Keyboard size={14} style={{ verticalAlign: '-2px', marginRight: '4px' }} />
+          {manualKeyboard ? 'Hide keyboard (use scanner)' : 'Type manually'}
+        </button>
+
         {moves.length > 0 && (
           <div className="scanner-transfer-moves">
             <div className="scanner-transfer-moves-header">
@@ -255,6 +335,7 @@ const ScannerTransferFlow = () => {
           </div>
         )}
       </div>
+      <ScanFeedback {...(feedback || {})} onDismiss={dismissFeedback} />
     </ScannerLayout>
   );
 };
