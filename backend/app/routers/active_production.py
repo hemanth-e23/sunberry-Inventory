@@ -50,14 +50,22 @@ def _resolve_warehouse_id(user: User) -> str:
 
 
 def _ensure_today(active: ActiveLineProduction, plant_tz: str) -> bool:
-    """Lazy reset: if the active row is from a previous plant-local day, mark
-    it inactive in-place (caller commits). Returns True if reset happened."""
+    """Lazy day-rollover: if the active row is from a previous plant-local
+    day, refresh it in-place (caller commits) so the same product continues
+    on the new day with a fresh lot number and pallet sequence reset to 0.
+    The supervisor's product choice is preserved — only midnight triggers
+    this, not the supervisor.
+
+    Returns True if a rollover happened."""
     if not active or not active.is_active:
         return False
     set_at_date = plant_local_date(plant_tz, active.set_at)
     today_local = datetime.now(ZoneInfo(plant_tz or "UTC")).date()
     if set_at_date < today_local:
-        active.is_active = False
+        line_name = active.line.name if active.line else ""
+        active.lot_number = lot_for_today(plant_tz, line_name)
+        active.last_printed_seq = 0
+        active.set_at = datetime.now(timezone.utc)
         return True
     return False
 

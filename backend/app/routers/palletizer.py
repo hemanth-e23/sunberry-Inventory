@@ -23,7 +23,7 @@ from app.schemas import (
     MintPalletsResponse, ProductionLineMini, ProductionLineWithActive,
     ProductMini, RecentPalletsResponse,
 )
-from app.utils.lot_number import plant_local_date
+from app.utils.lot_number import lot_for_today, plant_local_date
 
 
 router = APIRouter()
@@ -58,12 +58,18 @@ def _build_licence(lot_number: str, product: Product, seq: int) -> str:
 
 
 def _ensure_today(active: ActiveLineProduction, plant_tz: str) -> bool:
+    """Lazy day-rollover: if the active row is from a previous plant-local
+    day, refresh lot_number to today's and reset the pallet sequence to 0,
+    keeping the same product. Caller commits. Returns True on rollover."""
     if not active or not active.is_active:
         return False
     set_at_date = plant_local_date(plant_tz, active.set_at)
     today_local = datetime.now(ZoneInfo(plant_tz or "UTC")).date()
     if set_at_date < today_local:
-        active.is_active = False
+        line_name = active.line.name if active.line else ""
+        active.lot_number = lot_for_today(plant_tz, line_name)
+        active.last_printed_seq = 0
+        active.set_at = datetime.now(timezone.utc)
         return True
     return False
 
@@ -193,12 +199,10 @@ def kiosk_mint_pallets(
             detail="No active production set for this line. Ask supervisor to set the current product.",
         )
 
-    if _ensure_today(active, plant_tz):
-        db.commit()
-        raise HTTPException(
-            status_code=409,
-            detail="Active production has expired (new day). Ask supervisor to set the current product.",
-        )
+    # Silent day-rollover: refreshes lot_number + resets sequence if needed.
+    # Mint then continues with the new lot. The product itself never changes
+    # automatically — only a supervisor can do that.
+    _ensure_today(active, plant_tz)
 
     product = db.query(Product).filter(Product.id == active.product_id).first()
     if not product:
