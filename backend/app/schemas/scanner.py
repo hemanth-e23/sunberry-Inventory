@@ -44,6 +44,10 @@ class PalletLicence(PalletLicenceBase):
     scanned_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
+    storage_area_name: Optional[str] = None
+    storage_row_name: Optional[str] = None
+    location: Optional[str] = None
+    expiration_date: Optional[datetime] = None
 
 class PalletLicenceUpdate(BaseSchema):
     cases: Optional[int] = None

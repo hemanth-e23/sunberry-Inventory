@@ -466,6 +466,7 @@ def scan_pallet(
         status=PalletStatus.PENDING,
         scanned_by=str(current_user.id),
         scanned_at=datetime.now(timezone.utc),
+        warehouse_id=fr.warehouse_id,
     )
     db.add(pl)
 
@@ -532,6 +533,7 @@ def mark_missing_pallets(
             status=PalletStatus.MISSING_STICKER,
             scanned_by=str(current_user.id),
             scanned_at=datetime.now(timezone.utc),
+            warehouse_id=fr.warehouse_id,
         )
         db.add(pl)
 
@@ -696,6 +698,8 @@ def approve_forklift_request(
     for pl in licences:
         pl.receipt_id = receipt_id
         pl.status = PalletStatus.IN_STOCK
+        if pl.warehouse_id is None:
+            pl.warehouse_id = fr.warehouse_id
 
     # Update storage row occupancy
     for item in plan:
@@ -865,6 +869,7 @@ def add_pallet_to_request(
         status=PalletStatus.PENDING,
         scanned_by=str(current_user.id),
         scanned_at=datetime.now(timezone.utc),
+        warehouse_id=fr.warehouse_id,
     )
     db.add(pl)
 

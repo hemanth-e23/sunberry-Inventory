@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models import PalletLicence, Product, StorageRow, StorageArea
+from app.models import PalletLicence, Product, StorageRow, StorageArea, Receipt
 from app.schemas import PalletLicence as PalletLicenceSchema
 from app.utils.auth import get_current_active_user, warehouse_filter
 
@@ -29,6 +29,7 @@ async def list_pallet_licences(
         joinedload(PalletLicence.product),
         joinedload(PalletLicence.storage_row),
         joinedload(PalletLicence.storage_area),
+        joinedload(PalletLicence.receipt),
     )
     wh_id = warehouse_filter(current_user)
     if wh_id:
@@ -46,4 +47,14 @@ async def list_pallet_licences(
     if is_held is not None:
         query = query.filter(PalletLicence.is_held == is_held)
     licences = query.order_by(PalletLicence.sequence).all()
+    for pl in licences:
+        area_name = pl.storage_area.name if pl.storage_area else None
+        row_name = pl.storage_row.name if pl.storage_row else None
+        pl.storage_area_name = area_name
+        pl.storage_row_name = row_name
+        if area_name and row_name:
+            pl.location = f"{area_name}/{row_name}"
+        else:
+            pl.location = row_name or area_name
+        pl.expiration_date = pl.receipt.expiration_date if pl.receipt else None
     return licences
