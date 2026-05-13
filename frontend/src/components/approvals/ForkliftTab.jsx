@@ -193,6 +193,50 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
               {!fr.shift_id && <span style={{ color: '#ef4444', fontSize: '12px' }}>Required before approval</span>}
             </div>
 
+            {/* Row summary — per-row pallet/case counts so the reviewer doesn't have to count rows in the table */}
+            {(() => {
+              const summary = new Map();
+              for (const pl of licences) {
+                const key = pl.storage_row_id || 'unknown';
+                if (!summary.has(key)) {
+                  summary.set(key, {
+                    name: rowLookup[pl.storage_row_id] || pl.storage_row_id || 'Unknown row',
+                    pallets: 0,
+                    cases: 0,
+                  });
+                }
+                const entry = summary.get(key);
+                entry.pallets += 1;
+                entry.cases += pl.cases || 0;
+              }
+              const entries = Array.from(summary.values());
+              if (entries.length === 0) return null;
+              const totalPallets = entries.reduce((s, e) => s + e.pallets, 0);
+              const totalCases = entries.reduce((s, e) => s + e.cases, 0);
+              return (
+                <div style={{ marginBottom: '12px', background: '#f9fafb', borderRadius: '8px', padding: '12px 16px' }}>
+                  <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>
+                    Row Summary ({entries.length} {entries.length === 1 ? 'row' : 'rows'})
+                  </h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', columnGap: '24px', rowGap: '4px', fontSize: '13px' }}>
+                    <div style={{ color: '#6b7280', fontWeight: 500 }}>Row</div>
+                    <div style={{ color: '#6b7280', fontWeight: 500, textAlign: 'right' }}>Pallets</div>
+                    <div style={{ color: '#6b7280', fontWeight: 500, textAlign: 'right' }}>Cases</div>
+                    {entries.map((e, idx) => (
+                      <React.Fragment key={idx}>
+                        <div style={{ fontWeight: 600 }}>{e.name}</div>
+                        <div style={{ textAlign: 'right' }}>{e.pallets}</div>
+                        <div style={{ textAlign: 'right' }}>{e.cases}</div>
+                      </React.Fragment>
+                    ))}
+                    <div style={{ fontWeight: 700, borderTop: '1px solid #e5e7eb', paddingTop: '6px', marginTop: '2px' }}>Total</div>
+                    <div style={{ fontWeight: 700, textAlign: 'right', borderTop: '1px solid #e5e7eb', paddingTop: '6px', marginTop: '2px' }}>{totalPallets}</div>
+                    <div style={{ fontWeight: 700, textAlign: 'right', borderTop: '1px solid #e5e7eb', paddingTop: '6px', marginTop: '2px' }}>{totalCases}</div>
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Pallet licences - always visible */}
             <div style={{ marginBottom: '12px' }}>
               <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>
