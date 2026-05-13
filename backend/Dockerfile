@@ -26,6 +26,9 @@ RUN pip install --upgrade pip && \
 # Copy application code
 COPY . .
 
+# Make sure the entrypoint is executable even if git lost the +x bit on checkout.
+RUN chmod +x /app/entrypoint.sh
+
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app
@@ -38,5 +41,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8000/api/health')" || exit 1
 
-# Run the application
+# Entrypoint runs `alembic upgrade head` before exec'ing the CMD, so a fresh
+# container always boots against a migrated schema. Stop/start is enough — no
+# more manual migration step.
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
