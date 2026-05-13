@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Wifi, WifiOff, RefreshCw, X } from 'lucide-react';
 import { listScans } from '../../utils/scanQueue';
+import LicenceDisplay from './LicenceDisplay';
 import './NetworkStatus.css';
 
 /**
@@ -94,7 +95,7 @@ const NetworkStatus = ({
                 .map((s) => (
                   <div key={s.id} className="network-status__failed">
                     <div>
-                      <code>{s.payload?.licence_number}</code>
+                      <code><LicenceDisplay licence={s.payload?.licence_number} /></code>
                       <small>{s.lastError}</small>
                     </div>
                     <button

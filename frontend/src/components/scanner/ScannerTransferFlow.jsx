@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
 import ScanFeedback from './ScanFeedback';
+import LicenceDisplay from './LicenceDisplay';
 import { isValidLicenceFormat, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
 import { MapPin, ArrowRight, Package, Scan, X, Send, Keyboard } from 'lucide-react';
 import './ScannerTransferFlow.css';
@@ -230,7 +231,9 @@ const ScannerTransferFlow = () => {
                 <Package size={22} />
               </div>
               <div className="scanner-transfer-current-info">
-                <div className="scanner-transfer-current-lic">{currentLicence.licence_number}</div>
+                <div className="scanner-transfer-current-lic">
+                  <LicenceDisplay licence={currentLicence.licence_number} />
+                </div>
                 <div className="scanner-transfer-current-meta">
                   {(currentLicence.product?.name || currentLicence.product_name) && (
                     <span>{currentLicence.product?.name || currentLicence.product_name}</span>
@@ -311,7 +314,9 @@ const ScannerTransferFlow = () => {
               const toRow = storageRows.find((r) => r.id === m.to_row_id);
               return (
                 <div key={i} className="scanner-transfer-move-item">
-                  <span className="scanner-transfer-move-lic">{m.licence_number}</span>
+                  <span className="scanner-transfer-move-lic">
+                    <LicenceDisplay licence={m.licence_number} />
+                  </span>
                   <ArrowRight size={14} className="scanner-transfer-move-arrow" />
                   <span className="scanner-transfer-move-dest">{toRow?.name ?? '?'}</span>
                   <button

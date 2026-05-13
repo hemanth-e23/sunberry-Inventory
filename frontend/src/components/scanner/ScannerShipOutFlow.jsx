@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
 import ScanFeedback from './ScanFeedback';
+import LicenceDisplay from './LicenceDisplay';
 import { formatDateTime } from '../../utils/dateUtils';
 import { isValidLicenceFormat, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
 import {
@@ -426,7 +427,7 @@ const ScannerShipOutFlow = () => {
                 </div>
                 <div className="sso-pallet-info">
                   <span className="sso-pallet-licence">
-                    <Hash size={12} />{pallet.licence_number}
+                    <Hash size={12} /><LicenceDisplay licence={pallet.licence_number} />
                   </span>
                   <span className="sso-pallet-meta">
                     <MapPin size={11} />{pallet.location}
@@ -475,7 +476,9 @@ const ScannerShipOutFlow = () => {
             <AlertTriangle size={16} />
             <span>{exceptions.length} exception{exceptions.length !== 1 ? 's' : ''} — pallets not on list scanned:</span>
             {exceptions.map((ex, i) => (
-              <span key={i} className="sso-exception-badge">{ex.licence_number}</span>
+              <span key={i} className="sso-exception-badge">
+                <LicenceDisplay licence={ex.licence_number} />
+              </span>
             ))}
           </div>
         )}
@@ -532,7 +535,9 @@ const ScannerShipOutFlow = () => {
               <div className="sso-skipped-list">
                 <strong>Skipped pallets:</strong>
                 {mergedPickList.filter(p => p.is_skipped).map(p => (
-                  <span key={p.pallet_id} className="sso-exception-badge">{p.licence_number}</span>
+                  <span key={p.pallet_id} className="sso-exception-badge">
+                    <LicenceDisplay licence={p.licence_number} />
+                  </span>
                 ))}
               </div>
             )}

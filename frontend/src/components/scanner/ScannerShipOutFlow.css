@@ -244,6 +244,12 @@
   font-size: 0.95rem;
   font-family: monospace;
   color: #111;
+  min-width: 0;
+}
+
+.sso-pallet-licence .licence-display {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .sso-pallet-meta {

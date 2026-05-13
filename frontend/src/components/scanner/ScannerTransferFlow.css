@@ -98,7 +98,13 @@
   font-weight: 700;
   font-size: 1rem;
   color: #1e3a8a;
-  word-break: break-all;
+  display: flex;
+  min-width: 0;
+}
+
+.scanner-transfer-current-lic .licence-display {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .scanner-transfer-current-meta {
@@ -198,9 +204,12 @@
   font-size: 0.85rem;
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+}
+
+.scanner-transfer-move-lic .licence-display {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .scanner-transfer-move-arrow {

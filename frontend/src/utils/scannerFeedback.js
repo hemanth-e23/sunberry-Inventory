@@ -124,3 +124,16 @@ export const isValidLicenceFormat = (input) => {
   if (!lot) return false;
   return true;
 };
+
+// Split a licence into a left "prefix" (lot + product) and a right "suffix"
+// ("-NNN" pallet sequence), so the list row can keep the start of the lot
+// AND the pallet number visible while letting the middle ellipsis when the
+// column is narrow. Falls back to {prefix: whole string, suffix: ''} on
+// anything that doesn't match the expected format — caller renders that as
+// plain text with normal right-side ellipsis (i.e. old behavior).
+export const splitLicenceForDisplay = (input) => {
+  const value = input == null ? '' : String(input);
+  if (!isValidLicenceFormat(value)) return { prefix: value, suffix: '' };
+  const idx = value.lastIndexOf('-');
+  return { prefix: value.slice(0, idx), suffix: value.slice(idx) };
+};

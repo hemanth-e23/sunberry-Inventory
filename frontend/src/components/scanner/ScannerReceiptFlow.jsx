@@ -4,6 +4,7 @@ import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
 import NetworkStatus from './NetworkStatus';
 import ScanFeedback from './ScanFeedback';
+import LicenceDisplay from './LicenceDisplay';
 import { useScanQueue } from '../../hooks/useScanQueue';
 import { removeScan } from '../../utils/scanQueue';
 import { isValidLicenceFormat, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
@@ -691,7 +692,7 @@ const ScannerReceiptFlow = () => {
                 title={p._failed ? p._failError : (p._pending ? (online ? 'Syncing…' : 'Pending sync (offline)') : 'Synced')}
               >
                 {palletStatusIcon(p)}
-                <span className="pallet-lic">{p.licence_number}</span>
+                <LicenceDisplay licence={p.licence_number} className="pallet-lic" />
                 <span className="pallet-cases">{p.cases != null ? `${p.cases} cs` : '—'}</span>
               </div>
             ))}
@@ -741,7 +742,7 @@ const ScannerReceiptFlow = () => {
                 className={`scanner-receipt-pallet-item${p._pending ? ' pallet-pending' : ''}${p._failed ? ' pallet-failed' : ''}`}
               >
                 {p._pending || p._failed ? palletStatusIcon(p) : <Package size={14} color="#6b7280" />}
-                <span className="pallet-lic">{p.licence_number}</span>
+                <LicenceDisplay licence={p.licence_number} className="pallet-lic" />
                 <span className="pallet-cases">{p.cases != null ? `${p.cases} cs` : '—'}</span>
               </div>
             ))}
