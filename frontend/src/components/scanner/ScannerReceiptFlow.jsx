@@ -480,6 +480,7 @@ const ScannerReceiptFlow = () => {
               placeholder="Scan licence plate…"
               className="scanner-receipt-input"
               autoComplete="off"
+              autoFocus
               {...scanInputProps}
             />
             <button type="submit" disabled={loading || !firstLicence.trim()} className="scanner-receipt-btn">
@@ -517,6 +518,7 @@ const ScannerReceiptFlow = () => {
                     placeholder="Scan row name"
                     className="scanner-receipt-input"
                     autoComplete="off"
+                    autoFocus
                     {...scanInputProps}
                   />
                   <button type="submit" disabled={!rowScanInput.trim()} className="scanner-receipt-btn">
@@ -661,6 +663,7 @@ const ScannerReceiptFlow = () => {
               placeholder="Scan pallet licence…"
               className="scanner-receipt-input"
               autoComplete="off"
+              autoFocus
               {...scanInputProps}
             />
             <button

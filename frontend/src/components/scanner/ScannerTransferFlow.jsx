@@ -214,6 +214,7 @@ const ScannerTransferFlow = () => {
                 placeholder="Scan licence plate…"
                 className="scanner-transfer-input"
                 autoComplete="off"
+                autoFocus
                 {...scanInputProps}
               />
               <button type="submit" disabled={loading || !licenceInput.trim()} className="scanner-transfer-btn">
@@ -252,6 +253,7 @@ const ScannerTransferFlow = () => {
                   placeholder="Scan row name…"
                   className="scanner-transfer-input"
                   autoComplete="off"
+                  autoFocus
                   {...scanInputProps}
                 />
                 <button type="submit" disabled={!destScanInput.trim()} className="scanner-transfer-btn">
