@@ -27,6 +27,13 @@ class ForkliftRequest(Base):
     approved_at = Column(DateTime(timezone=True), nullable=True)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_activity_at = Column(DateTime(timezone=True), nullable=True)
+    auto_submitted_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    cancelled_reason = Column(String(100), nullable=True)
+    rejected_at = Column(DateTime(timezone=True), nullable=True)
+    rejected_by = Column(String(50), ForeignKey("users.id"), nullable=True)
 
     product = relationship("Product", backref="forklift_requests")
     shift = relationship("ProductionShift", backref="forklift_requests")
@@ -34,6 +41,8 @@ class ForkliftRequest(Base):
     receipt = relationship("Receipt", backref="forklift_requests", foreign_keys=[receipt_id])
     scanner = relationship("User", foreign_keys=[scanned_by], backref="scanned_forklift_requests")
     approver = relationship("User", foreign_keys=[approved_by], backref="approved_forklift_requests")
+    canceller = relationship("User", foreign_keys=[cancelled_by], backref="cancelled_forklift_requests")
+    rejecter = relationship("User", foreign_keys=[rejected_by], backref="rejected_forklift_requests")
 
 
 class PalletLicence(Base):

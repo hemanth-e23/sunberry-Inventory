@@ -21,3 +21,8 @@ DEFAULT_CASES_PER_PALLET = 40
 DEFAULT_EXPIRE_YEARS = 2
 DAYS_PER_YEAR = 365
 FORKLIFT_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
+
+# After this many hours of no scan activity, a SCANNING session is either
+# auto-submitted (if it has pallets) or auto-cancelled with reason="empty_timeout"
+# (if it has none). Surfaces forgotten work to supervisors automatically.
+STALE_FORKLIFT_SESSION_HOURS = 3

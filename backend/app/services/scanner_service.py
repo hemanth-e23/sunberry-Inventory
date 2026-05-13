@@ -20,6 +20,7 @@ from app.enums import ForkliftRequestStatus, PalletStatus, ReceiptStatus
 from app.constants import (
     ROLE_FORKLIFT, ROLE_ADMIN, ROLE_SUPERVISOR,
     CATEGORY_FINISHED, DEFAULT_CASES_PER_PALLET, DEFAULT_EXPIRE_YEARS, DAYS_PER_YEAR,
+    STALE_FORKLIFT_SESSION_HOURS,
 )
 from app.exceptions import NotFoundError, ForbiddenError, ValidationError
 
@@ -199,6 +200,52 @@ def _validate_storage_row(db: Session, row_id: str) -> StorageRow:
     return row
 
 
+def _touch_activity(fr: ForkliftRequest) -> None:
+    """Bump last_activity_at to now — keeps the 3h auto-submit window from firing on an active session."""
+    fr.last_activity_at = datetime.now(timezone.utc)
+
+
+def auto_close_stale_sessions(db: Session) -> dict:
+    """Sweep SCANNING sessions idle for more than STALE_FORKLIFT_SESSION_HOURS.
+
+    Sessions with pallets → SUBMITTED (auto), surface in supervisor queue.
+    Sessions with no pallets → CANCELLED (auto), reason="empty_timeout".
+
+    Called lazily on forklift active-session checks and supervisor list requests
+    so no separate scheduler is required.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=STALE_FORKLIFT_SESSION_HOURS)
+    stale = db.query(ForkliftRequest).filter(
+        ForkliftRequest.status == ForkliftRequestStatus.SCANNING,
+        ForkliftRequest.last_activity_at.isnot(None),
+        ForkliftRequest.last_activity_at < cutoff,
+    ).all()
+    auto_submitted = 0
+    auto_cancelled_empty = 0
+    now = datetime.now(timezone.utc)
+    for fr in stale:
+        pending_count = db.query(func.count(PalletLicence.id)).filter(
+            PalletLicence.forklift_request_id == fr.id,
+            PalletLicence.status.in_([PalletStatus.PENDING, PalletStatus.MISSING_STICKER]),
+        ).scalar() or 0
+        if pending_count > 0:
+            fr.status = ForkliftRequestStatus.SUBMITTED
+            fr.submitted_at = now
+            fr.auto_submitted_at = now
+            auto_submitted += 1
+        else:
+            fr.status = ForkliftRequestStatus.CANCELLED
+            fr.cancelled_at = now
+            fr.cancelled_reason = "empty_timeout"
+            auto_cancelled_empty += 1
+    if stale:
+        db.commit()
+    return {
+        "auto_submitted": auto_submitted,
+        "auto_cancelled_empty": auto_cancelled_empty,
+    }
+
+
 def _row_available_capacity(db: Session, row: StorageRow, request_id: str) -> int:
     """Compute available capacity for a row accounting for pending scans in this request."""
     capacity = row.pallet_capacity or 0
@@ -246,21 +293,23 @@ def create_forklift_request(
 
     line_id = _resolve_production_line(db, lot_number) if lot_number else None
 
-    # Cancel any abandoned scanning sessions for this user
-    abandoned = db.query(ForkliftRequest).filter(
+    # Sweep stale sessions first so a sessions-idle-for-3h+ doesn't block this user.
+    auto_close_stale_sessions(db)
+
+    # Strong rule: never silently destroy a user's scan work. If a SCANNING session
+    # already exists for this user, refuse to start a new one — they must submit
+    # the current one (manually or via the 3h auto-submit) before scanning fresh.
+    existing = db.query(ForkliftRequest).filter(
         ForkliftRequest.scanned_by == str(current_user.id),
         ForkliftRequest.status == ForkliftRequestStatus.SCANNING,
-    ).all()
-    for old_req in abandoned:
-        db.query(PalletLicence).filter(
-            PalletLicence.forklift_request_id == old_req.id,
-            PalletLicence.status.in_([PalletStatus.PENDING, PalletStatus.MISSING_STICKER]),
-        ).delete(synchronize_session=False)
-        old_req.status = ForkliftRequestStatus.CANCELLED
-    if abandoned:
-        db.flush()
+    ).first()
+    if existing:
+        raise ValidationError(
+            "You have an unsubmitted scanning session. Resume and submit it before starting a new one."
+        )
 
     request_id = f"fr-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
     fr = ForkliftRequest(
         id=request_id,
         product_id=product.id,
@@ -276,6 +325,7 @@ def create_forklift_request(
         status=ForkliftRequestStatus.SCANNING,
         scanned_by=str(current_user.id),
         warehouse_id=current_user.warehouse_id,
+        last_activity_at=now,
     )
     db.add(fr)
     db.commit()
@@ -284,7 +334,14 @@ def create_forklift_request(
 
 
 def get_active_scanning_session(db: Session, current_user: User) -> Optional[dict]:
-    """Return the current user's active SCANNING session with pallets, or None."""
+    """Return the current user's active SCANNING session with pallets, or None.
+
+    Runs the stale-session sweep first so a session idle past the 3h window
+    is auto-submitted (and disappears from "active") instead of being resumed
+    in a confusing half-stale state.
+    """
+    auto_close_stale_sessions(db)
+
     fr = db.query(ForkliftRequest).filter(
         ForkliftRequest.scanned_by == str(current_user.id),
         ForkliftRequest.status == ForkliftRequestStatus.SCANNING,
@@ -474,6 +531,7 @@ def scan_pallet(
     fr.total_full_pallets = fr.total_full_pallets + (0 if is_partial else 1)
     fr.total_partial_pallets = fr.total_partial_pallets + (1 if is_partial else 0)
     fr.total_cases = (fr.total_cases or 0) + cases
+    _touch_activity(fr)
     db.commit()
     db.refresh(pl)
 
@@ -537,6 +595,7 @@ def mark_missing_pallets(
         )
         db.add(pl)
 
+    _touch_activity(fr)
     db.commit()
     return {"status": "marked", "count": len(licence_numbers)}
 
@@ -591,6 +650,7 @@ def update_forklift_request(
                 pl.cases = new_cpp
         fr.total_cases = sum(pl.cases for pl in licences)
 
+    _touch_activity(fr)
     db.commit()
     db.refresh(fr)
     return fr
@@ -736,6 +796,8 @@ def reject_forklift_request(
     ).update({"status": PalletStatus.CANCELLED}, synchronize_session=False)
 
     fr.status = ForkliftRequestStatus.REJECTED
+    fr.rejected_at = datetime.now(timezone.utc)
+    fr.rejected_by = str(current_user.id)
     db.commit()
     return {"status": "rejected"}
 
@@ -761,13 +823,20 @@ def remove_pallet_licence(
 
     was_partial = pl.is_partial
     cases_removed = pl.cases or 0
-    db.delete(pl)
+
+    # Soft-delete: keep the row for audit, but mark it cancelled + deleted so all
+    # downstream queries (which filter by status or is_deleted) ignore it.
+    pl.status = PalletStatus.CANCELLED
+    pl.is_deleted = True
+    pl.deleted_at = datetime.now(timezone.utc)
+    pl.deleted_by_id = str(current_user.id)
 
     if was_partial:
         fr.total_partial_pallets = max(0, (fr.total_partial_pallets or 0) - 1)
     else:
         fr.total_full_pallets = max(0, (fr.total_full_pallets or 0) - 1)
     fr.total_cases = max(0, (fr.total_cases or 0) - cases_removed)
+    _touch_activity(fr)
 
     db.commit()
     return {"status": "removed", "licence_id": licence_id}
@@ -798,6 +867,7 @@ def update_pallet_licence(
         setattr(pl, k, v)
     new_cases = pl.cases or 0
     fr.total_cases = max(0, (fr.total_cases or 0) - old_cases + new_cases)
+    _touch_activity(fr)
 
     db.commit()
     db.refresh(pl)
@@ -878,6 +948,7 @@ def add_pallet_to_request(
     else:
         fr.total_full_pallets = (fr.total_full_pallets or 0) + 1
     fr.total_cases = (fr.total_cases or 0) + cases
+    _touch_activity(fr)
 
     db.commit()
     return {"status": "added", "pallet": {"id": pl.id, "licence_number": pl.licence_number, "cases": pl.cases}}

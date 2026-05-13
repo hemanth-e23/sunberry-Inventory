@@ -102,6 +102,9 @@ async def list_forklift_requests(
     current_user: User = Depends(get_current_active_user)
 ):
     """List forklift requests (for approvals page)."""
+    # Surface abandoned sessions: any SCANNING session idle past the 3h window
+    # is auto-submitted (or auto-cancelled if empty) before we build the list.
+    scanner_service.auto_close_stale_sessions(db)
     query = db.query(ForkliftRequest).options(
         joinedload(ForkliftRequest.product),
         joinedload(ForkliftRequest.pallet_licences),
