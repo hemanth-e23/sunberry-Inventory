@@ -8,8 +8,11 @@ import LicenceDisplay from './LicenceDisplay';
 import { useScanQueue } from '../../hooks/useScanQueue';
 import { removeScan } from '../../utils/scanQueue';
 import { isValidLicenceFormat, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
-import { Scan, MapPin, Package, Check, RefreshCw, CheckCircle2, Cloud, CloudOff, AlertTriangle, Keyboard } from 'lucide-react';
+import { formatDateTime } from '../../utils/dateUtils';
+import { Scan, MapPin, Package, Check, RefreshCw, CheckCircle2, Cloud, CloudOff, AlertTriangle, Keyboard, Clock } from 'lucide-react';
 import './ScannerReceiptFlow.css';
+
+const AUTO_SUBMIT_DISMISSED_KEY = 'forklift_auto_submit_dismissed_at';
 
 const MAX_ROW_SCAN_ATTEMPTS = 3;
 
@@ -36,6 +39,9 @@ const ScannerReceiptFlow = () => {
   const [resumeData, setResumeData] = useState(null);
   const [feedback, setFeedback] = useState(null); // { kind: 'success'|'error', message }
   const [manualKeyboard, setManualKeyboard] = useState(false);
+  // Sessions auto-submitted by the 3h idle sweep that the user hasn't acknowledged yet.
+  // Dismissal is persisted to localStorage so the banner doesn't reappear after refresh.
+  const [autoSubmittedNotice, setAutoSubmittedNotice] = useState(null);
   const inputRef = useRef(null);
 
   const showSuccess = useCallback((message) => {
@@ -105,6 +111,33 @@ const ScannerReceiptFlow = () => {
         }
       })
       .catch(() => setStep('scan-first'));
+  }, []);
+
+  // On mount: check for sessions auto-submitted by the 3h idle sweep that the
+  // user hasn't acknowledged yet. Backend filters by scanned_by for forklift
+  // role, so this returns this user's submissions only.
+  useEffect(() => {
+    apiClient.get('/scanner/requests', { params: { status_filter: 'submitted' } })
+      .then((r) => {
+        const dismissedAt = parseInt(localStorage.getItem(AUTO_SUBMIT_DISMISSED_KEY) || '0', 10);
+        const fresh = (r.data || []).filter((fr) => {
+          if (!fr.auto_submitted_at) return false;
+          const t = new Date(fr.auto_submitted_at).getTime();
+          return t > dismissedAt;
+        });
+        if (fresh.length > 0) {
+          setAutoSubmittedNotice({
+            count: fresh.length,
+            mostRecent: fresh[0],
+          });
+        }
+      })
+      .catch(() => { /* non-critical; banner just won't appear */ });
+  }, []);
+
+  const dismissAutoSubmittedNotice = useCallback(() => {
+    localStorage.setItem(AUTO_SUBMIT_DISMISSED_KEY, String(Date.now()));
+    setAutoSubmittedNotice(null);
   }, []);
 
   // Keep the scan input focused at all times. HID scanners type into
@@ -421,6 +454,50 @@ const ScannerReceiptFlow = () => {
     return <Check size={14} color="#16a34a" />;
   };
 
+  const autoSubmittedBanner = autoSubmittedNotice ? (
+    <div
+      style={{
+        background: '#fef3c7',
+        border: '1px solid #fcd34d',
+        borderRadius: '8px',
+        padding: '12px 14px',
+        marginBottom: '14px',
+        display: 'flex',
+        gap: '10px',
+        alignItems: 'flex-start',
+      }}
+    >
+      <Clock size={20} color="#92400e" style={{ flexShrink: 0, marginTop: '2px' }} />
+      <div style={{ flex: 1, fontSize: '13px', color: '#78350f', lineHeight: 1.4 }}>
+        <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+          {autoSubmittedNotice.count === 1 ? 'Session auto-submitted' : `${autoSubmittedNotice.count} sessions auto-submitted`}
+        </div>
+        <div>
+          {autoSubmittedNotice.count === 1
+            ? `Your session from ${formatDateTime(autoSubmittedNotice.mostRecent.auto_submitted_at)} was auto-submitted after 3 hours of inactivity. It's awaiting supervisor approval.`
+            : `Your most recent was auto-submitted ${formatDateTime(autoSubmittedNotice.mostRecent.auto_submitted_at)} after 3 hours of inactivity. They're awaiting supervisor approval.`}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={dismissAutoSubmittedNotice}
+        style={{
+          background: 'transparent',
+          border: '1px solid #d97706',
+          color: '#92400e',
+          padding: '4px 10px',
+          borderRadius: '6px',
+          fontSize: '12px',
+          fontWeight: 600,
+          cursor: 'pointer',
+          flexShrink: 0,
+        }}
+      >
+        Got it
+      </button>
+    </div>
+  ) : null;
+
   // ── Checking for active session ──────────────────────────────────────────
   if (step === 'checking') {
     return (
@@ -433,11 +510,15 @@ const ScannerReceiptFlow = () => {
   }
 
   // ── Resume prompt ────────────────────────────────────────────────────────
+  // Resume is the ONLY exit from a pending session. No "Start New" option here —
+  // forklift drivers must submit (or let the 3h auto-submit fire) before they
+  // can scan fresh, so no scan can be silently dropped.
   if (step === 'resume-prompt' && resumeData) {
     return (
       <ScannerLayout title="Resume Session" showBack onBack={getOnBack()} headerExtra={netStatus}>
         <div className="scanner-receipt-flow">
-          <p className="scanner-receipt-instruction">You have an unfinished scan session:</p>
+          {autoSubmittedBanner}
+          <p className="scanner-receipt-instruction">You have an unfinished scan session. Resume to continue or submit it before starting a new one.</p>
           <div className="scanner-receipt-resume-card">
             <div className="scanner-receipt-product">{resumeData.product_name}</div>
             <div className="scanner-receipt-resume-stats">
@@ -453,13 +534,6 @@ const ScannerReceiptFlow = () => {
             >
               Resume Session
             </button>
-            <button
-              type="button"
-              className="scanner-receipt-btn secondary"
-              onClick={handleStartAnother}
-            >
-              Start New
-            </button>
           </div>
         </div>
       </ScannerLayout>
@@ -471,6 +545,7 @@ const ScannerReceiptFlow = () => {
     return (
       <ScannerLayout title="Receipt Scan" showBack onBack={getOnBack()} headerExtra={netStatus}>
         <div className="scanner-receipt-flow">
+          {autoSubmittedBanner}
           <p className="scanner-receipt-instruction">Scan the first pallet to identify the product</p>
           <form onSubmit={handleCreateRequest} className="scanner-receipt-form">
             <input

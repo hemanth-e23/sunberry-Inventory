@@ -84,6 +84,13 @@ class ForkliftRequest(ForkliftRequestBase):
     approved_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
     created_at: datetime
+    last_activity_at: Optional[datetime] = None
+    auto_submitted_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+    cancelled_by: Optional[str] = None
+    cancelled_reason: Optional[str] = None
+    rejected_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
     pallet_licences: List[PalletLicence] = []
     product: Optional[ForkliftRequestProductRef] = None
 
