@@ -44,5 +44,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Entrypoint runs `alembic upgrade head` before exec'ing the CMD, so a fresh
 # container always boots against a migrated schema. Stop/start is enough — no
 # more manual migration step.
-ENTRYPOINT ["/app/entrypoint.sh"]
+#
+# We invoke `sh` explicitly instead of `["/app/entrypoint.sh"]` so the script
+# does not need a POSIX executable bit. The compose bind-mount (./backend:/app)
+# can strip +x when the host is Windows/NTFS, which would otherwise make the
+# entrypoint unexecutable even though `chmod +x` ran in the image build.
+ENTRYPOINT ["sh", "/app/entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

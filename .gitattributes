@@ -1,0 +1,7 @@
+# Shell scripts and the backend Dockerfile must keep LF line endings even when
+# the working tree is on Windows. Git on Windows defaults to autocrlf=true,
+# which would otherwise rewrite our entrypoint.sh shebang with CRLF — and the
+# Linux container then fails with "exec /app/entrypoint.sh: no such file or
+# directory" because the kernel looks for an interpreter `/bin/sh\r`.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
