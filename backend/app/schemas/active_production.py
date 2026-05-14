@@ -13,6 +13,9 @@ class ProductMini(BaseSchema):
     fcc_code: Optional[str] = None
     default_cases_per_pallet: Optional[int] = None
     expire_years: Optional[int] = None
+    customer_name: Optional[str] = None
+    customer_item_number: Optional[str] = None
+    customer_upc: Optional[str] = None
 
 
 class ProductionLineMini(BaseSchema):

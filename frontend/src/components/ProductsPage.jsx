@@ -60,6 +60,9 @@ const ProductsPage = () => {
     quantityUom: 'cases',
     inventoryTracked: true,
     galPerCase: '',
+    customerName: '',
+    customerItemNumber: '',
+    customerUpc: '',
   });
 
   const filteredProducts = useMemo(() => {
@@ -95,6 +98,9 @@ const ProductsPage = () => {
       quantityUom: 'cases',
       inventoryTracked: true,
       galPerCase: '',
+      customerName: '',
+      customerItemNumber: '',
+      customerUpc: '',
     });
     setEditingProduct(null);
   };
@@ -116,6 +122,9 @@ const ProductsPage = () => {
       quantityUom: formData.quantityUom || 'cases',
       inventoryTracked: formData.inventoryTracked,
       galPerCase: formData.galPerCase != null && formData.galPerCase !== '' ? Number(formData.galPerCase) : null,
+      customerName: formData.customerName.trim() || '',
+      customerItemNumber: formData.customerItemNumber.trim() || '',
+      customerUpc: formData.customerUpc.trim() || '',
       active: editingProduct ? editingProduct.active : true
     };
 
@@ -148,6 +157,9 @@ const ProductsPage = () => {
       quantityUom: product.quantityUom || 'cases',
       inventoryTracked: product.inventoryTracked !== false,
       galPerCase: product.galPerCase ?? '',
+      customerName: product.customerName || '',
+      customerItemNumber: product.customerItemNumber || '',
+      customerUpc: product.customerUpc || '',
     });
     setShowForm(true);
   };
@@ -302,6 +314,45 @@ const ProductsPage = () => {
                         placeholder="e.g. 4"
                         value={formData.galPerCase}
                         onChange={(e) => setFormData(prev => ({ ...prev, galPerCase: e.target.value }))}
+                      />
+                    </label>
+
+                    <div className="full-width" style={{ marginTop: '8px', paddingTop: '12px', borderTop: '1px dashed var(--color-border)' }}>
+                      <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-text-muted)', marginBottom: '8px' }}>
+                        Customer Info <span className="muted small" style={{ fontWeight: 400 }}>(Optional — for retailer pallet stickers, e.g. BJ's)</span>
+                      </div>
+                    </div>
+
+                    <label>
+                      <span>Customer Name <span className="muted small">(e.g. BJ's)</span></span>
+                      <input
+                        type="text"
+                        value={formData.customerName}
+                        onChange={(e) => setFormData(prev => ({ ...prev, customerName: e.target.value }))}
+                        placeholder="e.g. BJ's"
+                        maxLength={50}
+                      />
+                    </label>
+
+                    <label>
+                      <span>Customer Item # <span className="muted small">(retailer SKU)</span></span>
+                      <input
+                        type="text"
+                        value={formData.customerItemNumber}
+                        onChange={(e) => setFormData(prev => ({ ...prev, customerItemNumber: e.target.value }))}
+                        placeholder="e.g. 264170"
+                        maxLength={30}
+                      />
+                    </label>
+
+                    <label>
+                      <span>Customer UPC <span className="muted small">(for barcode)</span></span>
+                      <input
+                        type="text"
+                        value={formData.customerUpc}
+                        onChange={(e) => setFormData(prev => ({ ...prev, customerUpc: e.target.value }))}
+                        placeholder="e.g. 0085612800485"
+                        maxLength={20}
                       />
                     </label>
                   </>

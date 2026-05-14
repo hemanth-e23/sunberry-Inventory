@@ -190,6 +190,77 @@
   object-fit: contain;
 }
 
+/* ─── Customer variant (retailer-facing, e.g. BJ's) ─────────────────────── */
+
+.tag-customer-header {
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  text-align: center;
+  padding: 2px 4px 0;
+  flex-shrink: 0;
+}
+
+.tag-customer-lot {
+  font-size: 22px;
+  font-weight: 800;
+  text-align: center;
+  letter-spacing: 1.5px;
+  line-height: 1.1;
+  padding: 4px 4px;
+  flex-shrink: 0;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+.tag-customer-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 4px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.tag-customer-detail {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.4px;
+}
+
+.tag-customer-detail--fcc {
+  font-size: 14px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.tag-customer-barcode-container {
+  flex: 1 1 auto;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-top: 4px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tag-customer-barcode {
+  max-width: 100%;
+  max-height: 100%;
+  height: auto;
+}
+
+/* Landscape: tighten lot a touch so it fits the shorter column */
+.pallet-tag--landscape.pallet-tag--customer .tag-customer-lot {
+  font-size: 20px;
+  padding: 2px 4px;
+}
+
+.pallet-tag--landscape.pallet-tag--customer .tag-customer-detail {
+  font-size: 13px;
+}
+
 /* ─── Print ─────────────────────────────────────────────────────────────── */
 
 @media print {
@@ -235,5 +306,12 @@
   .tag-divider,
   .pallet-tag__col-divider {
     background: #000 !important;
+  }
+
+  .tag-customer-header,
+  .tag-customer-lot,
+  .tag-customer-detail,
+  .tag-customer-detail--fcc {
+    color: #000 !important;
   }
 }

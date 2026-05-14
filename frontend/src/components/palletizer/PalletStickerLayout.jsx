@@ -81,15 +81,39 @@ const PalletBlock = ({ palletId, qrRef }) => (
   </>
 );
 
+const CustomerLotLine = ({ lot }) => (
+  <div className="tag-customer-lot">{(lot || '-').toUpperCase()}</div>
+);
+
+const CustomerDetailLines = ({ customerName, customerItemNumber, customerUpc, fcc }) => (
+  <div className="tag-customer-details">
+    <div className="tag-customer-detail">
+      {(customerName || '').toUpperCase()} ITEM # {customerItemNumber || '-'}
+    </div>
+    <div className="tag-customer-detail">
+      UPC {customerUpc || '-'}
+    </div>
+    <div className="tag-customer-detail tag-customer-detail--fcc">
+      {fcc || '-'}
+    </div>
+  </div>
+);
+
+const CustomerBarcodeBlock = ({ barcodeRef }) => (
+  <div className="tag-customer-barcode-container">
+    <svg ref={barcodeRef} className="tag-customer-barcode" />
+  </div>
+);
+
 /**
  * Pallet sticker. 4" × 5.75" physical stock.
  *
- * Portrait — top-to-bottom stack:
- *   Name → FCC barcode → FCC text → Lot/Qty/BBD → Pallet ID + QR
+ * Variants:
+ *   primary  → standard Sunberry sticker: Name → FCC barcode → FCC text → Lot/Qty/BBD → Pallet ID + QR
+ *   customer → retailer-facing sticker (e.g. BJ's): Sunberry Farms → Name → Lot →
+ *              Customer Item # → UPC → FCC → UPC barcode w/ readable number
  *
- * Landscape — two columns, left/right:
- *   LEFT:  Name → FCC barcode → FCC text → Lot/Qty/BBD
- *   RIGHT: Pallet ID + full-height QR
+ * Both variants support portrait + landscape on the same 4"×5.75" stock.
  */
 const PalletStickerLayout = ({
   productName,
@@ -99,15 +123,72 @@ const PalletStickerLayout = ({
   lot,
   palletId,
   orientation = 'portrait',
+  variant = 'primary',
+  customerName,
+  customerItemNumber,
+  customerUpc,
 }) => {
   const fccBarcodeRef = useRef(null);
   const palletQrRef = useRef(null);
+  const customerBarcodeRef = useRef(null);
 
   useEffect(() => {
-    renderBarcode(fccBarcodeRef.current, fcc);
-    renderQr(palletQrRef.current, palletId);
-  }, [fcc, palletId]);
+    if (variant === 'customer') {
+      renderBarcode(customerBarcodeRef.current, customerUpc, { displayValue: true, fontSize: 14, height: 60 });
+    } else {
+      renderBarcode(fccBarcodeRef.current, fcc);
+      renderQr(palletQrRef.current, palletId);
+    }
+  }, [variant, fcc, palletId, customerUpc]);
 
+  // ─── Customer variant ────────────────────────────────────────────────────
+  if (variant === 'customer') {
+    if (orientation === 'landscape') {
+      return (
+        <div className="pallet-tag pallet-tag--landscape pallet-tag--customer">
+          <div className="pallet-tag__col pallet-tag__col--left">
+            <div className="tag-customer-header">SUNBERRY FARMS</div>
+            <div className="tag-divider" />
+            <ProductName productName={productName} />
+            <div className="tag-divider" />
+            <CustomerLotLine lot={lot} />
+            <div className="tag-divider" />
+            <CustomerDetailLines
+              customerName={customerName}
+              customerItemNumber={customerItemNumber}
+              customerUpc={customerUpc}
+              fcc={fcc}
+            />
+          </div>
+          <div className="pallet-tag__col-divider" />
+          <div className="pallet-tag__col pallet-tag__col--right">
+            <CustomerBarcodeBlock barcodeRef={customerBarcodeRef} />
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="pallet-tag pallet-tag--portrait pallet-tag--customer">
+        <div className="tag-customer-header">SUNBERRY FARMS</div>
+        <div className="tag-divider" />
+        <ProductName productName={productName} />
+        <div className="tag-divider" />
+        <CustomerLotLine lot={lot} />
+        <div className="tag-divider" />
+        <CustomerDetailLines
+          customerName={customerName}
+          customerItemNumber={customerItemNumber}
+          customerUpc={customerUpc}
+          fcc={fcc}
+        />
+        <div className="tag-divider" />
+        <CustomerBarcodeBlock barcodeRef={customerBarcodeRef} />
+      </div>
+    );
+  }
+
+  // ─── Primary variant (existing) ──────────────────────────────────────────
   if (orientation === 'landscape') {
     return (
       <div className="pallet-tag pallet-tag--landscape">

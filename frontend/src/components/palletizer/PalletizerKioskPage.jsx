@@ -11,19 +11,23 @@ import './PalletizerKioskPage.css';
 
 const POLL_MS = 10_000;
 
-const COUNT_PRESETS = [10, 15, 25, 50];
+const COUNT_PRESETS = [10, 15];
 const COPIES_OPTIONS = [1, 2, 4];
+
+const hasCustomerInfo = (product) => Boolean(
+  product?.customer_name && product?.customer_item_number && product?.customer_upc
+);
 
 const buildStickerSet = (pallets, product, lot, bbd, copies, orientation) => {
   const orientations = orientation === 'both'
     ? ['portrait', 'landscape']
     : [orientation];
+  const printCustomer = hasCustomerInfo(product);
   const out = [];
   pallets.forEach(p => {
     orientations.forEach(o => {
       for (let i = 0; i < copies; i += 1) {
-        out.push({
-          key: `${p.licence_number}-${o}-${i}`,
+        const base = {
           orientation: o,
           productName: product?.name,
           fcc: product?.fcc_code,
@@ -31,7 +35,24 @@ const buildStickerSet = (pallets, product, lot, bbd, copies, orientation) => {
           bbd,
           lot,
           palletId: p.licence_number,
+        };
+        // Primary (Sunberry) sticker
+        out.push({
+          ...base,
+          key: `${p.licence_number}-${o}-${i}-primary`,
+          variant: 'primary',
         });
+        // Customer sticker right after the primary so the pair comes out together
+        if (printCustomer) {
+          out.push({
+            ...base,
+            key: `${p.licence_number}-${o}-${i}-customer`,
+            variant: 'customer',
+            customerName: product.customer_name,
+            customerItemNumber: product.customer_item_number,
+            customerUpc: product.customer_upc,
+          });
+        }
       }
     });
   });
@@ -193,6 +214,10 @@ const PalletizerKioskPage = () => {
             lot={s.lot}
             palletId={s.palletId}
             orientation={s.orientation}
+            variant={s.variant}
+            customerName={s.customerName}
+            customerItemNumber={s.customerItemNumber}
+            customerUpc={s.customerUpc}
           />
         ))}
       </div>
@@ -204,14 +229,15 @@ const PalletizerKioskPage = () => {
 
 const PrintDialog = ({ line, active, warehouseId, apiKey, onClose, onPrint }) => {
   const [count, setCount] = useState(10);
-  const [copies, setCopies] = useState(2);
-  const [orientation, setOrientation] = useState('landscape');
+  const [copies, setCopies] = useState(hasCustomerInfo(active.product) ? 1 : 2);
+  const [orientation, setOrientation] = useState('portrait');
   const [submitting, setSubmitting] = useState(false);
 
   const startSeq = active.last_printed_seq + 1;
   const endSeq = active.last_printed_seq + Number(count || 0);
   const orientationsCount = orientation === 'both' ? 2 : 1;
-  const totalStickers = Math.max(0, Number(count || 0)) * Number(copies) * orientationsCount;
+  const stickersPerPallet = hasCustomerInfo(active.product) ? 2 : 1;
+  const totalStickers = Math.max(0, Number(count || 0)) * Number(copies) * orientationsCount * stickersPerPallet;
 
   const valid = Number(count) >= 1 && Number(count) <= 200;
 
@@ -307,6 +333,11 @@ const PrintDialog = ({ line, active, warehouseId, apiKey, onClose, onPrint }) =>
           {valid ? (
             <>
               Will mint <strong>{String(startSeq).padStart(3, '0')}</strong>–<strong>{String(endSeq).padStart(3, '0')}</strong> · print <strong>{totalStickers}</strong> sticker{totalStickers === 1 ? '' : 's'}
+              {stickersPerPallet === 2 && (
+                <div className="muted" style={{ marginTop: 4, fontSize: '0.85em' }}>
+                  Includes retailer sticker ({active.product?.customer_name}) — 2 per pallet
+                </div>
+              )}
             </>
           ) : (
             <span className="error">Count must be between 1 and 200.</span>
@@ -336,8 +367,8 @@ const ReprintDialog = ({ line, active, warehouseId, apiKey, onClose, onPrint }) 
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [selected, setSelected] = useState(new Set());
-  const [copies, setCopies] = useState(2);
-  const [orientation, setOrientation] = useState('landscape');
+  const [copies, setCopies] = useState(hasCustomerInfo(active.product) ? 1 : 2);
+  const [orientation, setOrientation] = useState('portrait');
 
   useEffect(() => {
     let cancelled = false;
@@ -384,7 +415,8 @@ const ReprintDialog = ({ line, active, warehouseId, apiKey, onClose, onPrint }) 
   };
 
   const orientationsCount = orientation === 'both' ? 2 : 1;
-  const total = selected.size * Number(copies) * orientationsCount;
+  const stickersPerPallet = hasCustomerInfo(recent.product) ? 2 : 1;
+  const total = selected.size * Number(copies) * orientationsCount * stickersPerPallet;
 
   const handleReprint = () => {
     const pickedPallets = recent.pallets.filter(p => selected.has(p.sequence));
@@ -491,6 +523,11 @@ const ReprintDialog = ({ line, active, warehouseId, apiKey, onClose, onPrint }) 
 
             <div className="kiosk-modal__summary">
               Reprinting <strong>{selected.size}</strong> pallet{selected.size === 1 ? '' : 's'} · <strong>{total}</strong> sticker{total === 1 ? '' : 's'} (no counter change)
+              {stickersPerPallet === 2 && (
+                <div className="muted" style={{ marginTop: 4, fontSize: '0.85em' }}>
+                  Includes retailer sticker ({recent.product?.customer_name}) — 2 per pallet
+                </div>
+              )}
             </div>
           </>
         )}

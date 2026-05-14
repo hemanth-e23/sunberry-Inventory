@@ -38,6 +38,9 @@ const mapProduct = (prod) => ({
   active: prod.is_active !== false,
   inventoryTracked: prod.inventory_tracked !== false,
   galPerCase: prod.gal_per_case ?? null,
+  customerName: prod.customer_name || '',
+  customerItemNumber: prod.customer_item_number || '',
+  customerUpc: prod.customer_upc || '',
 });
 
 const mapVendor = (vendor) => ({
@@ -192,6 +195,9 @@ export const FoundationProvider = ({ children }) => {
       is_active: product.active !== undefined ? product.active : true,
       inventory_tracked: product.inventoryTracked !== undefined ? product.inventoryTracked : true,
       gal_per_case: product.galPerCase != null && product.galPerCase !== '' ? Number(product.galPerCase) : null,
+      customer_name: product.customerName?.trim() || null,
+      customer_item_number: product.customerItemNumber?.trim() || null,
+      customer_upc: product.customerUpc?.trim() || null,
     };
 
     Object.keys(productData).forEach(key => {
@@ -221,6 +227,9 @@ export const FoundationProvider = ({ children }) => {
     if (updates.quantityUom !== undefined) updateData.quantity_uom = updates.quantityUom || null;
     if (updates.inventoryTracked !== undefined) updateData.inventory_tracked = updates.inventoryTracked;
     if (updates.galPerCase !== undefined) updateData.gal_per_case = updates.galPerCase != null && updates.galPerCase !== '' ? Number(updates.galPerCase) : null;
+    if (updates.customerName !== undefined) updateData.customer_name = updates.customerName?.trim() || null;
+    if (updates.customerItemNumber !== undefined) updateData.customer_item_number = updates.customerItemNumber?.trim() || null;
+    if (updates.customerUpc !== undefined) updateData.customer_upc = updates.customerUpc?.trim() || null;
     if (updates.active !== undefined) updateData.is_active = updates.active;
     else if (updates.status !== undefined) updateData.is_active = updates.status === 'active';
 

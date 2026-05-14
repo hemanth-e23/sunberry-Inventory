@@ -57,6 +57,9 @@ class Product(Base):
     quantity_uom = Column(String(20))
     inventory_tracked = Column(Boolean, default=True)
     gal_per_case = Column(Float, nullable=True)
+    customer_name = Column(String(50), nullable=True)
+    customer_item_number = Column(String(30), nullable=True)
+    customer_upc = Column(String(20), nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

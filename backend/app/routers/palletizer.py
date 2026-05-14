@@ -82,6 +82,9 @@ def _to_product_mini(product: Product) -> ProductMini:
         fcc_code=product.fcc_code,
         default_cases_per_pallet=product.default_cases_per_pallet,
         expire_years=product.expire_years,
+        customer_name=product.customer_name,
+        customer_item_number=product.customer_item_number,
+        customer_upc=product.customer_upc,
     )
 
 

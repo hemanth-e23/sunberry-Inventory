@@ -81,6 +81,9 @@ class ProductBase(BaseSchema):
     quantity_uom: Optional[str] = None
     inventory_tracked: bool = True
     gal_per_case: Optional[float] = None
+    customer_name: Optional[str] = Field(None, max_length=50)
+    customer_item_number: Optional[str] = Field(None, max_length=30)
+    customer_upc: Optional[str] = Field(None, max_length=20)
 
 class ProductCreate(ProductBase):
     pass
@@ -100,6 +103,9 @@ class ProductUpdate(BaseSchema):
     is_active: Optional[bool] = None
     inventory_tracked: Optional[bool] = None
     gal_per_case: Optional[float] = None
+    customer_name: Optional[str] = Field(None, max_length=50)
+    customer_item_number: Optional[str] = Field(None, max_length=30)
+    customer_upc: Optional[str] = Field(None, max_length=20)
 
 class Product(ProductBase):
     is_active: bool
