@@ -426,12 +426,10 @@ const ScannerReceiptFlow = () => {
     />
   );
 
-  // HID scanners send keystrokes — suppress the on-screen keyboard so it
-  // doesn't cover half the screen on a tablet. `inputMode="none"` keeps the
-  // field focusable + receiving keystrokes from the scanner. The toggle
-  // below restores `inputMode="text"` for the rare case of manual entry.
+  // Soft-keyboard suppression is handled by the kiosk browser at the OS
+  // level; we don't set inputMode="none" here because some kiosk shells
+  // interpret it as "no keyboard input at all" and break the HID scanner.
   const scanInputProps = {
-    inputMode: manualKeyboard ? 'text' : 'none',
     autoCapitalize: 'characters',
     autoCorrect: 'off',
     spellCheck: false,

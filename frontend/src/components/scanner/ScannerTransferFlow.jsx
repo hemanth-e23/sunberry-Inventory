@@ -34,7 +34,6 @@ const ScannerTransferFlow = () => {
   const dismissFeedback = useCallback(() => setFeedback(null), []);
 
   const scanInputProps = {
-    inputMode: manualKeyboard ? 'text' : 'none',
     autoCapitalize: 'characters',
     autoCorrect: 'off',
     spellCheck: false,

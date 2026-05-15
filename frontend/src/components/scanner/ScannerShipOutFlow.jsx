@@ -46,7 +46,6 @@ const ScannerShipOutFlow = () => {
   const dismissOverlay = useCallback(() => setOverlay(null), []);
 
   const scanInputProps = {
-    inputMode: manualKeyboard ? 'text' : 'none',
     autoCapitalize: 'characters',
     autoCorrect: 'off',
     spellCheck: false,
