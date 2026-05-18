@@ -4,6 +4,7 @@ import { useAppData } from "../../context/AppDataContext";
 import { useToast } from "../../context/ToastContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { formatDateTime, formatDate, toDateKey } from "../../utils/dateUtils";
+import { cleanScannedLicence } from "../../utils/scannerFeedback";
 import { FORKLIFT_REQUEST_STATUS, PALLET_STATUS } from '../../constants';
 
 const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLookup, userNameMap }) => {
@@ -30,6 +31,15 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
   const [editPalletCases, setEditPalletCases] = useState('');
   const [addPalletForm, setAddPalletForm] = useState({ licence_number: '', storage_row_id: '', is_partial: false, partial_cases: '' });
   const [isAddingPallet, setIsAddingPallet] = useState(false);
+  // Per-request × per-missing-licence selected storage row, plus which gap
+  // is currently being submitted. Keyed by licence_number so the dropdowns
+  // remember choices while the approver fills multiple gaps in a row.
+  const [missingRowSelections, setMissingRowSelections] = useState({}); // { [licenceNumber]: storage_row_id }
+  const [addingMissingLicence, setAddingMissingLicence] = useState(null);
+  // Fix-missing-sticker editor: only one row open at a time per card.
+  const [fixingPalletId, setFixingPalletId] = useState(null);
+  const [fixForm, setFixForm] = useState({ licence_number: '', storage_row_id: '', cases: '' });
+  const [isSavingFix, setIsSavingFix] = useState(false);
 
   const allStorageRows = useMemo(() => {
     const rows = [];
@@ -237,6 +247,91 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
               );
             })()}
 
+            {/* Missing pallets — sequence gaps in scanned licences. The
+                forklift driver scans in order, so a missing sequence number
+                means a pallet was skipped. Approver fills in the row here
+                without having to enter Edit mode. */}
+            {(() => {
+              const sample = licences.find((pl) => pl.licence_number && pl.sequence);
+              if (!sample) return null;
+              const lastDash = sample.licence_number.lastIndexOf('-');
+              if (lastDash < 0) return null;
+              const prefix = sample.licence_number.slice(0, lastDash); // e.g. "MP13526L1-GVN1280"
+              const seqs = new Set(licences.map((pl) => pl.sequence).filter((s) => s != null));
+              const maxSeq = Math.max(...seqs);
+              if (!Number.isFinite(maxSeq) || maxSeq < 1) return null;
+              const missing = [];
+              for (let s = 1; s <= maxSeq; s += 1) {
+                if (!seqs.has(s)) missing.push({ sequence: s, licence_number: `${prefix}-${String(s).padStart(3, '0')}` });
+              }
+              if (missing.length === 0) return null;
+              return (
+                <div style={{ marginBottom: '12px', background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: '8px', padding: '12px 16px' }}>
+                  <h4 style={{ margin: '0 0 4px 0', fontSize: '14px', fontWeight: 600, color: '#92400e' }}>
+                    Missing Pallets ({missing.length})
+                  </h4>
+                  <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#78350f' }}>
+                    Forklift driver skipped these in sequence. Select a row and add, or leave them if they weren&apos;t produced.
+                  </p>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {missing.map((m) => {
+                      const selRow = missingRowSelections[m.licence_number] || '';
+                      const isAdding = addingMissingLicence === m.licence_number;
+                      return (
+                        <div
+                          key={m.licence_number}
+                          style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: '8px', alignItems: 'center' }}
+                        >
+                          <span style={{ fontFamily: 'monospace', fontSize: '12px', color: '#7c2d12' }}>{m.licence_number}</span>
+                          <select
+                            value={selRow}
+                            onChange={(e) => setMissingRowSelections((prev) => ({ ...prev, [m.licence_number]: e.target.value }))}
+                            style={{ padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '12px', background: '#fff' }}
+                          >
+                            <option value="">Select row...</option>
+                            {allStorageRows.map((r) => (
+                              <option key={r.id} value={r.id}>{r.areaName} - {r.name}</option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            disabled={!selRow || isAdding}
+                            style={{
+                              padding: '4px 12px', fontSize: '12px', fontWeight: 600,
+                              background: !selRow ? '#d1d5db' : '#10b981',
+                              color: '#fff', border: 'none', borderRadius: '4px',
+                              cursor: !selRow ? 'not-allowed' : 'pointer',
+                            }}
+                            onClick={async () => {
+                              setAddingMissingLicence(m.licence_number);
+                              const result = await addPalletToForkliftRequest(fr.id, {
+                                licence_number: m.licence_number,
+                                storage_row_id: selRow,
+                                is_partial: false,
+                                partial_cases: null,
+                              });
+                              setAddingMissingLicence(null);
+                              if (result?.success) {
+                                setMissingRowSelections((prev) => {
+                                  const next = { ...prev };
+                                  delete next[m.licence_number];
+                                  return next;
+                                });
+                              } else {
+                                addToast(result?.error || 'Failed to add pallet', 'error');
+                              }
+                            }}
+                          >
+                            {isAdding ? 'Adding…' : 'Add'}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Pallet licences - always visible */}
             <div style={{ marginBottom: '12px' }}>
               <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>
@@ -255,8 +350,13 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                     </tr>
                   </thead>
                   <tbody>
-                    {licences.map((pl) => (
-                      <tr key={pl.id} style={{ borderTop: '1px solid #e5e7eb' }}>
+                    {licences.map((pl) => {
+                      const isMissingSticker = pl.status === PALLET_STATUS.MISSING_STICKER;
+                      const isFixingThis = fixingPalletId === pl.id;
+                      const colCount = isEditing ? 6 : 5;
+                      return (
+                      <React.Fragment key={pl.id}>
+                      <tr style={{ borderTop: '1px solid #e5e7eb' }}>
                         <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: '12px' }}>{pl.licence_number}</td>
                         <td style={{ padding: '8px 10px' }}>{rowLookup[pl.storage_row_id] || pl.storage_row_id || '—'}</td>
                         <td style={{ padding: '8px 10px', textAlign: 'center' }}>
@@ -311,11 +411,25 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                           )}
                         </td>
                         <td style={{ padding: '8px 10px', textAlign: 'center' }}>
-                          {pl.status === PALLET_STATUS.MISSING_STICKER ? (
-                            <span style={{ background: '#fee2e2', color: '#991b1b', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Missing Sticker</span>
-                          ) : (
-                            <span style={{ background: '#e0e7ff', color: '#3730a3', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Pending</span>
-                          )}
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                            {isMissingSticker ? (
+                              <span style={{ background: '#fee2e2', color: '#991b1b', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Missing Sticker</span>
+                            ) : (
+                              <span style={{ background: '#e0e7ff', color: '#3730a3', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Pending</span>
+                            )}
+                            <button
+                              type="button"
+                              style={{ padding: '2px 8px', fontSize: '11px', fontWeight: 600, background: '#fff', color: '#1f2937', border: '1px solid #d1d5db', borderRadius: '4px', cursor: 'pointer' }}
+                              onClick={() => {
+                                setFixingPalletId(isFixingThis ? null : pl.id);
+                                setFixForm({
+                                  licence_number: pl.licence_number || '',
+                                  storage_row_id: pl.storage_row_id || '',
+                                  cases: String(pl.cases ?? fr.cases_per_pallet ?? ''),
+                                });
+                              }}
+                            >{isFixingThis ? 'Close' : 'Fix'}</button>
+                          </span>
                         </td>
                         {isEditing && (
                           <td style={{ padding: '8px 10px', textAlign: 'center' }}>
@@ -333,7 +447,111 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                           </td>
                         )}
                       </tr>
-                    ))}
+                      {isFixingThis && (
+                        <tr style={{ background: '#fffbeb' }}>
+                          <td colSpan={colCount} style={{ padding: '12px 14px', borderTop: '1px solid #fde68a' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: '2fr 2fr 1fr auto', gap: '10px', alignItems: 'end' }}>
+                              <div>
+                                <label style={{ fontSize: '11px', color: '#78350f', display: 'block', marginBottom: '2px', fontWeight: 600 }}>
+                                  Licence Number
+                                </label>
+                                <input
+                                  type="text"
+                                  value={fixForm.licence_number}
+                                  onChange={(e) => setFixForm((prev) => ({ ...prev, licence_number: e.target.value }))}
+                                  style={{ width: '100%', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '13px', fontFamily: 'monospace', boxSizing: 'border-box' }}
+                                  autoFocus
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '11px', color: '#78350f', display: 'block', marginBottom: '2px', fontWeight: 600 }}>
+                                  Storage Row
+                                </label>
+                                <select
+                                  value={fixForm.storage_row_id}
+                                  onChange={(e) => setFixForm((prev) => ({ ...prev, storage_row_id: e.target.value }))}
+                                  style={{ width: '100%', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '13px', background: '#fff', boxSizing: 'border-box' }}
+                                >
+                                  <option value="">Select row...</option>
+                                  {allStorageRows.map((r) => (
+                                    <option key={r.id} value={r.id}>{r.areaName} - {r.name}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '11px', color: '#78350f', display: 'block', marginBottom: '2px', fontWeight: 600 }}>
+                                  Cases
+                                </label>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={fixForm.cases}
+                                  onChange={(e) => setFixForm((prev) => ({ ...prev, cases: e.target.value }))}
+                                  style={{ width: '100%', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '13px', boxSizing: 'border-box' }}
+                                />
+                              </div>
+                              <div style={{ display: 'flex', gap: '6px' }}>
+                                <button
+                                  type="button"
+                                  disabled={!fixForm.licence_number || !fixForm.storage_row_id || isSavingFix}
+                                  style={{
+                                    padding: '6px 14px', fontSize: '13px', fontWeight: 600,
+                                    background: (!fixForm.licence_number || !fixForm.storage_row_id) ? '#d1d5db' : '#10b981',
+                                    color: '#fff', border: 'none', borderRadius: '6px',
+                                    cursor: (!fixForm.licence_number || !fixForm.storage_row_id) ? 'not-allowed' : 'pointer',
+                                  }}
+                                  onClick={async () => {
+                                    setIsSavingFix(true);
+                                    const cleanedLicence = cleanScannedLicence(fixForm.licence_number, fr.lot_number);
+                                    const casesNum = parseInt(fixForm.cases, 10);
+                                    const updates = {
+                                      licence_number: cleanedLicence,
+                                      storage_row_id: fixForm.storage_row_id,
+                                    };
+                                    // Only flip status when fixing a missing-sticker
+                                    // placeholder; backend rejects other transitions.
+                                    if (isMissingSticker) {
+                                      updates.status = PALLET_STATUS.PENDING;
+                                    }
+                                    if (Number.isFinite(casesNum) && casesNum > 0) {
+                                      updates.cases = casesNum;
+                                      updates.is_partial = casesNum !== fr.cases_per_pallet;
+                                    }
+                                    const result = await updatePalletLicence(fr.id, pl.id, updates);
+                                    setIsSavingFix(false);
+                                    if (result?.success) {
+                                      setFixingPalletId(null);
+                                      setFixForm({ licence_number: '', storage_row_id: '', cases: '' });
+                                    } else {
+                                      addToast(result?.error || 'Fix failed', 'error');
+                                    }
+                                  }}
+                                >
+                                  {isSavingFix ? 'Saving…' : 'Save Fix'}
+                                </button>
+                                <button
+                                  type="button"
+                                  style={{ padding: '6px 12px', fontSize: '13px', background: '#fff', color: '#374151', border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer' }}
+                                  onClick={() => {
+                                    setFixingPalletId(null);
+                                    setFixForm({ licence_number: '', storage_row_id: '', cases: '' });
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                            <p style={{ margin: '8px 0 0 0', fontSize: '11px', color: '#78350f' }}>
+                              {isMissingSticker
+                                ? 'Overwrite with the licence number on the real sticker, pick the row it’s in, then Save. The pallet flips from Missing Sticker to Pending.'
+                                : 'Fix any field that’s wrong, then Save. Licence and row are validated against this lot.'}
+                            </p>
+                          </td>
+                        </tr>
+                      )}
+                      </React.Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -398,7 +616,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                     onClick={async () => {
                       setIsAddingPallet(true);
                       const payload = {
-                        licence_number: addPalletForm.licence_number.trim(),
+                        licence_number: cleanScannedLicence(addPalletForm.licence_number, fr.lot_number),
                         storage_row_id: addPalletForm.storage_row_id,
                         is_partial: addPalletForm.is_partial,
                         partial_cases: addPalletForm.is_partial ? parseInt(addPalletForm.partial_cases) || null : null,

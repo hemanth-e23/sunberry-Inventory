@@ -7,7 +7,7 @@ import ScanFeedback from './ScanFeedback';
 import LicenceDisplay from './LicenceDisplay';
 import { useScanQueue } from '../../hooks/useScanQueue';
 import { removeScan } from '../../utils/scanQueue';
-import { isValidLicenceFormat, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
+import { isValidLicenceFormat, cleanScannedLicence, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
 import { formatDateTime } from '../../utils/dateUtils';
 import { Scan, MapPin, Package, Check, RefreshCw, CheckCircle2, Cloud, CloudOff, AlertTriangle, Keyboard, Clock } from 'lucide-react';
 import './ScannerReceiptFlow.css';
@@ -22,6 +22,7 @@ const ScannerReceiptFlow = () => {
   const [firstLicence, setFirstLicence] = useState('');
   const [requestId, setRequestId] = useState(null);
   const [productName, setProductName] = useState('');
+  const [lotNumber, setLotNumber] = useState('');
   const [storageRows, setStorageRows] = useState([]);
   const [selectedRowId, setSelectedRowId] = useState('');
   const [licenceInput, setLicenceInput] = useState('');
@@ -201,6 +202,7 @@ const ScannerReceiptFlow = () => {
       setRequestId(r.data.id);
       const detail = await apiClient.get(`/scanner/requests/${r.data.id}`);
       setProductName(detail.data.product?.name || 'Product');
+      setLotNumber(detail.data.lot_number || '');
       setStep('select-location');
       setFirstLicence('');
       setRowScanAttempts(0);
@@ -285,7 +287,10 @@ const ScannerReceiptFlow = () => {
 
   const handleScanPallet = (e) => {
     e?.preventDefault?.();
-    const lic = licenceInput.trim();
+    // Trim any stray keystrokes that prefixed the scan because focus
+    // wasn't fully on the input when the gun fired. Uses the request's
+    // known lot_number as the anchor — no plant-specific hardcoding.
+    const lic = cleanScannedLicence(licenceInput, lotNumber);
     if (!lic || !selectedRowId) return;
     setError('');
 
@@ -373,6 +378,7 @@ const ScannerReceiptFlow = () => {
     if (!resumeData) return;
     setRequestId(resumeData.id);
     setProductName(resumeData.product_name || 'Product');
+    setLotNumber(resumeData.lot_number || '');
     setPallets(resumeData.pallets || []);
     setSelectedRowId(resumeData.last_row_id || '');
     setResumeData(null);
@@ -384,6 +390,7 @@ const ScannerReceiptFlow = () => {
     setFirstLicence('');
     setRequestId(null);
     setProductName('');
+    setLotNumber('');
     setStorageRows([]);
     setSelectedRowId('');
     setLicenceInput('');

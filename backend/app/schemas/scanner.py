@@ -52,6 +52,12 @@ class PalletLicence(PalletLicenceBase):
 class PalletLicenceUpdate(BaseSchema):
     cases: Optional[int] = None
     is_partial: Optional[bool] = None
+    # Below fields enable the "Fix" flow for missing-sticker placeholders:
+    # warehouse worker replaces the guessed licence with the real sticker's
+    # number, assigns a storage row, and flips status pending → in-stock-eligible.
+    licence_number: Optional[str] = None
+    storage_row_id: Optional[str] = None
+    status: Optional[str] = None
 
 
 class ForkliftRequestBase(BaseSchema):

@@ -849,7 +849,12 @@ def update_pallet_licence(
     update_data: dict,
     current_user: User,
 ) -> dict:
-    """Update a pallet licence within a forklift request (supervisor correction)."""
+    """Update a pallet licence within a forklift request (supervisor correction).
+
+    Supports the "Fix missing sticker" flow: warehouse worker overwrites the
+    guessed licence number with the real sticker's number, assigns a storage
+    row, and flips status MISSING_STICKER → PENDING.
+    """
     _require_admin_or_supervisor(current_user)
 
     fr = _get_forklift_request(db, request_id)
@@ -861,6 +866,43 @@ def update_pallet_licence(
     ).first()
     if not pl:
         raise NotFoundError("Pallet licence", "in this request")
+
+    # Validate licence_number change: must parse, must belong to this lot+product.
+    if "licence_number" in update_data:
+        new_lic = (update_data["licence_number"] or "").strip()
+        if not new_lic:
+            raise ValidationError("Licence number cannot be empty")
+        lot_number, product_code, sequence = parse_licence_number(new_lic)
+        if not lot_number or not product_code or sequence is None:
+            raise ValidationError("Invalid licence number format")
+        if fr.lot_number and lot_number != fr.lot_number:
+            raise ValidationError(
+                f"Licence number lot ({lot_number}) doesn't match this request's lot ({fr.lot_number})"
+            )
+        product = find_product_by_code(db, product_code)
+        if not product or product.id != fr.product_id:
+            raise ValidationError("Licence number's product doesn't match this request")
+        # Reject if this licence already exists elsewhere (different pallet, in-stock, etc.)
+        clash = db.query(PalletLicence).filter(
+            PalletLicence.licence_number == new_lic,
+            PalletLicence.id != licence_id,
+        ).first()
+        if clash:
+            raise ValidationError("That licence number is already in use")
+        update_data["licence_number"] = new_lic
+        update_data["sequence"] = sequence
+
+    # Validate storage_row_id change.
+    if "storage_row_id" in update_data and update_data["storage_row_id"]:
+        row = _validate_storage_row(db, update_data["storage_row_id"])
+        update_data["storage_area_id"] = row.storage_area_id
+
+    # Only allow MISSING_STICKER → PENDING (the Fix flow). Other transitions
+    # must go through approve/reject/remove so totals stay correct.
+    if "status" in update_data:
+        new_status = update_data["status"]
+        if new_status != PalletStatus.PENDING or pl.status != PalletStatus.MISSING_STICKER:
+            raise ValidationError("Status can only change from missing_sticker to pending")
 
     old_cases = pl.cases or 0
     for k, v in update_data.items():

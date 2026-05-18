@@ -125,6 +125,22 @@ export const isValidLicenceFormat = (input) => {
   return true;
 };
 
+// Strip stray characters that the operator typed before the barcode scanner
+// fired. When the request's lot number is known, find it inside the scanned
+// string and trim everything before it — anything before the lot is junk
+// keystrokes from a focus-race. Without a known lot we can't disambiguate
+// safely, so return the trimmed input and let server-side validation reject
+// it if the format is bad.
+export const cleanScannedLicence = (input, knownLotNumber) => {
+  if (input == null) return '';
+  const trimmed = String(input).trim();
+  if (!knownLotNumber) return trimmed;
+  const marker = `${knownLotNumber}-`;
+  const idx = trimmed.indexOf(marker);
+  if (idx > 0) return trimmed.slice(idx);
+  return trimmed;
+};
+
 // Split a licence into a left "prefix" (lot + product) and a right "suffix"
 // ("-NNN" pallet sequence), so the list row can keep the start of the lot
 // AND the pallet number visible while letting the middle ellipsis when the
