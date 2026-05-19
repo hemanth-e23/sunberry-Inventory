@@ -8,7 +8,7 @@ class InventoryTransfer(Base):
     __tablename__ = "inventory_transfers"
 
     id = Column(String(50), primary_key=True)
-    receipt_id = Column(String(50), ForeignKey("receipts.id"))
+    receipt_id = Column(String(50), ForeignKey("receipts.id"), nullable=True)
     from_location_id = Column(String(50), ForeignKey("locations.id"), nullable=True)
     from_sub_location_id = Column(String(50), ForeignKey("sub_locations.id"), nullable=True)
     to_location_id = Column(String(50), ForeignKey("locations.id"), nullable=True)
@@ -31,6 +31,9 @@ class InventoryTransfer(Base):
     forklift_notes = Column(Text, nullable=True)
     skipped_pallet_ids = Column(JSON, nullable=True)
     warehouse_id = Column(String(50), ForeignKey("warehouses.id"), nullable=True)
+    voided_at = Column(DateTime(timezone=True), nullable=True)
+    voided_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    voided_reason = Column(Text, nullable=True)
 
     receipt = relationship("Receipt", backref="transfers")
     from_location = relationship("Location", foreign_keys=[from_location_id], backref="transfers_from")
@@ -39,7 +42,60 @@ class InventoryTransfer(Base):
     to_sub_location = relationship("SubLocation", foreign_keys=[to_sub_location_id], backref="transfers_to")
     requester = relationship("User", foreign_keys=[requested_by], backref="requested_transfers")
     approver = relationship("User", foreign_keys=[approved_by], backref="approved_transfers")
+    voider = relationship("User", foreign_keys=[voided_by], backref="voided_transfers")
     warehouse = relationship("Warehouse", backref="inventory_transfers")
+    lines = relationship(
+        "InventoryTransferLine",
+        back_populates="transfer",
+        cascade="all, delete-orphan",
+        order_by="InventoryTransferLine.line_seq",
+    )
+    swaps = relationship(
+        "TransferPalletSwap",
+        back_populates="transfer",
+        cascade="all, delete-orphan",
+        order_by="TransferPalletSwap.swapped_at",
+    )
+
+
+class InventoryTransferLine(Base):
+    """A single product/receipt line within a multi-product ship-out order."""
+    __tablename__ = "inventory_transfer_lines"
+
+    id = Column(String(50), primary_key=True)
+    transfer_id = Column(String(50), ForeignKey("inventory_transfers.id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(String(50), ForeignKey("products.id"), nullable=False, index=True)
+    receipt_id = Column(String(50), ForeignKey("receipts.id"), nullable=False, index=True)
+    cases_requested = Column(Float, nullable=False)
+    cases_picked = Column(Float, nullable=False, default=0)
+    pallet_licence_ids = Column(JSON, nullable=True)
+    line_seq = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    transfer = relationship("InventoryTransfer", back_populates="lines")
+    product = relationship("Product")
+    receipt = relationship("Receipt")
+
+
+class TransferPalletSwap(Base):
+    """Records a pallet swap on a ship-out (forklift on-the-fly swap or warehouse edit)."""
+    __tablename__ = "transfer_pallet_swaps"
+
+    id = Column(String(50), primary_key=True)
+    transfer_id = Column(String(50), ForeignKey("inventory_transfers.id", ondelete="CASCADE"), nullable=False, index=True)
+    transfer_line_id = Column(String(50), ForeignKey("inventory_transfer_lines.id", ondelete="CASCADE"), nullable=True, index=True)
+    removed_pallet_id = Column(String(50), ForeignKey("pallet_licences.id"), nullable=True)
+    added_pallet_id = Column(String(50), ForeignKey("pallet_licences.id"), nullable=True)
+    swapped_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    swapped_at = Column(DateTime(timezone=True), server_default=func.now())
+    reason = Column(Text, nullable=True)
+    source = Column(String(20), nullable=False, default="forklift")  # 'forklift' | 'warehouse_edit'
+
+    transfer = relationship("InventoryTransfer", back_populates="swaps")
+    line = relationship("InventoryTransferLine")
+    removed_pallet = relationship("PalletLicence", foreign_keys=[removed_pallet_id])
+    added_pallet = relationship("PalletLicence", foreign_keys=[added_pallet_id])
+    swapper = relationship("User", foreign_keys=[swapped_by])
 
 
 class InventoryAdjustment(Base):

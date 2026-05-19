@@ -155,6 +155,13 @@ export const InventoryProvider = ({ children }) => {
             destinationBreakdown: t.destination_breakdown || [],
             palletLicenceIds: t.pallet_licence_ids || [],
             palletLicenceDetails: t.pallet_licence_details || [],
+            lines: t.lines || null,
+            swaps: t.swaps || [],
+            forkliftSubmittedAt: t.forklift_submitted_at,
+            forkliftNotes: t.forklift_notes,
+            voidedAt: t.voided_at,
+            voidedBy: t.voided_by,
+            voidedReason: t.voided_reason,
             editHistory: [],
           }));
           setInventoryTransfers(transfers);
@@ -944,11 +951,18 @@ export const InventoryProvider = ({ children }) => {
   // ─── createShipOutPickList ──────────────────────────────────────────────────
 
   const createShipOutPickList = async (data) => {
+    // data: { orderNumber, lines: [{ productId, casesRequested, picks: [{ receiptId, palletLicenceIds }] }] }
     try {
       const response = await apiClient.post('/inventory/ship-out/pick-list', {
-        receipt_id: data.receiptId,
         order_number: data.orderNumber,
-        pallet_licence_ids: data.palletLicenceIds,
+        lines: (data.lines || []).map((ln) => ({
+          product_id: ln.productId,
+          cases_requested: ln.casesRequested,
+          picks: (ln.picks || []).map((pk) => ({
+            receipt_id: pk.receiptId,
+            pallet_licence_ids: pk.palletLicenceIds || [],
+          })),
+        })),
       });
       const t = response.data;
       const newTransfer = {
@@ -965,13 +979,57 @@ export const InventoryProvider = ({ children }) => {
         palletLicenceDetails: t.pallet_licence_details || [],
         sourceBreakdown: t.source_breakdown || [],
         destinationBreakdown: t.destination_breakdown || [],
+        lines: t.lines || null,
+        swaps: t.swaps || [],
         editHistory: [],
       };
       setInventoryTransfers((prev) => [newTransfer, ...prev]);
-      return { success: true, transfer: newTransfer };
+      return { success: true, transfer: newTransfer, warning: t.warning || null };
     } catch (error) {
       console.error('Error creating ship-out pick list:', error);
       const msg = error.response?.data?.detail || error.message || 'Create failed';
+      return { success: false, error: msg };
+    }
+  };
+
+  // ─── editShipOutTransfer / voidShipOutTransfer ──────────────────────────────
+
+  const editShipOutTransfer = async (transferId, payload) => {
+    try {
+      const body = {
+        line_updates: (payload.lineUpdates || []).map((u) => ({
+          line_id: u.lineId,
+          cases_requested: u.casesRequested,
+          pallet_licence_ids: u.palletLicenceIds,
+        })),
+        add_lines: (payload.addLines || []).map((ln) => ({
+          product_id: ln.productId,
+          cases_requested: ln.casesRequested,
+          picks: (ln.picks || []).map((pk) => ({
+            receipt_id: pk.receiptId,
+            pallet_licence_ids: pk.palletLicenceIds || [],
+          })),
+        })),
+        remove_line_ids: payload.removeLineIds || [],
+      };
+      const response = await apiClient.patch(`/inventory/transfers/${transferId}/edit`, body);
+      return { success: true, transfer: response.data?.transfer || response.data };
+    } catch (error) {
+      console.error('Error editing ship-out transfer:', error);
+      const msg = error.response?.data?.detail || error.message || 'Edit failed';
+      return { success: false, error: msg };
+    }
+  };
+
+  const voidShipOutTransfer = async (transferId, reason) => {
+    try {
+      const response = await apiClient.post(`/inventory/transfers/${transferId}/void`, {
+        reason: reason || null,
+      });
+      return { success: true, transfer: response.data?.transfer || response.data };
+    } catch (error) {
+      console.error('Error voiding ship-out transfer:', error);
+      const msg = error.response?.data?.detail || error.message || 'Void failed';
       return { success: false, error: msg };
     }
   };
@@ -1020,6 +1078,8 @@ export const InventoryProvider = ({ children }) => {
     addPalletToForkliftRequest,
     fetchPalletLicences,
     createShipOutPickList,
+    editShipOutTransfer,
+    voidShipOutTransfer,
     fetchTransferScanProgress,
   };
 

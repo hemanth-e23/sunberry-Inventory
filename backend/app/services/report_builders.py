@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Receipt, InventoryTransfer, InventoryAdjustment, InventoryHoldAction,
+    Receipt, InventoryTransfer, InventoryTransferLine, InventoryAdjustment, InventoryHoldAction,
     Category, Product, Vendor, User, CycleCount, Location, SubLocation, StorageRow,
     InterWarehouseTransfer, Warehouse,
 )
@@ -126,14 +126,43 @@ def receipt_initial_rows(receipt, db: Session) -> list:
     return []
 
 
-def qty_on_date(receipt: Receipt, as_of_dt: datetime, db: Session) -> float:
-    """Reconstruct quantity for a receipt as of a specific datetime."""
-    shipped_after = db.query(InventoryTransfer).filter(
-        InventoryTransfer.receipt_id == receipt.id,
+def _shipped_cases_for_receipt(
+    db: Session,
+    receipt_id: str,
+    approved_after: Optional[datetime] = None,
+) -> float:
+    """Sum cases shipped from a receipt across BOTH legacy single-receipt ship-outs
+    AND new multi-product ship-out lines. Optionally filtered to approvals after a
+    given timestamp.
+    """
+    legacy_q = db.query(InventoryTransfer).filter(
+        InventoryTransfer.receipt_id == receipt_id,
         InventoryTransfer.transfer_type == "shipped-out",
         InventoryTransfer.status == TransferStatus.APPROVED,
-        InventoryTransfer.approved_at > as_of_dt,
-    ).all()
+    )
+    if approved_after is not None:
+        legacy_q = legacy_q.filter(InventoryTransfer.approved_at > approved_after)
+    legacy_total = sum(float(t.quantity or 0) for t in legacy_q.all())
+
+    line_q = (
+        db.query(InventoryTransferLine, InventoryTransfer)
+        .join(InventoryTransfer, InventoryTransfer.id == InventoryTransferLine.transfer_id)
+        .filter(
+            InventoryTransferLine.receipt_id == receipt_id,
+            InventoryTransfer.transfer_type == "shipped-out",
+            InventoryTransfer.status == TransferStatus.APPROVED,
+        )
+    )
+    if approved_after is not None:
+        line_q = line_q.filter(InventoryTransfer.approved_at > approved_after)
+    line_total = sum(float(ln.cases_picked or 0) for ln, _t in line_q.all())
+
+    return legacy_total + line_total
+
+
+def qty_on_date(receipt: Receipt, as_of_dt: datetime, db: Session) -> float:
+    """Reconstruct quantity for a receipt as of a specific datetime."""
+    shipped_after = _shipped_cases_for_receipt(db, receipt.id, approved_after=as_of_dt)
 
     adj_after = db.query(InventoryAdjustment).filter(
         InventoryAdjustment.receipt_id == receipt.id,
@@ -143,18 +172,14 @@ def qty_on_date(receipt: Receipt, as_of_dt: datetime, db: Session) -> float:
 
     return (
         float(receipt.quantity or 0)
-        + sum(float(t.quantity or 0) for t in shipped_after)
+        + shipped_after
         + sum(float(a.quantity or 0) for a in adj_after)
     )
 
 
 def initial_receipt_qty(receipt: Receipt, db: Session) -> float:
     """Estimate the original quantity when the receipt was first created."""
-    shipped = db.query(InventoryTransfer).filter(
-        InventoryTransfer.receipt_id == receipt.id,
-        InventoryTransfer.transfer_type == "shipped-out",
-        InventoryTransfer.status == TransferStatus.APPROVED,
-    ).all()
+    shipped = _shipped_cases_for_receipt(db, receipt.id, approved_after=None)
     adjs = db.query(InventoryAdjustment).filter(
         InventoryAdjustment.receipt_id == receipt.id,
         InventoryAdjustment.status == AdjustmentStatus.APPROVED,
@@ -169,7 +194,7 @@ def initial_receipt_qty(receipt: Receipt, db: Session) -> float:
     ).all()
     return (
         float(receipt.quantity or 0)
-        + sum(float(t.quantity or 0) for t in shipped)
+        + shipped
         + sum(float(a.quantity or 0) for a in adjs)
         + sum(float(iwt.quantity or 0) for iwt in iw_transfers)
     )
@@ -289,7 +314,7 @@ def build_activity_ledger(
     for r in range_receipts:
         product_ids.add(r.product_id)
 
-    # Transfers approved in range
+    # Transfers approved in range (covers both legacy single-receipt and multi-product)
     tq = db.query(InventoryTransfer).filter(
         InventoryTransfer.transfer_type == "shipped-out",
         InventoryTransfer.status == TransferStatus.APPROVED,
@@ -298,9 +323,13 @@ def build_activity_ledger(
     )
     range_transfers = tq.all()
     for t in range_transfers:
-        r = db.query(Receipt).filter(Receipt.id == t.receipt_id).first()
-        if r:
-            product_ids.add(r.product_id)
+        if t.receipt_id:
+            r = db.query(Receipt).filter(Receipt.id == t.receipt_id).first()
+            if r:
+                product_ids.add(r.product_id)
+        for ln in t.lines or []:
+            if ln.product_id:
+                product_ids.add(ln.product_id)
 
     # Adjustments approved in range
     aq = db.query(InventoryAdjustment).filter(
@@ -345,12 +374,17 @@ def build_activity_ledger(
             if a.product_id == pid and a.adjustment_type == "production-consumption"
         )
 
-        # Shipped out
+        # Shipped out (both legacy and multi-product paths)
         shipped = 0.0
         for t in range_transfers:
-            r = db.query(Receipt).filter(Receipt.id == t.receipt_id).first()
-            if r and r.product_id == pid:
-                shipped += float(t.quantity or 0)
+            if t.lines:
+                for ln in t.lines:
+                    if ln.product_id == pid:
+                        shipped += float(ln.cases_picked or 0)
+            elif t.receipt_id:
+                r = db.query(Receipt).filter(Receipt.id == t.receipt_id).first()
+                if r and r.product_id == pid:
+                    shipped += float(t.quantity or 0)
 
         # Other adjustments (damage, donation, trash, quality-rejection, stock-correction)
         other_adj = sum(
@@ -422,6 +456,37 @@ def build_shipments_report(
 
     rows = []
     for t in transfers:
+        # Multi-product/multi-receipt ship-out: emit one row per line
+        if t.lines:
+            for ln in t.lines:
+                receipt = db.query(Receipt).filter(Receipt.id == ln.receipt_id).first()
+                if not receipt:
+                    continue
+                if product_id and ln.product_id != product_id:
+                    continue
+                pname, pcode = product_info(db, ln.product_id)
+                cname, ctype = category_info(db, receipt.category_id)
+                rows.append({
+                    "transfer_id": t.id,
+                    "line_id": ln.id,
+                    "ship_date": t.approved_at,
+                    "order_number": t.order_number,
+                    "product_name": pname,
+                    "product_code": pcode,
+                    "category_name": cname,
+                    "lot_number": receipt.lot_number,
+                    "cases": round(float(ln.cases_picked or 0), 2),
+                    "cases_requested": round(float(ln.cases_requested or 0), 2),
+                    "unit": t.unit or "cases",
+                    "approved_by": user_name(db, t.approved_by),
+                    "requested_by": user_name(db, t.requested_by),
+                    "is_multi_product": True,
+                })
+            continue
+
+        # Legacy single-receipt ship-out
+        if not t.receipt_id:
+            continue
         receipt = db.query(Receipt).filter(Receipt.id == t.receipt_id).first()
         if not receipt:
             continue
@@ -431,6 +496,7 @@ def build_shipments_report(
         cname, ctype = category_info(db, receipt.category_id)
         rows.append({
             "transfer_id": t.id,
+            "line_id": None,
             "ship_date": t.approved_at,
             "order_number": t.order_number,
             "product_name": pname,
@@ -438,9 +504,11 @@ def build_shipments_report(
             "category_name": cname,
             "lot_number": receipt.lot_number,
             "cases": round(float(t.quantity or 0), 2),
+            "cases_requested": round(float(t.quantity or 0), 2),
             "unit": t.unit or "cases",
             "approved_by": user_name(db, t.approved_by),
             "requested_by": user_name(db, t.requested_by),
+            "is_multi_product": False,
         })
 
     totals = {
@@ -579,10 +647,30 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
         cname, ctype = category_info(db, r.category_id)
         vname = vendor_name(db, r.vendor_id)
 
-        transfers = db.query(InventoryTransfer).filter(
+        legacy_transfers = db.query(InventoryTransfer).filter(
             InventoryTransfer.receipt_id == r.id,
             InventoryTransfer.status == TransferStatus.APPROVED,
         ).order_by(InventoryTransfer.approved_at).all()
+
+        # Multi-product ship-outs that drew from this receipt via their lines
+        line_transfer_ids = [
+            tid for (tid,) in db.query(InventoryTransferLine.transfer_id)
+            .filter(InventoryTransferLine.receipt_id == r.id)
+            .distinct()
+            .all()
+        ]
+        multi_transfers = []
+        if line_transfer_ids:
+            multi_transfers = db.query(InventoryTransfer).filter(
+                InventoryTransfer.id.in_(line_transfer_ids),
+                InventoryTransfer.status == TransferStatus.APPROVED,
+                InventoryTransfer.receipt_id.is_(None),  # exclude legacy already captured
+            ).order_by(InventoryTransfer.approved_at).all()
+        # Combined, sorted by approved_at
+        transfers = sorted(
+            list(legacy_transfers) + list(multi_transfers),
+            key=lambda t: t.approved_at or datetime.min,
+        )
 
         adjustments = db.query(InventoryAdjustment).filter(
             InventoryAdjustment.receipt_id == r.id,
@@ -625,11 +713,17 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             "recipient": None,
         })
         for t in transfers:
+            # For multi-product ship-outs, report only this receipt's portion (line.cases_picked)
+            if t.lines and t.receipt_id is None:
+                line_for_this_receipt = next((ln for ln in t.lines if ln.receipt_id == r.id), None)
+                line_qty = float(line_for_this_receipt.cases_picked or 0) if line_for_this_receipt else 0.0
+            else:
+                line_qty = float(t.quantity or 0)
             timeline.append({
                 "event": t.transfer_type.replace("-", " ").title(),
                 "event_type": t.transfer_type,
                 "date": t.approved_at,
-                "qty": round(float(t.quantity or 0), 2),
+                "qty": round(line_qty, 2),
                 "notes": t.reason or None,
                 "submitted_by": user_name(db, t.requested_by),
                 "submitted_at": t.submitted_at,

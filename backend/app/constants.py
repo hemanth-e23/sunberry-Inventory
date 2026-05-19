@@ -26,3 +26,10 @@ FORKLIFT_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 # auto-submitted (if it has pallets) or auto-cancelled with reason="empty_timeout"
 # (if it has none). Surfaces forgotten work to supervisors automatically.
 STALE_FORKLIFT_SESSION_HOURS = 3
+
+# ─── Ship-out transfer types ──────────────────────────────────────────────────
+TRANSFER_TYPE_SHIPPED_OUT = "shipped-out"
+
+# ─── Pallet swap source markers ───────────────────────────────────────────────
+SWAP_SOURCE_FORKLIFT = "forklift"
+SWAP_SOURCE_WAREHOUSE_EDIT = "warehouse_edit"

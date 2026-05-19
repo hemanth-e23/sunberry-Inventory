@@ -262,7 +262,7 @@ const ApprovalsPage = () => {
     () =>
       inventoryTransfers
         .filter((transfer) =>
-          transfer.status === TRANSFER_STATUS.PENDING &&
+          (transfer.status === TRANSFER_STATUS.PENDING || transfer.status === TRANSFER_STATUS.FORKLIFT_SUBMITTED) &&
           (user?.role !== 'warehouse' || (transfer.requestedBy !== currentUserId && transfer.requested_by !== currentUserId))
         )
         .sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0)),

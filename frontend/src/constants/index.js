@@ -31,8 +31,19 @@ export const RECEIPT_STATUS = {
 export const TRANSFER_STATUS = {
   PENDING: 'pending',
   SUBMITTED: 'submitted',
+  FORKLIFT_SUBMITTED: 'forklift_submitted',
   APPROVED: 'approved',
   REJECTED: 'rejected',
+  VOIDED: 'voided',
+};
+
+export const TRANSFER_STATUS_LABELS = {
+  pending: 'Pending',
+  submitted: 'Submitted',
+  forklift_submitted: 'Ready for review',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  voided: 'Voided',
 };
 
 export const ADJUSTMENT_STATUS = {
@@ -59,10 +70,20 @@ export const PALLET_STATUS = {
   PENDING: 'pending',
   MISSING_STICKER: 'missing_sticker',
   IN_STOCK: 'in_stock',
+  RESERVED: 'reserved',
   PLACED: 'placed',
   TRANSFERRED: 'transferred',
+  SHIPPED: 'shipped',
   MISSING: 'missing',
   CANCELLED: 'cancelled',
+};
+
+// Scan reason codes returned by the ship-out scan-pick endpoint
+export const SHIP_OUT_SCAN_REASON = {
+  WRONG_PRODUCT: 'wrong_product',
+  LINE_COMPLETE: 'line_complete',
+  PALLET_UNAVAILABLE: 'pallet_unavailable',
+  PALLET_NOT_FOUND: 'pallet_not_found',
 };
 
 export const STAGING_ITEM_STATUS = {

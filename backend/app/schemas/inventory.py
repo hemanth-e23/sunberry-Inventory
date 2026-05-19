@@ -6,7 +6,7 @@ from app.schemas.base import BaseSchema
 
 # Transfer schemas
 class InventoryTransferBase(BaseSchema):
-    receipt_id: str
+    receipt_id: Optional[str] = None
     from_location_id: Optional[str] = None
     from_sub_location_id: Optional[str] = None
     to_location_id: Optional[str] = None
@@ -43,11 +43,43 @@ class InventoryTransfer(InventoryTransferBase):
     pallet_licence_details: Optional[List[PalletLicenceTransferRef]] = None
 
 
-class ShipOutPickListCreate(BaseSchema):
-    """Create ship-out transfer with specific pallet licence IDs (pick list)"""
+class ShipOutPalletPick(BaseSchema):
+    """A pallet selection from a single receipt within one ship-out line."""
     receipt_id: str = Field(..., min_length=1)
-    order_number: str = Field(..., min_length=1, max_length=100)
     pallet_licence_ids: List[str] = Field(..., min_length=1)
+
+
+class ShipOutLineCreate(BaseSchema):
+    """One product line within a ship-out order (can span multiple receipts)."""
+    product_id: str = Field(..., min_length=1)
+    cases_requested: float = Field(..., gt=0)
+    picks: List[ShipOutPalletPick] = Field(..., min_length=1)
+
+
+class ShipOutPickListCreate(BaseSchema):
+    """Create a multi-product ship-out order. Each line is one product; picks within
+    a line span the receipts FIFO is pulling from."""
+    order_number: str = Field(..., min_length=1, max_length=100)
+    lines: List[ShipOutLineCreate] = Field(..., min_length=1)
+
+
+class TransferEditLineUpdate(BaseSchema):
+    """Update an existing line on a ship-out (after forklift submit, pre-approval)."""
+    line_id: str = Field(..., min_length=1)
+    cases_requested: Optional[float] = Field(None, gt=0)
+    pallet_licence_ids: Optional[List[str]] = None  # full replacement set if provided
+
+
+class TransferEditRequest(BaseSchema):
+    """Warehouse user edits to a forklift-submitted ship-out before approval."""
+    line_updates: List[TransferEditLineUpdate] = Field(default_factory=list)
+    add_lines: List[ShipOutLineCreate] = Field(default_factory=list)
+    remove_line_ids: List[str] = Field(default_factory=list)
+
+
+class TransferVoidRequest(BaseSchema):
+    """Void a ship-out order (any non-approved/voided status)."""
+    reason: Optional[str] = Field(None, max_length=1000)
 
 
 class ScanPickRequest(BaseSchema):

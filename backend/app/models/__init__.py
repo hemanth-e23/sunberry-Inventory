@@ -20,7 +20,8 @@ from app.models.receipt import Receipt, ReceiptAllocation
 
 # 4. Inventory transfers (FK: receipts, locations, users, warehouses)
 from app.models.inventory import (
-    InventoryTransfer, InventoryAdjustment, InventoryHoldAction,
+    InventoryTransfer, InventoryTransferLine, TransferPalletSwap,
+    InventoryAdjustment, InventoryHoldAction,
     CycleCount, StagingItem,
 )
 
@@ -48,7 +49,8 @@ __all__ = [
     "Location", "SubLocation", "StorageArea", "StorageRow",
     "ProductionShift", "ProductionLine",
     "Receipt", "ReceiptAllocation",
-    "InventoryTransfer", "InventoryAdjustment", "InventoryHoldAction",
+    "InventoryTransfer", "InventoryTransferLine", "TransferPalletSwap",
+    "InventoryAdjustment", "InventoryHoldAction",
     "CycleCount", "StagingItem",
     "ForkliftRequest", "PalletLicence", "TransferScanEvent",
     "StagingRequest", "StagingRequestItem",

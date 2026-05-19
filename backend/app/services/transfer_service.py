@@ -333,9 +333,75 @@ def _update_receipt_allocation_json(
 # Public service functions
 # ---------------------------------------------------------------------------
 
+def _approve_multi_line_ship_out(db: Session, transfer: InventoryTransfer, current_user) -> InventoryTransfer:
+    """Approval path for new multi-product/multi-receipt ship-outs.
+
+    Iterates pallet groups by receipt: marks them shipped, decrements each
+    receipt's quantity, depletes receipts that hit zero. Pallet reservation is
+    flipped to SHIPPED via the existing _apply_pallet_licence_ship_out helper.
+    """
+    pl_ids = list(transfer.pallet_licence_ids or [])
+    if not pl_ids:
+        raise ValidationError("Ship-out has no pallets to approve")
+
+    licences = (
+        db.query(PalletLicence)
+        .filter(PalletLicence.id.in_(pl_ids))
+        .with_for_update()
+        .all()
+    )
+    found_ids = {pl.id for pl in licences}
+    missing = [pid for pid in pl_ids if pid not in found_ids]
+    if missing:
+        raise ValidationError(f"Missing pallets at approval: {missing}")
+
+    bad_status = [
+        pl.licence_number or pl.id
+        for pl in licences
+        if pl.status not in (PalletStatus.RESERVED, PalletStatus.IN_STOCK)
+    ]
+    if bad_status:
+        raise ValidationError(
+            f"Pallets no longer available (already shipped/transferred): {bad_status}"
+        )
+
+    held = [pl.licence_number or pl.id for pl in licences if pl.is_held]
+    if held:
+        raise ValidationError(
+            f"{len(held)} pallet(s) on hold — remove from ship-out or release hold first: {held}"
+        )
+
+    # Group by receipt and apply per-receipt effects
+    by_receipt: dict = {}
+    for pl in licences:
+        by_receipt.setdefault(pl.receipt_id, []).append(pl)
+
+    for rid, group in by_receipt.items():
+        receipt = (
+            db.query(Receipt).filter(Receipt.id == rid).with_for_update().first()
+        )
+        if not receipt:
+            from app.exceptions import NotFoundError
+            raise NotFoundError("Receipt", rid)
+        _apply_pallet_licence_ship_out(db, group, transfer.id)
+        cases_shipped = sum(pl.cases or 0 for pl in group)
+        receipt.quantity = max(0, (receipt.quantity or 0) - cases_shipped)
+        _rebuild_receipt_allocation_from_licences(db, receipt)
+        if not receipt.held_quantity or receipt.held_quantity <= 0:
+            receipt.hold = False
+        if receipt.quantity <= 0:
+            receipt.status = ReceiptStatus.DEPLETED
+
+    transfer.status = TransferStatus.APPROVED
+    transfer.approved_by = str(current_user.id)
+    transfer.approved_at = datetime.now(timezone.utc)
+    return transfer
+
+
 def approve_transfer(db: Session, transfer: InventoryTransfer, current_user) -> InventoryTransfer:
     """Approve a transfer: validate permissions, apply all inventory mutations."""
-    if transfer.status != TransferStatus.PENDING:
+    allowed_statuses = (TransferStatus.PENDING, TransferStatus.FORKLIFT_SUBMITTED)
+    if transfer.status not in allowed_statuses:
         raise ValidationError("Transfer is not in pending status")
 
     if current_user.role == ROLE_WAREHOUSE and transfer.requested_by == str(current_user.id):
@@ -343,6 +409,11 @@ def approve_transfer(db: Session, transfer: InventoryTransfer, current_user) -> 
             "You cannot approve your own transfers. Only other users' transfers can be approved."
         )
 
+    # ── New multi-product ship-out path (lines present, no parent receipt_id) ──
+    if transfer.transfer_type == "shipped-out" and transfer.lines:
+        return _approve_multi_line_ship_out(db, transfer, current_user)
+
+    # ── Legacy path: single-receipt transfer ──
     receipt = db.query(Receipt).filter(Receipt.id == transfer.receipt_id).first()
     if not receipt:
         from app.exceptions import NotFoundError
@@ -415,8 +486,9 @@ def approve_transfer(db: Session, transfer: InventoryTransfer, current_user) -> 
 
 
 def reject_transfer(db: Session, transfer: InventoryTransfer, reason: str, current_user) -> InventoryTransfer:
-    """Reject a transfer: validate permissions, clear receipt hold."""
-    if transfer.status != TransferStatus.PENDING:
+    """Reject a transfer: validate permissions, clear receipt hold, release any
+    pallet reservations from the new multi-line ship-out path."""
+    if transfer.status not in (TransferStatus.PENDING, TransferStatus.FORKLIFT_SUBMITTED):
         raise ValidationError("Transfer is not in pending status")
 
     if current_user.role == ROLE_WAREHOUSE and transfer.requested_by == str(current_user.id):
@@ -424,9 +496,23 @@ def reject_transfer(db: Session, transfer: InventoryTransfer, reason: str, curre
             "You cannot reject your own transfers. Only other users' transfers can be rejected."
         )
 
-    receipt = db.query(Receipt).filter(Receipt.id == transfer.receipt_id).first()
-    if receipt:
-        receipt.hold = False
+    if transfer.receipt_id:
+        receipt = db.query(Receipt).filter(Receipt.id == transfer.receipt_id).first()
+        if receipt:
+            receipt.hold = False
+
+    # Release any reserved pallets (new ship-out path)
+    pl_ids = list(transfer.pallet_licence_ids or [])
+    if pl_ids:
+        licences = (
+            db.query(PalletLicence)
+            .filter(PalletLicence.id.in_(pl_ids))
+            .with_for_update()
+            .all()
+        )
+        for pl in licences:
+            if pl.status == PalletStatus.RESERVED:
+                pl.status = PalletStatus.IN_STOCK
 
     transfer.status = TransferStatus.REJECTED
     transfer.reason = f"{transfer.reason or ''}\n[Rejected by {current_user.name}]: {reason}".strip()

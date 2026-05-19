@@ -14,8 +14,10 @@ class ReceiptStatus(str, Enum):
 class TransferStatus(str, Enum):
     PENDING = "pending"
     SUBMITTED = "submitted"
+    FORKLIFT_SUBMITTED = "forklift_submitted"
     APPROVED = "approved"
     REJECTED = "rejected"
+    VOIDED = "voided"
 
 
 class AdjustmentStatus(str, Enum):
@@ -52,10 +54,20 @@ class PalletStatus(str, Enum):
     PENDING = "pending"
     MISSING_STICKER = "missing_sticker"
     IN_STOCK = "in_stock"
+    RESERVED = "reserved"
     PLACED = "placed"
     TRANSFERRED = "transferred"
+    SHIPPED = "shipped"
     MISSING = "missing"
     CANCELLED = "cancelled"
+
+
+class ShipOutScanReason(str, Enum):
+    """Reason code returned when a forklift scan during ship-out picking is rejected."""
+    WRONG_PRODUCT = "wrong_product"
+    LINE_COMPLETE = "line_complete"
+    PALLET_UNAVAILABLE = "pallet_unavailable"
+    PALLET_NOT_FOUND = "pallet_not_found"
 
 
 class StagingItemStatus(str, Enum):

@@ -117,6 +117,8 @@ export const AppDataProvider = ({ children }) => {
     addPalletToForkliftRequest: inventory.addPalletToForkliftRequest,
     fetchPalletLicences: inventory.fetchPalletLicences,
     createShipOutPickList: inventory.createShipOutPickList,
+    editShipOutTransfer: inventory.editShipOutTransfer,
+    voidShipOutTransfer: inventory.voidShipOutTransfer,
     fetchTransferScanProgress: inventory.fetchTransferScanProgress,
     inventoryHoldActions: inventory.inventoryHoldActions,
     submitHoldAction: inventory.submitHoldAction,

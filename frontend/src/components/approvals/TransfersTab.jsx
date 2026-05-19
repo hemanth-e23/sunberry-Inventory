@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { useAppData } from "../../context/AppDataContext";
 import { useConfirm } from "../../context/ConfirmContext";
+import { useToast } from "../../context/ToastContext";
 import { formatDateTime, formatTime, formatTimeAgo, getDaysAgo } from "../../utils/dateUtils";
 import { formatUserName } from "../../utils/userDisplay";
 
@@ -14,8 +15,9 @@ const getPriorityLevel = (days) => {
 
 const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLookup, locationLookupMap, userNameMap }) => {
   const { user } = useAuth();
-  const { approveTransfer, rejectTransfer, fetchTransferScanProgress } = useAppData();
+  const { approveTransfer, rejectTransfer, fetchTransferScanProgress, voidShipOutTransfer } = useAppData();
   const { confirm } = useConfirm();
+  const { addToast } = useToast();
 
   const [transferScanProgress, setTransferScanProgress] = useState({});
 
@@ -92,11 +94,30 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
         const lastScan = progress?.last_scan;
         const exceptions = progress?.exceptions || [];
 
+        const transferLines = transfer.lines || null;
+        const isMultiProduct = Array.isArray(transferLines) && transferLines.length > 0;
+        const swaps = transfer.swaps || progress?.swaps || [];
+        const headerTitle = isMultiProduct
+          ? (transfer.orderNumber || transfer.order_number || `Order ${transfer.id.slice(-8)}`)
+          : (product?.name || 'Unknown Product');
+        const productSummary = isMultiProduct
+          ? (() => {
+              const names = Array.from(new Set(transferLines.map(l => l.product_name).filter(Boolean)));
+              if (names.length <= 2) return names.join(' + ');
+              return `${names.slice(0, 2).join(', ')} +${names.length - 2} more`;
+            })()
+          : null;
+
         return (
           <article key={transfer.id} className="approval-card" style={{ maxWidth: '720px' }}>
             <header>
               <div>
-                <h3>{product?.name || "Unknown Product"}</h3>
+                <h3>{headerTitle}</h3>
+                {productSummary && (
+                  <div style={{ fontSize: '13px', color: '#475569', marginTop: '2px' }}>
+                    {transferLines.length} product line{transferLines.length !== 1 ? 's' : ''}: {productSummary}
+                  </div>
+                )}
                 <span className="badge">{isShipOut ? 'Shipped Out' : (transfer.reason || 'Transfer')}</span>
                 {isShipOut && forkliftDone && (
                   <span style={{ marginLeft: '8px', background: '#22c55e', color: 'white', borderRadius: '999px', padding: '2px 10px', fontSize: '12px', fontWeight: 600 }}>
@@ -153,6 +174,54 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
             {forkliftDone && (progress?.forklift_notes || transfer.forklift_notes) && (
               <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '10px 14px', marginBottom: '10px', fontSize: '13px', color: '#166534' }}>
                 <strong>Forklift note:</strong> {progress?.forklift_notes || transfer.forklift_notes}
+              </div>
+            )}
+
+            {/* Multi-product line breakdown */}
+            {isMultiProduct && (
+              <div style={{ marginBottom: '10px', borderRadius: '8px', overflow: 'hidden', border: '1px solid #e5e7eb' }}>
+                <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ background: '#f1f5f9' }}>
+                      <th style={{ textAlign: 'left', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>Product</th>
+                      <th style={{ textAlign: 'left', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>FCC</th>
+                      <th style={{ textAlign: 'left', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>Lot #</th>
+                      <th style={{ textAlign: 'right', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>Requested</th>
+                      <th style={{ textAlign: 'right', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>Picked</th>
+                      <th style={{ textAlign: 'right', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>Pallets</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {transferLines.map((ln, i) => (
+                      <tr key={ln.id} style={{ borderTop: i ? '1px solid #e5e7eb' : 'none', background: i % 2 === 0 ? '#fafbfc' : 'white' }}>
+                        <td style={{ padding: '6px 10px' }}>{ln.product_name || ln.product_id}</td>
+                        <td style={{ padding: '6px 10px', color: '#64748b' }}>{ln.product_fcc_code || '—'}</td>
+                        <td style={{ padding: '6px 10px', color: '#64748b' }}>{ln.lot_number || '—'}</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'right' }}>{(ln.cases_requested || 0).toLocaleString()}</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 600 }}>{(ln.cases_picked || 0).toLocaleString()}</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'right' }}>{(ln.pallet_licence_ids || []).length}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Swap log */}
+            {swaps.length > 0 && (
+              <div style={{ background: '#fefce8', border: '1px solid #fde68a', borderRadius: '8px', padding: '8px 12px', marginBottom: '10px', fontSize: '12px', color: '#713f12' }}>
+                <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+                  🔁 {swaps.length} pallet swap{swaps.length !== 1 ? 's' : ''}
+                </div>
+                {swaps.map((s) => (
+                  <div key={s.id || `${s.removed_pallet_id}-${s.added_pallet_id}`}>
+                    <span style={{ fontFamily: 'monospace' }}>{s.removed_licence_number || '?'}</span>
+                    {' → '}
+                    <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{s.added_licence_number || '?'}</span>
+                    {s.swapped_by_name || s.swapped_by ? ` · by ${s.swapped_by_name || s.swapped_by}` : ''}
+                    {s.source ? ` (${s.source === 'forklift' ? 'forklift' : 'warehouse edit'})` : ''}
+                  </div>
+                ))}
               </div>
             )}
 
@@ -353,17 +422,39 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
               >
                 {isShipOut ? '✓ Approve & Deduct Inventory' : 'Approve'}
               </button>
-              <button
-                type="button"
-                className="secondary-button danger"
-                onClick={() => {
-                  confirm('Reject this transfer?').then(ok => {
-                    if (ok) rejectTransfer(transfer.id, user?.id || user?.username);
-                  });
-                }}
-              >
-                Reject
-              </button>
+              {isShipOut ? (
+                <button
+                  type="button"
+                  className="secondary-button danger"
+                  onClick={() => {
+                    confirm(
+                      `Void this ship-out order (${transfer.orderNumber || transfer.order_number || transfer.id.slice(-8)})? All reserved pallets will go back to in-stock.`
+                    ).then(async (ok) => {
+                      if (!ok) return;
+                      const result = await voidShipOutTransfer(transfer.id);
+                      if (result.success) {
+                        addToast('Order voided. Pallets released.', 'success');
+                      } else {
+                        addToast(result.error || 'Void failed', 'error');
+                      }
+                    });
+                  }}
+                >
+                  Void Order
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="secondary-button danger"
+                  onClick={() => {
+                    confirm('Reject this transfer?').then(ok => {
+                      if (ok) rejectTransfer(transfer.id, user?.id || user?.username);
+                    });
+                  }}
+                >
+                  Reject
+                </button>
+              )}
             </footer>
           </article>
         );

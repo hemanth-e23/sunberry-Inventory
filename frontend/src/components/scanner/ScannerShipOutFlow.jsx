@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import apiClient from '../../api/client';
 import ScannerLayout from './ScannerLayout';
@@ -6,9 +6,11 @@ import ScanFeedback from './ScanFeedback';
 import LicenceDisplay from './LicenceDisplay';
 import { formatDateTime } from '../../utils/dateUtils';
 import { isValidLicenceFormat, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
+import { SHIP_OUT_SCAN_REASON } from '../../constants';
 import {
   Truck, Scan, CheckCircle2, Circle, AlertTriangle, XCircle,
-  ChevronRight, Package, MapPin, Hash, Send, SkipForward, RefreshCw, Keyboard
+  ChevronRight, Package, MapPin, Hash, Send, SkipForward, RefreshCw, Keyboard,
+  Repeat,
 } from 'lucide-react';
 import './ScannerShipOutFlow.css';
 
@@ -72,12 +74,14 @@ const ScannerShipOutFlow = () => {
     loadOrders();
   }, [loadOrders]);
 
+  const [swaps, setSwaps] = useState([]);
   const loadPickProgress = useCallback(async (transferId) => {
     try {
       const r = await apiClient.get(`/inventory/transfers/${transferId}/scan-progress`);
       const data = r.data;
       setPickList(data.pick_list || []);
       setExceptions(data.exceptions || []);
+      setSwaps(data.swaps || []);
       if (data.forklift_submitted_at) {
         setStep('done');
       }
@@ -169,7 +173,18 @@ const ScannerShipOutFlow = () => {
       const data = r.data;
 
       if (!data.success) {
-        const msg = `Pallet "${lic}" not found in system.`;
+        // Structured rejection — show a meaningful message based on reason code
+        let msg = data.message || `Pallet "${lic}" not accepted.`;
+        if (data.reason === SHIP_OUT_SCAN_REASON.WRONG_PRODUCT) {
+          const exp = (data.expected_fcc_codes || []).join(', ') || '?';
+          msg = `Wrong product. You scanned FCC ${data.scanned_fcc || '?'}, this order needs FCC ${exp}.`;
+        } else if (data.reason === SHIP_OUT_SCAN_REASON.LINE_COMPLETE) {
+          msg = `This product is fully picked — nothing left to swap for FCC ${data.scanned_fcc || ''}.`;
+        } else if (data.reason === SHIP_OUT_SCAN_REASON.PALLET_UNAVAILABLE) {
+          msg = data.message || 'Pallet is held, already shipped, or in another order.';
+        } else if (data.reason === SHIP_OUT_SCAN_REASON.PALLET_NOT_FOUND) {
+          msg = `Pallet "${lic}" not found in system.`;
+        }
         setScanFeedback({ type: 'err', msg });
         showOverlayError(msg);
         setLicenceInput('');
@@ -177,12 +192,20 @@ const ScannerShipOutFlow = () => {
         return;
       }
 
-      if (data.on_list) {
+      if (data.swap) {
+        // Forklift on-the-fly swap accepted: removed → added
+        const removed = data.swap.removed_licence_number || '(planned)';
+        const added = data.swap.added_licence_number || lic;
+        const msg = `🔁 Swapped ${removed} → ${added}`;
+        setScanFeedback({ type: 'warn', msg });
+        showOverlaySuccess(`Swapped for ${added}`);
+        await loadPickProgress(selectedTransfer.id);
+      } else if (data.on_list) {
         setScanFeedback({ type: 'ok', msg: `✓ ${lic} — on pick list` });
         showOverlaySuccess(`${lic} — on pick list`);
         await loadPickProgress(selectedTransfer.id);
       } else {
-        // Not on list — show exception dialog
+        // Legacy single-receipt: off-list scan with override — keep exception dialog
         setExceptDialog({ licence_number: lic });
       }
       setLicenceInput('');
@@ -215,6 +238,27 @@ const ScannerShipOutFlow = () => {
   const totalCount = mergedPickList.length;
   const pendingCount = totalCount - scannedCount - skippedCount;
   const allDone = totalCount > 0 && pendingCount === 0;
+
+  // Group pallets by product (multi-product orders); single-product orders just
+  // produce one group with a generic header.
+  const groupedPickList = useMemo(() => {
+    const buckets = new Map();
+    for (const p of mergedPickList) {
+      const key = p.product_id || '_unknown';
+      if (!buckets.has(key)) {
+        buckets.set(key, {
+          product_id: p.product_id || null,
+          product_name: p.product_name || null,
+          product_fcc_code: p.product_fcc_code || null,
+          pallets: [],
+        });
+      }
+      buckets.get(key).pallets.push(p);
+    }
+    return Array.from(buckets.values());
+  }, [mergedPickList]);
+
+  const hasMultipleProducts = groupedPickList.length > 1;
 
   const handleSkipPallet = (pallet) => {
     setLocalSkippedIds((prev) => {
@@ -407,67 +451,123 @@ const ScannerShipOutFlow = () => {
           </div>
         )}
 
-        {/* Pallet pick list */}
+        {/* Pallet pick list — grouped by product when the order has multiple */}
         <div className="sso-picklist">
-          {mergedPickList.map((pallet) => {
-            const isActive = nextPending?.pallet_id === pallet.pallet_id;
-            const isLocallySkipped = localSkippedIds.has(pallet.pallet_id);
+          {groupedPickList.map((group) => {
+            const groupScanned = group.pallets.filter((p) => p.is_scanned).length;
+            const groupCases = group.pallets.reduce((s, p) => s + (p.cases || 0), 0);
             return (
-              <div
-                key={pallet.pallet_id}
-                className={`sso-pallet-row${pallet.is_scanned ? ' sso-pallet--scanned' : ''}${pallet.is_skipped ? ' sso-pallet--skipped' : ''}${isActive ? ' sso-pallet--active' : ''}`}
-              >
-                <div className="sso-pallet-status-icon">
-                  {pallet.is_scanned
-                    ? <CheckCircle2 size={22} className="sso-icon-ok" />
-                    : pallet.is_skipped
-                      ? <SkipForward size={22} className="sso-icon-skip" />
-                      : <Circle size={22} className="sso-icon-pending" />}
-                </div>
-                <div className="sso-pallet-info">
-                  <span className="sso-pallet-licence">
-                    <Hash size={12} /><LicenceDisplay licence={pallet.licence_number} />
-                  </span>
-                  <span className="sso-pallet-meta">
-                    <MapPin size={11} />{pallet.location}
-                    &nbsp;&middot;&nbsp;
-                    <Package size={11} />{pallet.cases} cases
-                  </span>
-                  {pallet.is_scanned && pallet.scanned_at && (
-                    <span className="sso-pallet-time">
-                      Scanned {formatDateTime(pallet.scanned_at)}
+              <div key={group.product_id || '_unknown'}>
+                {hasMultipleProducts && (
+                  <div
+                    style={{
+                      padding: '8px 10px',
+                      background: '#eff6ff',
+                      borderLeft: '3px solid #1e40af',
+                      borderRadius: '4px',
+                      marginTop: '8px',
+                      marginBottom: '4px',
+                      fontSize: '13px',
+                      fontWeight: 600,
+                      color: '#1e3a8a',
+                    }}
+                  >
+                    {group.product_name || 'Unknown product'}
+                    {group.product_fcc_code && (
+                      <span style={{ color: '#475569', fontWeight: 500, marginLeft: '6px' }}>
+                        (FCC: {group.product_fcc_code})
+                      </span>
+                    )}
+                    <span style={{ float: 'right', color: '#475569', fontWeight: 500 }}>
+                      {groupScanned}/{group.pallets.length} · {groupCases} cs
                     </span>
-                  )}
-                  {isLocallySkipped && (
-                    <span className="sso-pallet-time" style={{ color: '#f59e0b' }}>Skipped</span>
-                  )}
-                </div>
-                {/* Skip button for pending pallets; undo button for locally-skipped */}
-                {!pallet.is_scanned && (
-                  isLocallySkipped ? (
-                    <button
-                      type="button"
-                      className="sso-skip-btn sso-unskip-btn"
-                      title="Undo skip"
-                      onClick={() => handleUnskipPallet(pallet)}
-                    >
-                      ↩
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="sso-skip-btn"
-                      title="Skip this pallet"
-                      onClick={() => handleSkipPallet(pallet)}
-                    >
-                      <SkipForward size={16} />
-                    </button>
-                  )
+                  </div>
                 )}
+                {group.pallets.map((pallet) => {
+                  const isActive = nextPending?.pallet_id === pallet.pallet_id;
+                  const isLocallySkipped = localSkippedIds.has(pallet.pallet_id);
+                  return (
+                    <div
+                      key={pallet.pallet_id}
+                      className={`sso-pallet-row${pallet.is_scanned ? ' sso-pallet--scanned' : ''}${pallet.is_skipped ? ' sso-pallet--skipped' : ''}${isActive ? ' sso-pallet--active' : ''}`}
+                    >
+                      <div className="sso-pallet-status-icon">
+                        {pallet.is_scanned
+                          ? <CheckCircle2 size={22} className="sso-icon-ok" />
+                          : pallet.is_skipped
+                            ? <SkipForward size={22} className="sso-icon-skip" />
+                            : <Circle size={22} className="sso-icon-pending" />}
+                      </div>
+                      <div className="sso-pallet-info">
+                        <span className="sso-pallet-licence">
+                          <Hash size={12} /><LicenceDisplay licence={pallet.licence_number} />
+                        </span>
+                        <span className="sso-pallet-meta">
+                          <MapPin size={11} />{pallet.location}
+                          &nbsp;&middot;&nbsp;
+                          <Package size={11} />{pallet.cases} cases
+                        </span>
+                        {pallet.is_scanned && pallet.scanned_at && (
+                          <span className="sso-pallet-time">
+                            Scanned {formatDateTime(pallet.scanned_at)}
+                          </span>
+                        )}
+                        {isLocallySkipped && (
+                          <span className="sso-pallet-time" style={{ color: '#f59e0b' }}>Skipped</span>
+                        )}
+                      </div>
+                      {!pallet.is_scanned && (
+                        isLocallySkipped ? (
+                          <button
+                            type="button"
+                            className="sso-skip-btn sso-unskip-btn"
+                            title="Undo skip"
+                            onClick={() => handleUnskipPallet(pallet)}
+                          >
+                            ↩
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="sso-skip-btn"
+                            title="Skip this pallet"
+                            onClick={() => handleSkipPallet(pallet)}
+                          >
+                            <SkipForward size={16} />
+                          </button>
+                        )
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             );
           })}
         </div>
+
+        {/* Swap log (forklift on-the-fly swaps) */}
+        {swaps.length > 0 && (
+          <div
+            style={{
+              padding: '8px 10px',
+              background: '#fefce8',
+              borderLeft: '3px solid #ca8a04',
+              borderRadius: '4px',
+              marginTop: '10px',
+              fontSize: '12px',
+              color: '#713f12',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, marginBottom: '4px' }}>
+              <Repeat size={14} /> {swaps.length} swap{swaps.length !== 1 ? 's' : ''} on this order
+            </div>
+            {swaps.map((s) => (
+              <div key={s.id}>
+                {s.removed_licence_number || '?'} → {s.added_licence_number || '?'}
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Exceptions summary */}
         {exceptions.length > 0 && (
