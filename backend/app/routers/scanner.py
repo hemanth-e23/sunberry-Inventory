@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models import User, ForkliftRequest
+from app.models import User, ForkliftRequest, PalletLicence
 from app.schemas import (
     ForkliftRequest as ForkliftRequestSchema,
     ForkliftRequestCreate,
@@ -19,7 +19,52 @@ from app.schemas import (
 )
 from app.utils.auth import get_current_active_user, warehouse_filter
 from app.constants import ROLE_FORKLIFT, ROLE_ADMIN, ROLE_SUPERVISOR
+from app.enums import PalletStatus
 from app.services import scanner_service
+
+
+# Statuses that mean "this pallet physically exists / is accounted for".
+# Cancelled is excluded — those sequences are still missing.
+_COVERED_PALLET_STATUSES = (
+    PalletStatus.PENDING,
+    PalletStatus.MISSING_STICKER,
+    PalletStatus.IN_STOCK,
+    PalletStatus.RESERVED,
+    PalletStatus.PLACED,
+    PalletStatus.TRANSFERRED,
+    PalletStatus.SHIPPED,
+)
+
+
+def _compute_covered_sequences(db: Session, fr: ForkliftRequest) -> list[int]:
+    """Return sorted sequence numbers from OTHER sessions covering this fr's
+    lot_number + product_code. Used by the approval UI to avoid flagging
+    pallets covered by another driver's session as missing.
+
+    Lot numbers are globally unique per product, so we don't need to scope by
+    warehouse or time window.
+    """
+    if not fr.lot_number or not fr.product_id:
+        return []
+    rows = (
+        db.query(PalletLicence.sequence)
+        .filter(
+            PalletLicence.lot_number == fr.lot_number,
+            PalletLicence.product_id == fr.product_id,
+            PalletLicence.forklift_request_id != fr.id,
+            PalletLicence.status.in_(_COVERED_PALLET_STATUSES),
+            PalletLicence.sequence.isnot(None),
+        )
+        .distinct()
+        .all()
+    )
+    return sorted({int(seq) for (seq,) in rows if seq is not None})
+
+
+def _attach_covered_sequences(db: Session, frs: list[ForkliftRequest]) -> None:
+    """Mutate each ForkliftRequest in-place so pydantic picks up covered_sequences."""
+    for fr in frs:
+        fr.covered_sequences = _compute_covered_sequences(db, fr)
 
 
 router = APIRouter()
@@ -116,7 +161,9 @@ async def list_forklift_requests(
         query = query.filter(ForkliftRequest.status == status_filter)
     if current_user.role == ROLE_FORKLIFT:
         query = query.filter(ForkliftRequest.scanned_by == str(current_user.id))
-    return query.order_by(ForkliftRequest.created_at.desc()).all()
+    frs = query.order_by(ForkliftRequest.created_at.desc()).all()
+    _attach_covered_sequences(db, frs)
+    return frs
 
 
 @router.get("/requests/{request_id}", response_model=ForkliftRequestSchema)
@@ -134,6 +181,7 @@ async def get_forklift_request(
     ).filter(ForkliftRequest.id == request_id).first()
     if not fr:
         raise HTTPException(status_code=404, detail="Forklift request not found")
+    fr.covered_sequences = _compute_covered_sequences(db, fr)
     return fr
 
 

@@ -99,6 +99,10 @@ class ForkliftRequest(ForkliftRequestBase):
     rejected_by: Optional[str] = None
     pallet_licences: List[PalletLicence] = []
     product: Optional[ForkliftRequestProductRef] = None
+    # Sequences for this lot+product that already exist on OTHER forklift sessions
+    # (live statuses only). Used by the approval UI to avoid flagging pallets
+    # covered by another driver's session as missing.
+    covered_sequences: List[int] = []
 
 class ForkliftRequestUpdate(BaseSchema):
     shift_id: Optional[str] = None

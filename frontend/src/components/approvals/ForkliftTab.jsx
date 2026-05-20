@@ -14,7 +14,6 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
     productionLines,
     storageAreas,
     approveForkliftRequest,
-    rejectForkliftRequest,
     updateForkliftRequest,
     removePalletLicence,
     updatePalletLicence,
@@ -26,7 +25,6 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
 
   const [editingForkliftId, setEditingForkliftId] = useState(null);
   const [forkliftProcessingId, setForkliftProcessingId] = useState(null);
-  const [forkliftRejectingId, setForkliftRejectingId] = useState(null);
   const [editingPalletId, setEditingPalletId] = useState(null);
   const [editPalletCases, setEditPalletCases] = useState('');
   const [addPalletForm, setAddPalletForm] = useState({ licence_number: '', storage_row_id: '', is_partial: false, partial_cases: '' });
@@ -250,7 +248,10 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
             {/* Missing pallets — sequence gaps in scanned licences. The
                 forklift driver scans in order, so a missing sequence number
                 means a pallet was skipped. Approver fills in the row here
-                without having to enter Edit mode. */}
+                without having to enter Edit mode.
+                A sequence is only flagged missing if NO other forklift session
+                covers it — backend supplies covered_sequences for cross-session
+                multi-driver scenarios. */}
             {(() => {
               const sample = licences.find((pl) => pl.licence_number && pl.sequence);
               if (!sample) return null;
@@ -258,11 +259,14 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
               if (lastDash < 0) return null;
               const prefix = sample.licence_number.slice(0, lastDash); // e.g. "MP13526L1-GVN1280"
               const seqs = new Set(licences.map((pl) => pl.sequence).filter((s) => s != null));
+              const coveredElsewhere = new Set(fr.covered_sequences || []);
               const maxSeq = Math.max(...seqs);
               if (!Number.isFinite(maxSeq) || maxSeq < 1) return null;
               const missing = [];
               for (let s = 1; s <= maxSeq; s += 1) {
-                if (!seqs.has(s)) missing.push({ sequence: s, licence_number: `${prefix}-${String(s).padStart(3, '0')}` });
+                if (!seqs.has(s) && !coveredElsewhere.has(s)) {
+                  missing.push({ sequence: s, licence_number: `${prefix}-${String(s).padStart(3, '0')}` });
+                }
               }
               if (missing.length === 0) return null;
               return (
@@ -657,26 +661,6 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                 }}
               >
                 {forkliftProcessingId === fr.id ? 'Approving...' : 'Approve'}
-              </button>
-              <button
-                type="button"
-                className="secondary-button danger"
-                disabled={forkliftRejectingId === fr.id}
-                onClick={() => {
-                  confirm('Reject this forklift request? All pallet licences will be cancelled.').then(async (ok) => {
-                    if (!ok) return;
-                    setForkliftRejectingId(fr.id);
-                    const result = await rejectForkliftRequest(fr.id);
-                    setForkliftRejectingId(null);
-                    if (result?.success) {
-                      fetchForkliftRequests();
-                    } else {
-                      addToast(result?.error || 'Reject failed', 'error');
-                    }
-                  });
-                }}
-              >
-                {forkliftRejectingId === fr.id ? 'Rejecting...' : 'Reject'}
               </button>
             </footer>
           </article>
