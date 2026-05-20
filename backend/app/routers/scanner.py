@@ -23,8 +23,9 @@ from app.enums import PalletStatus
 from app.services import scanner_service
 
 
-# Statuses that mean "this pallet physically exists / is accounted for".
-# Cancelled is excluded — those sequences are still missing.
+# Statuses that mean "this sequence is accounted for and should NOT appear as missing".
+# Includes NOT_PRODUCED (supervisor confirmed the line skipped that sticker).
+# Excludes CANCELLED (those sequences are still missing — someone has to refill).
 _COVERED_PALLET_STATUSES = (
     PalletStatus.PENDING,
     PalletStatus.MISSING_STICKER,
@@ -33,6 +34,7 @@ _COVERED_PALLET_STATUSES = (
     PalletStatus.PLACED,
     PalletStatus.TRANSFERRED,
     PalletStatus.SHIPPED,
+    PalletStatus.NOT_PRODUCED,
 )
 
 
@@ -128,6 +130,25 @@ async def mark_missing_pallets(
 ):
     """Mark pallets as missing (damaged sticker)."""
     return scanner_service.mark_missing_pallets(db, request_id, data.licence_numbers, current_user)
+
+
+@router.post("/requests/{request_id}/mark-not-produced")
+async def mark_not_produced(
+    request_id: str,
+    data: MarkMissingRequest,  # same shape: { licence_numbers: [...] }
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_forklift_or_admin)
+):
+    """Supervisor marks pallet slots as 'never produced by the production line'.
+    Removes them from the missing-pallets list in this card and any other card
+    for the same lot. Final action — undo requires DB intervention."""
+    if current_user.role == ROLE_FORKLIFT:
+        # Only approvers should be able to declare "not produced"
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only supervisors/admins can mark pallets as not produced",
+        )
+    return scanner_service.mark_not_produced(db, request_id, data.licence_numbers, current_user)
 
 
 @router.post("/requests/{request_id}/submit")

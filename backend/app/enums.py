@@ -60,6 +60,11 @@ class PalletStatus(str, Enum):
     SHIPPED = "shipped"
     MISSING = "missing"
     CANCELLED = "cancelled"
+    # NOT_PRODUCED: supervisor confirmed during approval that the
+    # gap in the sticker sequence was a pallet that the production
+    # line never actually produced (skipped sticker number). Excluded
+    # from missing-pallet lists in this AND other forklift sessions.
+    NOT_PRODUCED = "not_produced"
 
 
 class ShipOutScanReason(str, Enum):

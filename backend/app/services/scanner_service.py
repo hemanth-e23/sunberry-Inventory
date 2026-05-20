@@ -66,6 +66,31 @@ def parse_licence_number(licence_number: str) -> tuple:
     return lot_number, product_code, sequence
 
 
+def normalize_scanned_licence(licence_number: str, expected_lot: str) -> str:
+    """Strip stray characters that landed in the scan input before the scanner
+    gun fired. If the licence_number doesn't start with the session's expected
+    lot_number but contains it as a substring, trim everything before it.
+
+    Examples (expected_lot='MP13926L1'):
+      'MP13926L1-GVN1280-073'   -> unchanged
+      'PMP13926L1-GVN1280-073'  -> 'MP13926L1-GVN1280-073'
+      'QMP13926L1-GVN1280-073'  -> 'MP13926L1-GVN1280-073'
+      ' MP13926L1-GVN1280-073'  -> 'MP13926L1-GVN1280-073'  (after strip)
+
+    If expected_lot is missing entirely from the scan, return the input
+    unchanged — the existing validation will reject it as a wrong-lot scan.
+    """
+    if not licence_number:
+        return licence_number
+    s = licence_number.strip()
+    if not expected_lot:
+        return s
+    idx = s.find(expected_lot)
+    if idx > 0:
+        return s[idx:]
+    return s
+
+
 # ---------------------------------------------------------------------------
 # DB look-up helpers
 # ---------------------------------------------------------------------------
@@ -400,6 +425,10 @@ def scan_pallet(
     if current_user.role == ROLE_FORKLIFT and str(fr.scanned_by) != str(current_user.id):
         raise ForbiddenError("You can only scan into your own request")
 
+    # Strip stray characters that landed in the scan input before the gun fired.
+    # See normalize_scanned_licence docstring.
+    licence_number = normalize_scanned_licence(licence_number, fr.lot_number)
+
     # Idempotency check: if the offline scan queue has retried a request
     # whose original write actually succeeded, return that pallet instead
     # of erroring or double-creating. (See scanQueue.js on the frontend.)
@@ -598,6 +627,67 @@ def mark_missing_pallets(
     _touch_activity(fr)
     db.commit()
     return {"status": "marked", "count": len(licence_numbers)}
+
+
+def mark_not_produced(
+    db: Session,
+    request_id: str,
+    licence_numbers: List[str],
+    current_user: User,
+) -> dict:
+    """Supervisor marks one or more sequences as 'never produced by the line'.
+
+    Inserts a PalletLicence row with status NOT_PRODUCED for each licence_number
+    that has no existing row yet. NOT_PRODUCED is treated as 'covered' by the
+    missing-pallets logic, so the gap disappears from the approval card and
+    won't haunt future cards for the same lot.
+
+    Caller must have approval rights (warehouse or higher).
+    """
+    fr = _get_forklift_request(db, request_id)
+    # Allow during scanning OR after submit (approver typically marks at review time)
+    if fr.status not in (ForkliftRequestStatus.SCANNING, ForkliftRequestStatus.SUBMITTED):
+        raise ValidationError("Forklift request must be in scanning or submitted state")
+
+    if not licence_numbers:
+        return {"status": "marked", "count": 0}
+
+    inserted = 0
+    skipped: list = []
+    for lic_num in licence_numbers:
+        lot_number, _product_code, seq = parse_licence_number(lic_num)
+        if seq is None or lot_number != fr.lot_number:
+            skipped.append({"licence_number": lic_num, "reason": "invalid_or_wrong_lot"})
+            continue
+        existing = db.query(PalletLicence).filter(
+            PalletLicence.licence_number == lic_num,
+        ).first()
+        if existing:
+            # Already exists somewhere — leave it alone, the supervisor can't
+            # turn a real pallet into "not produced" via this path.
+            skipped.append({"licence_number": lic_num, "reason": "already_exists"})
+            continue
+        pl_id = f"pl-{uuid.uuid4().hex[:12]}"
+        pl = PalletLicence(
+            id=pl_id,
+            licence_number=lic_num,
+            forklift_request_id=request_id,
+            product_id=fr.product_id,
+            lot_number=lot_number,
+            cases=0,
+            is_partial=False,
+            sequence=seq,
+            status=PalletStatus.NOT_PRODUCED,
+            scanned_by=str(current_user.id),
+            scanned_at=datetime.now(timezone.utc),
+            warehouse_id=fr.warehouse_id,
+        )
+        db.add(pl)
+        inserted += 1
+
+    _touch_activity(fr)
+    db.commit()
+    return {"status": "marked", "count": inserted, "skipped": skipped}
 
 
 def submit_forklift_request(db: Session, request_id: str) -> dict:

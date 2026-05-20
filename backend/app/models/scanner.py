@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Float
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -74,7 +74,13 @@ class PalletLicence(Base):
     deleted_by_id = Column(String(50), ForeignKey("users.id"), nullable=True)
 
     receipt = relationship("Receipt", backref="pallet_licences")
-    forklift_request = relationship("ForkliftRequest", backref="pallet_licences")
+    # Approval card renders this collection — sort by sequence so the
+    # supervisor always sees licences in the order they were produced,
+    # not Postgres physical storage order.
+    forklift_request = relationship(
+        "ForkliftRequest",
+        backref=backref("pallet_licences", order_by="PalletLicence.sequence"),
+    )
     product = relationship("Product", backref="pallet_licences")
     storage_area = relationship("StorageArea", backref="pallet_licences")
     storage_row = relationship("StorageRow", backref="pallet_licences")

@@ -18,6 +18,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
     removePalletLicence,
     updatePalletLicence,
     addPalletToForkliftRequest,
+    markPalletsNotProduced,
     fetchForkliftRequests,
   } = useAppData();
   const { addToast } = useToast();
@@ -245,103 +246,47 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
               );
             })()}
 
-            {/* Missing pallets — sequence gaps in scanned licences. The
-                forklift driver scans in order, so a missing sequence number
-                means a pallet was skipped. Approver fills in the row here
-                without having to enter Edit mode.
-                A sequence is only flagged missing if NO other forklift session
-                covers it — backend supplies covered_sequences for cross-session
-                multi-driver scenarios. */}
+            {/* Missing pallets are now interleaved into the Pallet Licences
+                table below (sorted by sequence) instead of shown in a
+                separate section. See the merged rendering below. */}
+
+            {/* Unified pallet list — scanned licences + missing slots
+                interleaved in sequence order. Missing slots show inline
+                actions for Add (assign to a row) or Skip (mark NOT_PRODUCED). */}
             {(() => {
+              // Build the merged list once per render
               const sample = licences.find((pl) => pl.licence_number && pl.sequence);
-              if (!sample) return null;
-              const lastDash = sample.licence_number.lastIndexOf('-');
-              if (lastDash < 0) return null;
-              const prefix = sample.licence_number.slice(0, lastDash); // e.g. "MP13526L1-GVN1280"
-              const seqs = new Set(licences.map((pl) => pl.sequence).filter((s) => s != null));
+              const lastDash = sample ? sample.licence_number.lastIndexOf('-') : -1;
+              const prefix = lastDash >= 0 ? sample.licence_number.slice(0, lastDash) : null;
+              const seqsHere = new Set(licences.map((pl) => pl.sequence).filter((s) => s != null));
               const coveredElsewhere = new Set(fr.covered_sequences || []);
-              const maxSeq = Math.max(...seqs);
-              if (!Number.isFinite(maxSeq) || maxSeq < 1) return null;
-              const missing = [];
-              for (let s = 1; s <= maxSeq; s += 1) {
-                if (!seqs.has(s) && !coveredElsewhere.has(s)) {
-                  missing.push({ sequence: s, licence_number: `${prefix}-${String(s).padStart(3, '0')}` });
+              const maxSeq = seqsHere.size ? Math.max(...seqsHere) : 0;
+              const merged = licences.map((pl) => ({ kind: 'licence', sequence: pl.sequence || 0, pl }));
+              if (prefix && maxSeq >= 1) {
+                for (let s = 1; s <= maxSeq; s += 1) {
+                  if (!seqsHere.has(s) && !coveredElsewhere.has(s)) {
+                    merged.push({
+                      kind: 'missing',
+                      sequence: s,
+                      licence_number: `${prefix}-${String(s).padStart(3, '0')}`,
+                    });
+                  }
                 }
               }
-              if (missing.length === 0) return null;
-              return (
-                <div style={{ marginBottom: '12px', background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: '8px', padding: '12px 16px' }}>
-                  <h4 style={{ margin: '0 0 4px 0', fontSize: '14px', fontWeight: 600, color: '#92400e' }}>
-                    Missing Pallets ({missing.length})
-                  </h4>
-                  <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#78350f' }}>
-                    Forklift driver skipped these in sequence. Select a row and add, or leave them if they weren&apos;t produced.
-                  </p>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    {missing.map((m) => {
-                      const selRow = missingRowSelections[m.licence_number] || '';
-                      const isAdding = addingMissingLicence === m.licence_number;
-                      return (
-                        <div
-                          key={m.licence_number}
-                          style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: '8px', alignItems: 'center' }}
-                        >
-                          <span style={{ fontFamily: 'monospace', fontSize: '12px', color: '#7c2d12' }}>{m.licence_number}</span>
-                          <select
-                            value={selRow}
-                            onChange={(e) => setMissingRowSelections((prev) => ({ ...prev, [m.licence_number]: e.target.value }))}
-                            style={{ padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '12px', background: '#fff' }}
-                          >
-                            <option value="">Select row...</option>
-                            {allStorageRows.map((r) => (
-                              <option key={r.id} value={r.id}>{r.areaName} - {r.name}</option>
-                            ))}
-                          </select>
-                          <button
-                            type="button"
-                            disabled={!selRow || isAdding}
-                            style={{
-                              padding: '4px 12px', fontSize: '12px', fontWeight: 600,
-                              background: !selRow ? '#d1d5db' : '#10b981',
-                              color: '#fff', border: 'none', borderRadius: '4px',
-                              cursor: !selRow ? 'not-allowed' : 'pointer',
-                            }}
-                            onClick={async () => {
-                              setAddingMissingLicence(m.licence_number);
-                              const result = await addPalletToForkliftRequest(fr.id, {
-                                licence_number: m.licence_number,
-                                storage_row_id: selRow,
-                                is_partial: false,
-                                partial_cases: null,
-                              });
-                              setAddingMissingLicence(null);
-                              if (result?.success) {
-                                setMissingRowSelections((prev) => {
-                                  const next = { ...prev };
-                                  delete next[m.licence_number];
-                                  return next;
-                                });
-                              } else {
-                                addToast(result?.error || 'Failed to add pallet', 'error');
-                              }
-                            }}
-                          >
-                            {isAdding ? 'Adding…' : 'Add'}
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })()}
+              merged.sort((a, b) => a.sequence - b.sequence);
+              const missingCount = merged.filter((r) => r.kind === 'missing').length;
 
-            {/* Pallet licences - always visible */}
+              return (
             <div style={{ marginBottom: '12px' }}>
               <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>
                 Pallet Licences ({licences.length})
+                {missingCount > 0 && (
+                  <span style={{ marginLeft: '8px', background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>
+                    {missingCount} missing
+                  </span>
+                )}
               </h4>
-              <div style={{ maxHeight: '300px', overflow: 'auto', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
+              <div style={{ maxHeight: '360px', overflow: 'auto', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                   <thead>
                     <tr style={{ background: '#f3f4f6', position: 'sticky', top: 0 }}>
@@ -354,10 +299,105 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                     </tr>
                   </thead>
                   <tbody>
-                    {licences.map((pl) => {
+                    {merged.map((row) => {
+                      if (row.kind === 'missing') {
+                        const m = row;
+                        const selRow = missingRowSelections[m.licence_number] || '';
+                        const isAdding = addingMissingLicence === m.licence_number;
+                        const skipKey = `skip:${m.licence_number}`;
+                        const isSkipping = addingMissingLicence === skipKey;
+                        return (
+                          <tr key={`missing-${m.sequence}`} style={{ borderTop: '1px solid #fcd34d', background: '#fef3c7' }}>
+                            <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: '12px', color: '#7c2d12' }}>
+                              ⚠ {m.licence_number}
+                            </td>
+                            <td colSpan={isEditing ? 5 : 4} style={{ padding: '6px 10px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                <select
+                                  value={selRow}
+                                  onChange={(e) => setMissingRowSelections((prev) => ({ ...prev, [m.licence_number]: e.target.value }))}
+                                  style={{ padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '12px', background: '#fff', minWidth: '180px' }}
+                                >
+                                  <option value="">Select row...</option>
+                                  {allStorageRows.map((r) => (
+                                    <option key={r.id} value={r.id}>{r.areaName} - {r.name}</option>
+                                  ))}
+                                </select>
+                                <button
+                                  type="button"
+                                  disabled={!selRow || isAdding || isSkipping}
+                                  style={{
+                                    padding: '4px 12px', fontSize: '12px', fontWeight: 600,
+                                    background: !selRow ? '#d1d5db' : '#10b981',
+                                    color: '#fff', border: 'none', borderRadius: '4px',
+                                    cursor: !selRow ? 'not-allowed' : 'pointer',
+                                  }}
+                                  onClick={async () => {
+                                    setAddingMissingLicence(m.licence_number);
+                                    const result = await addPalletToForkliftRequest(fr.id, {
+                                      licence_number: m.licence_number,
+                                      storage_row_id: selRow,
+                                      is_partial: false,
+                                      partial_cases: null,
+                                    });
+                                    setAddingMissingLicence(null);
+                                    if (result?.success) {
+                                      setMissingRowSelections((prev) => {
+                                        const next = { ...prev };
+                                        delete next[m.licence_number];
+                                        return next;
+                                      });
+                                    } else {
+                                      addToast(result?.error || 'Failed to add pallet', 'error');
+                                    }
+                                  }}
+                                >
+                                  {isAdding ? 'Adding…' : 'Add'}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isAdding || isSkipping}
+                                  style={{
+                                    padding: '4px 12px', fontSize: '12px', fontWeight: 600,
+                                    background: '#fff', color: '#7c2d12', border: '1px solid #fcd34d',
+                                    borderRadius: '4px', cursor: 'pointer',
+                                  }}
+                                  title="The production line never made this pallet — remove the gap permanently"
+                                  onClick={async () => {
+                                    const ok = await confirm(`Mark ${m.licence_number} as NOT produced? This is final — the gap will disappear from this card and any future cards for the same lot.`);
+                                    if (!ok) return;
+                                    setAddingMissingLicence(skipKey);
+                                    const result = await markPalletsNotProduced(fr.id, [m.licence_number]);
+                                    setAddingMissingLicence(null);
+                                    if (!result?.success) {
+                                      addToast(result?.error || 'Skip failed', 'error');
+                                    }
+                                  }}
+                                >
+                                  {isSkipping ? 'Skipping…' : 'Skip — Not Produced'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      }
+                      const pl = row.pl;
                       const isMissingSticker = pl.status === PALLET_STATUS.MISSING_STICKER;
+                      const isNotProduced = pl.status === PALLET_STATUS.NOT_PRODUCED;
                       const isFixingThis = fixingPalletId === pl.id;
                       const colCount = isEditing ? 6 : 5;
+                      if (isNotProduced) {
+                        return (
+                          <tr key={pl.id} style={{ borderTop: '1px solid #e5e7eb', background: '#f3f4f6', color: '#6b7280' }}>
+                            <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: '12px', textDecoration: 'line-through' }}>
+                              {pl.licence_number}
+                            </td>
+                            <td colSpan={isEditing ? 5 : 4} style={{ padding: '8px 10px', fontStyle: 'italic' }}>
+                              Not produced
+                            </td>
+                          </tr>
+                        );
+                      }
                       return (
                       <React.Fragment key={pl.id}>
                       <tr style={{ borderTop: '1px solid #e5e7eb' }}>
@@ -560,6 +600,8 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                 </table>
               </div>
             </div>
+              );
+            })()}
 
             {/* Add Pallet form - only in edit mode */}
             {isEditing && (

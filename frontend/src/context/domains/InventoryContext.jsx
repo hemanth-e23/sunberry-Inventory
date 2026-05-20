@@ -922,6 +922,22 @@ export const InventoryProvider = ({ children }) => {
     }
   };
 
+  // ─── markPalletsNotProduced ─────────────────────────────────────────────────
+
+  const markPalletsNotProduced = async (requestId, licenceNumbers) => {
+    try {
+      await apiClient.post(`/scanner/requests/${requestId}/mark-not-produced`, {
+        licence_numbers: licenceNumbers,
+      });
+      await fetchForkliftRequests();
+      return { success: true };
+    } catch (error) {
+      console.error('Error marking pallets not produced:', error);
+      const msg = error.response?.data?.detail || error.message || 'Mark not-produced failed';
+      return { success: false, error: msg };
+    }
+  };
+
   // ─── addPalletToForkliftRequest ─────────────────────────────────────────────
 
   const addPalletToForkliftRequest = async (requestId, palletData) => {
@@ -1076,6 +1092,7 @@ export const InventoryProvider = ({ children }) => {
     removePalletLicence,
     updatePalletLicence,
     addPalletToForkliftRequest,
+    markPalletsNotProduced,
     fetchPalletLicences,
     createShipOutPickList,
     editShipOutTransfer,
