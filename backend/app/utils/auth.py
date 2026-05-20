@@ -130,6 +130,10 @@ def get_current_user(
     if user is None:
         raise credentials_exception
 
+    # Stash the authenticated user on request.state so the logging middleware
+    # in main.py can attribute error responses to a specific username/role.
+    request.state.current_user = user
+
     # For corporate users: check X-View-Warehouse header to scope their view
     if user.role in CORPORATE_ROLES:
         view_as = request.headers.get("X-View-Warehouse")

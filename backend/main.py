@@ -16,9 +16,10 @@ from app.database import engine, Base
 from app.routers import auth, users, products, receipts, inventory, master_data, service, scanner, pallet_licences, reports, inter_warehouse_transfers, notifications
 from app.routers import transfers, adjustments, holds, cycle_counts, staging
 from app.routers import active_production, palletizer
+from app.utils.logging_setup import setup_logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO if settings.DEBUG else logging.WARNING)
+# Configure logging — writes to stdout AND a rotating file at /app/logs/app.log
+setup_logging(level_name="DEBUG" if settings.DEBUG else "INFO")
 logger = logging.getLogger(__name__)
 
 # Create database tables for fresh installs.
@@ -72,6 +73,70 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         
         return await call_next(request)
 
+def _request_user_repr(request: Request) -> str:
+    """Short identifier for the user behind a request, for log lines.
+    Returns '-' if the request is unauthenticated or auth never ran."""
+    user = getattr(request.state, "current_user", None)
+    if not user:
+        return "-"
+    username = getattr(user, "username", "?")
+    role = getattr(user, "role", "?")
+    return f"{username}({role})"
+
+
+def _safe_body_for_log(body: bytes, path: str) -> str:
+    """Decode and trim a request body for log output. Auth bodies are redacted
+    because they contain passwords."""
+    if not body:
+        return ""
+    if path.startswith("/api/auth/"):
+        return "<redacted-auth>"
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return "<binary>"
+    if len(text) > 500:
+        return text[:500] + "...<truncated>"
+    return text
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Log every error response (status >= 400) with the user, path, request
+    body, and duration. This is the audit trail that lets a supervisor diagnose
+    'the forklift driver scanned X and got an error' after the fact.
+
+    Successful responses are NOT logged here (would be too noisy). Successful
+    operations leave their own footprint in the DB.
+    """
+    async def dispatch(self, request: Request, call_next):
+        # Buffer the body up front so we can both log it and let the route
+        # consume it. Re-attach it via a fresh ASGI receive callable.
+        body = await request.body()
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request = Request(request.scope, receive=receive)
+
+        start = time.time()
+        response = await call_next(request)
+        duration_ms = int((time.time() - start) * 1000)
+
+        if response.status_code >= 400:
+            level = logging.ERROR if response.status_code >= 500 else logging.WARNING
+            logger.log(
+                level,
+                "status=%d user=%s method=%s path=%s duration_ms=%d body=%s",
+                response.status_code,
+                _request_user_repr(request),
+                request.method,
+                request.url.path,
+                duration_ms,
+                _safe_body_for_log(body, request.url.path),
+            )
+        return response
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add security headers to all responses"""
     async def dispatch(self, request: Request, call_next):
@@ -100,30 +165,30 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 # Exception handlers
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    """Handle HTTP exceptions - hide details in production"""
-    if settings.DEBUG:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.detail}
-        )
+    """Translate HTTPExceptions into JSON responses.
+
+    400 (ValidationError) and 409 (ConflictError) carry user-correctable
+    messages like "Invalid licence number format" or "Row is full" — these are
+    safe and useful to show users in production so they can fix their input.
+
+    401/403/404/500 stay generic in production to avoid leaking internals.
+
+    Logging is handled by RequestLoggingMiddleware (it logs the full path,
+    user, body, and the resolved status), so this handler does not log here.
+    """
+    if settings.DEBUG or exc.status_code in (400, 409):
+        detail = exc.detail
+    elif exc.status_code == 404:
+        detail = "Resource not found"
+    elif exc.status_code == 401:
+        detail = "Authentication required"
+    elif exc.status_code == 403:
+        detail = "Access denied"
+    elif exc.status_code == 500:
+        detail = "Internal server error"
     else:
-        # In production, return generic messages
-        if exc.status_code == 404:
-            detail = "Resource not found"
-        elif exc.status_code == 401:
-            detail = "Authentication required"
-        elif exc.status_code == 403:
-            detail = "Access denied"
-        elif exc.status_code == 500:
-            detail = "Internal server error"
-        else:
-            detail = "An error occurred"
-        
-        logger.error(f"HTTP {exc.status_code}: {exc.detail} - Path: {request.url.path}")
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": detail}
-        )
+        detail = "An error occurred"
+    return JSONResponse(status_code=exc.status_code, content={"detail": detail})
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -160,11 +225,12 @@ async def general_exception_handler(request: Request, exc: Exception):
             content={"detail": "An internal error occurred"}
         )
 
-# Add security headers middleware (first)
+# Middleware order: Starlette applies these in reverse — the LAST added wraps
+# everything else and runs FIRST per request. So with this order the logging
+# middleware sees the final response status (including rate-limit 429s).
 app.add_middleware(SecurityHeadersMiddleware)
-
-# Add rate limiting middleware
 app.add_middleware(RateLimitMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
 
 # Configure CORS with proper origins
 app.add_middleware(
