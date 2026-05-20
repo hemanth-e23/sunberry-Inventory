@@ -11,6 +11,8 @@ If the log directory cannot be created (e.g. running tests outside docker
 without write permission to /app), file logging is skipped silently — stdout
 still works.
 """
+from __future__ import annotations
+
 import logging
 import os
 from logging.handlers import RotatingFileHandler

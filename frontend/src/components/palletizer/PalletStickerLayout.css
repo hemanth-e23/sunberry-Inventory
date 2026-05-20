@@ -162,12 +162,11 @@
   letter-spacing: 0.3px;
 }
 
-.pallet-value {
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-  word-break: break-all;
+.pallet-value-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 2px;
 }
 
 /* QR — fills remaining vertical space and stays square */
@@ -298,9 +297,12 @@
   .tag-fcc-code,
   .info-label,
   .info-value,
-  .pallet-label,
-  .pallet-value {
+  .pallet-label {
     color: #000 !important;
+  }
+
+  .pallet-value-svg text {
+    fill: #000 !important;
   }
 
   .tag-divider,

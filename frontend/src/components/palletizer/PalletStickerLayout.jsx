@@ -69,17 +69,37 @@ const InfoRow = ({ lot, cases, bbd }) => (
   </div>
 );
 
-const PalletBlock = ({ palletId, qrRef }) => (
-  <>
-    <div className="tag-pallet-section">
-      <span className="pallet-label">Pallet ID</span>
-      <span className="pallet-value">{palletId || '-'}</span>
-    </div>
-    <div className="tag-qr-container">
-      <canvas ref={qrRef} className="tag-qr" />
-    </div>
-  </>
-);
+const PalletBlock = ({ palletId, qrRef }) => {
+  const text = (palletId || '-').toUpperCase();
+  return (
+    <>
+      <div className="tag-pallet-section">
+        <span className="pallet-label">Pallet ID</span>
+        <svg
+          className="pallet-value-svg"
+          viewBox="0 0 1000 140"
+          width="100%"
+          aria-label={text}
+        >
+          <text
+            x="0"
+            y="118"
+            fontSize="140"
+            fontWeight="900"
+            textLength="1000"
+            lengthAdjust="spacingAndGlyphs"
+            fill="#000"
+          >
+            {text}
+          </text>
+        </svg>
+      </div>
+      <div className="tag-qr-container">
+        <canvas ref={qrRef} className="tag-qr" />
+      </div>
+    </>
+  );
+};
 
 const CustomerLotLine = ({ lot }) => (
   <div className="tag-customer-lot">{(lot || '-').toUpperCase()}</div>
