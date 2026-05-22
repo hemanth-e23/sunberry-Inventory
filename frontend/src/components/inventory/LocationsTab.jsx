@@ -464,7 +464,7 @@ const LocationsTab = ({
   productOptions,
 }) => {
   const [locationFilter, setLocationFilter] = useState("all");
-  const [occupancyFilter, setOccupancyFilter] = useState("occupied");
+  const [occupancyFilter, setOccupancyFilter] = useState("all");
   const [productFilter, setProductFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [collapsedIds, setCollapsedIds] = useState(() => new Set());
