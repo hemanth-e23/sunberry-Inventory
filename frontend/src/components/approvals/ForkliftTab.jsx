@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../../context/AuthContext";
 import { useAppData } from "../../context/AppDataContext";
 import { useToast } from "../../context/ToastContext";
@@ -7,12 +7,124 @@ import { formatDateTime, formatDate, toDateKey } from "../../utils/dateUtils";
 import { cleanScannedLicence } from "../../utils/scannerFeedback";
 import { FORKLIFT_REQUEST_STATUS, PALLET_STATUS } from '../../constants';
 
+// Typeable storage-row picker. Replaces the long native <select> with a
+// filter-as-you-type combobox. Filters case-insensitively on `parent name +
+// row name` so "aj 11", "aj11", "floor" all match. Click a suggestion or
+// press Enter/ArrowDown+Enter to pick; Esc closes the list.
+const RowPicker = ({ rows, value, onChange, placeholder = 'Type to search rows…', size = 'sm' }) => {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const [highlightIdx, setHighlightIdx] = useState(0);
+  const containerRef = useRef(null);
+
+  // Keep the visible input in sync with `value` whenever the selection
+  // changes from outside (form reset, parent prop update).
+  const selectedRow = useMemo(() => rows.find((r) => r.id === value) || null, [rows, value]);
+  const displayLabel = (r) => (r ? `${r.areaName ? r.areaName + ' - ' : ''}${r.name}` : '');
+  useEffect(() => {
+    if (selectedRow) setQuery(displayLabel(selectedRow));
+    else setQuery('');
+  }, [selectedRow]);
+
+  // Close on outside click so the suggestion list doesn't linger.
+  useEffect(() => {
+    const onDocClick = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, []);
+
+  const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, '');
+  const filtered = useMemo(() => {
+    const q = norm(query);
+    if (!q) return rows.slice(0, 10);
+    return rows
+      .filter((r) => norm(displayLabel(r)).includes(q))
+      .slice(0, 10);
+  }, [rows, query]);
+
+  const padding = size === 'xs' ? '4px 8px' : '6px 10px';
+  const fontSize = size === 'xs' ? '12px' : '13px';
+
+  const pick = (r) => {
+    onChange(r.id);
+    setQuery(displayLabel(r));
+    setOpen(false);
+  };
+
+  return (
+    <div ref={containerRef} style={{ position: 'relative', width: '100%' }}>
+      <input
+        type="text"
+        value={query}
+        onFocus={() => { setOpen(true); setHighlightIdx(0); }}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setOpen(true);
+          setHighlightIdx(0);
+          // Typing invalidates a previous pick; clear value so parent disables Save.
+          if (value) onChange('');
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            setOpen(true);
+            setHighlightIdx((i) => Math.min(i + 1, filtered.length - 1));
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            setHighlightIdx((i) => Math.max(i - 1, 0));
+          } else if (e.key === 'Enter') {
+            if (open && filtered[highlightIdx]) {
+              e.preventDefault();
+              pick(filtered[highlightIdx]);
+            }
+          } else if (e.key === 'Escape') {
+            setOpen(false);
+          }
+        }}
+        placeholder={placeholder}
+        style={{ width: '100%', padding, border: '1px solid #d1d5db', borderRadius: '4px', fontSize, background: '#fff', boxSizing: 'border-box' }}
+      />
+      {open && filtered.length > 0 && (
+        <ul
+          style={{
+            position: 'absolute', top: '100%', left: 0, right: 0,
+            margin: '2px 0 0 0', padding: 0, listStyle: 'none',
+            background: '#fff', border: '1px solid #d1d5db', borderRadius: '4px',
+            maxHeight: '220px', overflowY: 'auto', zIndex: 20,
+            boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+          }}
+        >
+          {filtered.map((r, idx) => (
+            <li
+              key={r.id}
+              onMouseDown={(e) => { e.preventDefault(); pick(r); }}
+              onMouseEnter={() => setHighlightIdx(idx)}
+              style={{
+                padding: '6px 10px', fontSize,
+                background: idx === highlightIdx ? '#eef2ff' : '#fff',
+                cursor: 'pointer',
+              }}
+            >
+              {displayLabel(r)}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+};
+
 const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLookup, userNameMap }) => {
   const { user } = useAuth();
   const {
     productionShifts,
     productionLines,
     storageAreas,
+    locations,
     approveForkliftRequest,
     updateForkliftRequest,
     removePalletLicence,
@@ -40,19 +152,37 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
   const [fixForm, setFixForm] = useState({ licence_number: '', storage_row_id: '', cases: '' });
   const [isSavingFix, setIsSavingFix] = useState(false);
 
+  // Union of all storage rows visible to the approver: FG areas + raw-material
+  // sub-locations. The floor row lives under a sub-location, so iterating only
+  // storageAreas hides it from the picker.
   const allStorageRows = useMemo(() => {
-    const rows = [];
-    if (storageAreas && Array.isArray(storageAreas)) {
+    const out = [];
+    const seen = new Set();
+    const push = (id, name, parentName) => {
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      out.push({ id, name: name || id, areaName: parentName || '' });
+    };
+    if (Array.isArray(storageAreas)) {
       storageAreas.forEach((area) => {
         (area.rows || []).forEach((row) => {
-          if (row.is_active !== false) {
-            rows.push({ id: row.id, name: row.name, areaName: area.name });
-          }
+          if (row.active === false) return;
+          push(row.id, row.name, area.name);
         });
       });
     }
-    return rows;
-  }, [storageAreas]);
+    if (Array.isArray(locations)) {
+      locations.forEach((loc) => {
+        (loc.subLocations || []).forEach((sub) => {
+          (sub.rows || []).forEach((row) => {
+            if (row.active === false) return;
+            push(row.id, row.name, sub.name);
+          });
+        });
+      });
+    }
+    return out;
+  }, [storageAreas, locations]);
 
   if (pendingForkliftRequests.length === 0) {
     return (
@@ -339,16 +469,14 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                             </td>
                             <td colSpan={isEditing ? 5 : 4} style={{ padding: '6px 10px' }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-                                <select
-                                  value={selRow}
-                                  onChange={(e) => setMissingRowSelections((prev) => ({ ...prev, [m.licence_number]: e.target.value }))}
-                                  style={{ padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '12px', background: '#fff', minWidth: '180px' }}
-                                >
-                                  <option value="">Select row...</option>
-                                  {allStorageRows.map((r) => (
-                                    <option key={r.id} value={r.id}>{r.areaName} - {r.name}</option>
-                                  ))}
-                                </select>
+                                <div style={{ minWidth: '220px' }}>
+                                  <RowPicker
+                                    rows={allStorageRows}
+                                    value={selRow}
+                                    onChange={(id) => setMissingRowSelections((prev) => ({ ...prev, [m.licence_number]: id }))}
+                                    size="xs"
+                                  />
+                                </div>
                                 <button
                                   type="button"
                                   disabled={!selRow || isAdding || isSkipping}
@@ -537,16 +665,11 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                                 <label style={{ fontSize: '11px', color: '#78350f', display: 'block', marginBottom: '2px', fontWeight: 600 }}>
                                   Storage Row
                                 </label>
-                                <select
+                                <RowPicker
+                                  rows={allStorageRows}
                                   value={fixForm.storage_row_id}
-                                  onChange={(e) => setFixForm((prev) => ({ ...prev, storage_row_id: e.target.value }))}
-                                  style={{ width: '100%', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '13px', background: '#fff', boxSizing: 'border-box' }}
-                                >
-                                  <option value="">Select row...</option>
-                                  {allStorageRows.map((r) => (
-                                    <option key={r.id} value={r.id}>{r.areaName} - {r.name}</option>
-                                  ))}
-                                </select>
+                                  onChange={(id) => setFixForm((prev) => ({ ...prev, storage_row_id: id }))}
+                                />
                               </div>
                               <div>
                                 <label style={{ fontSize: '11px', color: '#78350f', display: 'block', marginBottom: '2px', fontWeight: 600 }}>
@@ -646,16 +769,11 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                   </div>
                   <div>
                     <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '2px' }}>Storage Row</label>
-                    <select
+                    <RowPicker
+                      rows={allStorageRows}
                       value={addPalletForm.storage_row_id}
-                      onChange={(e) => setAddPalletForm(prev => ({ ...prev, storage_row_id: e.target.value }))}
-                      style={{ width: '100%', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '13px', boxSizing: 'border-box' }}
-                    >
-                      <option value="">Select row...</option>
-                      {allStorageRows.map((r) => (
-                        <option key={r.id} value={r.id}>{r.areaName} - {r.name}</option>
-                      ))}
-                    </select>
+                      onChange={(id) => setAddPalletForm(prev => ({ ...prev, storage_row_id: id }))}
+                    />
                   </div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '8px' }}>
