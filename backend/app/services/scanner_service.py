@@ -66,28 +66,29 @@ def parse_licence_number(licence_number: str) -> tuple:
     return lot_number, product_code, sequence
 
 
+_LOT_PREFIX_RE = re.compile(r"MP\d{3}\d{2}L\d+", re.IGNORECASE)
+
+
 def normalize_scanned_licence(licence_number: str, expected_lot: str) -> str:
     """Strip stray characters that landed in the scan input before the scanner
-    gun fired. If the licence_number doesn't start with the session's expected
-    lot_number but contains it as a substring, trim everything before it.
+    gun fired. Trim everything before the first MP{DDD}{YY}L{N} lot prefix.
 
-    Examples (expected_lot='MP13926L1'):
-      'MP13926L1-GVN1280-073'   -> unchanged
-      'PMP13926L1-GVN1280-073'  -> 'MP13926L1-GVN1280-073'
-      'QMP13926L1-GVN1280-073'  -> 'MP13926L1-GVN1280-073'
-      ' MP13926L1-GVN1280-073'  -> 'MP13926L1-GVN1280-073'  (after strip)
+    Examples:
+      'MP13926L1-GVN1280-073'    -> unchanged
+      'PMP13926L1-GVN1280-073'   -> 'MP13926L1-GVN1280-073'
+      'QMP14226L1-PF128C-019'    -> 'MP14226L1-PF128C-019'
+      ' MP13926L1-GVN1280-073'   -> 'MP13926L1-GVN1280-073'  (after strip)
 
-    If expected_lot is missing entirely from the scan, return the input
-    unchanged — the existing validation will reject it as a wrong-lot scan.
+    Matching against the canonical lot pattern (not fr.lot_number) means stray
+    characters are stripped even after a midnight lot rollover, when the
+    session was opened against the previous day's lot.
     """
     if not licence_number:
         return licence_number
     s = licence_number.strip()
-    if not expected_lot:
-        return s
-    idx = s.find(expected_lot)
-    if idx > 0:
-        return s[idx:]
+    m = _LOT_PREFIX_RE.search(s)
+    if m and m.start() > 0:
+        return s[m.start():]
     return s
 
 
@@ -965,9 +966,13 @@ def update_pallet_licence(
         lot_number, product_code, sequence = parse_licence_number(new_lic)
         if not lot_number or not product_code or sequence is None:
             raise ValidationError("Invalid licence number format")
-        if fr.lot_number and lot_number != fr.lot_number:
+        # A session can legitimately contain pallets from two lots when production
+        # spans midnight (the kiosk rolls the lot over). Accept any well-formed lot
+        # following the canonical MP{DDD}{YY}L{N} pattern; reject garbage like
+        # 'QMP14226L1' that comes from a misfired barcode scan.
+        if not _LOT_PREFIX_RE.fullmatch(lot_number):
             raise ValidationError(
-                f"Licence number lot ({lot_number}) doesn't match this request's lot ({fr.lot_number})"
+                f"Licence number lot ({lot_number}) is not a valid lot format"
             )
         product = find_product_by_code(db, product_code)
         if not product or product.id != fr.product_id:

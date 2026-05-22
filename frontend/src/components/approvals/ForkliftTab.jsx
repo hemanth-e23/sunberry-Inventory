@@ -254,26 +254,52 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                 interleaved in sequence order. Missing slots show inline
                 actions for Add (assign to a row) or Skip (mark NOT_PRODUCED). */}
             {(() => {
-              // Build the merged list once per render
-              const sample = licences.find((pl) => pl.licence_number && pl.sequence);
-              const lastDash = sample ? sample.licence_number.lastIndexOf('-') : -1;
-              const prefix = lastDash >= 0 ? sample.licence_number.slice(0, lastDash) : null;
-              const seqsHere = new Set(licences.map((pl) => pl.sequence).filter((s) => s != null));
+              // Group licences by lot prefix so a mid-session lot rollover
+              // (production spans midnight) renders cleanly: each lot's pallets
+              // are listed together, and missing-pallet detection runs per-lot
+              // instead of globally — otherwise MP142-012 wouldn't be flagged
+              // missing just because MP141-012 exists.
+              const prefixOf = (lic) => {
+                if (!lic) return null;
+                const lastDash = lic.lastIndexOf('-');
+                return lastDash >= 0 ? lic.slice(0, lastDash) : null;
+              };
               const coveredElsewhere = new Set(fr.covered_sequences || []);
-              const maxSeq = seqsHere.size ? Math.max(...seqsHere) : 0;
-              const merged = licences.map((pl) => ({ kind: 'licence', sequence: pl.sequence || 0, pl }));
-              if (prefix && maxSeq >= 1) {
-                for (let s = 1; s <= maxSeq; s += 1) {
-                  if (!seqsHere.has(s) && !coveredElsewhere.has(s)) {
-                    merged.push({
-                      kind: 'missing',
-                      sequence: s,
-                      licence_number: `${prefix}-${String(s).padStart(3, '0')}`,
-                    });
+              const groups = new Map(); // prefix -> { seqs:Set, items:[] }
+              for (const pl of licences) {
+                const prefix = prefixOf(pl.licence_number);
+                if (!prefix) continue;
+                if (!groups.has(prefix)) {
+                  groups.set(prefix, { seqs: new Set(), items: [] });
+                }
+                const g = groups.get(prefix);
+                if (pl.sequence != null) g.seqs.add(pl.sequence);
+                g.items.push({ kind: 'licence', prefix, sequence: pl.sequence || 0, pl });
+              }
+              const merged = [];
+              // Sort lots in ascending prefix order so MP141 comes before MP142.
+              const sortedPrefixes = Array.from(groups.keys()).sort();
+              for (const prefix of sortedPrefixes) {
+                const g = groups.get(prefix);
+                const maxSeq = g.seqs.size ? Math.max(...g.seqs) : 0;
+                merged.push(...g.items);
+                if (maxSeq >= 1) {
+                  for (let s = 1; s <= maxSeq; s += 1) {
+                    if (!g.seqs.has(s) && !coveredElsewhere.has(s)) {
+                      merged.push({
+                        kind: 'missing',
+                        prefix,
+                        sequence: s,
+                        licence_number: `${prefix}-${String(s).padStart(3, '0')}`,
+                      });
+                    }
                   }
                 }
               }
-              merged.sort((a, b) => a.sequence - b.sequence);
+              merged.sort((a, b) => {
+                if (a.prefix !== b.prefix) return a.prefix < b.prefix ? -1 : 1;
+                return a.sequence - b.sequence;
+              });
               const missingCount = merged.filter((r) => r.kind === 'missing').length;
 
               return (
