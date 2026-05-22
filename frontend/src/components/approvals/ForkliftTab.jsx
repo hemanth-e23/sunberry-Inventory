@@ -201,15 +201,41 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
         const licences = (fr.pallet_licences || []).filter(pl => pl.status !== FORKLIFT_REQUEST_STATUS.CANCELLED);
         const isEditing = editingForkliftId === fr.id;
 
+        // Per-lot + floor breakdown — driver may scan multiple lots into one
+        // session (e.g. MP14126L1 → MP14226L1 mid-batch) or scan some pallets
+        // onto the floor. Surface both so the supervisor sees the split before
+        // approving (which is when the backend creates one receipt per lot).
+        const lotBreakdown = licences.reduce((acc, pl) => {
+          const lot = pl.lot_number || fr.lot_number || '—';
+          if (!acc[lot]) acc[lot] = { pallets: 0, cases: 0 };
+          acc[lot].pallets += 1;
+          acc[lot].cases += pl.cases || 0;
+          return acc;
+        }, {});
+        const lotEntries = Object.entries(lotBreakdown);
+        const hasMixedLots = lotEntries.length > 1;
+        const floorPalletCount = licences.filter(pl => !pl.storage_row_id).length;
+
         return (
           <article key={fr.id} className="approval-card" style={{ maxWidth: '720px' }}>
             <header>
               <div style={{ flex: 1 }}>
                 <h3 style={{ margin: 0 }}>{productName}</h3>
                 <div style={{ display: 'flex', gap: '6px', marginTop: '4px', flexWrap: 'wrap' }}>
-                  <span className="badge">{fr.lot_number || '—'}</span>
+                  {hasMixedLots
+                    ? lotEntries.map(([lot, info]) => (
+                        <span key={lot} className="badge" title={`${info.pallets} pallets · ${info.cases} cases`}>
+                          {lot} ({info.pallets})
+                        </span>
+                      ))
+                    : <span className="badge">{fr.lot_number || '—'}</span>}
                   {fccCode && <span className="badge" style={{ background: '#e0e7ff', color: '#3730a3' }}>FCC: {fccCode}</span>}
                   {shortCode && <span className="badge" style={{ background: '#d1fae5', color: '#065f46' }}>{shortCode}</span>}
+                  {floorPalletCount > 0 && (
+                    <span className="badge" style={{ background: '#fef3c7', color: '#92400e' }}>
+                      Floor: {floorPalletCount}
+                    </span>
+                  )}
                 </div>
               </div>
               <button
@@ -234,8 +260,23 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
             <div style={{ background: '#f9fafb', borderRadius: '8px', padding: '12px 16px', marginBottom: '12px' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '14px' }}>
                 <div>
-                  <span style={{ color: '#6b7280', fontWeight: 500 }}>Lot Number</span>
-                  <div style={{ fontWeight: 600, marginTop: '2px' }}>{fr.lot_number || '—'}</div>
+                  <span style={{ color: '#6b7280', fontWeight: 500 }}>
+                    {hasMixedLots ? `Lot Numbers (${lotEntries.length})` : 'Lot Number'}
+                  </span>
+                  {hasMixedLots ? (
+                    <div style={{ marginTop: '2px' }}>
+                      {lotEntries.map(([lot, info]) => (
+                        <div key={lot} style={{ fontWeight: 600 }}>
+                          {lot} <span style={{ fontWeight: 400, color: '#6b7280' }}>· {info.pallets} pallets</span>
+                        </div>
+                      ))}
+                      <div style={{ fontSize: '12px', color: '#92400e', marginTop: '4px' }}>
+                        Approval will create {lotEntries.length} separate receipts.
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ fontWeight: 600, marginTop: '2px' }}>{fr.lot_number || '—'}</div>
+                  )}
                 </div>
                 <div>
                   <span style={{ color: '#6b7280', fontWeight: 500 }}>Submitted</span>

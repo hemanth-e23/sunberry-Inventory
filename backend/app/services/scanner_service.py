@@ -752,7 +752,14 @@ def approve_forklift_request(
     request_id: str,
     current_user: User,
 ) -> dict:
-    """Approve a forklift request — creates a receipt and links pallet licences to it."""
+    """Approve a forklift request.
+
+    Creates one Receipt per distinct lot_number on the scanned pallets, so a
+    session that rolled over mid-batch (e.g. MP14126L1 → MP14226L1) lands as
+    two separate lots in inventory. Pallets scanned to no storage row ("floor")
+    are still linked to their receipt and surfaced as allocation.floorAllocation
+    so the inventory UI can render them under "Floor Staging".
+    """
     _require_admin_or_supervisor(current_user)
 
     fr = _get_forklift_request_with_relations(db, request_id)
@@ -765,110 +772,159 @@ def approve_forklift_request(
         pl for pl in fr.pallet_licences
         if pl.status in (PalletStatus.PENDING, PalletStatus.MISSING_STICKER)
     ]
-    total_cases = sum(pl.cases for pl in licences)
-    partial_cases = sum(pl.cases for pl in licences if pl.is_partial)
 
-    # Group licences by storage location
-    row_groups: dict = {}
+    # Group by per-pallet lot_number so a mixed session produces multiple receipts.
+    lot_groups: dict = {}
     for pl in licences:
-        if pl.storage_row_id and pl.storage_area_id:
-            key = (pl.storage_area_id, pl.storage_row_id)
-            if key not in row_groups:
-                row_groups[key] = {"pallets": 0, "cases": 0}
-            row_groups[key]["pallets"] += 1
-            row_groups[key]["cases"] += pl.cases
+        key = pl.lot_number or fr.lot_number
+        lot_groups.setdefault(key, []).append(pl)
 
-    plan = []
-    for (area_id, row_id), info in row_groups.items():
-        area = db.query(StorageArea).filter(StorageArea.id == area_id).first()
-        row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
-        plan.append({
-            "areaId": area_id,
-            "rowId": row_id,
-            "areaName": area.name if area else "",
-            "rowName": row.name if row else "",
-            "pallets": info["pallets"],
-            "cases": info["cases"],
-        })
+    # Deterministic order: by the first pallet's sequence in each lot. Keeps the
+    # earlier-produced lot as the "primary" for fr.receipt_id back-compat.
+    ordered_lots = sorted(
+        lot_groups.items(),
+        key=lambda kv: min((pl.sequence or 0) for pl in kv[1]),
+    )
 
-    # Build receipt
-    receipt_id = f"rcpt-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
     category = db.query(Category).filter(Category.id == fr.product.category_id).first()
     cat_id = category.id if category else None
+    now = datetime.now(timezone.utc)
 
-    location_id = sub_location_id = None
-    if plan:
-        first_area = db.query(StorageArea).filter(StorageArea.id == plan[0]["areaId"]).first()
-        if first_area:
-            location_id = first_area.location_id
-            sub_location_id = first_area.sub_location_id
+    created_receipt_ids: List[str] = []
 
-    rec = Receipt(
-        id=receipt_id,
-        product_id=fr.product_id,
-        category_id=cat_id,
-        lot_number=fr.lot_number,
-        quantity=total_cases,
-        unit="cases",
-        production_date=fr.production_date,
-        expiration_date=fr.expiration_date,
-        receipt_date=datetime.now(timezone.utc),
-        cases_per_pallet=fr.cases_per_pallet,
-        full_pallets=fr.total_full_pallets,
-        partial_cases=int(partial_cases),
-        quantity_produced=total_cases,
-        shift_id=fr.shift_id,
-        line_id=fr.line_id,
-        status=ReceiptStatus.APPROVED,
-        location_id=location_id,
-        sub_location_id=sub_location_id,
-        submitted_by=str(fr.scanned_by),
-        approved_by=str(current_user.id),
-        approved_at=datetime.now(timezone.utc),
-        submitted_at=datetime.now(timezone.utc),
-        allocation={
+    for lot_number, lot_licences in ordered_lots:
+        lot_total_cases = sum(pl.cases for pl in lot_licences)
+        lot_partial_cases = sum(pl.cases for pl in lot_licences if pl.is_partial)
+        lot_full_pallets = sum(1 for pl in lot_licences if not pl.is_partial)
+
+        # Split this lot's pallets into located (real storage row) and floor.
+        row_groups: dict = {}
+        floor_pallets = 0
+        floor_cases = 0
+        for pl in lot_licences:
+            if pl.storage_row_id and pl.storage_area_id:
+                key = (pl.storage_area_id, pl.storage_row_id)
+                if key not in row_groups:
+                    row_groups[key] = {"pallets": 0, "cases": 0}
+                row_groups[key]["pallets"] += 1
+                row_groups[key]["cases"] += pl.cases
+            else:
+                floor_pallets += 1
+                floor_cases += pl.cases
+
+        plan = []
+        for (area_id, row_id), info in row_groups.items():
+            area = db.query(StorageArea).filter(StorageArea.id == area_id).first()
+            row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
+            plan.append({
+                "areaId": area_id,
+                "rowId": row_id,
+                "areaName": area.name if area else "",
+                "rowName": row.name if row else "",
+                "pallets": info["pallets"],
+                "cases": info["cases"],
+            })
+
+        # Per-lot production_date / expiration_date — parsed from this lot's
+        # number, falling back to the request's values if the lot doesn't match
+        # the MP{DDD}{YY}L{N} format.
+        product_expire_years = (
+            fr.product.expire_years
+            if fr.product and getattr(fr.product, "expire_years", None)
+            else DEFAULT_EXPIRE_YEARS
+        )
+        prod_date = parse_production_date_from_lot(lot_number) or fr.production_date
+        exp_date = (
+            prod_date + timedelta(days=DAYS_PER_YEAR * product_expire_years)
+            if prod_date else fr.expiration_date
+        )
+
+        line_id = _resolve_production_line(db, lot_number) if lot_number else fr.line_id
+
+        location_id = sub_location_id = None
+        if plan:
+            first_area = db.query(StorageArea).filter(StorageArea.id == plan[0]["areaId"]).first()
+            if first_area:
+                location_id = first_area.location_id
+                sub_location_id = first_area.sub_location_id
+
+        receipt_id = f"rcpt-{int(now.timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+        allocation = {
             "success": True,
             "plan": plan,
-            "totalCases": total_cases,
-            "totalPallets": len(licences),
-        },
-        warehouse_id=fr.warehouse_id,
-    )
-    db.add(rec)
+            "totalCases": lot_total_cases,
+            "totalPallets": len(lot_licences),
+        }
+        if floor_pallets or floor_cases:
+            allocation["floorAllocation"] = {
+                "pallets": floor_pallets,
+                "cases": floor_cases,
+            }
 
-    # Create receipt allocations
-    for item in plan:
-        db.add(ReceiptAllocation(
-            receipt_id=receipt_id,
-            storage_area_id=item["areaId"],
-            pallet_quantity=float(item["pallets"]),
-            cases_quantity=float(item["cases"]),
-        ))
+        rec = Receipt(
+            id=receipt_id,
+            product_id=fr.product_id,
+            category_id=cat_id,
+            lot_number=lot_number,
+            quantity=lot_total_cases,
+            unit="cases",
+            production_date=prod_date,
+            expiration_date=exp_date,
+            receipt_date=now,
+            cases_per_pallet=fr.cases_per_pallet,
+            full_pallets=lot_full_pallets,
+            partial_cases=int(lot_partial_cases),
+            quantity_produced=lot_total_cases,
+            shift_id=fr.shift_id,
+            line_id=line_id or fr.line_id,
+            status=ReceiptStatus.APPROVED,
+            location_id=location_id,
+            sub_location_id=sub_location_id,
+            submitted_by=str(fr.scanned_by),
+            approved_by=str(current_user.id),
+            approved_at=now,
+            submitted_at=now,
+            allocation=allocation,
+            warehouse_id=fr.warehouse_id,
+        )
+        db.add(rec)
 
-    # Transition pallets to IN_STOCK
-    for pl in licences:
-        pl.receipt_id = receipt_id
-        pl.status = PalletStatus.IN_STOCK
-        if pl.warehouse_id is None:
-            pl.warehouse_id = fr.warehouse_id
+        for item in plan:
+            db.add(ReceiptAllocation(
+                receipt_id=receipt_id,
+                storage_area_id=item["areaId"],
+                pallet_quantity=float(item["pallets"]),
+                cases_quantity=float(item["cases"]),
+            ))
 
-    # Update storage row occupancy
-    for item in plan:
-        row = db.query(StorageRow).filter(StorageRow.id == item["rowId"]).first()
-        if row:
-            row.occupied_pallets = (row.occupied_pallets or 0) + item["pallets"]
-            row.occupied_cases = (row.occupied_cases or 0) + item["cases"]
-            if not row.product_id:
-                row.product_id = fr.product_id
+        for pl in lot_licences:
+            pl.receipt_id = receipt_id
+            pl.status = PalletStatus.IN_STOCK
+            if pl.warehouse_id is None:
+                pl.warehouse_id = fr.warehouse_id
 
-    # Transition forklift request
+        for item in plan:
+            row = db.query(StorageRow).filter(StorageRow.id == item["rowId"]).first()
+            if row:
+                row.occupied_pallets = (row.occupied_pallets or 0) + item["pallets"]
+                row.occupied_cases = (row.occupied_cases or 0) + item["cases"]
+                if not row.product_id:
+                    row.product_id = fr.product_id
+
+        created_receipt_ids.append(receipt_id)
+
+    # Back-compat: fr.receipt_id holds the first (earliest-sequence) receipt.
     fr.status = ForkliftRequestStatus.APPROVED
-    fr.receipt_id = receipt_id
+    fr.receipt_id = created_receipt_ids[0] if created_receipt_ids else None
     fr.approved_by = str(current_user.id)
-    fr.approved_at = datetime.now(timezone.utc)
+    fr.approved_at = now
 
     db.commit()
-    return {"status": "approved", "receipt_id": receipt_id}
+    return {
+        "status": "approved",
+        "receipt_id": created_receipt_ids[0] if created_receipt_ids else None,
+        "receipt_ids": created_receipt_ids,
+    }
 
 
 def reject_forklift_request(
