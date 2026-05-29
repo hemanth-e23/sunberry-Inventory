@@ -275,6 +275,16 @@ const WarehouseDashboard = () => {
           </div>
         </button>
 
+        <button className="action-button" onClick={() => navigate('/warehouse/active-production')}>
+          <div className="action-icon">
+            <Layers size={24} />
+          </div>
+          <div className="action-content">
+            <h3>Active Production</h3>
+            <p>Set the product currently running on each line</p>
+          </div>
+        </button>
+
 
         {hasFeature(user?.warehouse_type, 'productionRequests') && (
           <button className="action-button" onClick={() => navigate('/warehouse/production-requests')} style={{ borderLeft: '3px solid #007bff' }}>

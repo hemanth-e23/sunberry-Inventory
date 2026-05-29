@@ -276,8 +276,10 @@ function Sidebar({ isOpen, isCollapsed, onToggleCollapse, onClose }) {
     const hasStaging = hasFeature(warehouseType, 'staging');
     const hasProdReqs = hasFeature(warehouseType, 'productionRequests');
     const prodItems = [];
-    // Active Production is available for admin + supervisor on all warehouse types.
-    if (role === 'admin' || role === 'supervisor' || role === 'superadmin' || role === 'corporate_admin') {
+    // Active Production is available for warehouse workers and above on
+    // all warehouse types — they need to switch the line when production
+    // rolls to a new product. Forklift is still excluded.
+    if (role === 'warehouse' || role === 'admin' || role === 'supervisor' || role === 'superadmin' || role === 'corporate_admin') {
       prodItems.push({ label: 'Active Production', icon: Layers, to: `${prefix}/active-production` });
     }
     if (isAdmin && hasStaging) {

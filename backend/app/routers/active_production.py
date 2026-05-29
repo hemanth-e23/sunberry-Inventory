@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
-from app.constants import APPROVAL_ROLES, CATEGORY_FINISHED
+from app.constants import APPROVAL_ROLES, CATEGORY_FINISHED, ROLE_WAREHOUSE
 from app.database import get_db
 from app.models import (
     ActiveLineProduction, Category, Product, ProductionLine, User, Warehouse,
@@ -28,10 +28,14 @@ router = APIRouter()
 
 
 def _require_approval_role(current_user: User = Depends(get_current_active_user)) -> User:
-    if current_user.role not in APPROVAL_ROLES:
+    # Active production is editable by anyone in the warehouse, not just
+    # approval roles — warehouse staff need to switch the line over when
+    # production rolls to a new product. Forklift remains locked out.
+    allowed = set(APPROVAL_ROLES) | {ROLE_WAREHOUSE}
+    if current_user.role not in allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Supervisor or admin access required",
+            detail="Warehouse, supervisor, or admin access required",
         )
     return current_user
 

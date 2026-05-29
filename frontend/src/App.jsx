@@ -514,6 +514,14 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
+        <Route path="/warehouse/active-production" element={
+          <ProtectedRoute requiredRole="warehouse">
+            <Layout>
+              {page(<ActiveProductionPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
         <Route path="/supervisor/active-production" element={
           <ProtectedRoute requiredRole="supervisor">
             <Layout>
