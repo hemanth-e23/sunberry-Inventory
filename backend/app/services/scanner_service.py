@@ -747,6 +747,88 @@ def update_forklift_request(
     return fr
 
 
+_COVERED_PALLET_STATUSES_FOR_GAPS = (
+    PalletStatus.PENDING,
+    PalletStatus.MISSING_STICKER,
+    PalletStatus.IN_STOCK,
+    PalletStatus.RESERVED,
+    PalletStatus.PLACED,
+    PalletStatus.TRANSFERRED,
+    PalletStatus.SHIPPED,
+    PalletStatus.NOT_PRODUCED,
+)
+
+
+def _unresolved_missing_for_fr(db: Session, fr: ForkliftRequest) -> list:
+    """Compute the licence numbers that the UI flags as missing for this
+    request and the supervisor has not yet resolved (added or marked
+    not_produced).
+
+    Mirrors the per-prefix logic in ForkliftTab.jsx:
+    - group this fr's pallet rows by licence-number prefix (lot+product)
+    - for each prefix, the expected range is 1..max(sequence in this group)
+    - subtract sequences covered IN THIS FR plus sequences covered by other
+      forklift sessions for the same prefix (so a parallel driver's session
+      doesn't re-flag the same gaps)
+    """
+    if not fr.pallet_licences:
+        return []
+
+    # Group THIS fr's pallets by licence prefix (everything before the last "-").
+    groups: dict = {}
+    for pl in fr.pallet_licences:
+        lic = pl.licence_number or ""
+        if not lic or pl.sequence is None:
+            continue
+        last_dash = lic.rfind("-")
+        if last_dash < 0:
+            continue
+        prefix = lic[:last_dash]
+        g = groups.setdefault(prefix, {"seqs": set(), "max_seq": 0})
+        g["seqs"].add(int(pl.sequence))
+        if int(pl.sequence) > g["max_seq"]:
+            g["max_seq"] = int(pl.sequence)
+
+    if not groups:
+        return []
+
+    # For each prefix, pull "covered elsewhere" sequences from sibling fr's
+    # touching the same lot+product. Cheap to compute: one query per prefix
+    # filtered by lot_number + product_id.
+    missing: list = []
+    for prefix, g in groups.items():
+        # Derive lot + product code from the prefix. Format: {LOT}-{PRODUCT_CODE}
+        last_dash = prefix.rfind("-")
+        lot_for_prefix = prefix[:last_dash] if last_dash >= 0 else prefix
+        product_code = prefix[last_dash + 1:] if last_dash >= 0 else ""
+
+        covered_elsewhere = set()
+        if lot_for_prefix and fr.product_id:
+            rows = (
+                db.query(PalletLicence.sequence)
+                .filter(
+                    PalletLicence.lot_number == lot_for_prefix,
+                    PalletLicence.product_id == fr.product_id,
+                    PalletLicence.forklift_request_id != fr.id,
+                    PalletLicence.status.in_(_COVERED_PALLET_STATUSES_FOR_GAPS),
+                    PalletLicence.sequence.isnot(None),
+                )
+                .distinct()
+                .all()
+            )
+            covered_elsewhere = {int(s) for (s,) in rows if s is not None}
+
+        for s in range(1, g["max_seq"] + 1):
+            if s in g["seqs"]:
+                continue
+            if s in covered_elsewhere:
+                continue
+            missing.append(f"{prefix}-{str(s).zfill(3)}")
+
+    missing.sort()
+    return missing
+
+
 def approve_forklift_request(
     db: Session,
     request_id: str,
@@ -759,6 +841,11 @@ def approve_forklift_request(
     two separate lots in inventory. Pallets scanned to no storage row ("floor")
     are still linked to their receipt and surfaced as allocation.floorAllocation
     so the inventory UI can render them under "Floor Staging".
+
+    Blocks approval if any sequence gaps are still unresolved — the supervisor
+    must either add the missing pallet (Fix) or mark it Not Produced (Skip)
+    before approval. Reason: previously gaps were silently dropped, and the
+    same missing sequences resurfaced on the next session against the lot.
     """
     _require_admin_or_supervisor(current_user)
 
@@ -767,6 +854,15 @@ def approve_forklift_request(
 
     if not fr.shift_id:
         raise ValidationError("Shift must be set before approval")
+
+    unresolved = _unresolved_missing_for_fr(db, fr)
+    if unresolved:
+        preview = ", ".join(unresolved[:5])
+        suffix = f" (and {len(unresolved) - 5} more)" if len(unresolved) > 5 else ""
+        raise ValidationError(
+            f"Cannot approve — {len(unresolved)} pallet(s) missing: "
+            f"{preview}{suffix}. Add each one or mark it Not Produced first."
+        )
 
     licences = [
         pl for pl in fr.pallet_licences

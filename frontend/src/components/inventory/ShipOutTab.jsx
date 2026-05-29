@@ -7,22 +7,25 @@ import ShipOutLineEditor, { buildLinePayload, emptyShipOutLine } from './ShipOut
 import '../InventoryActionsPage.css';
 
 /**
- * Ship Out tab — multi-product order builder.
+ * Ship Out tab — multi-product order builder (lot-level v2 flow).
  *
  * Layout:
  *   Order Number (single field at top)
- *   Line 1, Line 2, … (each Line = one product, cases needed, pallet selection)
+ *   Line 1, Line 2, … (each line = one product, cases needed, lots picked)
  *   + Add another product
  *   Submit Ship-Out
  *
- * One submit creates one InventoryTransfer (the order) plus one
- * InventoryTransferLine per (product, receipt) pair on the backend.
+ * One submit calls /ship-out/pick-list-v2 which creates one
+ * InventoryTransfer (the order) and one InventoryTransferLine per product
+ * line, each with lot_allocations recording the per-lot case split. No
+ * pallets are reserved — capacity is held in ship_out_lot_reservations.
+ * The forklift commits specific pallets at scan time.
  */
 const ShipOutTab = () => {
   const { addToast } = useToast();
   const { isCorporateUser, selectedWarehouse, selectedWarehouseName } = useAuth();
   const { confirm } = useConfirm();
-  const { createShipOutPickList } = useAppData();
+  const { createShipOutPickListV2 } = useAppData();
 
   const [orderNumber, setOrderNumber] = useState('');
   const [lines, setLines] = useState([emptyShipOutLine()]);
@@ -41,21 +44,15 @@ const ShipOutTab = () => {
     setLines((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  const takenPalletIdsExcept = (excludeIdx) => {
-    const ids = [];
-    lines.forEach((ln, i) => {
-      if (i === excludeIdx) return;
-      ids.push(...(ln.selectedPalletIds || []));
-    });
-    return ids;
-  };
-
-  const totalCases = lines.reduce((sum, ln) => {
-    const info = ln.selectedPalletInfo || {};
-    return sum + (ln.selectedPalletIds || []).reduce((s, id) => s + (info[id]?.cases || 0), 0);
-  }, 0);
-  const totalPallets = lines.reduce((sum, ln) => sum + (ln.selectedPalletIds?.length || 0), 0);
+  const totalCases = lines.reduce(
+    (sum, ln) => sum + (Number(ln.casesRequested) || 0),
+    0
+  );
   const productCount = new Set(lines.map((ln) => ln.productId).filter(Boolean)).size;
+  const totalLots = lines.reduce(
+    (sum, ln) => sum + (ln.lotAllocations || []).length,
+    0
+  );
 
   const handleSubmit = async () => {
     setError('');
@@ -70,20 +67,14 @@ const ShipOutTab = () => {
     }
 
     const payloadLines = [];
-    const seen = new Set();
     for (let i = 0; i < lines.length; i++) {
       const ln = lines[i];
       const built = buildLinePayload(ln);
       if (!built) {
-        setError(`Line ${i + 1}: select a product, enter cases needed, and pick at least one pallet.`);
+        setError(
+          `Line ${i + 1}: select a product, enter cases needed, and allocate them across one or more lots (sum must match exactly).`
+        );
         return;
-      }
-      for (const pid of ln.selectedPalletIds) {
-        if (seen.has(pid)) {
-          setError(`Pallet selected on more than one line. Each pallet can only ship once per order.`);
-          return;
-        }
-        seen.add(pid);
       }
       payloadLines.push(built);
     }
@@ -97,7 +88,7 @@ const ShipOutTab = () => {
 
     setIsSubmitting(true);
     try {
-      const result = await createShipOutPickList({
+      const result = await createShipOutPickListV2({
         orderNumber: orderNumber.trim(),
         lines: payloadLines,
       });
@@ -124,8 +115,8 @@ const ShipOutTab = () => {
       <div className="action-form" style={{ maxWidth: '900px', margin: '0 auto' }}>
         <h3>Ship Out Order</h3>
         <p className="muted small">
-          Add a line per product. Each line can draw pallets from multiple lots (FIFO across receipts).
-          One order can ship multiple products at once.
+          Add a line per product. For each line, pick which lot(s) to draw from and
+          how many cases from each. Forklift picks specific pallets at scan time.
         </p>
 
         <label>
@@ -148,7 +139,6 @@ const ShipOutTab = () => {
               onChange={(next) => updateLine(idx, next)}
               onRemove={() => removeLine(idx)}
               canRemove={lines.length > 1}
-              takenPalletIds={takenPalletIdsExcept(idx)}
             />
           ))}
         </div>
@@ -188,7 +178,7 @@ const ShipOutTab = () => {
           }}
         >
           <span>
-            Order total: <strong>{totalCases.toLocaleString()} cases</strong> · {totalPallets} pallets · {productCount} product{productCount !== 1 ? 's' : ''}
+            Order total: <strong>{totalCases.toLocaleString()} cases</strong> · {totalLots} lot{totalLots !== 1 ? 's' : ''} · {productCount} product{productCount !== 1 ? 's' : ''}
           </span>
         </div>
 
@@ -196,12 +186,12 @@ const ShipOutTab = () => {
           type="button"
           className="primary-button"
           onClick={handleSubmit}
-          disabled={isSubmitting || !orderNumber.trim() || totalPallets === 0}
+          disabled={isSubmitting || !orderNumber.trim() || totalCases === 0}
           style={{ width: '100%' }}
         >
           {isSubmitting
             ? 'Submitting…'
-            : `Submit Ship-Out (${totalPallets} pallets · ${totalCases.toLocaleString()} cases)`}
+            : `Submit Ship-Out (${totalCases.toLocaleString()} cases)`}
         </button>
       </div>
     </div>

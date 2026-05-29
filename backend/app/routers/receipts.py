@@ -1,5 +1,7 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime
 import json
@@ -223,8 +225,26 @@ async def create_receipt(
         plan = alloc.get("plan") or []
         product = db.query(Product).filter(Product.id == db_receipt.product_id).first()
         product_code = (product.short_code or product.fcc_code or product.name or "PRD")[:10].replace(" ", "").upper()
-        seq = 1
         total_plan_pallets = sum(int(i.get("pallets", 0)) for i in plan)
+
+        # Continue the existing sequence for this (lot, product) instead of
+        # restarting at 001. Real-world flow: pallets 001-020 already exist
+        # (from the palletizer kiosk or an earlier receipt); when the
+        # operator logs another batch (e.g. "found 20 more"), we append
+        # 021-040 instead of failing on duplicate licence numbers.
+        max_existing_seq = (
+            db.query(func.coalesce(func.max(PalletLicence.sequence), 0))
+            .filter(
+                PalletLicence.lot_number == db_receipt.lot_number,
+                PalletLicence.product_id == db_receipt.product_id,
+            )
+            .scalar()
+            or 0
+        )
+        start_seq = int(max_existing_seq) + 1
+        end_seq = start_seq + total_plan_pallets - 1
+
+        seq = start_seq
         for item in plan:
             row_id = item.get("rowId")
             area_id = item.get("areaId")
@@ -232,7 +252,10 @@ async def create_receipt(
             item_cases = float(item.get("cases", 0))
             cases_per_pallet = (item_cases / pallets) if pallets > 0 else (db_receipt.cases_per_pallet or DEFAULT_CASES_PER_PALLET)
             for p in range(pallets):
-                is_last = seq == total_plan_pallets
+                # `is_last` is the last pallet of THIS receipt's batch, not of
+                # the whole (lot, product). Only this batch's tail can be a
+                # partial pallet.
+                is_last = seq == end_seq
                 is_partial = is_last and (db_receipt.partial_cases or 0) > 0
                 cases = int(db_receipt.partial_cases) if is_partial else int(cases_per_pallet)
                 lic_num = f"{db_receipt.lot_number}-{product_code}-{str(seq).zfill(3)}"
@@ -253,8 +276,36 @@ async def create_receipt(
                 db.add(pl)
                 seq += 1
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        # Defensive net for any unique-constraint race that slipped past the
+        # pre-check above (concurrent receipt submission of the same lot).
+        db.rollback()
+        msg = str(getattr(e, "orig", e))
+        if "ix_pallet_licences_licence_number" in msg or "pallet_licences" in msg:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "A pallet licence with the same number already exists for "
+                    "this lot + product. Another session may have just created "
+                    "them. Refresh and try again with a different lot, or "
+                    "remove the existing pallets."
+                ),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not save receipt — a uniqueness conflict occurred.",
+        )
     db.refresh(db_receipt)
+
+    # Tag the response with the exact licence range that was generated, so
+    # the toast can show real numbers instead of the frontend's guesswork.
+    if is_finished_goods and db_receipt.lot_number and db_receipt.product_id and total_plan_pallets > 0:
+        db_receipt.generated_licence_first = f"{db_receipt.lot_number}-{product_code}-{str(start_seq).zfill(3)}"
+        db_receipt.generated_licence_last = f"{db_receipt.lot_number}-{product_code}-{str(end_seq).zfill(3)}"
+        db_receipt.generated_licence_count = total_plan_pallets
+
     return db_receipt
 
 @router.get("/{receipt_id}", response_model=ReceiptSchema)

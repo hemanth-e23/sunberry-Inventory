@@ -18,6 +18,8 @@ from app.schemas import (
     InventoryTransfer as InventoryTransferSchema, InventoryTransferCreate, InventoryTransferUpdate,
     ShipOutPickListCreate, ScanPickRequest, ForkliftSubmitRequest,
     TransferEditRequest, TransferVoidRequest,
+    # v2 lot-level ship-out
+    ShipOutPickListCreateV2, ScanPickRequestV2, LotEscapeHatchRequest,
 )
 from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus, ShipOutScanReason
@@ -115,6 +117,11 @@ def _transfer_to_response(transfer, db: Session) -> dict:
                 "cases_requested": ln.cases_requested,
                 "cases_picked": ln.cases_picked,
                 "pallet_licence_ids": ln.pallet_licence_ids or [],
+                # v2 lot-level fields (populated by the new pick-list flow;
+                # backfilled for legacy rows by the migration)
+                "lot_allocations": ln.lot_allocations or [],
+                "picks": ln.picks or [],
+                "lot_swap_history": ln.lot_swap_history or [],
                 "line_seq": ln.line_seq,
             })
         data["lines"] = line_list
@@ -187,16 +194,26 @@ async def get_transfers(
     skip: int = 0,
     limit: int = 1000,
     status: str = None,
+    transfer_type: str = None,
     requested_by: str = None,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
-    """Get all inventory transfers with pallet licence details."""
+    """Get inventory transfers with pallet licence details.
+
+    Forklift role is restricted to pending ship-out orders only — the
+    scanner needs this to populate the order-picker screen. Everything
+    else (other statuses, other transfer types) still 403s for forklift.
+    """
     if current_user.role == ROLE_FORKLIFT:
-        raise HTTPException(
-            status_code=403,
-            detail="Forklift role does not have access to the transfer list"
-        )
+        if status != TransferStatus.PENDING or transfer_type != TRANSFER_TYPE_SHIPPED_OUT:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Forklift can only list pending ship-out orders "
+                    "(status=pending, transfer_type=shipped-out)."
+                ),
+            )
 
     query = db.query(InventoryTransfer)
 
@@ -206,6 +223,8 @@ async def get_transfers(
 
     if status:
         query = query.filter(InventoryTransfer.status == status)
+    if transfer_type:
+        query = query.filter(InventoryTransfer.transfer_type == transfer_type)
     if requested_by:
         query = query.filter(InventoryTransfer.requested_by == requested_by)
 
@@ -731,8 +750,9 @@ async def get_transfer_scan_progress(
 
     # Build scan lookup: pallet_id -> latest scan event
     scanned_pl_ids: dict = {}
-    exceptions = []
+    raw_exceptions: list = []
     last_scan = None
+    successful_normalized: set = set()
     for e in events:
         scanner_name = None
         if e.scanned_by:
@@ -746,9 +766,20 @@ async def get_transfer_scan_progress(
         }
         if e.on_list and e.licence_id:
             scanned_pl_ids[e.licence_id] = evt
+        if e.on_list and e.licence_number:
+            successful_normalized.add("".join(e.licence_number.split()).upper())
         if not e.on_list:
-            exceptions.append(evt)
+            raw_exceptions.append(evt)
         last_scan = evt
+
+    # Suppress exceptions that the user later resolved with a successful scan
+    # (whitespace-normalized + case-insensitive match against successful
+    # scans). Stops failed copy-paste attempts from showing up after the
+    # pallet was eventually picked correctly.
+    exceptions = [
+        e for e in raw_exceptions
+        if "".join((e["licence_number"] or "").split()).upper() not in successful_normalized
+    ]
 
     # Build per-pallet pick list (enriched with product info for grouped display)
     pick_list = []
@@ -1088,7 +1119,16 @@ async def void_ship_out_transfer(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
-    """Void a ship-out order. Releases all reserved pallets back to IN_STOCK."""
+    """Void a ship-out order.
+
+    v1 (pallets in RESERVED): releases those pallets back to IN_STOCK.
+    v2 (lot reservations + pallet picks): allowed only while zero pallets
+    have been scanned. Once any pallet is SHIPPED or any line has a pick
+    recorded, the only path back is an inventory adjustment (the pallets
+    are physically gone from the shelf or split across two rows).
+    """
+    from app.services import ship_out_service
+
     _require_warehouse_role_or_higher(current_user)
 
     transfer = (
@@ -1106,12 +1146,27 @@ async def void_ship_out_transfer(
             detail=f"Cannot void an order that is already {transfer.status}",
         )
 
+    # v2 guard: refuse if any pallet has been scanned.
+    if ship_out_service.transfer_has_picks(transfer):
+        pick_count = sum(len(ln.picks or []) for ln in (transfer.lines or []))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot void — {pick_count} pallet(s) already picked. "
+                "Return pallets and use an inventory adjustment instead."
+            ),
+        )
+
+    # v1: release any RESERVED pallets back to IN_STOCK.
     pallet_ids = list(transfer.pallet_licence_ids or [])
     pallet_lookup = _lock_pallets_for_update(db, pallet_ids)
     for pid in pallet_ids:
         pl = pallet_lookup.get(pid)
         if pl and pl.status == PalletStatus.RESERVED:
             pl.status = PalletStatus.IN_STOCK
+
+    # v2: release any lot reservations on this order.
+    ship_out_service.release_reservations(db, transfer)
 
     transfer.status = TransferStatus.VOIDED
     transfer.voided_at = datetime.now(timezone.utc)
@@ -1197,7 +1252,175 @@ async def reject_transfer(
         )
 
     transfer_service.reject_transfer(db, transfer, reason, current_user)
+    # v2: also release any lot reservations.
+    from app.services import ship_out_service
+    if (transfer.transfer_type or "") == TRANSFER_TYPE_SHIPPED_OUT:
+        ship_out_service.release_reservations(db, transfer)
     db.commit()
     db.refresh(transfer)
 
     return {"message": "Transfer rejected successfully", "transfer": transfer}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Lot-level ship-out v2 endpoints
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.get("/ship-out/available-lots")
+async def list_available_lots(
+    product_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+):
+    """Phase 1 helper: lots available for a product, oldest-first, with
+    cases minus active reservations and per-row breakdown."""
+    from app.services import ship_out_service
+
+    target_warehouse_id = resolve_warehouse_for_write(current_user)
+    lots = ship_out_service.available_lots_for_product(db, product_id, target_warehouse_id)
+    return {"lots": lots}
+
+
+@router.post("/ship-out/pick-list-v2")
+async def create_ship_out_pick_list_v2(
+    data: ShipOutPickListCreateV2,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+):
+    """Phase 1 submission: warehouse worker creates a ship-out order by
+    picking lots + cases per line. Pallets stay IN_STOCK; capacity is held
+    in `ship_out_lot_reservations`."""
+    from app.services import ship_out_service
+
+    target_warehouse_id = resolve_warehouse_for_write(current_user)
+
+    # Soft warn for duplicate order_number in this warehouse
+    dup_query = db.query(InventoryTransfer).filter(
+        InventoryTransfer.order_number == data.order_number,
+        InventoryTransfer.transfer_type == TRANSFER_TYPE_SHIPPED_OUT,
+        InventoryTransfer.status.in_([TransferStatus.PENDING, TransferStatus.FORKLIFT_SUBMITTED]),
+    )
+    if target_warehouse_id:
+        dup_query = dup_query.filter(InventoryTransfer.warehouse_id == target_warehouse_id)
+    duplicate_warning = dup_query.first()
+
+    try:
+        transfer = ship_out_service.create_pick_list_v2(
+            db, data, current_user, target_warehouse_id
+        )
+    except Exception as e:
+        db.rollback()
+        from app.exceptions import ValidationError, NotFoundError
+        if isinstance(e, (ValidationError, NotFoundError)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise
+
+    db.commit()
+    db.refresh(transfer)
+
+    response = _transfer_to_response(transfer, db)
+    if duplicate_warning:
+        response["warning"] = (
+            f"Order number {data.order_number} already has another open ship-out "
+            f"({duplicate_warning.id})."
+        )
+    return response
+
+
+@router.get("/transfers/{transfer_id}/scanner-view")
+async def get_scanner_view(
+    transfer_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+):
+    """Phase 2 helper: forklift's view of a ship-out — per-line, per-open-lot,
+    per-row, with pallets inside each row sorted by sequence ascending."""
+    from app.services import ship_out_service
+
+    transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == transfer_id).first()
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+    _ship_out_only(transfer)
+
+    try:
+        view = ship_out_service.scanner_view_for_transfer(db, transfer)
+    except Exception as e:
+        from app.exceptions import ValidationError, NotFoundError
+        if isinstance(e, (ValidationError, NotFoundError)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise
+    return view
+
+
+@router.post("/transfers/{transfer_id}/scan-pick-v2")
+async def scan_pick_v2_endpoint(
+    transfer_id: str,
+    data: ScanPickRequestV2,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+):
+    """Phase 2 scan: lot-aware. Returns ok=False with `needs_partial_confirm`
+    when the scanned pallet would overshoot the line — client re-scans with
+    `cases_to_consume` set to confirm the partial pull."""
+    from app.services import ship_out_service
+
+    transfer = (
+        db.query(InventoryTransfer)
+        .filter(InventoryTransfer.id == transfer_id)
+        .with_for_update()
+        .first()
+    )
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+    _ship_out_only(transfer)
+
+    try:
+        result = ship_out_service.scan_pick_v2(
+            db, transfer, data.licence_number, data.cases_to_consume, current_user
+        )
+    except Exception as e:
+        db.rollback()
+        from app.exceptions import ValidationError, NotFoundError
+        if isinstance(e, (ValidationError, NotFoundError)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise
+
+    db.commit()
+    return result
+
+
+@router.post("/transfers/{transfer_id}/lot-escape-hatch")
+async def lot_escape_hatch_endpoint(
+    transfer_id: str,
+    data: LotEscapeHatchRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+):
+    """Phase 2 escape hatch: forklift marks the current lot's rows
+    inaccessible. Server swaps to next-oldest lot of the same product."""
+    from app.services import ship_out_service
+
+    transfer = (
+        db.query(InventoryTransfer)
+        .filter(InventoryTransfer.id == transfer_id)
+        .with_for_update()
+        .first()
+    )
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+    _ship_out_only(transfer)
+
+    try:
+        result = ship_out_service.lot_escape_hatch(
+            db, transfer, data.line_id, data.blocked_lot_number,
+            list(data.blocked_row_ids or []), data.reason, current_user,
+        )
+    except Exception as e:
+        db.rollback()
+        from app.exceptions import ValidationError, NotFoundError
+        if isinstance(e, (ValidationError, NotFoundError)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise
+
+    db.commit()
+    return result

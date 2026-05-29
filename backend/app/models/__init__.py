@@ -21,6 +21,7 @@ from app.models.receipt import Receipt, ReceiptAllocation
 # 4. Inventory transfers (FK: receipts, locations, users, warehouses)
 from app.models.inventory import (
     InventoryTransfer, InventoryTransferLine, TransferPalletSwap,
+    ShipOutLotReservation,
     InventoryAdjustment, InventoryHoldAction,
     CycleCount, StagingItem,
 )

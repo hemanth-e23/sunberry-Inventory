@@ -121,6 +121,9 @@ export const AppDataProvider = ({ children }) => {
     editShipOutTransfer: inventory.editShipOutTransfer,
     voidShipOutTransfer: inventory.voidShipOutTransfer,
     fetchTransferScanProgress: inventory.fetchTransferScanProgress,
+    // Lot-level ship-out v2
+    fetchAvailableLots: inventory.fetchAvailableLots,
+    createShipOutPickListV2: inventory.createShipOutPickListV2,
     inventoryHoldActions: inventory.inventoryHoldActions,
     submitHoldAction: inventory.submitHoldAction,
     updateHoldAction: inventory.updateHoldAction,

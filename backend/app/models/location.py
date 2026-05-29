@@ -60,6 +60,11 @@ class StorageRow(Base):
     hold = Column(Boolean, default=False)
     notes = Column(Text)
     is_active = Column(Boolean, default=True)
+    # When true, ship-out partial pulls move pallet remainders into this row.
+    # Operationally one row per warehouse is flagged (named e.g. "Partials").
+    is_partial_pallet_location = Column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     storage_area = relationship("StorageArea", backref="rows")

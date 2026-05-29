@@ -96,6 +96,78 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
 
         const transferLines = transfer.lines || null;
         const isMultiProduct = Array.isArray(transferLines) && transferLines.length > 0;
+
+        // Aggregate DB sub-lines by (product, lot) for display. A single UI
+        // line can fan out to multiple DB rows (one per receipt) under v2 —
+        // and drift sub-lines can add extra rows for the same lot. The
+        // approver thinks in lots, so we collapse the receipt-level split.
+        const aggregatedLines = (() => {
+          if (!isMultiProduct) return [];
+          const map = new Map();
+          for (const ln of transferLines) {
+            const palletCount = (ln.pallet_licence_ids || []).length;
+            const allocs = ln.lot_allocations || [];
+
+            if (allocs.length === 0) {
+              // Legacy / v1 lines with no lot_allocations — keyed by line's
+              // own lot_number (derived from receipt on the backend).
+              const key = `${ln.product_id}__${ln.lot_number || '—'}`;
+              const e = map.get(key) || {
+                id: key,
+                product_name: ln.product_name,
+                product_fcc_code: ln.product_fcc_code,
+                lot_number: ln.lot_number || '—',
+                cases_requested: 0,
+                cases_picked: 0,
+                pallet_licence_ids: [],
+              };
+              e.cases_requested += Number(ln.cases_requested) || 0;
+              e.cases_picked += Number(ln.cases_picked) || 0;
+              e.pallet_licence_ids = e.pallet_licence_ids.concat(ln.pallet_licence_ids || []);
+              map.set(key, e);
+              continue;
+            }
+
+            const totalPicked = allocs.reduce((s, a) => s + (Number(a.cases_picked) || 0), 0);
+            allocs.forEach((alloc, idx) => {
+              const lot = alloc.lot_number || '—';
+              const key = `${ln.product_id}__${lot}`;
+              const e = map.get(key) || {
+                id: key,
+                product_name: ln.product_name,
+                product_fcc_code: ln.product_fcc_code,
+                lot_number: lot,
+                cases_requested: 0,
+                cases_picked: 0,
+                pallet_licence_ids: [],
+              };
+              e.cases_requested += Number(alloc.cases_requested) || 0;
+              e.cases_picked += Number(alloc.cases_picked) || 0;
+              // Pallet attribution: in the common case a sub-line has one
+              // lot allocation, so all of its pallets belong here. With
+              // multiple lot allocations on a sub-line (rare — drift or
+              // escape hatch), split proportionally to cases_picked.
+              if (allocs.length === 1) {
+                if (idx === 0) {
+                  e.pallet_licence_ids = e.pallet_licence_ids.concat(ln.pallet_licence_ids || []);
+                }
+              } else if (totalPicked > 0 && (Number(alloc.cases_picked) || 0) > 0) {
+                const share = Math.round(
+                  palletCount * ((Number(alloc.cases_picked) || 0) / totalPicked)
+                );
+                // Approximate — exact pallet→lot resolution would need
+                // pallet enrichment, which we skip for the approver view.
+                e.pallet_licence_ids = e.pallet_licence_ids.concat(
+                  (ln.pallet_licence_ids || []).slice(0, share)
+                );
+              }
+              map.set(key, e);
+            });
+          }
+          return Array.from(map.values()).sort((a, b) =>
+            String(a.lot_number).localeCompare(String(b.lot_number))
+          );
+        })();
         const swaps = transfer.swaps || progress?.swaps || [];
         const headerTitle = isMultiProduct
           ? (transfer.orderNumber || transfer.order_number || `Order ${transfer.id.slice(-8)}`)
@@ -192,7 +264,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                     </tr>
                   </thead>
                   <tbody>
-                    {transferLines.map((ln, i) => (
+                    {aggregatedLines.map((ln, i) => (
                       <tr key={ln.id} style={{ borderTop: i ? '1px solid #e5e7eb' : 'none', background: i % 2 === 0 ? '#fafbfc' : 'white' }}>
                         <td style={{ padding: '6px 10px' }}>{ln.product_name || ln.product_id}</td>
                         <td style={{ padding: '6px 10px', color: '#64748b' }}>{ln.product_fcc_code || '—'}</td>

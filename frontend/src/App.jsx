@@ -43,6 +43,7 @@ const ScannerHome = lazy(() => import('./components/scanner/ScannerHome'));
 const ScannerReceiptFlow = lazy(() => import('./components/scanner/ScannerReceiptFlow'));
 const ScannerTransferFlow = lazy(() => import('./components/scanner/ScannerTransferFlow'));
 const ScannerShipOutFlow = lazy(() => import('./components/scanner/ScannerShipOutFlow'));
+const ScannerShipOutFlowV2 = lazy(() => import('./components/scanner/ScannerShipOutFlowV2'));
 
 // Context
 import { ToastProvider } from './context/ToastContext';
@@ -209,6 +210,14 @@ function AppRoutes() {
         } />
 
         <Route path="/forklift/ship-out" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerShipOutFlowV2 />
+          </ProtectedRoute>
+        } />
+
+        {/* Legacy v1 pallet-level ship-out scanner — kept for in-flight
+            orders submitted before the v2 cutover. Will drain over time. */}
+        <Route path="/forklift/ship-out-v1" element={
           <ProtectedRoute requiredRole="forklift">
             <ScannerShipOutFlow />
           </ProtectedRoute>

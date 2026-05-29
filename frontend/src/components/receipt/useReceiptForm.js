@@ -44,6 +44,23 @@ const defaultFormState = {
 };
 
 export const buildLicenceNote = (receipt, products = []) => {
+  // Prefer the exact range the backend reports — it knows the real
+  // sequence start (which appends to any existing pallets of the same
+  // lot+product) and uses the same product_code resolution rules as the
+  // create endpoint.
+  const first = receipt?.generated_licence_first || receipt?.generatedLicenceFirst;
+  const last = receipt?.generated_licence_last || receipt?.generatedLicenceLast;
+  const count = receipt?.generated_licence_count ?? receipt?.generatedLicenceCount;
+  if (first && last && count) {
+    if (first === last) {
+      return `${count} pallet licence number generated (${first})`;
+    }
+    return `${count} pallet licence numbers generated (${first} through ${last})`;
+  }
+
+  // Fallback (e.g. preview before submit): derive from the receipt's plan.
+  // Note this can't know about existing pallets in the same (lot, product),
+  // so it shows 001..N — acceptable for the pre-submit preview only.
   const lot = receipt?.lotNo || receipt?.lot_number;
   const prodId = receipt?.productId || receipt?.product_id;
   if (!receipt?.allocation?.plan?.length || !lot || !prodId) return null;
@@ -51,7 +68,10 @@ export const buildLicenceNote = (receipt, products = []) => {
   const totalPallets = plan.reduce((s, i) => s + (parseInt(i.pallets, 10) || 0), 0);
   if (totalPallets < 1) return null;
   const product = products.find((p) => p.id === prodId) || {};
-  const productCode = (product.fcc || product.name || "PRD").slice(0, 10).replace(/\s/g, "").toUpperCase();
+  const productCode = (product.short_code || product.shortCode || product.fcc || product.name || "PRD")
+    .slice(0, 10)
+    .replace(/\s/g, "")
+    .toUpperCase();
   const lastSeq = String(totalPallets).padStart(3, "0");
   return `${totalPallets} pallet licence numbers generated (e.g. ${lot}-${productCode}-001 through ${productCode}-${lastSeq})`;
 };

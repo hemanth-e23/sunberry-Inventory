@@ -419,6 +419,12 @@ export const ReceiptProvider = ({ children }) => {
         ...baseReceipt,
         allocation: allocationData,
         ...(pendingAllocation ? { pendingAllocation } : {}),
+        // Pass-through the actual licence range the backend generated, so
+        // the success toast can show real numbers (e.g. ...-141 through
+        // ...-150) instead of guessing 001..N.
+        generated_licence_first: response.data.generated_licence_first || null,
+        generated_licence_last: response.data.generated_licence_last || null,
+        generated_licence_count: response.data.generated_licence_count || null,
       };
 
       setReceipts((prev) => [...prev, newReceipt]);

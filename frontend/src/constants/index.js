@@ -84,6 +84,8 @@ export const SHIP_OUT_SCAN_REASON = {
   LINE_COMPLETE: 'line_complete',
   PALLET_UNAVAILABLE: 'pallet_unavailable',
   PALLET_NOT_FOUND: 'pallet_not_found',
+  // v2 lot-level ship-out: same product but wrong lot, server offers swap
+  WRONG_LOT_NEEDS_SWAP: 'wrong_lot_needs_swap',
 };
 
 export const STAGING_ITEM_STATUS = {

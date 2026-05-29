@@ -33,6 +33,13 @@ from app.schemas.inventory import (
     ShipOutPalletPick, ShipOutLineCreate, ShipOutPickListCreate,
     TransferEditLineUpdate, TransferEditRequest, TransferVoidRequest,
     ScanPickRequest, ForkliftSubmitRequest,
+    # Lot-level ship-out v2
+    LotAllocation, Pick, LotSwapHistoryEntry,
+    AvailableLotRow, AvailableLot,
+    ShipOutLineInputV2, ShipOutPickListCreateV2,
+    ScannerPallet, ScannerRow, ScannerLotView, ScannerLineView, ScannerTransferView,
+    ScanPickRequestV2, ScanPickResponseV2,
+    LotEscapeHatchRequest, LotEscapeHatchResponse,
     InventoryAdjustmentBase, InventoryAdjustmentCreate, InventoryAdjustmentUpdate, InventoryAdjustment,
     HoldItem, InventoryHoldActionBase, InventoryHoldActionCreate, InventoryHoldActionUpdate, InventoryHoldAction,
     CycleCountBase, CycleCountCreate, CycleCount,

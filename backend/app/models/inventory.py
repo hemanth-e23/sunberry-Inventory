@@ -69,12 +69,47 @@ class InventoryTransferLine(Base):
     cases_requested = Column(Float, nullable=False)
     cases_picked = Column(Float, nullable=False, default=0)
     pallet_licence_ids = Column(JSON, nullable=True)
+    # Lot-level intent: [{lot_number, cases_requested, cases_picked}]
+    lot_allocations = Column(JSON, nullable=True)
+    # Actual scanned pulls: [{pallet_licence_id, cases_consumed, was_partial,
+    # scanned_at, scanned_by}]. Source of truth for what shipped.
+    picks = Column(JSON, nullable=True)
+    # Audit of escape-hatch swaps: [{from_lot, to_lot, reason, at, by}]
+    lot_swap_history = Column(JSON, nullable=True)
     line_seq = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     transfer = relationship("InventoryTransfer", back_populates="lines")
     product = relationship("Product")
     receipt = relationship("Receipt")
+
+
+class ShipOutLotReservation(Base):
+    """Soft capacity lock per (product_id, lot_number) for an open ship-out line.
+
+    Prevents two concurrent ship-out plans from over-committing the same lot.
+    Sum of `cases_reserved` for active rows (released_at IS NULL) on a
+    (product_id, lot_number) must stay ≤ that lot's available cases.
+    Released when the line is fully picked, voided, or swapped via the
+    escape hatch.
+    """
+    __tablename__ = "ship_out_lot_reservations"
+
+    id = Column(String(50), primary_key=True)
+    transfer_line_id = Column(
+        String(50),
+        ForeignKey("inventory_transfer_lines.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    product_id = Column(String(50), ForeignKey("products.id"), nullable=False)
+    lot_number = Column(String(100), nullable=False)
+    cases_reserved = Column(Float, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    released_at = Column(DateTime(timezone=True), nullable=True)
+
+    transfer_line = relationship("InventoryTransferLine", backref="lot_reservations")
+    product = relationship("Product")
 
 
 class TransferPalletSwap(Base):

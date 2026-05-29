@@ -7,141 +7,151 @@ import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 /**
  * One product line within a multi-product ship-out order.
  *
- * Controlled by parent via `value` / `onChange` props:
+ * Controlled by parent via `value` / `onChange`:
  *   value = {
  *     productId: string,
  *     casesRequested: number|string,
- *     selectedPalletIds: string[],
- *     // selectedPalletInfo is a lookup [id -> { id, receipt_id, cases, licence_number, lot_number }]
- *     // maintained by this component so the parent can group by receipt at submit time.
- *     selectedPalletInfo: Record<string, object>,
+ *     lotAllocations: [
+ *       {
+ *         lotNumber: string,
+ *         casesRequested: number,      // what this line draws from this lot
+ *         casesAvailable: number,      // live snapshot from /available-lots
+ *         palletsAvailable: number,
+ *         oldestAt: string|null,
+ *         rows: [{row_id, row_name, cases, pallets}],
+ *       },
+ *       ...
+ *     ],
  *   }
- *   onChange(next)
  *
- * Loads pallet licences for the chosen product, suggests FIFO selection, and lets
- * the user adjust the selection. Multiple receipts per line are allowed (FIFO
- * naturally crosses receipts) — picks are grouped by receipt when the parent
- * submits.
+ * The user picks a product + total cases; the component loads the list of
+ * available lots (FIFO order from the backend) and lets them split the order
+ * across one or more lots. Forklift commits specific pallets at scan time.
  */
-const ShipOutLineEditor = ({ value, onChange, onRemove, canRemove, lineIndex, takenPalletIds }) => {
-  const { products, categories, receipts, fetchPalletLicences } = useAppData();
-  const [licences, setLicences] = useState([]);
+const ShipOutLineEditor = ({ value, onChange, onRemove, canRemove, lineIndex }) => {
+  const { products, categories, fetchAvailableLots } = useAppData();
+  const [availableLots, setAvailableLots] = useState([]);
   const [loadError, setLoadError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const approvedReceipts = useMemo(
-    () => receipts.filter((r) => r.status === RECEIPT_STATUS.APPROVED),
-    [receipts]
-  );
-
+  // FG products that still have stock somewhere (best-effort filter — the
+  // available-lots endpoint is authoritative once a product is picked).
   const finishedGoodsProducts = useMemo(() => {
-    const productIdsWithStock = new Set(
-      approvedReceipts.filter((r) => r.quantity > 0).map((r) => r.productId)
-    );
     return products
       .filter((p) => {
         const cat = categories.find((c) => c.id === p.categoryId);
-        return cat?.type === CATEGORY_TYPES.FINISHED && productIdsWithStock.has(p.id);
+        return cat?.type === CATEGORY_TYPES.FINISHED;
       })
       .map((p) => ({ value: p.id, label: String(p.name || 'Unknown') }));
-  }, [products, categories, approvedReceipts]);
+  }, [products, categories]);
 
-  const loadLicences = async (productId) => {
+  const loadLots = async (productId) => {
     if (!productId) {
-      setLicences([]);
+      setAvailableLots([]);
       return;
     }
     setIsLoading(true);
     setLoadError('');
     try {
-      const list = await fetchPalletLicences({ product_id: productId, status: 'in_stock', is_held: false });
-      const sorted = (list || []).sort((a, b) => {
-        const dateA = a.expiration_date || a.lot_number || '';
-        const dateB = b.expiration_date || b.lot_number || '';
-        if (dateA < dateB) return -1;
-        if (dateA > dateB) return 1;
-        return (a.sequence || 0) - (b.sequence || 0);
-      });
-      setLicences(sorted);
-      if (!sorted.length) {
-        setLoadError('No pallets in stock for this product.');
+      const lots = await fetchAvailableLots(productId);
+      setAvailableLots(lots || []);
+      if (!lots || lots.length === 0) {
+        setLoadError('No lots available for this product.');
       }
     } catch (e) {
       console.error(e);
-      setLoadError('Failed to load pallet licences.');
+      setLoadError('Failed to load lot availability.');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Auto-load pallets when the product changes
+  // Reload lots whenever product changes. Also reset the lot allocations so
+  // a stale allocation from the previous product doesn't survive.
   useEffect(() => {
     if (value.productId) {
-      loadLicences(value.productId);
+      loadLots(value.productId);
     } else {
-      setLicences([]);
+      setAvailableLots([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value.productId]);
 
   const cases = Number(value.casesRequested) || 0;
 
-  const palletInfoFromList = (palletId) => {
-    const pl = licences.find((l) => l.id === palletId);
-    if (!pl) return null;
-    return {
-      id: pl.id,
-      receipt_id: pl.receipt_id,
-      cases: pl.cases || 0,
-      licence_number: pl.licence_number,
-      lot_number: pl.lot_number,
-    };
-  };
+  const allocatedCases = (value.lotAllocations || []).reduce(
+    (s, la) => s + (Number(la.casesRequested) || 0),
+    0
+  );
+  const shortage = Math.max(0, cases - allocatedCases);
+  const overage = Math.max(0, allocatedCases - cases);
 
-  // FIFO auto-suggest when cases change
-  const autoSelect = () => {
-    if (!cases || !licences.length) return;
-    const blocked = new Set(takenPalletIds || []);
+  // FIFO auto-fill — distribute `casesRequested` across lots oldest-first,
+  // taking whole-lot bites until the total is satisfied.
+  const fifoFill = () => {
+    if (!cases || availableLots.length === 0) return;
     let remaining = cases;
-    const pickedIds = [];
-    const pickedInfo = {};
-    for (const pl of licences) {
+    const allocs = [];
+    for (const lot of availableLots) {
       if (remaining <= 0) break;
-      if (blocked.has(pl.id)) continue;
-      pickedIds.push(pl.id);
-      pickedInfo[pl.id] = palletInfoFromList(pl.id);
-      remaining -= pl.cases || 0;
+      const take = Math.min(remaining, lot.cases_available);
+      if (take <= 0) continue;
+      allocs.push({
+        lotNumber: lot.lot_number,
+        casesRequested: take,
+        casesAvailable: lot.cases_available,
+        palletsAvailable: lot.pallets_available,
+        oldestAt: lot.oldest_at,
+        rows: lot.rows || [],
+      });
+      remaining -= take;
     }
-    onChange({ ...value, selectedPalletIds: pickedIds, selectedPalletInfo: pickedInfo });
+    onChange({ ...value, lotAllocations: allocs });
   };
 
-  const togglePallet = (palletId, checked) => {
-    let nextIds;
-    const nextInfo = { ...(value.selectedPalletInfo || {}) };
-    if (checked) {
-      nextIds = [...value.selectedPalletIds, palletId];
-      nextInfo[palletId] = palletInfoFromList(palletId);
+  const updateLotCases = (lotNumber, casesStr) => {
+    // Preserve empty string so the input renders blank (with placeholder "0")
+    // rather than a real "0" — otherwise typing 500 with the cursor before
+    // the 0 produces 5000.
+    let nextVal;
+    if (casesStr === '' || casesStr === null || casesStr === undefined) {
+      nextVal = '';
     } else {
-      nextIds = value.selectedPalletIds.filter((id) => id !== palletId);
-      delete nextInfo[palletId];
+      const n = Number(casesStr);
+      nextVal = isNaN(n) || n < 0 ? 0 : n;
     }
-    onChange({ ...value, selectedPalletIds: nextIds, selectedPalletInfo: nextInfo });
+    const next = (value.lotAllocations || []).map((la) =>
+      la.lotNumber === lotNumber ? { ...la, casesRequested: nextVal } : la
+    );
+    onChange({ ...value, lotAllocations: next });
   };
 
-  const selectedPallets = value.selectedPalletIds
-    .map((id) => licences.find((l) => l.id === id))
-    .filter(Boolean);
-  const selectedCases = selectedPallets.reduce((s, p) => s + (p.cases || 0), 0);
-  const palletsInLineByReceipt = useMemo(() => {
-    const grouped = {};
-    selectedPallets.forEach((pl) => {
-      if (!grouped[pl.receipt_id]) grouped[pl.receipt_id] = [];
-      grouped[pl.receipt_id].push(pl);
-    });
-    return grouped;
-  }, [selectedPallets]);
+  const addLotToAllocation = (lot) => {
+    if ((value.lotAllocations || []).some((la) => la.lotNumber === lot.lot_number)) return;
+    const next = [
+      ...(value.lotAllocations || []),
+      {
+        lotNumber: lot.lot_number,
+        // Start empty so the input shows the placeholder, not a real "0".
+        casesRequested: '',
+        casesAvailable: lot.cases_available,
+        palletsAvailable: lot.pallets_available,
+        oldestAt: lot.oldest_at,
+        rows: lot.rows || [],
+      },
+    ];
+    onChange({ ...value, lotAllocations: next });
+  };
 
-  const shortage = cases > 0 ? Math.max(0, cases - selectedCases) : 0;
+  const removeLotFromAllocation = (lotNumber) => {
+    const next = (value.lotAllocations || []).filter((la) => la.lotNumber !== lotNumber);
+    onChange({ ...value, lotAllocations: next });
+  };
+
+  const lotsNotYetAllocated = useMemo(() => {
+    const picked = new Set((value.lotAllocations || []).map((la) => la.lotNumber));
+    return availableLots.filter((l) => !picked.has(l.lot_number));
+  }, [availableLots, value.lotAllocations]);
 
   return (
     <div
@@ -172,7 +182,7 @@ const ShipOutLineEditor = ({ value, onChange, onRemove, canRemove, lineIndex, ta
           <SearchableSelect
             options={finishedGoodsProducts}
             value={value.productId}
-            onChange={(productId) => onChange({ ...value, productId, selectedPalletIds: [], selectedPalletInfo: {} })}
+            onChange={(productId) => onChange({ ...value, productId, lotAllocations: [] })}
             placeholder="Select finished goods product"
             searchPlaceholder="Search products..."
           />
@@ -193,17 +203,22 @@ const ShipOutLineEditor = ({ value, onChange, onRemove, canRemove, lineIndex, ta
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
             <div style={{ fontSize: '13px', color: '#6b7280', fontWeight: 600 }}>
-              Selected: {selectedPallets.length} pallets · {selectedCases.toLocaleString()} cases
+              Allocated: {allocatedCases.toLocaleString()} / {cases.toLocaleString()} cases
               {shortage > 0 && (
                 <span style={{ color: '#dc2626', marginLeft: '8px' }}>
                   short {shortage.toLocaleString()} cs
+                </span>
+              )}
+              {overage > 0 && (
+                <span style={{ color: '#dc2626', marginLeft: '8px' }}>
+                  over {overage.toLocaleString()} cs
                 </span>
               )}
             </div>
             <div style={{ display: 'flex', gap: '6px' }}>
               <button
                 type="button"
-                onClick={() => loadLicences(value.productId)}
+                onClick={() => loadLots(value.productId)}
                 disabled={isLoading}
                 style={{ background: 'none', border: '1px solid #cbd5e1', color: '#475569', padding: '3px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }}
               >
@@ -211,101 +226,117 @@ const ShipOutLineEditor = ({ value, onChange, onRemove, canRemove, lineIndex, ta
               </button>
               <button
                 type="button"
-                onClick={autoSelect}
-                disabled={!licences.length || !cases}
+                onClick={fifoFill}
+                disabled={!availableLots.length || !cases}
                 style={{ background: '#eff6ff', border: '1px solid #93c5fd', color: '#1e40af', padding: '3px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}
               >
-                FIFO suggest
+                FIFO fill
               </button>
             </div>
           </div>
 
           {loadError && <div className="alert error" style={{ marginBottom: '6px' }}>{loadError}</div>}
 
-          {selectedPallets.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', maxHeight: '160px', overflow: 'auto', marginBottom: '6px' }}>
-              {Object.entries(palletsInLineByReceipt).map(([receiptId, pls]) => {
-                const rcpt = receipts.find((r) => r.id === receiptId);
+          {/* Selected lot allocations (with editable case counts) */}
+          {(value.lotAllocations || []).length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '8px' }}>
+              {(value.lotAllocations || []).map((la) => {
+                const overshoot = la.casesRequested > la.casesAvailable;
                 return (
-                  <div key={receiptId}>
-                    <div style={{ fontSize: '11px', color: '#6b7280', padding: '2px 4px', fontWeight: 600 }}>
-                      Lot: {rcpt?.lotNo || '—'} ({pls.length} pallets)
-                    </div>
-                    {pls.map((pl) => (
-                      <div
-                        key={pl.id}
-                        style={{
-                          display: 'flex',
-                          gap: '6px',
-                          alignItems: 'center',
-                          padding: '4px 8px',
-                          background: '#f0fdf4',
-                          border: '1px solid #86efac',
-                          borderRadius: '6px',
-                          fontSize: '12px',
-                          marginBottom: '2px',
-                        }}
-                      >
-                        <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#1e40af', flex: 1 }}>
-                          {pl.licence_number}
-                        </span>
-                        <span style={{ color: '#6b7280' }}>{pl.location || pl.storage_row_id || 'Floor'}</span>
-                        <span style={{ color: '#6b7280' }}>· {pl.cases} cs</span>
-                        <button
-                          type="button"
-                          onClick={() => togglePallet(pl.id, false)}
-                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', padding: '0 4px', fontSize: '14px' }}
-                          title="Remove"
-                        >×</button>
-                      </div>
-                    ))}
+                  <div
+                    key={la.lotNumber}
+                    style={{
+                      display: 'flex',
+                      gap: '8px',
+                      alignItems: 'center',
+                      padding: '6px 8px',
+                      background: overshoot ? '#fef2f2' : '#f0fdf4',
+                      border: `1px solid ${overshoot ? '#fca5a5' : '#86efac'}`,
+                      borderRadius: '6px',
+                      fontSize: '12px',
+                    }}
+                  >
+                    <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#1e40af', flex: 1 }}>
+                      {la.lotNumber}
+                    </span>
+                    <span style={{ color: '#6b7280' }}>
+                      avail {la.casesAvailable?.toLocaleString()} cs ({la.palletsAvailable} pl)
+                    </span>
+                    {la.oldestAt && (
+                      <span style={{ color: '#9ca3af', fontSize: '11px' }}>
+                        oldest: {formatDate(la.oldestAt)}
+                      </span>
+                    )}
+                    <input
+                      type="number"
+                      min="0"
+                      max={la.casesAvailable}
+                      value={la.casesRequested}
+                      placeholder="0"
+                      onFocus={(e) => e.target.select()}
+                      onChange={(e) => updateLotCases(la.lotNumber, e.target.value)}
+                      style={{
+                        width: '110px',
+                        padding: '3px 6px',
+                        border: `1px solid ${overshoot ? '#fca5a5' : '#cbd5e1'}`,
+                        borderRadius: '4px',
+                        textAlign: 'right',
+                      }}
+                    />
+                    <span style={{ color: '#6b7280' }}>cs</span>
+                    <button
+                      type="button"
+                      onClick={() => removeLotFromAllocation(la.lotNumber)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', padding: '0 4px', fontSize: '14px' }}
+                      title="Remove this lot"
+                    >×</button>
                   </div>
                 );
               })}
             </div>
           )}
 
-          {licences.length > 0 && (
+          {/* Available lots (FIFO ordered) to add */}
+          {lotsNotYetAllocated.length > 0 && (
             <details>
               <summary style={{ cursor: 'pointer', fontSize: '12px', color: '#6b7280', fontWeight: 600 }}>
-                Available pallets ({licences.length}) — expand to add
+                Available lots ({lotsNotYetAllocated.length}) — oldest first
               </summary>
-              <div style={{ maxHeight: '160px', overflow: 'auto', paddingTop: '6px' }}>
-                {licences.map((pl) => {
-                  const checked = value.selectedPalletIds.includes(pl.id);
-                  const blocked = (takenPalletIds || []).includes(pl.id) && !checked;
-                  return (
-                    <label
-                      key={pl.id}
-                      style={{
-                        display: 'flex',
-                        gap: '8px',
-                        alignItems: 'center',
-                        padding: '4px 8px',
-                        borderRadius: '6px',
-                        cursor: blocked ? 'not-allowed' : 'pointer',
-                        opacity: blocked ? 0.5 : 1,
-                        background: checked ? '#f0fdf4' : 'transparent',
-                        fontSize: '12px',
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={blocked}
-                        onChange={(e) => togglePallet(pl.id, e.target.checked)}
-                      />
-                      <span style={{ fontFamily: 'monospace', fontWeight: 600, color: '#1e40af' }}>{pl.licence_number}</span>
-                      <span style={{ color: '#6b7280' }}>{pl.location || pl.storage_row_id || 'Floor'}</span>
-                      <span style={{ color: '#6b7280', marginLeft: 'auto' }}>{pl.cases} cs</span>
-                      {pl.lot_number && <span style={{ color: '#9ca3af', fontSize: '11px' }}>Lot: {pl.lot_number}</span>}
-                      {pl.expiration_date && (
-                        <span style={{ color: '#9ca3af', fontSize: '11px' }}>Exp: {formatDate(pl.expiration_date)}</span>
-                      )}
-                      {blocked && <span style={{ color: '#dc2626', fontSize: '11px' }}>(used elsewhere)</span>}
-                    </label>
-                  );
-                })}
+              <div style={{ maxHeight: '200px', overflow: 'auto', paddingTop: '6px' }}>
+                {lotsNotYetAllocated.map((lot) => (
+                  <button
+                    key={lot.lot_number}
+                    type="button"
+                    onClick={() => addLotToAllocation(lot)}
+                    style={{
+                      display: 'flex',
+                      gap: '8px',
+                      alignItems: 'center',
+                      padding: '5px 8px',
+                      width: '100%',
+                      background: '#ffffff',
+                      border: '1px solid #e5e7eb',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      marginBottom: '3px',
+                      fontSize: '12px',
+                      textAlign: 'left',
+                    }}
+                  >
+                    <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#1e40af', flex: 1 }}>
+                      {lot.lot_number}
+                    </span>
+                    <span style={{ color: '#6b7280' }}>
+                      {lot.cases_available.toLocaleString()} cs · {lot.pallets_available} pallets
+                    </span>
+                    {lot.oldest_at && (
+                      <span style={{ color: '#9ca3af', fontSize: '11px' }}>
+                        {formatDate(lot.oldest_at)}
+                      </span>
+                    )}
+                    <span style={{ color: '#1e40af', fontWeight: 600 }}>+ Add</span>
+                  </button>
+                ))}
               </div>
             </details>
           )}
@@ -316,27 +347,28 @@ const ShipOutLineEditor = ({ value, onChange, onRemove, canRemove, lineIndex, ta
 };
 
 /**
- * Build the payload shape the backend expects: groups selected pallets by receipt_id.
- * Returns null if the line is incomplete.
+ * Build the v2 backend payload for a single line.
+ *
+ * Returns null if the line is incomplete (no product, no cases, no
+ * allocations, or sum mismatch).
  */
 export const buildLinePayload = (line) => {
-  if (!line.productId || !Number(line.casesRequested) || line.casesRequested <= 0) return null;
-  if (!line.selectedPalletIds || line.selectedPalletIds.length === 0) return null;
+  const cases = Number(line.casesRequested);
+  if (!line.productId || !cases || cases <= 0) return null;
+  if (!line.lotAllocations || line.lotAllocations.length === 0) return null;
 
-  const info = line.selectedPalletInfo || {};
-  const picksByReceipt = {};
-  for (const pid of line.selectedPalletIds) {
-    const pl = info[pid];
-    if (!pl?.receipt_id) return null;
-    if (!picksByReceipt[pl.receipt_id]) picksByReceipt[pl.receipt_id] = [];
-    picksByReceipt[pl.receipt_id].push(pid);
-  }
+  const sum = line.lotAllocations.reduce((s, la) => s + (Number(la.casesRequested) || 0), 0);
+  // tolerance for float math
+  if (Math.abs(sum - cases) > 0.001) return null;
+  if (line.lotAllocations.some((la) => Number(la.casesRequested) <= 0)) return null;
+  if (line.lotAllocations.some((la) => Number(la.casesRequested) > la.casesAvailable + 0.001)) return null;
+
   return {
     productId: line.productId,
-    casesRequested: Number(line.casesRequested),
-    picks: Object.entries(picksByReceipt).map(([receiptId, palletLicenceIds]) => ({
-      receiptId,
-      palletLicenceIds,
+    casesRequested: cases,
+    lotAllocations: line.lotAllocations.map((la) => ({
+      lotNumber: la.lotNumber,
+      casesRequested: Number(la.casesRequested),
     })),
   };
 };
@@ -344,8 +376,7 @@ export const buildLinePayload = (line) => {
 export const emptyShipOutLine = () => ({
   productId: '',
   casesRequested: '',
-  selectedPalletIds: [],
-  selectedPalletInfo: {},
+  lotAllocations: [],
 });
 
 export default ShipOutLineEditor;

@@ -1062,6 +1062,60 @@ export const InventoryProvider = ({ children }) => {
     }
   };
 
+  // ─── Lot-level ship-out v2 (Phase 1: warehouse worker) ─────────────────────
+
+  const fetchAvailableLots = async (productId) => {
+    if (!productId) return [];
+    try {
+      const response = await apiClient.get('/inventory/ship-out/available-lots', {
+        params: { product_id: productId },
+      });
+      return response.data?.lots || [];
+    } catch (error) {
+      console.error('Error fetching available lots:', error);
+      return [];
+    }
+  };
+
+  const createShipOutPickListV2 = async (data) => {
+    // data: { orderNumber, lines: [{ productId, casesRequested, lotAllocations: [{lotNumber, casesRequested}] }] }
+    try {
+      const response = await apiClient.post('/inventory/ship-out/pick-list-v2', {
+        order_number: data.orderNumber,
+        lines: (data.lines || []).map((ln) => ({
+          product_id: ln.productId,
+          cases_requested: ln.casesRequested,
+          lot_allocations: (ln.lotAllocations || []).map((la) => ({
+            lot_number: la.lotNumber,
+            cases_requested: la.casesRequested,
+            cases_picked: 0,
+          })),
+        })),
+      });
+      const t = response.data;
+      const newTransfer = {
+        id: t.id,
+        receiptId: t.receipt_id,
+        transferType: t.transfer_type,
+        quantity: t.quantity,
+        orderNumber: t.order_number,
+        status: t.status,
+        submittedAt: t.submitted_at,
+        palletLicenceIds: t.pallet_licence_ids || [],
+        palletLicenceDetails: t.pallet_licence_details || [],
+        lines: t.lines || null,
+        swaps: t.swaps || [],
+        editHistory: [],
+      };
+      setInventoryTransfers((prev) => [newTransfer, ...prev]);
+      return { success: true, transfer: newTransfer, warning: t.warning || null };
+    } catch (error) {
+      console.error('Error creating ship-out pick list v2:', error);
+      const msg = error.response?.data?.detail || error.message || 'Create failed';
+      return { success: false, error: msg };
+    }
+  };
+
   // ─── Context value ──────────────────────────────────────────────────────────
 
   const value = {
@@ -1098,6 +1152,9 @@ export const InventoryProvider = ({ children }) => {
     editShipOutTransfer,
     voidShipOutTransfer,
     fetchTransferScanProgress,
+    // Lot-level ship-out v2
+    fetchAvailableLots,
+    createShipOutPickListV2,
   };
 
   return <InventoryContext.Provider value={value}>{children}</InventoryContext.Provider>;

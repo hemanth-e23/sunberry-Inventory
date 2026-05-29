@@ -334,15 +334,21 @@ def _update_receipt_allocation_json(
 # ---------------------------------------------------------------------------
 
 def _approve_multi_line_ship_out(db: Session, transfer: InventoryTransfer, current_user) -> InventoryTransfer:
-    """Approval path for new multi-product/multi-receipt ship-outs.
+    """Approval path for multi-line ship-outs.
 
-    Iterates pallet groups by receipt: marks them shipped, decrements each
-    receipt's quantity, depletes receipts that hit zero. Pallet reservation is
-    flipped to SHIPPED via the existing _apply_pallet_licence_ship_out helper.
+    Two sub-paths:
+    - **v2 lot-level** (any line has picks recorded): pallets were already
+      flipped to SHIPPED and receipt quantities decremented at scan time.
+      Approval just marks the order APPROVED, depletes drained receipts,
+      and releases any lingering reservations.
+    - **v1 multi-line** (no picks JSON, pallets in RESERVED/IN_STOCK):
+      groups pallets by receipt, runs the ship-out mutations now.
     """
     pl_ids = list(transfer.pallet_licence_ids or [])
     if not pl_ids:
         raise ValidationError("Ship-out has no pallets to approve")
+
+    is_v2 = any((ln.picks or []) for ln in (transfer.lines or []))
 
     licences = (
         db.query(PalletLicence)
@@ -355,42 +361,80 @@ def _approve_multi_line_ship_out(db: Session, transfer: InventoryTransfer, curre
     if missing:
         raise ValidationError(f"Missing pallets at approval: {missing}")
 
-    bad_status = [
-        pl.licence_number or pl.id
-        for pl in licences
-        if pl.status not in (PalletStatus.RESERVED, PalletStatus.IN_STOCK)
-    ]
-    if bad_status:
-        raise ValidationError(
-            f"Pallets no longer available (already shipped/transferred): {bad_status}"
-        )
-
     held = [pl.licence_number or pl.id for pl in licences if pl.is_held]
     if held:
         raise ValidationError(
             f"{len(held)} pallet(s) on hold — remove from ship-out or release hold first: {held}"
         )
 
-    # Group by receipt and apply per-receipt effects
-    by_receipt: dict = {}
-    for pl in licences:
-        by_receipt.setdefault(pl.receipt_id, []).append(pl)
+    if is_v2:
+        # v2 — pallets were shipped + receipts decremented at scan time. Just
+        # tidy up: any pallet that somehow stayed IN_STOCK gets flipped to
+        # SHIPPED here (drift safety), receipts that hit zero get depleted,
+        # and lingering reservations are released.
+        #
+        # Exception: partial-pull pallets stay IN_STOCK at the Partials row
+        # with their remaining cases — only the consumed portion shipped, and
+        # the remainder is still on the shelf. Identify them by walking the
+        # `picks` JSON across every line.
+        partial_pulled_ids = set()
+        for ln in (transfer.lines or []):
+            for pick in (ln.picks or []):
+                if pick.get("was_partial") and pick.get("pallet_licence_id"):
+                    partial_pulled_ids.add(pick["pallet_licence_id"])
 
-    for rid, group in by_receipt.items():
-        receipt = (
-            db.query(Receipt).filter(Receipt.id == rid).with_for_update().first()
-        )
-        if not receipt:
-            from app.exceptions import NotFoundError
-            raise NotFoundError("Receipt", rid)
-        _apply_pallet_licence_ship_out(db, group, transfer.id)
-        cases_shipped = sum(pl.cases or 0 for pl in group)
-        receipt.quantity = max(0, (receipt.quantity or 0) - cases_shipped)
-        _rebuild_receipt_allocation_from_licences(db, receipt)
-        if not receipt.held_quantity or receipt.held_quantity <= 0:
-            receipt.hold = False
-        if receipt.quantity <= 0:
-            receipt.status = ReceiptStatus.DEPLETED
+        for pl in licences:
+            if pl.id in partial_pulled_ids:
+                continue  # remainder stays in stock — don't ship the leftover
+            if pl.status == PalletStatus.IN_STOCK:
+                pl.status = PalletStatus.SHIPPED
+                pl.transfer_id = transfer.id
+
+        receipt_ids = {pl.receipt_id for pl in licences if pl.receipt_id}
+        for rid in receipt_ids:
+            receipt = db.query(Receipt).filter(Receipt.id == rid).with_for_update().first()
+            if not receipt:
+                continue
+            _rebuild_receipt_allocation_from_licences(db, receipt)
+            if not receipt.held_quantity or receipt.held_quantity <= 0:
+                receipt.hold = False
+            if (receipt.quantity or 0) <= 0:
+                receipt.status = ReceiptStatus.DEPLETED
+
+        # Release any reservations still sitting open on this transfer's lines.
+        from app.services import ship_out_service
+        ship_out_service.release_reservations(db, transfer)
+    else:
+        # v1 multi-line — pallets are still RESERVED/IN_STOCK; mutate now.
+        bad_status = [
+            pl.licence_number or pl.id
+            for pl in licences
+            if pl.status not in (PalletStatus.RESERVED, PalletStatus.IN_STOCK)
+        ]
+        if bad_status:
+            raise ValidationError(
+                f"Pallets no longer available (already shipped/transferred): {bad_status}"
+            )
+
+        by_receipt: dict = {}
+        for pl in licences:
+            by_receipt.setdefault(pl.receipt_id, []).append(pl)
+
+        for rid, group in by_receipt.items():
+            receipt = (
+                db.query(Receipt).filter(Receipt.id == rid).with_for_update().first()
+            )
+            if not receipt:
+                from app.exceptions import NotFoundError
+                raise NotFoundError("Receipt", rid)
+            _apply_pallet_licence_ship_out(db, group, transfer.id)
+            cases_shipped = sum(pl.cases or 0 for pl in group)
+            receipt.quantity = max(0, (receipt.quantity or 0) - cases_shipped)
+            _rebuild_receipt_allocation_from_licences(db, receipt)
+            if not receipt.held_quantity or receipt.held_quantity <= 0:
+                receipt.hold = False
+            if receipt.quantity <= 0:
+                receipt.status = ReceiptStatus.DEPLETED
 
     transfer.status = TransferStatus.APPROVED
     transfer.approved_by = str(current_user.id)

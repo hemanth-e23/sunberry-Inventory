@@ -93,3 +93,9 @@ class Receipt(ReceiptBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     allocations: List[ReceiptAllocation] = []
+    # Populated by the create endpoint when FG pallet licences are generated
+    # so the UI can show the exact range (e.g. "MP14426L1-MGN128O127-141
+    # through ...-150") instead of guessing 001..N.
+    generated_licence_first: Optional[str] = None
+    generated_licence_last: Optional[str] = None
+    generated_licence_count: Optional[int] = None

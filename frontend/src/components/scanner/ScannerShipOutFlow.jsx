@@ -57,10 +57,10 @@ const ScannerShipOutFlow = () => {
     setLoadingOrders(true);
     try {
       const r = await apiClient.get('/inventory/transfers', {
-        params: { status: 'pending' },
+        params: { status: 'pending', transfer_type: 'shipped-out' },
       });
       const shipOut = (r.data || []).filter(
-        (t) => t.transfer_type === 'shipped-out' && (t.pallet_licence_ids || []).length > 0
+        (t) => (t.pallet_licence_ids || []).length > 0
       );
       setTransfers(shipOut);
     } catch {

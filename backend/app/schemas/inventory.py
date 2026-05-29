@@ -94,6 +94,171 @@ class ForkliftSubmitRequest(BaseSchema):
     skipped_pallet_ids: Optional[List[str]] = Field(default_factory=list)
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# Lot-level ship-out v2
+# Phase 1 (warehouse worker) reserves capacity by (lot, cases); Phase 2
+# (forklift) commits specific pallets at scan time.
+# ───────────────────────────────────────────────────────────────────────────
+
+
+# --- Persisted JSON shapes (stored on InventoryTransferLine) ----------------
+
+class LotAllocation(BaseSchema):
+    """One lot's slice of a ship-out line's requested cases."""
+    lot_number: str = Field(..., min_length=1)
+    cases_requested: float = Field(..., ge=0)
+    cases_picked: float = 0
+
+
+class Pick(BaseSchema):
+    """A single pallet scan that contributed cases to a line."""
+    pallet_licence_id: str
+    cases_consumed: float = Field(..., gt=0)
+    was_partial: bool = False
+    scanned_at: Optional[datetime] = None
+    scanned_by: Optional[str] = None
+
+
+class LotSwapHistoryEntry(BaseSchema):
+    """Audit entry for a line's lot being swapped via the escape hatch."""
+    from_lot: str
+    to_lot: Optional[str] = None  # null when no replacement lot was found
+    reason: Optional[str] = None
+    at: datetime
+    by: Optional[str] = None
+    blocked_row_ids: List[str] = Field(default_factory=list)
+
+
+# --- Phase 1: warehouse worker views & inputs ------------------------------
+
+class AvailableLotRow(BaseSchema):
+    """Where a given lot's pallets currently sit."""
+    row_id: Optional[str] = None  # None = floor
+    row_name: str
+    cases: float
+    pallets: int
+
+
+class AvailableLot(BaseSchema):
+    """A lot offered to the warehouse worker, sorted oldest-first by caller."""
+    lot_number: str
+    cases_available: float
+    pallets_available: int
+    oldest_at: Optional[datetime] = None
+    rows: List[AvailableLotRow] = Field(default_factory=list)
+
+
+class ShipOutLineInputV2(BaseSchema):
+    """A single product line submitted under the lot-level flow.
+
+    `sum(lot_allocations[*].cases_requested)` must equal `cases_requested`.
+    Validated server-side.
+    """
+    product_id: str = Field(..., min_length=1)
+    cases_requested: float = Field(..., gt=0)
+    lot_allocations: List[LotAllocation] = Field(..., min_length=1)
+
+
+class ShipOutPickListCreateV2(BaseSchema):
+    """Phase 1 submission: per-product lines, each with per-lot case splits."""
+    order_number: str = Field(..., min_length=1, max_length=100)
+    lines: List[ShipOutLineInputV2] = Field(..., min_length=1)
+
+
+# --- Phase 2: scanner views -------------------------------------------------
+
+class ScannerPallet(BaseSchema):
+    pallet_licence_id: str
+    licence_number: str
+    sequence: int = 0
+    cases: float
+    lot_number: str  # always present — 001 sequences collide across lots
+    is_picked: bool = False
+    cases_consumed: Optional[float] = None  # set when is_picked
+    was_partial: bool = False
+
+
+class ScannerRow(BaseSchema):
+    row_id: Optional[str] = None
+    row_name: str
+    pallets: List[ScannerPallet] = Field(default_factory=list)
+    cases_total: float = 0
+    pallets_total: int = 0
+    is_blocked: bool = False
+
+
+class ScannerLotView(BaseSchema):
+    lot_number: str
+    cases_remaining: float
+    rows: List[ScannerRow] = Field(default_factory=list)
+    is_suggested_swap: bool = False
+
+
+class ScannerLineView(BaseSchema):
+    line_id: str
+    product_id: str
+    product_name: Optional[str] = None
+    product_short_code: Optional[str] = None
+    cases_requested: float
+    cases_remaining: float
+    lots: List[ScannerLotView] = Field(default_factory=list)
+
+
+class ScannerTransferView(BaseSchema):
+    """What the forklift sees for a single ship-out order in the v2 flow."""
+    transfer_id: str
+    order_number: str
+    lines: List[ScannerLineView] = Field(default_factory=list)
+    partial_pallet_row: Optional[AvailableLotRow] = None  # destination for remainders
+
+
+# --- Phase 2: scan-pick request & response ---------------------------------
+
+class ScanPickRequestV2(BaseSchema):
+    """A forklift scan in the v2 lot-level flow.
+
+    `cases_to_consume` is only sent on the partial-pull confirmation step:
+    the client first scans normally, gets a "would overshoot, pull only X"
+    response from a previous scan-pick attempt, then re-submits with
+    `cases_to_consume = X` to confirm the partial pull.
+    """
+    licence_number: str = Field(..., min_length=1, max_length=100)
+    cases_to_consume: Optional[float] = Field(None, gt=0)
+
+
+class ScanPickResponseV2(BaseSchema):
+    """Response shape for v2 scan-pick. `ok=False` → check `reject_reason`."""
+    ok: bool
+    pick: Optional[Pick] = None
+    line_id: Optional[str] = None
+    line_remaining: Optional[float] = None
+    lot_remaining: Optional[float] = None
+    row_emptied: Optional[str] = None  # row_id that just hit zero
+    partial_pallet_remaining: Optional[float] = None  # cases left on the pallet
+    needs_partial_confirm: bool = False
+    suggested_partial_cases: Optional[float] = None
+    reject_reason: Optional[str] = None
+    swap_suggestion: Optional[ScannerLotView] = None
+    message: Optional[str] = None
+
+
+# --- Phase 2: escape hatch --------------------------------------------------
+
+class LotEscapeHatchRequest(BaseSchema):
+    """Forklift marks a lot's rows as inaccessible. Server picks next-oldest
+    lot of the same product and swaps the line allocation atomically."""
+    line_id: str = Field(..., min_length=1)
+    blocked_lot_number: str = Field(..., min_length=1)
+    blocked_row_ids: List[str] = Field(default_factory=list)
+    reason: Optional[str] = Field(None, max_length=500)
+
+
+class LotEscapeHatchResponse(BaseSchema):
+    swapped_to_lot: Optional[str] = None  # null if no suitable lot found
+    new_line_view: Optional[ScannerLineView] = None
+    message: str
+
+
 # Adjustment schemas
 class InventoryAdjustmentBase(BaseSchema):
     receipt_id: Optional[str] = None

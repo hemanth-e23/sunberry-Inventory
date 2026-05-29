@@ -73,6 +73,10 @@ class ShipOutScanReason(str, Enum):
     LINE_COMPLETE = "line_complete"
     PALLET_UNAVAILABLE = "pallet_unavailable"
     PALLET_NOT_FOUND = "pallet_not_found"
+    # Lot-level ship-out v2: scanned pallet is the right product but its lot
+    # isn't on any open line allocation. Response includes swap_suggestion so
+    # the UI can offer the escape hatch.
+    WRONG_LOT_NEEDS_SWAP = "wrong_lot_needs_swap"
 
 
 class StagingItemStatus(str, Enum):
