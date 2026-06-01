@@ -90,6 +90,13 @@ const buildTree = ({ locationsTree, storageAreas, receipts, productsById }) => {
     }
   }
 
+  // FG rows whose live aggregates we'll inject after the receipt-bucketing loop.
+  // We still build the nodes the same way (capacity/declaredProduct/occupiedCases
+  // are kept for back-compat), but for any row where the API returned live data
+  // we'll replace its products / capacity counter with the live values, so the
+  // row card reflects pallet_licences truth instead of receipt routing.
+  const liveRowData = {};
+
   for (const area of storageAreas) {
     let parentLoc = locById[area.locationId];
     if (!parentLoc) {
@@ -102,6 +109,10 @@ const buildTree = ({ locationsTree, storageAreas, receipts, productsById }) => {
     subById[area.id] = areaNode;
 
     for (const row of (area.rows || [])) {
+      const hasLive = Array.isArray(row.liveProducts);
+      const livePallets = hasLive ? Number(row.livePallets || 0) : null;
+      const liveCases   = hasLive ? Number(row.liveCases   || 0) : null;
+
       const rowNode = makeNode(
         row.id,
         row.name,
@@ -109,14 +120,15 @@ const buildTree = ({ locationsTree, storageAreas, receipts, productsById }) => {
         parentLoc.id,
         area.id,
         row.palletCapacity ? {
-          occupiedPallets: Number(row.occupiedPallets || 0),
+          occupiedPallets: hasLive ? livePallets : Number(row.occupiedPallets || 0),
           total: Number(row.palletCapacity || 0),
         } : null,
         row.productId || null,
-        Number(row.occupiedCases || 0),
+        hasLive ? liveCases : Number(row.occupiedCases || 0),
       );
       areaNode.children.push(rowNode);
       rowById[row.id] = rowNode;
+      if (hasLive) liveRowData[row.id] = row.liveProducts;
     }
   }
 
@@ -186,6 +198,29 @@ const buildTree = ({ locationsTree, storageAreas, receipts, productsById }) => {
     // Floor allocations from FG receipts → bucket on location node
     if (placed && receipt.allocation?.floorAllocation) {
       // already bucketed above; don't double-count
+    }
+  }
+
+  // Replace FG row products with live pallet_licence aggregates. We do this
+  // AFTER the receipt loop so receipt-bucketing logic for non-FG rows is
+  // untouched; for any FG row that came back with live data, its _products map
+  // is rebuilt from the live breakdown — receipts that landed on this row are
+  // discarded since the pallet truth is authoritative.
+  for (const rowId in liveRowData) {
+    const node = rowById[rowId];
+    if (!node) continue;
+    node._products = new Map();
+    for (const lp of liveRowData[rowId]) {
+      if (!lp.productId || lp.cases <= 0) continue;
+      const product = productsById[lp.productId];
+      const bucket = node._products.get(lp.productId) || newProductBucket(
+        lp.productId,
+        product?.name || 'Unknown product',
+        'cases',
+      );
+      bucket.qty += Number(lp.cases) || 0;
+      if (lp.lotNumber) bucket.lots.add(lp.lotNumber);
+      node._products.set(lp.productId, bucket);
     }
   }
 

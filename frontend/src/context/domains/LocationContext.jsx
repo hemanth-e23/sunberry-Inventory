@@ -81,6 +81,16 @@ export const LocationProvider = ({ children }) => {
           hold: row.hold || false,
           notes: row.notes || '',
           active: row.is_active !== false,
+          livePallets: row.live_pallets == null ? null : Number(row.live_pallets),
+          liveCases: row.live_cases == null ? null : Number(row.live_cases),
+          liveProducts: Array.isArray(row.live_products)
+            ? row.live_products.map(p => ({
+                productId: p.product_id,
+                lotNumber: p.lot_number || null,
+                pallets: Number(p.pallets || 0),
+                cases: Number(p.cases || 0),
+              }))
+            : null,
         })),
       }));
       setStorageAreasState(areas);

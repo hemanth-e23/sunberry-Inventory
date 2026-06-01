@@ -23,6 +23,13 @@ class Location(LocationBase):
     created_at: datetime
 
 
+class LiveRowProduct(BaseSchema):
+    product_id: str
+    lot_number: Optional[str] = None
+    pallets: int = 0
+    cases: float = 0
+
+
 class StorageRowBase(BaseSchema):
     id: str
     name: str
@@ -34,6 +41,13 @@ class StorageRowBase(BaseSchema):
     product_id: Optional[str] = None
     hold: bool = False
     notes: Optional[str] = None
+    # Live aggregates computed from pallet_licences at read time.
+    # Only populated for FG rows by the storage-areas endpoint; absent on RM rows
+    # (which don't use pallet_licences). When present, clients should prefer
+    # these over occupied_pallets / occupied_cases / product_id.
+    live_pallets: Optional[float] = None
+    live_cases: Optional[float] = None
+    live_products: Optional[List[LiveRowProduct]] = None
 
 class StorageRowCreate(StorageRowBase):
     storage_area_id: Optional[str] = None

@@ -1,12 +1,16 @@
 from typing import List
+from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.database import get_db
 from app.models import (
     Location, SubLocation, StorageArea, StorageRow,
     ProductionShift, ProductionLine, Warehouse, WarehouseCategoryAccess, CategoryGroup,
+    PalletLicence,
 )
+from app.enums import PalletStatus
 from app.schemas import (
     Location as LocationSchema, LocationCreate, LocationUpdate,
     SubLocation as SubLocationSchema, SubLocationCreate, SubLocationUpdate,
@@ -274,6 +278,79 @@ async def update_sub_location(
     return sub_location
 
 # Storage Area endpoints
+def _attach_live_row_aggregates(db: Session, storage_areas: list) -> None:
+    """Populate live_pallets / live_cases / live_products on each StorageRow ORM
+    instance by aggregating in_stock pallet_licences. FG-only — RM rows don't
+    use pallet_licences, so this is called only for storage_areas.rows.
+
+    Mutates the ORM instances in place; Pydantic picks the fields up via
+    from_attributes. Two grouped queries (totals + per-product breakdown), no
+    N+1 over rows."""
+    row_ids: list[str] = []
+    for area in storage_areas:
+        for row in (area.rows or []):
+            row_ids.append(row.id)
+    if not row_ids:
+        return
+
+    totals_q = (
+        db.query(
+            PalletLicence.storage_row_id,
+            func.count(PalletLicence.id),
+            func.coalesce(func.sum(PalletLicence.cases), 0),
+        )
+        .filter(
+            PalletLicence.storage_row_id.in_(row_ids),
+            PalletLicence.status == PalletStatus.IN_STOCK,
+            PalletLicence.is_held == False,  # noqa: E712
+            PalletLicence.is_deleted == False,  # noqa: E712
+        )
+        .group_by(PalletLicence.storage_row_id)
+        .all()
+    )
+    totals = {row_id: (int(n), float(cases)) for row_id, n, cases in totals_q}
+
+    breakdown_q = (
+        db.query(
+            PalletLicence.storage_row_id,
+            PalletLicence.product_id,
+            PalletLicence.lot_number,
+            func.count(PalletLicence.id),
+            func.coalesce(func.sum(PalletLicence.cases), 0),
+        )
+        .filter(
+            PalletLicence.storage_row_id.in_(row_ids),
+            PalletLicence.status == PalletStatus.IN_STOCK,
+            PalletLicence.is_held == False,  # noqa: E712
+            PalletLicence.is_deleted == False,  # noqa: E712
+        )
+        .group_by(
+            PalletLicence.storage_row_id,
+            PalletLicence.product_id,
+            PalletLicence.lot_number,
+        )
+        .all()
+    )
+    breakdown: dict[str, list[dict]] = defaultdict(list)
+    for row_id, product_id, lot_number, n, cases in breakdown_q:
+        if not product_id:
+            continue
+        breakdown[row_id].append({
+            "product_id": product_id,
+            "lot_number": lot_number,
+            "pallets": int(n),
+            "cases": float(cases),
+        })
+
+    for area in storage_areas:
+        for row in (area.rows or []):
+            pallets, cases = totals.get(row.id, (0, 0.0))
+            # Set on the ORM instance so Pydantic (from_attributes=True) reads it
+            row.live_pallets = float(pallets)
+            row.live_cases = float(cases)
+            row.live_products = breakdown.get(row.id, [])
+
+
 @router.get("/storage-areas", response_model=List[StorageAreaSchema])
 async def get_storage_areas(
     sub_location_id: str = None,
@@ -291,6 +368,7 @@ async def get_storage_areas(
         query = query.filter(StorageArea.sub_location_id == sub_location_id)
 
     storage_areas = query.all()
+    _attach_live_row_aggregates(db, storage_areas)
     return storage_areas
 
 @router.post("/storage-areas", response_model=StorageAreaSchema)
