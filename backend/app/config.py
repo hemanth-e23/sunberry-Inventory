@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # Service-to-service API key (used by /api/service/* endpoints)
     SERVICE_API_KEY: str = ""
 
+    # KPI dashboard bearer token (used by /api/kpi/* endpoints)
+    KPI_API_TOKEN: str = ""
+
     # Production app integration (optional — leave empty to disable)
     PRODUCTION_API_URL: str = ""
     PRODUCTION_API_KEY: str = ""

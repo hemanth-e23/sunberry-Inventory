@@ -1,4 +1,5 @@
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text
+from datetime import time
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, Time
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -16,6 +17,11 @@ class Warehouse(Base):
     email = Column(String(100), nullable=True)
     phone = Column(String(20), nullable=True)
     timezone = Column(String(50), default="America/New_York")
+    # 24h production-day window. Operating hours are ~05:30 AM through 03:00 AM
+    # next day; using a 24h window starting at 05:30 catches stragglers without
+    # a dead-zone gap. If start == end, the window is a full 24h block.
+    production_day_start = Column(Time, nullable=False, server_default="05:30", default=time(5, 30))
+    production_day_end = Column(Time, nullable=False, server_default="05:30", default=time(5, 30))
     is_active = Column(Boolean, default=True)
     allow_product_creation = Column(Boolean, default=False, nullable=False, server_default="false")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
