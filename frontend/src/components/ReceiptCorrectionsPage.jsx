@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
+import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
 import { getDashboardPath } from '../App';
 import { formatDateTime } from '../utils/dateUtils';
@@ -11,9 +12,11 @@ const ReceiptCorrectionsPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { receipts, products, categories, vendors, updateReceipt, resubmitReceipt } = useAppData();
+  const { addToast } = useToast();
   
   const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [draft, setDraft] = useState({});
+  const [saving, setSaving] = useState(false);
 
   // Filter receipts that have been sent back. Accept the canonical 'sent_back'
   // enum value and the legacy 'sent-back' spelling (older rows, pre-migration),
@@ -69,15 +72,26 @@ const ReceiptCorrectionsPage = () => {
   };
 
   const handleSaveAndResubmit = async () => {
-    if (!selectedReceipt) return;
+    if (!selectedReceipt || saving) return;
+    setSaving(true);
 
     // Save the corrected fields, then move the receipt back into the approval
-    // queue via the dedicated resubmit endpoint (status is no longer pushed
-    // through the receipt PUT).
-    await updateReceipt(selectedReceipt.id, { ...draft });
-    await resubmitReceipt(selectedReceipt.id);
+    // queue via the dedicated resubmit endpoint. Both calls are checked — on
+    // failure we keep the detail view open so the corrections aren't lost.
+    const upd = await updateReceipt(selectedReceipt.id, { ...draft });
+    if (upd && upd.success === false) {
+      addToast(upd.message || upd.error || 'Failed to save corrections.', 'error');
+      setSaving(false);
+      return;
+    }
+    const res = await resubmitReceipt(selectedReceipt.id);
+    setSaving(false);
+    if (!res?.success) {
+      addToast(res?.error || res?.message || 'Failed to resubmit receipt.', 'error');
+      return;
+    }
 
-    // Close the detail view
+    // Close the detail view only after a confirmed success.
     setSelectedReceipt(null);
     setDraft({});
   };
@@ -304,8 +318,8 @@ const ReceiptCorrectionsPage = () => {
                 <button className="secondary-button" onClick={handleCancel}>
                   Cancel
                 </button>
-                <button className="primary-button" onClick={handleSaveAndResubmit}>
-                  Save & Resubmit for Approval
+                <button className="primary-button" onClick={handleSaveAndResubmit} disabled={saving}>
+                  {saving ? 'Saving…' : 'Save & Resubmit for Approval'}
                 </button>
               </div>
             </div>

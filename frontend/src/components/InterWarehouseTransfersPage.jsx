@@ -585,7 +585,12 @@ function ConfirmShipmentModal({ transfer, onClose, onConfirm }) {
   const labelStyle = { display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 4, color: '#374151' };
 
   const canConfirm = (() => {
-    if (isFG === true) return selectedPalletIds.length > 0 || pallets.length === 0; // allow legacy FG without pallet licences
+    if (isFG === true) {
+      if (pallets.length === 0) return true; // legacy FG without pallet licences
+      // Selected pallets must cover the requested quantity — selecting fewer
+      // used to ship less while the backend deducted the full amount.
+      return selectedPalletCases >= transfer.quantity;
+    }
     if (isFG === false && availableSources.length > 0) return Math.abs(selectedRmQty - transfer.quantity) <= 0.01;
     return true; // legacy / no category detection
   })();
@@ -673,6 +678,11 @@ function ConfirmShipmentModal({ transfer, onClose, onConfirm }) {
                 {selectedPalletIds.length} pallets &middot; {selectedPalletCases} cases
               </span>
             </div>
+            {selectedPalletCases < transfer.quantity && (
+              <div style={{ fontSize: 12, color: '#b91c1c', marginBottom: 8 }}>
+                Select {transfer.quantity - selectedPalletCases} more case(s) to cover this transfer.
+              </div>
+            )}
             {selectedPalletIds.length > 0 && (
               <div style={{ marginBottom: 8, fontSize: 12, color: '#166534' }}>
                 {selectedPalletIds.length} pallets selected ({selectedPalletCases} cases)

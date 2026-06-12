@@ -82,9 +82,20 @@ function ProtectedRoute({ children, requiredRole, requiredFeature }) {
     return <Navigate to={redirectTo} replace />;
   }
 
-  const SUPERADMIN_ROLES = ['superadmin', 'corporate_admin', 'corporate_viewer'];
-  if (requiredRole && user?.role !== requiredRole && !SUPERADMIN_ROLES.includes(user?.role)) {
-    return <Navigate to="/unauthorized" replace />;
+  // Role hierarchy for route access. Higher rank = more access. Corporate roles
+  // outrank plant admin for cross-warehouse VIEW pages, but must NOT bypass
+  // superadmin-only routes (the previous flat allow-list let them through).
+  const ROLE_RANK = {
+    forklift: 0, warehouse: 1, supervisor: 2, admin: 3,
+    corporate_viewer: 4, corporate_admin: 5, superadmin: 6,
+  };
+  if (requiredRole) {
+    const authorized = requiredRole === 'forklift'
+      ? user?.role === 'forklift'   // forklift routes need the forklift role specifically
+      : (ROLE_RANK[user?.role] ?? -1) >= (ROLE_RANK[requiredRole] ?? 0);
+    if (!authorized) {
+      return <Navigate to="/unauthorized" replace />;
+    }
   }
 
   if (requiredFeature && !hasFeature(user?.warehouse_type, requiredFeature)) {
