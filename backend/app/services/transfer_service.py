@@ -543,7 +543,14 @@ def reject_transfer(db: Session, transfer: InventoryTransfer, reason: str, curre
     if transfer.receipt_id:
         receipt = db.query(Receipt).filter(Receipt.id == transfer.receipt_id).first()
         if receipt:
-            receipt.hold = False
+            # Some flows (e.g. scanner internal transfers) set receipt.hold=True
+            # as a transient lock while the move is pending; rejecting the
+            # transfer should release that lock. But a QA hold (held_quantity
+            # > 0) is an independent quality hold and must NOT be released by
+            # rejecting an unrelated transfer — only clear the flag when there
+            # is nothing actually held.
+            if not receipt.held_quantity or receipt.held_quantity <= 0:
+                receipt.hold = False
 
     # Release any reserved pallets (new ship-out path)
     pl_ids = list(transfer.pallet_licence_ids or [])
