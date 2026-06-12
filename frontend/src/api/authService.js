@@ -10,10 +10,14 @@ export const badgeLogin = (badgeId) =>
 export const getMe = () =>
   apiClient.get('/auth/me');
 
-// Uses plain axios (NOT apiClient) to avoid the 401 interceptor triggering on refresh failure
+// Uses plain axios (NOT apiClient) to avoid the 401 interceptor triggering on
+// refresh failure. Must still hit the API host (VITE_API_URL), same base as
+// client.js — a relative URL resolves against the frontend origin and 404s in
+// production, breaking refresh entirely.
 export const refresh = () => {
   const token = localStorage.getItem('token');
-  return axios.post('/api/auth/refresh', {}, {
+  const baseURL = (import.meta.env.VITE_API_URL || '') + '/api';
+  return axios.post(`${baseURL}/auth/refresh`, {}, {
     headers: { Authorization: `Bearer ${token}` },
   });
 };
