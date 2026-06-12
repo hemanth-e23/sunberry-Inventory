@@ -20,7 +20,6 @@ export const UserProvider = ({ children }) => {
 
   useEffect(() => {
     if (authLoading || !isAuthenticated) return;
-    if (!ROLES_WITH_USER_ACCESS.includes(user?.role)) return;
     const fetchUsers = async () => {
       try {
         const response = await apiClient.get('/users/');
@@ -57,8 +56,14 @@ export const UserProvider = ({ children }) => {
         }
       }
     };
-    fetchUsers();
+    // The directory (id/username → name) must load for EVERY authenticated
+    // user so submitter/approver names resolve everywhere (approvals, overview,
+    // holds). The backend /users/directory endpoint is open to all roles.
     fetchDirectory();
+    // The full admin user list stays gated to user-management roles.
+    if (ROLES_WITH_USER_ACCESS.includes(user?.role)) {
+      fetchUsers();
+    }
   }, [authLoading, isAuthenticated, user?.role]);
 
   const addUser = async (user) => {
