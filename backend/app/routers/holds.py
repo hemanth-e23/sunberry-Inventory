@@ -11,7 +11,7 @@ from app.schemas import (
     InventoryHoldActionCreate,
     InventoryHoldActionUpdate,
 )
-from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write
+from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
 from app.enums import HoldStatus
 from app.services import hold_service
 from app.constants import ROLE_WAREHOUSE
@@ -171,6 +171,7 @@ async def approve_hold_action(
             detail="Hold action not found"
         )
 
+    require_approval_access(current_user, hold_action)
     hold_service.approve_hold_action(db, hold_action, current_user)
     db.commit()
     db.refresh(hold_action)
@@ -196,6 +197,7 @@ async def reject_hold_action(
             detail="Hold action not found"
         )
 
+    require_approval_access(current_user, hold_action)
     hold_service.reject_hold_action(db, hold_action, reason, current_user)
     db.commit()
     db.refresh(hold_action)

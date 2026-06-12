@@ -10,7 +10,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import User
 from app.schemas import TokenData
-from app.constants import ROLE_FORKLIFT, ROLE_SUPERADMIN, ROLE_ADMIN
+from app.constants import ROLE_FORKLIFT, ROLE_SUPERADMIN, ROLE_ADMIN, ROLE_WAREHOUSE, APPROVAL_ROLES
 
 # JWT token handling
 security = HTTPBearer()
@@ -48,6 +48,36 @@ def resolve_warehouse_for_write(user) -> str:
             detail="Please select a specific warehouse location before creating records. You currently have 'All Warehouses' selected."
         )
     return view_wh
+
+
+def require_approval_access(user, record) -> None:
+    """Authorize a user to approve or reject a pending inventory record.
+
+    Two gates, both must pass:
+      1. Role — only approval roles (admin/superadmin/corporate_admin/
+         supervisor) and warehouse workers may approve/reject. Warehouse
+         workers approve only OTHER users' records; the service layer still
+         enforces that self-approval block. Forklift and anyone else: 403.
+      2. Warehouse scope — a plant-scoped user may act only on records in
+         their own warehouse. Corporate users viewing all warehouses (no view
+         override) are unrestricted. Records whose warehouse_id is unset are
+         not scope-blocked here (that drift is handled separately); the check
+         only stops the cross-warehouse case (warehouse A acting on B's
+         record).
+    """
+    if user.role not in APPROVAL_ROLES and user.role != ROLE_WAREHOUSE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to approve or reject this record",
+        )
+
+    scoped_wh = warehouse_filter(user)
+    record_wh = getattr(record, "warehouse_id", None)
+    if scoped_wh is not None and record_wh is not None and record_wh != scoped_wh:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only approve or reject records in your own warehouse",
+        )
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

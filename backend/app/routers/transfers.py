@@ -21,7 +21,7 @@ from app.schemas import (
     # v2 lot-level ship-out
     ShipOutPickListCreateV2, ScanPickRequestV2, LotEscapeHatchRequest,
 )
-from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write
+from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus, ShipOutScanReason
 from app.services import transfer_service
 from app.constants import (
@@ -1239,6 +1239,7 @@ async def approve_transfer(
             detail="Transfer not found"
         )
 
+    require_approval_access(current_user, transfer)
     transfer_service.approve_transfer(db, transfer, current_user)
     db.commit()
     db.refresh(transfer)
@@ -1264,6 +1265,7 @@ async def reject_transfer(
             detail="Transfer not found"
         )
 
+    require_approval_access(current_user, transfer)
     transfer_service.reject_transfer(db, transfer, reason, current_user)
     # v2: also release any lot reservations.
     from app.services import ship_out_service

@@ -13,7 +13,7 @@ from app.schemas import (
     Receipt as ReceiptSchema, ReceiptCreate, ReceiptUpdate, ReceiptAssignStorage,
     ReceiptAllocation as ReceiptAllocationSchema
 )
-from app.utils.auth import get_current_active_user, require_role, warehouse_filter, resolve_warehouse_for_write
+from app.utils.auth import get_current_active_user, require_role, warehouse_filter, resolve_warehouse_for_write, require_approval_access
 from app.enums import ReceiptStatus, PalletStatus
 from app.services import receipt_service
 from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED, DEFAULT_CASES_PER_PALLET
@@ -430,6 +430,7 @@ async def approve_receipt(
             detail="Receipt not found"
         )
     
+    require_approval_access(current_user, receipt)
     receipt_service.approve_receipt(db, receipt, current_user)
     db.commit()
     db.refresh(receipt)
@@ -455,6 +456,7 @@ async def reject_receipt(
             detail="Receipt not found"
         )
     
+    require_approval_access(current_user, receipt)
     receipt_service.reject_receipt(db, receipt, reason, current_user)
     db.commit()
     db.refresh(receipt)
@@ -480,6 +482,7 @@ async def send_back_receipt(
             detail="Receipt not found"
         )
     
+    require_approval_access(current_user, receipt)
     receipt_service.send_back_receipt(db, receipt, reason, current_user)
     db.commit()
     db.refresh(receipt)

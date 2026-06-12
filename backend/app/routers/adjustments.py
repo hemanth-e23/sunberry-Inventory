@@ -11,7 +11,7 @@ from app.schemas import (
     InventoryAdjustmentCreate,
     InventoryAdjustmentUpdate,
 )
-from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write
+from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
 from app.enums import AdjustmentStatus
 from app.services import adjustment_service
 from app.constants import ROLE_WAREHOUSE
@@ -142,6 +142,7 @@ async def approve_adjustment(
             detail="Adjustment not found"
         )
 
+    require_approval_access(current_user, adjustment)
     adjustment_service.approve_adjustment(db, adjustment, current_user)
     db.commit()
     db.refresh(adjustment)
@@ -167,6 +168,7 @@ async def reject_adjustment(
             detail="Adjustment not found"
         )
 
+    require_approval_access(current_user, adjustment)
     adjustment_service.reject_adjustment(db, adjustment, reason, current_user)
     db.commit()
     db.refresh(adjustment)
