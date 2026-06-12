@@ -4,9 +4,11 @@ from sqlalchemy.orm import Session
 
 from app.models import Receipt, InventoryAdjustment, PalletLicence
 from app.models.location import StorageRow
-from app.enums import AdjustmentStatus, ReceiptStatus
+from app.enums import AdjustmentStatus, ReceiptStatus, PalletStatus
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE
+from app.services.ship_out_service import _release_row_capacity
+from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
 
 # Adjustment types that reduce inventory quantity
 DEDUCTION_TYPES = frozenset({
@@ -48,6 +50,16 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
                 adjustment.original_quantity = receipt.quantity
                 receipt.quantity = max(0, receipt.quantity - cases_removed)
                 adjustment.new_quantity = receipt.quantity
+                # Take the adjusted pallets out of stock and free the storage
+                # rows they occupied. Without this they stayed IN_STOCK and
+                # could be picked again at ship-out — deducting the receipt a
+                # second time for goods that were already written off.
+                for pallet in receipt_pallets:
+                    _release_row_capacity(db, pallet, pallet.cases or 0)
+                    pallet.status = PalletStatus.CANCELLED
+                # Rebuild the FG occupancy view from the remaining IN_STOCK
+                # pallets so row cards and allocation stay in sync.
+                _rebuild_receipt_allocation_from_licences(db, receipt)
                 if receipt.quantity <= 0:
                     receipt.status = ReceiptStatus.DEPLETED
     else:
