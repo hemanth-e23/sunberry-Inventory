@@ -49,7 +49,7 @@ const AdjustmentsReport = ({ productOptions }) => {
     { label: "Type", value: (r) => r.adjustment_type?.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) },
     { label: "Product", value: (r) => r.product_name },
     { label: "Lot #", value: (r) => r.lot_number || "—" },
-    { label: "Quantity", value: (r) => formatNumber(r.quantity) },
+    { label: "Quantity", value: (r) => `${formatNumber(r.quantity)}${r.unit ? ` ${r.unit}` : ""}` },
     { label: "Qty Before", value: (r) => r.qty_before != null ? formatNumber(r.qty_before) : "—" },
     { label: "Qty After", value: (r) => r.qty_after != null ? formatNumber(r.qty_after) : "—" },
     { label: "Reason", value: (r) => r.reason || "—" },
@@ -86,10 +86,11 @@ const AdjustmentsReport = ({ productOptions }) => {
         <>
           <SummaryCards cards={[
             { label: "Total Adjustments", value: formatNumber(adjData.totals?.count) },
-            { label: "Total Qty Adjusted", value: formatNumber(adjData.totals?.total_quantity), highlight: true },
-            ...Object.entries(adjData.totals?.by_type || {}).map(([k, v]) => ({
-              label: k.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-              value: formatNumber(v),
+            // One headline card per unit — cases/lbs/units are never summed together.
+            ...Object.entries(adjData.totals?.total_by_unit || {}).map(([unit, v]) => ({
+              label: `Total Adjusted (${unit})`,
+              value: `${formatNumber(v)} ${unit}`,
+              highlight: true,
             })),
           ]} />
           <div className="reports-section">

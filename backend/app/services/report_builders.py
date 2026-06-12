@@ -1090,6 +1090,10 @@ def build_adjustments_report(
         pname, pcode = product_info(db, a.product_id)
         cname, _ = category_info(db, a.category_id)
         receipt = db.query(Receipt).filter(Receipt.id == a.receipt_id).first()
+        # Prefer the adjustment's own recorded unit (added in Task 2.5); fall
+        # back to the receipt's unit. Adjustments span cases/lbs/units, so the
+        # report must keep the unit per row and never sum across units.
+        unit = getattr(a, "unit", None) or (receipt.unit if receipt else None) or "units"
         rows.append({
             "adjustment_id": a.id,
             "date": a.approved_at,
@@ -1099,6 +1103,7 @@ def build_adjustments_report(
             "category_name": cname,
             "lot_number": receipt.lot_number if receipt else "",
             "quantity": round(float(a.quantity or 0), 2),
+            "unit": unit,
             "qty_before": a.original_quantity,
             "qty_after": a.new_quantity,
             "reason": a.reason,
@@ -1106,17 +1111,22 @@ def build_adjustments_report(
             "approved_by": user_name(db, a.approved_by),
         })
 
-    type_summary: dict = {}
+    # Totals grouped by unit so cases/lbs/units never get added together.
+    total_by_unit: dict = {}
+    by_type_unit: dict = {}
     for r in rows:
+        u = r["unit"]
+        total_by_unit[u] = round(total_by_unit.get(u, 0) + r["quantity"], 2)
         t = r["adjustment_type"]
-        type_summary[t] = type_summary.get(t, 0) + r["quantity"]
+        by_type_unit.setdefault(t, {})
+        by_type_unit[t][u] = round(by_type_unit[t].get(u, 0) + r["quantity"], 2)
 
     return {
         "rows": rows,
         "totals": {
             "count": len(rows),
-            "total_quantity": round(sum(r["quantity"] for r in rows), 2),
-            "by_type": {k: round(v, 2) for k, v in type_summary.items()},
+            "total_by_unit": total_by_unit,
+            "by_type_unit": by_type_unit,
         },
     }
 
