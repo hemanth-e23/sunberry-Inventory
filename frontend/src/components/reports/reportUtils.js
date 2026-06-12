@@ -1,4 +1,5 @@
 import apiClient from "../../api/client";
+import { toDateKey as tzToDateKey, getTodayDateKey } from "../../utils/dateUtils";
 
 export const apiFetch = async (path, params = {}) => {
   const cleanParams = Object.fromEntries(
@@ -15,12 +16,10 @@ export const apiError = (e) => {
   return e.message || "An unexpected error occurred.";
 };
 
-export const toDateKey = (value) => {
-  if (!value) return null;
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
-};
+// Delegates to the warehouse-timezone helper — the old local version used UTC
+// (toISOString), so evening users west of UTC got tomorrow's date in the
+// default report ranges.
+export const toDateKey = (value) => (value ? tzToDateKey(value) : null);
 
 export const formatNumber = (value, fractionDigits = 0) =>
   Number(value || 0).toLocaleString(undefined, {
@@ -31,17 +30,16 @@ export const formatNumber = (value, fractionDigits = 0) =>
 export const sanitizeFileName = (name) =>
   name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "report";
 
-export const today = () => toDateKey(new Date());
+export const today = () => getTodayDateKey();
 
-export const monthStart = () => {
-  const d = new Date();
-  return toDateKey(new Date(d.getFullYear(), d.getMonth(), 1));
-};
+export const monthStart = () => `${getTodayDateKey().slice(0, 8)}01`;
 
 export const daysAgo = (n) => {
-  const d = new Date();
+  // Anchor at warehouse-tz noon today, then step back n days — stays on the
+  // right calendar day in every timezone.
+  const d = new Date(`${getTodayDateKey()}T12:00:00`);
   d.setDate(d.getDate() - n);
-  return toDateKey(d);
+  return tzToDateKey(d);
 };
 
 export const GROUP_ORDER = [

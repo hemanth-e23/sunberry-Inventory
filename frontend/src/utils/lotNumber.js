@@ -35,6 +35,8 @@ export const generateLotNumberFromLine = (productionDate, lineNameOrNumber) => {
   const lineNum = extractLineNumber(lineNameOrNumber);
   if (!lineNum) return "";
   const date = new Date(productionDate);
-  const year = date.getFullYear().toString().slice(-2);
+  // UTC year, matching getDayOfYear's UTC math — local getFullYear() gave the
+  // prior year's digits for Jan 1 in browsers west of UTC.
+  const year = date.getUTCFullYear().toString().slice(-2);
   return `MP${String(dayOfYear).padStart(3, "0")}${year}L${lineNum}`;
 };

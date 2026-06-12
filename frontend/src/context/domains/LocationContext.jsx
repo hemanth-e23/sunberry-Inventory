@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useRef } from 'react';
 import apiClient from '../../api/client';
 import { useAuth } from '../AuthContext';
 
@@ -22,10 +22,17 @@ export const LocationProvider = ({ children }) => {
   // Fetch helpers (also exposed for external refresh)
   // ---------------------------------------------------------------------------
 
+  // Stale-response guards: a slow response from the previous warehouse must not
+  // overwrite the newly selected warehouse's data (latest call wins).
+  const locationsFetchSeq = useRef(0);
+  const storageAreasFetchSeq = useRef(0);
+
   const fetchLocations = async () => {
+    const seq = ++locationsFetchSeq.current;
     try {
       const locResponse = await apiClient.get('/master-data/locations');
       const subLocResponse = await apiClient.get('/master-data/sub-locations');
+      if (seq !== locationsFetchSeq.current) return;
 
       const locations = locResponse.data.map(loc => ({
         id: loc.id,
@@ -60,8 +67,10 @@ export const LocationProvider = ({ children }) => {
   };
 
   const fetchStorageAreas = async () => {
+    const seq = ++storageAreasFetchSeq.current;
     try {
       const response = await apiClient.get('/master-data/storage-areas');
+      if (seq !== storageAreasFetchSeq.current) return;
       const areas = response.data.map(area => ({
         id: area.id,
         name: area.name,

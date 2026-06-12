@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useMemo, useState, useCallback, useRef } from 'react';
 import { useAppData } from '../../context/AppDataContext';
 import { useAuth } from '../../context/AuthContext';
 import { useConfirm } from '../../context/ConfirmContext';
@@ -97,7 +97,11 @@ const HoldsTab = () => {
   };
 
   // ─── Fetch pallets when FG product or mode changes ────────────────────────
+  // Stale-response guard: only the LATEST fetch may apply — fast product
+  // switching must not leave the previous product's pallets selectable.
+  const fgFetchSeq = useRef(0);
   const fetchFgPallets = useCallback(async (productId, mode) => {
+    const seq = ++fgFetchSeq.current;
     if (!productId) {
       setFgPallets([]);
       setFgSelectedIds([]);
@@ -110,11 +114,13 @@ const HoldsTab = () => {
     try {
       const params = { product_id: productId, status: 'in_stock', is_held: mode === 'release' };
       const response = await apiClient.get('/pallet-licences/', { params });
+      if (seq !== fgFetchSeq.current) return;
       setFgPallets(response.data || []);
     } catch {
+      if (seq !== fgFetchSeq.current) return;
       setFgError('Failed to load pallets.');
     } finally {
-      setFgPalletsLoading(false);
+      if (seq === fgFetchSeq.current) setFgPalletsLoading(false);
     }
   }, []);
 

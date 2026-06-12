@@ -1009,6 +1009,7 @@ const TransferCard = memo(function TransferCard({ transfer, currentUser, onActio
   const [actionModal, setActionModal] = useState(null);
   const [showConfirmShipment, setShowConfirmShipment] = useState(false);
   const [showPlaceInStorage, setShowPlaceInStorage] = useState(false);
+  const [acting, setActing] = useState(false);
 
   const isCorporate = CORPORATE_ROLES.includes(currentUser?.role);
   const isFromWarehouse = currentUser?.warehouse_id === transfer.from_warehouse_id;
@@ -1016,6 +1017,8 @@ const TransferCard = memo(function TransferCard({ transfer, currentUser, onActio
   const canAct = isCorporate || isFromWarehouse || isToWarehouse;
 
   const doAction = async (endpoint, payload = {}) => {
+    if (acting) return;  // a slow request must not be double-submitted
+    setActing(true);
     try {
       const res = await apiClient.post(
         `/inter-warehouse-transfers/${transfer.id}/${endpoint}`,
@@ -1024,6 +1027,8 @@ const TransferCard = memo(function TransferCard({ transfer, currentUser, onActio
       onAction(res.data);
     } catch (err) {
       addToast(err.response?.data?.detail || 'Action failed.', 'error');
+    } finally {
+      setActing(false);
     }
   };
 
@@ -1162,13 +1167,14 @@ const TransferCard = memo(function TransferCard({ transfer, currentUser, onActio
           {canAct && actions.length > 0 && (
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {actions.map(act => (
-                <button key={act.endpoint} onClick={() => {
+                <button key={act.endpoint} disabled={acting} onClick={() => {
                   if (act.direct) { doAction(act.endpoint); }
                   else if (act.customModal) { setShowConfirmShipment(true); }
                   else { setActionModal(act); }
                 }} style={{
                   padding: '7px 16px', borderRadius: 6, border: `1px solid ${act.color}`,
-                  background: '#fff', color: act.color, cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                  background: '#fff', color: act.color, cursor: acting ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 600,
+                  opacity: acting ? 0.6 : 1,
                 }}>
                   {act.label}
                 </button>

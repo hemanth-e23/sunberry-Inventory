@@ -114,10 +114,15 @@ export const InventoryProvider = ({ children }) => {
   useEffect(() => {
     if (authLoading || !isAuthenticated) return;
 
+    // Stale-response guard: switching warehouses re-runs this effect; a slow
+    // response from the PREVIOUS warehouse must not overwrite the new one's data.
+    let cancelled = false;
+
     const fetchInventoryActions = async () => {
       // Each fetch is independent — a failure in one must not block the others
       await Promise.allSettled([
         apiClient.get('/inventory/hold-actions').then((holdsResponse) => {
+          if (cancelled) return;
           const holds = holdsResponse.data.map((hold) => ({
             id: hold.id,
             receiptId: hold.receipt_id,
@@ -138,6 +143,7 @@ export const InventoryProvider = ({ children }) => {
         }).catch((error) => console.error('Error fetching hold actions:', error)),
 
         apiClient.get('/inventory/transfers').then((transfersResponse) => {
+          if (cancelled) return;
           const transfers = transfersResponse.data.map((t) => ({
             id: t.id,
             receiptId: t.receipt_id,
@@ -171,6 +177,7 @@ export const InventoryProvider = ({ children }) => {
         }).catch((error) => console.error('Error fetching transfers:', error)),
 
         apiClient.get('/inventory/adjustments').then((adjustmentsResponse) => {
+          if (cancelled) return;
           const adjustments = adjustmentsResponse.data.map((adj) => ({
             id: adj.id,
             receiptId: adj.receipt_id,
@@ -192,6 +199,7 @@ export const InventoryProvider = ({ children }) => {
       ]);
     };
     fetchInventoryActions();
+    return () => { cancelled = true; };
   }, [authLoading, isAuthenticated, selectedWarehouse]);
 
   // ─── Fetch cycle counts ─────────────────────────────────────────────────────

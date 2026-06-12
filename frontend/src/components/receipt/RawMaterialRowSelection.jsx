@@ -137,7 +137,10 @@ const RawMaterialRowSelection = ({
               </div>
               {rawMaterialRowAllocations.map((alloc) => {
                 const row = availableRows.find(r => r.value === alloc.rowId);
-                const maxPallets = alloc.available || row?.capacity || alloc.capacity || 0;
+                // null available/capacity = capacity unset = soft-unlimited; an
+                // || chain turned that into 0 and clamped the input to nothing.
+                const rawMax = alloc.available ?? row?.capacity ?? alloc.capacity ?? null;
+                const maxPallets = rawMax === null ? Infinity : rawMax;
 
                 return (
                   <div key={alloc.id} style={{ marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -154,7 +157,7 @@ const RawMaterialRowSelection = ({
                         );
                       }}
                       min="0"
-                      max={maxPallets}
+                      max={maxPallets === Infinity ? undefined : maxPallets}
                       step="1"
                       style={{ width: '80px', padding: '4px 8px' }}
                     />

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useRef } from 'react';
 import { useAppData } from '../../context/AppDataContext';
 import { useAuth } from '../../context/AuthContext';
 import { useConfirm } from '../../context/ConfirmContext';
@@ -100,7 +100,11 @@ const TransfersTab = () => {
   }, [fgToLocationId, storageAreas]);
 
   // ─── FG: load pallets ────────────────────────────────────────────────────────
+  // Stale-response guard: only the LATEST fetch may apply — fast product
+  // switching must not leave the previous product's pallets selectable.
+  const fgFetchSeq = useRef(0);
   const loadFgPallets = async (productId) => {
+    const seq = ++fgFetchSeq.current;
     setFgPallets([]);
     setFgSelectedIds([]);
     setFgError('');
@@ -108,11 +112,13 @@ const TransfersTab = () => {
     setFgPalletsLoading(true);
     try {
       const data = await fetchPalletLicences({ product_id: productId, status: 'in_stock', is_held: false });
+      if (seq !== fgFetchSeq.current) return;
       setFgPallets((data || []).sort((a, b) => (a.sequence || 0) - (b.sequence || 0)));
     } catch {
+      if (seq !== fgFetchSeq.current) return;
       setFgError('Failed to load pallets. Please try again.');
     } finally {
-      setFgPalletsLoading(false);
+      if (seq === fgFetchSeq.current) setFgPalletsLoading(false);
     }
   };
 

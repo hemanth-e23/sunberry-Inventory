@@ -139,7 +139,15 @@ const ScannerShipOutFlowV2 = () => {
   // Keep scan input focused for HID scanners.
   useEffect(() => {
     if (manualKeyboard || step !== 'pick') return;
-    const id = requestAnimationFrame(() => inputRef.current?.focus());
+    const id = requestAnimationFrame(() => {
+      // Don't steal focus while the operator is typing in another field (e.g.
+      // the notes textarea) — the 4s poll re-runs this effect via `view`.
+      const active = document.activeElement;
+      const typing = active && active !== inputRef.current &&
+        (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+      if (typing) return;
+      inputRef.current?.focus();
+    });
     return () => cancelAnimationFrame(id);
   }, [step, overlay, scanFeedback, manualKeyboard, view]);
 

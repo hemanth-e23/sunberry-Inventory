@@ -108,6 +108,15 @@ const ScannerTransferFlow = () => {
         setLicenceInput('');
         return;
       }
+      // The backend rejects a submission that spans receipts wholesale — block
+      // the mismatched pallet at scan time instead of losing the work at submit.
+      if (moves.length > 0 && pl.receipt_id && moves[0].receipt_id && pl.receipt_id !== moves[0].receipt_id) {
+        const msg = 'This pallet belongs to a different receipt. Submit the current moves first, then start a new batch.';
+        setError(msg);
+        showError(msg);
+        setLicenceInput('');
+        return;
+      }
       setCurrentLicence(pl);
       setLicenceInput('');
       setSelectedDestId('');
@@ -165,6 +174,7 @@ const ScannerTransferFlow = () => {
       product_name: currentLicence.product?.name || currentLicence.product_name || null,
       cases: currentLicence.cases || 0,
       to_row_id: selectedDestId,
+      receipt_id: currentLicence.receipt_id || null,
     }]);
     setCurrentLicence(null);
     setSelectedDestId('');

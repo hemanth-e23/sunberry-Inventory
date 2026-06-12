@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { useAppData } from '../../context/AppDataContext';
 import SearchableSelect from '../SearchableSelect';
 import { formatDate } from '../../utils/dateUtils';
@@ -45,7 +45,11 @@ const ShipOutLineEditor = ({ value, onChange, onRemove, canRemove, lineIndex }) 
       .map((p) => ({ value: p.id, label: String(p.name || 'Unknown') }));
   }, [products, categories]);
 
+  // Stale-response guard: only the LATEST fetch may apply — fast product
+  // switching must not render the previous product's lots.
+  const lotsFetchSeq = useRef(0);
   const loadLots = async (productId) => {
+    const seq = ++lotsFetchSeq.current;
     if (!productId) {
       setAvailableLots([]);
       return;
@@ -54,15 +58,17 @@ const ShipOutLineEditor = ({ value, onChange, onRemove, canRemove, lineIndex }) 
     setLoadError('');
     try {
       const lots = await fetchAvailableLots(productId);
+      if (seq !== lotsFetchSeq.current) return;
       setAvailableLots(lots || []);
       if (!lots || lots.length === 0) {
         setLoadError('No lots available for this product.');
       }
     } catch (e) {
+      if (seq !== lotsFetchSeq.current) return;
       console.error(e);
       setLoadError('Failed to load lot availability.');
     } finally {
-      setIsLoading(false);
+      if (seq === lotsFetchSeq.current) setIsLoading(false);
     }
   };
 

@@ -88,12 +88,12 @@ export const getTodayDateKey = () => {
 
 export const isDateInPast = (dateValue) => {
   if (!dateValue) return false;
-  const date = new Date(ensureUtc(dateValue));
-  if (Number.isNaN(date.getTime())) return false;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  date.setHours(0, 0, 0, 0);
-  return date < today;
+  // Compare calendar-day keys in the warehouse timezone. The old version mixed
+  // a UTC-parsed date with local midnight, falsely rejecting same-day dates
+  // (e.g. a same-day expiration entered from a US-timezone browser).
+  const key = toDateKey(dateValue);
+  if (!key) return false;
+  return key < getTodayDateKey();
 };
 
 export const isDateValid = (dateValue) => {

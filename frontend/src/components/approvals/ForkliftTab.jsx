@@ -289,7 +289,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                       type="date"
                       value={fr.production_date ? toDateKey(fr.production_date) : ''}
                       onChange={(e) => {
-                        const val = e.target.value ? new Date(e.target.value + 'T00:00:00').toISOString() : null;
+                        const val = e.target.value ? new Date(e.target.value + 'T12:00:00').toISOString() : null; // noon anchor: same calendar day in any tz
                         updateForkliftRequest(fr.id, { production_date: val });
                       }}
                       style={{ display: 'block', marginTop: '2px', padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', width: '100%', boxSizing: 'border-box' }}
@@ -307,7 +307,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                       type="date"
                       value={fr.expiration_date ? toDateKey(fr.expiration_date) : ''}
                       onChange={(e) => {
-                        const val = e.target.value ? new Date(e.target.value + 'T00:00:00').toISOString() : null;
+                        const val = e.target.value ? new Date(e.target.value + 'T12:00:00').toISOString() : null; // noon anchor: same calendar day in any tz
                         updateForkliftRequest(fr.id, { expiration_date: val });
                       }}
                       style={{ display: 'block', marginTop: '2px', padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: '4px', width: '100%', boxSizing: 'border-box' }}

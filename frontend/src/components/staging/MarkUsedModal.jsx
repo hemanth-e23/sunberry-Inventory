@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useAppData } from '../../context/AppDataContext';
 import { useToast } from '../../context/ToastContext';
 import apiClient from '../../api/client';
@@ -41,6 +41,9 @@ const MarkUsedModal = ({
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState('');
   const [actionSuccess, setActionSuccess] = useState('');
+  // Rows already applied in THIS modal session — a retry after a mid-loop
+  // failure must skip them, or the earlier rows get consumed twice.
+  const appliedRowsRef = useRef(new Set());
 
   const handleMarkUsed = async () => {
     setSubmitting(true);
@@ -51,12 +54,14 @@ const MarkUsedModal = ({
       for (const detail of details || []) {
         const qty = parseFloat(quantities[detail.staging_item_id]) || 0;
         if (qty <= 0) continue;
+        if (appliedRowsRef.current.has(detail.staging_item_id)) continue;
 
         const itemId = detail._itemId ?? item.id;
         await apiClient.post(
           `/service/staging-requests/${requestId}/items/${itemId}/mark-used`,
           { staging_item_id: detail.staging_item_id, quantity: qty }
         );
+        appliedRowsRef.current.add(detail.staging_item_id);
       }
 
       const successMsg = 'Items marked as used successfully!';
