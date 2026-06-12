@@ -524,6 +524,19 @@ async def assign_storage(
     if wh_id and receipt.warehouse_id != wh_id:
         raise HTTPException(status_code=403, detail="Cannot assign storage for a different warehouse's receipt")
 
+    # Idempotency guard: assigning storage increments row occupancy, so calling
+    # it twice would double-book. Reject if storage was already assigned.
+    already_assigned = bool(
+        receipt.storage_row_id
+        or (isinstance(receipt.raw_material_row_allocations, list)
+            and len(receipt.raw_material_row_allocations) > 0)
+    )
+    if already_assigned:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Storage has already been assigned for this receipt.",
+        )
+
     # Update location fields
     if data.location_id:
         receipt.location_id = data.location_id

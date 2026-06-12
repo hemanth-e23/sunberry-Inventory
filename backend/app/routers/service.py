@@ -222,9 +222,11 @@ async def check_availability(
             })
             continue
 
-        # Sum on-hand quantity from approved receipts with quantity > 0
+        # Sum on-hand quantity from approved receipts with quantity > 0,
+        # excluding any quantity on QA hold (held material is not available to
+        # production).
         on_hand = (
-            db.query(func.coalesce(func.sum(Receipt.quantity), 0))
+            db.query(func.coalesce(func.sum(Receipt.quantity - func.coalesce(Receipt.held_quantity, 0)), 0))
             .filter(
                 Receipt.product_id == product.id,
                 Receipt.status == ReceiptStatus.APPROVED,

@@ -508,6 +508,14 @@ def scan_pallet(
                 ForkliftRequest.id == existing_other.forklift_request_id
             ).first()
             if other_req and other_req.status == ForkliftRequestStatus.SCANNING:
+                # Decrement the other (still-scanning) session's running totals
+                # before removing its pallet, otherwise its approval card
+                # overstates production.
+                other_req.total_cases = max(0, (other_req.total_cases or 0) - (existing_other.cases or 0))
+                if existing_other.is_partial:
+                    other_req.total_partial_pallets = max(0, (other_req.total_partial_pallets or 0) - 1)
+                else:
+                    other_req.total_full_pallets = max(0, (other_req.total_full_pallets or 0) - 1)
                 db.delete(existing_other)
                 db.flush()
             elif other_req and other_req.status == ForkliftRequestStatus.SUBMITTED:

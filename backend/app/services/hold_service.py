@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models import Receipt, InventoryHoldAction, StorageRow, PalletLicence
-from app.enums import HoldStatus
+from app.enums import HoldStatus, PalletStatus
 from app.exceptions import ForbiddenError, ValidationError, NotFoundError
 from app.constants import ROLE_WAREHOUSE
 
@@ -40,7 +40,7 @@ def validate_and_build_hold_dict(db: Session, hold_action_data) -> dict:
             "action": hold_action_data.action,
             "reason": hold_action_data.reason,
             "hold_items": None,
-            "total_quantity": sum(p.cases for p in pallets),
+            "total_quantity": sum(p.cases or 0 for p in pallets),
             "pallet_licence_ids": hold_action_data.pallet_licence_ids,
         }
 
@@ -96,15 +96,20 @@ def approve_hold_action(db: Session, hold_action: InventoryHoldAction, current_u
         ).all()
         is_hold = hold_action.action == "hold"
         for pallet in pallets:
+            # Only hold pallets that are still in stock — a pallet that shipped
+            # between hold-request and approval must not be re-held.
+            if is_hold and pallet.status != PalletStatus.IN_STOCK:
+                continue
             pallet.is_held = is_hold
 
         # Recalculate held_quantity for each affected receipt
         affected_receipt_ids = set(p.receipt_id for p in pallets if p.receipt_id)
         for receipt_id in affected_receipt_ids:
             held_cases = sum(
-                p.cases for p in db.query(PalletLicence).filter(
+                (p.cases or 0) for p in db.query(PalletLicence).filter(
                     PalletLicence.receipt_id == receipt_id,
                     PalletLicence.is_held == True,
+                    PalletLicence.status == PalletStatus.IN_STOCK,
                 ).all()
             )
             receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()

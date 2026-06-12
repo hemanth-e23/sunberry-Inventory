@@ -58,6 +58,14 @@ async def create_adjustment(
     # client-supplied unit so it can't disagree with the inventory it touches.
     adjustment_dict.pop("unit", None)
 
+    # Only deduction types actually change inventory on approval. Reject anything
+    # else here rather than approving a silent no-op the user thinks corrected stock.
+    if adjustment_data.adjustment_type not in adjustment_service.DEDUCTION_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported adjustment type '{adjustment_data.adjustment_type}'.",
+        )
+
     if adjustment_data.pallet_licence_ids:
         # Pallet-based adjustment (Finished Goods) — always measured in cases.
         pallets = db.query(PalletLicence).filter(

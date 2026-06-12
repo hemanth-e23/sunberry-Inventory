@@ -103,7 +103,7 @@ def send_back_receipt(db: Session, receipt: Receipt, reason: str, current_user) 
 
     _free_storage_row_occupancy(db, receipt)
 
-    receipt.status = "sent-back"
+    receipt.status = ReceiptStatus.SENT_BACK
     receipt.note = f"{receipt.note or ''}\n[Sent Back by {current_user.name}]: {reason}".strip()
 
     # Delete licences so they get regenerated when the receipt is resubmitted

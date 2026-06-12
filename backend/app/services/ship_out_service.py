@@ -883,6 +883,13 @@ def scan_pick_v2(
                 ),
             }
         consumed = float(cases_to_consume)
+        # Cases are discrete — a fractional partial pull would desync the receipt
+        # from the rounded pallet remainder (minting or destroying cases).
+        if consumed != int(consumed):
+            raise ValidationError(
+                f"Partial cases must be a whole number, got {consumed}"
+            )
+        consumed = int(consumed)
         if consumed <= 0 or consumed > pallet_cases + 0.001:
             raise ValidationError(
                 f"Invalid partial cases: {consumed} (pallet has {pallet_cases})"

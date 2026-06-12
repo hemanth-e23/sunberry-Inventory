@@ -855,7 +855,9 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                 if receipt:
                     receipt.quantity = (receipt.quantity or 0) + reduce_qty
                     if receipt.status == ReceiptStatus.DEPLETED:
-                        receipt.status = ReceiptStatus.RECORDED
+                        # It was approved before it depleted — restore to APPROVED,
+                        # not RECORDED, so it stays visible to availability queries.
+                        receipt.status = ReceiptStatus.APPROVED
                     adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
                     db.add(InventoryAdjustment(
                         id=adj_id,

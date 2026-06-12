@@ -15,10 +15,12 @@ const ReceiptCorrectionsPage = () => {
   const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [draft, setDraft] = useState({});
 
-  // Filter receipts that have been sent back (status: "sent-back", or legacy: "recorded" with supervisor notes)
+  // Filter receipts that have been sent back. Accept the canonical 'sent_back'
+  // enum value and the legacy 'sent-back' spelling (older rows, pre-migration),
+  // plus 'recorded' receipts carrying a supervisor send-back note.
   const sentBackReceipts = useMemo(() => {
     return receipts.filter(receipt => {
-      if (receipt.status === 'sent-back') return true;
+      if (receipt.status === 'sent_back' || receipt.status === 'sent-back') return true;
       if (receipt.status !== 'recorded') return false;
       return receipt.note && receipt.note.includes('[Sent Back by');
     });

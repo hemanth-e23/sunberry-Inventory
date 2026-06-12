@@ -476,7 +476,9 @@ def approve_transfer(db: Session, transfer: InventoryTransfer, current_user) -> 
         return _approve_multi_line_ship_out(db, transfer, current_user)
 
     # ── Legacy path: single-receipt transfer ──
-    receipt = db.query(Receipt).filter(Receipt.id == transfer.receipt_id).first()
+    # Lock the receipt row: this path does a read-modify-write on quantity, so
+    # two concurrent approvals must not both read the pre-deduction value.
+    receipt = db.query(Receipt).filter(Receipt.id == transfer.receipt_id).with_for_update().first()
     if not receipt:
         from app.exceptions import NotFoundError
         raise NotFoundError("Receipt", transfer.receipt_id)

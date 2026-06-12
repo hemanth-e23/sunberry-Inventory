@@ -6,7 +6,7 @@ import uuid
 from app.database import get_db
 from app.models import CycleCount
 from app.schemas import CycleCount as CycleCountSchema, CycleCountCreate
-from app.utils.auth import get_current_active_user, warehouse_filter
+from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write
 
 router = APIRouter()
 
@@ -27,7 +27,9 @@ async def create_cycle_count(
 
     db_cycle_count = CycleCount(
         id=f"cycle-{uuid.uuid4().hex[:12]}",
-        warehouse_id=current_user.warehouse_id,
+        # Resolve via the standard helper so a corporate user's count gets the
+        # selected warehouse instead of NULL (which hid it from warehouse lists).
+        warehouse_id=resolve_warehouse_for_write(current_user),
         **cycle_count_dict
     )
 
