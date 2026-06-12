@@ -302,7 +302,9 @@ export const ReceiptProvider = ({ children }) => {
       sub_location_id: subLocationId,
       storage_row_id: receipt.storageRowId || null,
       pallets: receipt.pallets ? Number(receipt.pallets) : null,
-      raw_material_row_allocations: receipt.rawMaterialRowAllocations || null,
+      // Backend ReceiptCreate expects this exact camelCase key (popped in the
+      // router); sending snake_case here silently dropped multi-row allocations.
+      rawMaterialRowAllocations: receipt.rawMaterialRowAllocations || null,
       cases_per_pallet: receipt.casesPerPallet ? Number(receipt.casesPerPallet) : null,
       full_pallets: receipt.fullPallets ? Number(receipt.fullPallets) : null,
       partial_cases: receipt.partialCases ? Number(receipt.partialCases) : 0,
