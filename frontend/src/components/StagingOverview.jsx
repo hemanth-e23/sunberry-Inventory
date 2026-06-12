@@ -124,7 +124,8 @@ const StagingOverview = () => {
 
     const available = selectedItem.quantity_staged - selectedItem.quantity_used - selectedItem.quantity_returned;
     if (parseFloat(markUsedQuantity) > available) {
-      setError(`Cannot use more than available (${available} cases).`);
+      const unit = selectedItem.receipt?.unit || receipts.find(r => r.id === selectedItem.receipt_id)?.quantityUnits || 'units';
+      setError(`Cannot use more than available (${available} ${unit}).`);
       return;
     }
 
@@ -160,7 +161,8 @@ const StagingOverview = () => {
 
     const available = selectedItem.quantity_staged - selectedItem.quantity_used - selectedItem.quantity_returned;
     if (parseFloat(returnQuantity) > available) {
-      setError(`Cannot return more than available (${available} cases).`);
+      const unit = selectedItem.receipt?.unit || receipts.find(r => r.id === selectedItem.receipt_id)?.quantityUnits || 'units';
+      setError(`Cannot return more than available (${available} ${unit}).`);
       return;
     }
 

@@ -24,7 +24,12 @@ const InventoryDashboard = ({
       return expiryDate <= sixMonthsFromNow && expiryDate >= new Date();
     }).length;
 
-    const lowStockItems = receipts.filter(r => r.quantity < 100).length;
+    // Only finished goods are measured in cases, so the 100-case threshold only
+    // makes sense for them — a 95-lb raw-material remnant isn't "low stock".
+    const lowStockItems = receipts.filter(r => {
+      const category = categoriesById[productsById[r.productId]?.categoryId];
+      return category?.type === CATEGORY_TYPES.FINISHED && r.quantity < 100;
+    }).length;
 
     const totalValue = receipts.reduce((sum, r) => {
       const category = categoriesById[productsById[r.productId]?.categoryId];

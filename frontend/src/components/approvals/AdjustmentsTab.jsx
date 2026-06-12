@@ -135,7 +135,7 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
                 type="button"
                 className="secondary-button"
                 onClick={() => {
-                  confirm(`Approve this ${getAdjustmentTypeLabel(adjustment.adjustmentType).toLowerCase()} of ${adjQty} cases?`).then(ok => {
+                  confirm(`Approve this ${getAdjustmentTypeLabel(adjustment.adjustmentType).toLowerCase()} of ${adjQty} ${receipt?.quantityUnits || 'units'}?`).then(ok => {
                     if (ok) approveAdjustment(adjustment.id, user?.id || user?.username);
                   });
                 }}

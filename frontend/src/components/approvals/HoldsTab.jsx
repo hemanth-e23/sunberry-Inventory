@@ -110,7 +110,7 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
                   {receipt?.heldQuantity > 0 && (
                     <div>
                       <span style={{ color: '#6b7280' }}>Currently on Hold</span>
-                      <div style={{ fontWeight: 600, color: '#d97706', marginTop: '2px' }}>{receipt.heldQuantity} cases</div>
+                      <div style={{ fontWeight: 600, color: '#d97706', marginTop: '2px' }}>{receipt.heldQuantity} {receipt?.quantityUnits || 'units'}</div>
                     </div>
                   )}
                   {(receipt?.locationId || receipt?.location) && (
