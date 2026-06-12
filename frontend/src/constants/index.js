@@ -16,6 +16,13 @@ export const CATEGORY_TYPES = {
   PACKAGING: 'packaging',
 };
 
+// Production data contains BOTH 'raw' (dominant) and the legacy 'raw-material'
+// spelling for raw materials / ingredients. Use this everywhere a raw-material
+// check is needed instead of a single equality comparison, which silently
+// misses whichever spelling it isn't testing.
+export const isRawMaterialType = (type) =>
+  type === 'raw' || type === CATEGORY_TYPES.RAW_MATERIAL;
+
 // ─── Statuses ─────────────────────────────────────────────────────────────────
 
 export const RECEIPT_STATUS = {

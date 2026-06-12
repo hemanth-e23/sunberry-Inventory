@@ -4,7 +4,7 @@ import { useAppData } from "../../context/AppDataContext";
 import { useToast } from "../../context/ToastContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { formatDateTime, formatTimeAgo, getDaysAgo, toDateKey, getTodayDateKey } from "../../utils/dateUtils";
-import { ROLES, CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
+import { ROLES, CATEGORY_TYPES, RECEIPT_STATUS, isRawMaterialType } from '../../constants';
 
 const STATUS_PENDING = new Set([RECEIPT_STATUS.RECORDED, RECEIPT_STATUS.REVIEWED]);
 
@@ -181,7 +181,7 @@ const ReceiptsTab = ({
       }
       if (category?.type !== CATEGORY_TYPES.FINISHED &&
         ["productionDate", "fccCode", "shift", "lineNumber", "hold"].includes(field)) return;
-      if (category?.type !== CATEGORY_TYPES.INGREDIENT) {
+      if (!isRawMaterialType(category?.type)) {
         if (["vendorId", "brix", "sid"].includes(field)) return;
       }
       summary.push({ field, label, before: original, after: updated });
@@ -298,7 +298,7 @@ const ReceiptsTab = ({
 
   const isEditable = selectedReceipt && STATUS_PENDING.has(selectedReceipt.status);
   const category = selectedReceipt ? categoryLookup[selectedReceipt.categoryId] : null;
-  const isIngredient = category?.type === CATEGORY_TYPES.INGREDIENT;
+  const isIngredient = isRawMaterialType(category?.type);
   const isPackaging = category?.type === CATEGORY_TYPES.PACKAGING;
   const isFinished = category?.type === CATEGORY_TYPES.FINISHED;
 

@@ -5,6 +5,7 @@ import { useReceipt } from './ReceiptContext';
 import { useInventory } from './InventoryContext';
 import { numberFrom } from '../../utils/allocationUtils';
 import { toDateKey } from '../../utils/dateUtils';
+import { isRawMaterialType } from '../../constants';
 
 // ─── Pure helper functions ────────────────────────────────────────────────────
 
@@ -278,7 +279,7 @@ export const ReportingProvider = ({ children }) => {
     const floorStagingPallets = receipts.reduce((sum, receipt) => {
       const product = products.find((p) => p.id === receipt.productId);
       const category = categories.find((c) => c.id === product?.categoryId);
-      const isRawMaterial = category?.type === 'raw-material';
+      const isRawMaterial = isRawMaterialType(category?.type);
       if (isRawMaterial && receipt.status === 'approved') {
         return sum + numberFrom(receipt.allocation?.floorAllocation?.pallets, 0);
       }
