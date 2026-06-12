@@ -610,16 +610,22 @@ export const InventoryProvider = ({ children }) => {
           }),
         );
       }
+      return { success: true };
     } catch (error) {
       console.error('Error approving hold action:', error);
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to approve hold action';
+      return { success: false, error: errorMessage };
     }
   };
 
   // ─── rejectHoldAction ───────────────────────────────────────────────────────
 
-  const rejectHoldAction = async (id, approverId = 'admin-user') => {
+  const rejectHoldAction = async (id, reason = '', approverId = 'admin-user') => {
     try {
-      await apiClient.post(`/inventory/hold-actions/${id}/reject`, {});
+      await apiClient.post(
+        `/inventory/hold-actions/${id}/reject?reason=${encodeURIComponent(reason)}`,
+        {},
+      );
 
       setInventoryHoldActions((prev) =>
         prev.map((hold) =>
@@ -628,8 +634,11 @@ export const InventoryProvider = ({ children }) => {
             : hold,
         ),
       );
+      return { success: true };
     } catch (error) {
       console.error('Error rejecting hold action:', error);
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to reject hold action';
+      return { success: false, error: errorMessage };
     }
   };
 
@@ -754,8 +763,6 @@ export const InventoryProvider = ({ children }) => {
 
   const approveAdjustment = async (id, approverId = 'admin-user') => {
     try {
-      const adjustment = inventoryAdjustments.find((adj) => adj.id === id);
-
       await apiClient.post(`/inventory/adjustments/${id}/approve`, {});
 
       setInventoryAdjustments((prev) =>
@@ -766,28 +773,27 @@ export const InventoryProvider = ({ children }) => {
         ),
       );
 
-      if (adjustment && adjustment.receiptId) {
-        const deductTypes = ['stock-correction', 'damage-reduction', 'donation', 'trash-disposal', 'quality-rejection'];
-        if (deductTypes.includes(adjustment.adjustmentType)) {
-          setReceipts((prev) =>
-            prev.map((r) =>
-              r.id === adjustment.receiptId
-                ? { ...r, quantity: Math.max(0, r.quantity - (adjustment.quantity || 0)) }
-                : r,
-            ),
-          );
-        }
-      }
+      // Refetch receipts so quantities/pallets reflect the server's deduction
+      // exactly. Local math here got it wrong (it omitted some deduction types
+      // and skipped pallet-based adjustments).
+      const receiptsResponse = await apiClient.get('/receipts/', { params: { limit: 10000 } });
+      setReceipts(receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products, categories)));
+      return { success: true };
     } catch (error) {
       console.error('Error approving adjustment:', error);
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to approve adjustment';
+      return { success: false, error: errorMessage };
     }
   };
 
   // ─── rejectAdjustment ───────────────────────────────────────────────────────
 
-  const rejectAdjustment = async (id, approverId = 'admin-user') => {
+  const rejectAdjustment = async (id, reason = '', approverId = 'admin-user') => {
     try {
-      await apiClient.post(`/inventory/adjustments/${id}/reject`, {});
+      await apiClient.post(
+        `/inventory/adjustments/${id}/reject?reason=${encodeURIComponent(reason)}`,
+        {},
+      );
 
       setInventoryAdjustments((prev) =>
         prev.map((adj) =>
@@ -796,8 +802,11 @@ export const InventoryProvider = ({ children }) => {
             : adj,
         ),
       );
+      return { success: true };
     } catch (error) {
       console.error('Error rejecting adjustment:', error);
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to reject adjustment';
+      return { success: false, error: errorMessage };
     }
   };
 
@@ -830,10 +839,11 @@ export const InventoryProvider = ({ children }) => {
       };
 
       setCycleCounts((prev) => [...prev, newCycleCount]);
-      return newCycleCount.id;
+      return { success: true, id: newCycleCount.id };
     } catch (error) {
       console.error('Error saving cycle count:', error);
-      return null;
+      const message = error.response?.data?.detail || error.message || 'Failed to save cycle count';
+      return { success: false, error: message };
     }
   };
 

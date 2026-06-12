@@ -4,6 +4,7 @@ import ExcelJS from 'exceljs';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
+import { useToast } from '../context/ToastContext';
 import { getDashboardPath } from '../App';
 import { formatDate, getTodayDateKey, toDateKey, escapeHtml } from '../utils/dateUtils';
 import { ROLES, RECEIPT_STATUS, CATEGORY_TYPES } from '../constants';
@@ -60,6 +61,7 @@ const CycleCountingPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { confirm } = useConfirm();
+  const { addToast } = useToast();
   const {
     receipts,
     products,
@@ -296,7 +298,7 @@ const CycleCountingPage = () => {
       overages,
     };
 
-    await saveCycleCount({
+    const result = await saveCycleCount({
       location: selectedLocation || null,
       category: null,
       countDate,
@@ -305,6 +307,13 @@ const CycleCountingPage = () => {
       performedBy: user?.name || user?.username || 'Unknown',
       performedById: user?.id || 'unknown',
     });
+
+    if (!result?.success) {
+      // Keep the form editable so the operator's counts aren't lost.
+      addToast(result?.error || 'Failed to save the count. Please try again.', 'error');
+      setSubmitting(false);
+      return;
+    }
 
     setSubmittedVariances(items);
     setSubmitted(true);

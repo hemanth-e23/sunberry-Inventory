@@ -59,18 +59,28 @@ const ScannerReceiptFlow = () => {
   // anything. When online, drain is immediate. When offline, the operator
   // keeps scanning and items flush when network returns.
   const onScanSynced = useCallback((item, resp) => {
-    setPallets((prev) => prev.map((p) => (
-      p._idempotency_key === item.idempotency_key
-        ? { ...resp.pallet, _pending: false, _idempotency_key: undefined }
-        : p
-    )));
+    // The sync endpoint returns HTTP 200 even for a soft rejection (a duplicate
+    // pallet), with no `pallet` in the body. Treat that as a failure: drop the
+    // optimistic row and surface the message instead of a false success beep.
+    if (resp.status === 'duplicate' || (!resp.pallet && resp.status !== 'updated')) {
+      setPallets((prev) => prev.filter((p) => p._idempotency_key !== item.idempotency_key));
+      showError(resp.message || 'Pallet already scanned');
+      return;
+    }
+    if (resp.pallet) {
+      setPallets((prev) => prev.map((p) => (
+        p._idempotency_key === item.idempotency_key
+          ? { ...resp.pallet, _pending: false, _idempotency_key: undefined }
+          : p
+      )));
+    }
     if (resp.row_available != null) setRowAvailable(resp.row_available);
     if (resp.gap_detected && resp.gap_missing?.length) {
       setGapMissing(resp.gap_missing);
       setStep('gap-prompt');
     }
-    showSuccess(`Scanned ${resp.pallet?.licence_number || ''}`.trim());
-  }, [showSuccess]);
+    showSuccess(resp.message || `Scanned ${resp.pallet?.licence_number || ''}`.trim());
+  }, [showSuccess, showError]);
 
   const onScanFailed = useCallback((item, err) => {
     // No response = transient (offline, 5xx, timeout). Leave optimistic

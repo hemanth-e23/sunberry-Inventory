@@ -2,6 +2,7 @@ import React from "react";
 import { useAuth } from "../../context/AuthContext";
 import { useAppData } from "../../context/AppDataContext";
 import { useConfirm } from "../../context/ConfirmContext";
+import { useToast } from "../../context/ToastContext";
 import { formatTimeAgo, getDaysAgo } from "../../utils/dateUtils";
 
 const getPriorityLevel = (days) => {
@@ -15,6 +16,7 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
   const { user } = useAuth();
   const { approveHoldAction, rejectHoldAction } = useAppData();
   const { confirm } = useConfirm();
+  const { addToast } = useToast();
 
   if (pendingHolds.length === 0) {
     return (
@@ -146,8 +148,10 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
                 type="button"
                 className="secondary-button"
                 onClick={() => {
-                  confirm(`Approve ${isPlacingHold ? 'placing on hold' : 'releasing from hold'}?`).then(ok => {
-                    if (ok) approveHoldAction(hold.id, user?.id || user?.username);
+                  confirm(`Approve ${isPlacingHold ? 'placing on hold' : 'releasing from hold'}?`).then(async ok => {
+                    if (!ok) return;
+                    const res = await approveHoldAction(hold.id, user?.id || user?.username);
+                    if (!res?.success) addToast(res?.error || 'Failed to approve hold', 'error');
                   });
                 }}
                 style={{ marginRight: '8px' }}
@@ -158,8 +162,10 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
                 type="button"
                 className="secondary-button danger"
                 onClick={() => {
-                  confirm('Reject this hold request?').then(ok => {
-                    if (ok) rejectHoldAction(hold.id, user?.id || user?.username);
+                  confirm('Reject this hold request?').then(async ok => {
+                    if (!ok) return;
+                    const res = await rejectHoldAction(hold.id, '', user?.id || user?.username);
+                    if (!res?.success) addToast(res?.error || 'Failed to reject hold', 'error');
                   });
                 }}
               >

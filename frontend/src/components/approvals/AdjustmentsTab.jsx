@@ -2,6 +2,7 @@ import React from "react";
 import { useAuth } from "../../context/AuthContext";
 import { useAppData } from "../../context/AppDataContext";
 import { useConfirm } from "../../context/ConfirmContext";
+import { useToast } from "../../context/ToastContext";
 import { formatTimeAgo, getDaysAgo } from "../../utils/dateUtils";
 
 const getPriorityLevel = (days) => {
@@ -35,6 +36,7 @@ const adjustmentTypeColors = {
 const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, categoryLookup, userNameMap }) => {
   const { user } = useAuth();
   const { approveAdjustment, rejectAdjustment } = useAppData();
+  const { addToast } = useToast();
   const { confirm } = useConfirm();
 
   if (pendingAdjustments.length === 0) {
@@ -135,8 +137,10 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
                 type="button"
                 className="secondary-button"
                 onClick={() => {
-                  confirm(`Approve this ${getAdjustmentTypeLabel(adjustment.adjustmentType).toLowerCase()} of ${adjQty} ${receipt?.quantityUnits || 'units'}?`).then(ok => {
-                    if (ok) approveAdjustment(adjustment.id, user?.id || user?.username);
+                  confirm(`Approve this ${getAdjustmentTypeLabel(adjustment.adjustmentType).toLowerCase()} of ${adjQty} ${receipt?.quantityUnits || 'units'}?`).then(async ok => {
+                    if (!ok) return;
+                    const res = await approveAdjustment(adjustment.id, user?.id || user?.username);
+                    if (!res?.success) addToast(res?.error || 'Failed to approve adjustment', 'error');
                   });
                 }}
                 style={{ marginRight: '8px' }}
@@ -147,8 +151,10 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
                 type="button"
                 className="secondary-button danger"
                 onClick={() => {
-                  confirm('Reject this adjustment?').then(ok => {
-                    if (ok) rejectAdjustment(adjustment.id, user?.id || user?.username);
+                  confirm('Reject this adjustment?').then(async ok => {
+                    if (!ok) return;
+                    const res = await rejectAdjustment(adjustment.id, '', user?.id || user?.username);
+                    if (!res?.success) addToast(res?.error || 'Failed to reject adjustment', 'error');
                   });
                 }}
               >
