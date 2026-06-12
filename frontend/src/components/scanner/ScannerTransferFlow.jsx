@@ -90,14 +90,17 @@ const ScannerTransferFlow = () => {
       const r = await apiClient.get('/pallet-licences/', {
         params: { licence_number: lic, status: 'in_stock' },
       });
-      if (!r.data || r.data.length === 0) {
+      // Exact match — the backend does a substring (ilike) search, so taking
+      // data[0] could grab the wrong pallet once licence numbers nest
+      // (e.g. "...-001" vs "...-0010").
+      const pl = (r.data || []).find((p) => p.licence_number === lic);
+      if (!pl) {
         const msg = 'Pallet not found or not in stock';
         setError(msg);
         showError(msg);
         setLicenceInput('');
         return;
       }
-      const pl = r.data[0];
       if (pl.is_held) {
         const msg = 'This pallet is on hold — release the hold before moving it.';
         setError(msg);

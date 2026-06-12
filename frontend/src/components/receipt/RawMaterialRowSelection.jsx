@@ -59,7 +59,9 @@ const RawMaterialRowSelection = ({
             }}>
               {availableRows.map((row) => {
                 const isSelected = rawMaterialRowAllocations.some(alloc => alloc.rowId === row.value);
-                const canFitAll = row.available !== null && row.available >= Number(formData.pallets);
+                // Capacity is a soft hint — a row with no capacity set (null)
+                // is treated as unlimited, not un-allocatable.
+                const canFitAll = row.available === null || row.available >= Number(formData.pallets);
 
                 return (
                   <label
@@ -85,7 +87,10 @@ const RawMaterialRowSelection = ({
                           );
                           const totalNeeded = Number(formData.pallets) || 0;
                           const remainingToAllocate = Math.max(0, totalNeeded - alreadyAllocated);
-                          const palletsForThisRow = Math.min(remainingToAllocate, row.available || 0);
+                          // null capacity = unlimited: take the full remainder.
+                          const palletsForThisRow = row.available === null
+                            ? remainingToAllocate
+                            : Math.min(remainingToAllocate, row.available || 0);
 
                           const newAlloc = {
                             id: `raw-alloc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,

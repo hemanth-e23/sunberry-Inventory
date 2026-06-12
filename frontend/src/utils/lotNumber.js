@@ -12,8 +12,11 @@ export const getDayOfYear = (date) => {
   if (!date) return null;
   const d = new Date(date);
   if (Number.isNaN(d.getTime())) return null;
-  const start = new Date(d.getFullYear(), 0, 0);
-  const diff = d - start;
+  // Compute entirely in UTC. Mixing a UTC-parsed date (e.g. "2026-01-01") with a
+  // local-midnight year start shifted the day-of-year by one west of UTC, so
+  // form-generated lot numbers disagreed with the backend's.
+  const start = Date.UTC(d.getUTCFullYear(), 0, 0);
+  const diff = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - start;
   const oneDay = 1000 * 60 * 60 * 24;
   return Math.floor(diff / oneDay);
 };

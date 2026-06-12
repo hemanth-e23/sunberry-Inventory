@@ -481,7 +481,7 @@ export const ReceiptProvider = ({ children }) => {
           ...receipt,
           status,
           approvedBy: approverId || receipt.approvedBy,
-          approvedAt: status === RECEIPT_STATUS.APPROVED ? null : receipt.approvedAt,
+          approvedAt: status === RECEIPT_STATUS.APPROVED ? new Date().toISOString() : receipt.approvedAt,
         };
       }),
     );

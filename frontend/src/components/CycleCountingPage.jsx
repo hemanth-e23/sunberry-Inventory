@@ -219,8 +219,11 @@ const CycleCountingPage = () => {
   const getVarianceInfo = (item) => {
     const raw = physicalCounts[item.id];
     if (raw === undefined || raw === '') return null;
+    const actual = Number(raw);
+    // Non-numeric input means "not counted", not zero — coercing garbage to 0
+    // recorded a phantom 100% shortage.
+    if (Number.isNaN(actual)) return null;
     const { expectedCount } = getQtyInfo(item);
-    const actual = Number(raw) || 0;
     const variance = actual - expectedCount;
     return {
       actual,

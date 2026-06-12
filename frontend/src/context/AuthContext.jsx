@@ -136,8 +136,24 @@ export const AuthProvider = ({ children }) => {
           localStorage.setItem('user', JSON.stringify(userData));
         } catch (error) {
           console.error('Token validation failed:', error);
-          localStorage.removeItem('user');
-          localStorage.removeItem('token');
+          const status = error.response?.status;
+          if (status === 401 || status === 403) {
+            // Genuine auth failure — clear the session.
+            localStorage.removeItem('user');
+            localStorage.removeItem('token');
+          } else {
+            // Transient failure (offline / timeout / 5xx) — keep the cached
+            // session so a network blip doesn't force a re-login.
+            try {
+              const cached = JSON.parse(savedUser);
+              setAppTimezone(cached.warehouse_timezone);
+              setUser(cached);
+              setIsAuthenticated(true);
+            } catch {
+              localStorage.removeItem('user');
+              localStorage.removeItem('token');
+            }
+          }
         }
       }
       setLoading(false);
