@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from app.models import Receipt, InterWarehouseTransfer, StorageRow, StorageArea, Category, PalletLicence
 from app.enums import ReceiptStatus
 from app.constants import CATEGORY_FINISHED
+from app.services.row_allocation import parse_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
 
 
 def _is_finished_goods(db: Session, receipt: Receipt) -> bool:
@@ -134,38 +135,9 @@ def _deduct_fg_pallets(db: Session, transfer: InterWarehouseTransfer, receipt: R
 
 
 def _deduct_rm_from_breakdown(db: Session, transfer: InterWarehouseTransfer, receipt: Receipt):
-    """Deduct RM/ingredient inventory from specific rows per source_breakdown."""
-    cases_per_pallet = float(receipt.cases_per_pallet or 40)
-
-    for entry in transfer.source_breakdown:
-        source_id = entry.get("id", "")
-        qty = float(entry.get("quantity", 0))
-        if not source_id.startswith("row-") or qty <= 0:
-            continue
-        row_id = source_id.removeprefix("row-")
-        row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
-        if row:
-            pallets_to_free = qty / cases_per_pallet if cases_per_pallet > 0 else 0
-            row.occupied_cases = max(0, (row.occupied_cases or 0) - qty)
-            row.occupied_pallets = max(0, (row.occupied_pallets or 0) - pallets_to_free)
-            if row.occupied_pallets <= 0:
-                row.product_id = None
-
-    # Update receipt.raw_material_row_allocations to reflect freed quantities
-    if receipt.raw_material_row_allocations and isinstance(receipt.raw_material_row_allocations, list):
-        allocs = copy.deepcopy(receipt.raw_material_row_allocations)
-        for entry in transfer.source_breakdown:
-            source_id = entry.get("id", "")
-            qty = float(entry.get("quantity", 0))
-            if not source_id.startswith("row-"):
-                continue
-            row_id = source_id.removeprefix("row-")
-            for alloc in allocs:
-                if alloc.get("rowId") == row_id:
-                    pallets_freed = qty / cases_per_pallet if cases_per_pallet > 0 else 0
-                    alloc["pallets"] = max(0, float(alloc.get("pallets", 0)) - pallets_freed)
-        receipt.raw_material_row_allocations = [a for a in allocs if float(a.get("pallets", 0)) > 0]
-
+    """Deduct RM/ingredient inventory from specific rows per source_breakdown,
+    keeping storage rows and the allocation JSON (cases + pallets) in sync."""
+    deduct_rm_rows(db, receipt, parse_breakdown(transfer.source_breakdown), update_rows=True)
     receipt.quantity = max(0, receipt.quantity - transfer.quantity)
 
 

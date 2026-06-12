@@ -8,6 +8,7 @@ from app.models import (
 )
 from app.enums import ReceiptStatus, AdjustmentStatus
 from app.exceptions import ValidationError, NotFoundError
+from app.services.row_allocation import deduct_rm_total
 
 
 def _compute_available_quantity(db: Session, receipt: Receipt) -> float:
@@ -283,6 +284,9 @@ def mark_staging_used(db: Session, staging_item: StagingItem, request, current_u
         approved_by=str(current_user.id),
         approved_at=datetime.now(timezone.utc),
     )
+    # Keep the allocation JSON in sync with the proportional row free above
+    # (was previously left stale after staging consumption). Rows already freed.
+    deduct_rm_total(db, receipt, request.quantity, update_rows=False)
     receipt.quantity -= request.quantity
     if receipt.quantity <= 0:
         receipt.quantity = 0

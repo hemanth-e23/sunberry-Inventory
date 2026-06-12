@@ -7,6 +7,7 @@ from app.models import Receipt, InventoryTransfer, StorageRow, StorageArea, Pall
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED
+from app.services.row_allocation import parse_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +214,12 @@ def _apply_raw_material_internal_transfer(
         if len(dest_row_ids) == 1:
             receipt.storage_row_id = dest_row_ids[0]
 
+    # Keep the allocation JSON in sync with the row move above (was previously
+    # left stale, so the JSON kept pointing at the old rows after an internal
+    # transfer). Rows are already updated inline, so JSON-only here.
+    deduct_rm_rows(db, receipt, parse_breakdown(transfer.source_breakdown), update_rows=False)
+    add_rm_rows(db, receipt, parse_breakdown(transfer.destination_breakdown), update_rows=False)
+
 
 def _apply_raw_material_ship_out(
     db: Session, transfer: InventoryTransfer, receipt: Receipt
@@ -250,6 +257,10 @@ def _apply_raw_material_ship_out(
                     row.occupied_cases = max(0, (row.occupied_cases or 0) - pallets_to_free * receipt.cases_per_pallet)
                 if row.occupied_pallets <= 0:
                     row.product_id = None
+
+    # Keep the allocation JSON in sync with the proportional row free above
+    # (was previously left stale after RM ship-outs). Rows already updated.
+    deduct_rm_total(db, receipt, transfer_quantity, update_rows=False)
 
 
 def _update_receipt_allocation_json(

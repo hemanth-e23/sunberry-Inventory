@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.enums import ReceiptStatus, AdjustmentStatus, StagingItemStatus, StagingRequestStatus
 from app.exceptions import NotFoundError, ValidationError
+from app.services.row_allocation import deduct_rm_total
 
 import logging
 logger = logging.getLogger(__name__)
@@ -392,6 +393,9 @@ def mark_request_item_used(
     )
     db.add(adjustment)
 
+    # Free rows and the allocation JSON proportionally (this path previously
+    # updated neither, so both drifted on every production consumption).
+    deduct_rm_total(db, receipt, quantity, update_rows=True)
     # Update receipt quantity
     receipt.quantity = max(0, receipt.quantity - quantity)
     if receipt.quantity <= 0:
@@ -732,6 +736,7 @@ def notify_ingredient_used(
                 )
                 db.add(adjustment)
 
+                deduct_rm_total(db, receipt, use_qty, update_rows=True)
                 receipt.quantity = max(0, receipt.quantity - use_qty)
                 if receipt.quantity <= 0:
                     receipt.status = ReceiptStatus.DEPLETED
@@ -903,6 +908,7 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
             )
             db.add(adjustment)
 
+            deduct_rm_total(db, receipt, use_qty, update_rows=True)
             receipt.quantity = max(0, receipt.quantity - use_qty)
             if receipt.quantity <= 0:
                 receipt.status = ReceiptStatus.DEPLETED
