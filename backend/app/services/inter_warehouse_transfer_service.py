@@ -130,7 +130,11 @@ def _deduct_fg_pallets(db: Session, transfer: InterWarehouseTransfer, receipt: R
                 if row.occupied_pallets <= 0:
                     row.product_id = None
 
-    receipt.quantity = max(0, receipt.quantity - transfer.quantity)
+    # Deduct only what actually shipped (the selected pallets' cases), not the
+    # requested transfer.quantity — selecting fewer pallets than requested used
+    # to over-deduct the receipt and desync it from the pallet licences.
+    shipped_cases = sum(pl.cases or 0 for pl in licences)
+    receipt.quantity = max(0, receipt.quantity - shipped_cases)
     _rebuild_receipt_allocation_from_licences(db, receipt)
 
 
@@ -278,6 +282,34 @@ def create_destination_receipt(
     )
     db.add(new_receipt)
     db.flush()
+
+    # For finished goods, recreate the shipped pallets at the destination so the
+    # destination's pallet-based ship-out can actually pick them. Without this
+    # the FG arrives as a quantity-only receipt with no pallet licences and is a
+    # functional dead-end.
+    if source_receipt and _is_finished_goods(db, source_receipt) and transfer.pallet_licence_ids:
+        source_pallets = db.query(PalletLicence).filter(
+            PalletLicence.id.in_(transfer.pallet_licence_ids)
+        ).all()
+        minted_cases = 0
+        for sp in source_pallets:
+            minted_cases += (sp.cases or 0)
+            db.add(PalletLicence(
+                id=f"pl-{uuid.uuid4().hex[:12]}",
+                licence_number=f"{new_receipt.lot_number or 'IWT'}-{transfer.to_warehouse_id or 'D'}-{uuid.uuid4().hex[:6]}",
+                receipt_id=new_receipt.id,
+                product_id=new_receipt.product_id,
+                lot_number=new_receipt.lot_number,
+                cases=sp.cases,
+                status="in_stock",
+                warehouse_id=transfer.to_warehouse_id,
+                # storage_row_id stays None until the destination assigns storage;
+                # the ship-out pool keys on warehouse_id + product, not the row.
+            ))
+        if minted_cases:
+            new_receipt.quantity = minted_cases  # match the actual pallets received
+        db.flush()
+        _rebuild_receipt_allocation_from_licences(db, new_receipt)
 
     transfer.destination_receipt_id = new_receipt.id
     return new_receipt
