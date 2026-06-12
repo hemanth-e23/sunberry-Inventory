@@ -761,11 +761,12 @@ async def get_transfer_scan_progress(
         scanner_name = None
         if e.scanned_by:
             u = db.query(User).filter(User.id == e.scanned_by).first()
-            scanner_name = u.name if u else e.scanned_by
+            # Show a readable label for a hard-deleted user, never the raw id.
+            scanner_name = u.name if u else "Former user"
         evt = {
             "licence_number": e.licence_number,
             "on_list": e.on_list,
-            "scanned_by": scanner_name or e.scanned_by,
+            "scanned_by": scanner_name,
             "scanned_at": e.scanned_at.isoformat() if e.scanned_at else None,
         }
         if e.on_list and e.licence_id:
@@ -833,7 +834,8 @@ async def get_transfer_scan_progress(
         actor_name = None
         if s.swapped_by:
             u = db.query(User).filter(User.id == s.swapped_by).first()
-            actor_name = u.name if u else s.swapped_by
+            # Show a readable label for a hard-deleted user, never the raw id.
+            actor_name = u.name if u else "Former user"
         removed_pl = db.query(PalletLicence).filter(PalletLicence.id == s.removed_pallet_id).first() if s.removed_pallet_id else None
         added_pl = db.query(PalletLicence).filter(PalletLicence.id == s.added_pallet_id).first() if s.added_pallet_id else None
         swaps_payload.append({

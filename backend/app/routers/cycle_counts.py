@@ -19,6 +19,11 @@ async def create_cycle_count(
 ):
     """Create a new cycle count"""
     cycle_count_dict = cycle_count_data.dict()
+    # Trust the server identity for who performed the count — the client used to
+    # send the literal "Unknown" when its user object was incomplete, which then
+    # got written to the DB permanently.
+    cycle_count_dict["performed_by"] = current_user.name or current_user.username
+    cycle_count_dict["performed_by_id"] = str(current_user.id)
 
     db_cycle_count = CycleCount(
         id=f"cycle-{uuid.uuid4().hex[:12]}",
