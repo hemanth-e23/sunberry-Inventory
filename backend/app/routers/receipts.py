@@ -126,8 +126,12 @@ async def create_receipt(
     )
     
     db.add(db_receipt)
-    db.commit()
-    db.refresh(db_receipt)
+    # flush (not commit) so the receipt id is assigned and the row is visible to
+    # the rest of this function, but the WHOLE create — receipt + occupancy +
+    # allocations + pallet licences — commits atomically below. Previously this
+    # committed the bare receipt first, so a later IntegrityError rolled back only
+    # the pallets and left an orphaned receipt that the client's retry duplicated.
+    db.flush()
 
     # Persist multi-row pallet allocations for raw materials/packaging so they
     # can be used later when approving ship-outs or marking staging as used
