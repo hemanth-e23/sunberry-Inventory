@@ -142,6 +142,9 @@ class InventoryAdjustment(Base):
     product_id = Column(String(50), ForeignKey("products.id"), nullable=True)
     adjustment_type = Column(String(50), nullable=False)
     quantity = Column(Float, nullable=False)
+    # Unit of `quantity`, copied from the receipt at create time so historical
+    # adjustments stay interpretable even if the receipt's unit later changes.
+    unit = Column(String(20), nullable=True)
     reason = Column(Text, nullable=False)
     recipient = Column(String(200), nullable=True)
     source_breakdown = Column(JSON, nullable=True)

@@ -283,6 +283,7 @@ class InventoryAdjustmentUpdate(BaseSchema):
 class InventoryAdjustment(InventoryAdjustmentBase):
     id: str
     status: str
+    unit: Optional[str] = None
     submitted_by: Optional[str] = None
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None

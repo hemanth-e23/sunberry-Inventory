@@ -54,15 +54,19 @@ async def create_adjustment(
 ):
     """Create a new inventory adjustment"""
     adjustment_dict = adjustment_data.dict()
+    # The unit is derived server-side (from the pallets/receipt); ignore any
+    # client-supplied unit so it can't disagree with the inventory it touches.
+    adjustment_dict.pop("unit", None)
 
     if adjustment_data.pallet_licence_ids:
-        # Pallet-based adjustment (Finished Goods)
+        # Pallet-based adjustment (Finished Goods) — always measured in cases.
         pallets = db.query(PalletLicence).filter(
             PalletLicence.id.in_(adjustment_data.pallet_licence_ids)
         ).all()
         if len(pallets) != len(adjustment_data.pallet_licence_ids):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="One or more pallets not found")
         adjustment_dict['quantity'] = sum(p.cases or 0 for p in pallets)
+        resolved_unit = "cases"
     else:
         # Lot-based adjustment (RM / Packaging)
         receipt = db.query(Receipt).filter(Receipt.id == adjustment_data.receipt_id).first()
@@ -72,10 +76,24 @@ async def create_adjustment(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Quantity must be greater than zero")
         if adjustment_data.quantity > receipt.quantity:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Adjustment quantity cannot exceed available quantity")
+        # When the operator picks specific source rows, their quantities must
+        # add up to the adjustment quantity — otherwise the deduction and the
+        # per-row breakdown disagree and row availability drifts.
+        if adjustment_data.source_breakdown:
+            bd_sum = sum(
+                float((e or {}).get("quantity", 0) or 0) for e in adjustment_data.source_breakdown
+            )
+            if abs(bd_sum - float(adjustment_data.quantity or 0)) > 0.01:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Source breakdown quantities must sum to the adjustment quantity"
+                )
+        resolved_unit = receipt.unit
 
     db_adjustment = InventoryAdjustment(
         id=f"adj-{uuid.uuid4().hex[:12]}",
         **adjustment_dict,
+        unit=resolved_unit,
         submitted_by=str(current_user.id),
         warehouse_id=resolve_warehouse_for_write(current_user),
         status=AdjustmentStatus.PENDING
