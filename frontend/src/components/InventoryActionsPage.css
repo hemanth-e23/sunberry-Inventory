@@ -287,6 +287,11 @@
 }
 
 @media (max-width: 640px) {
+  /* Stack the two-column form fields so date pickers / selects don't truncate. */
+  .two-col {
+    grid-template-columns: 1fr;
+  }
+
   .inventory-actions-page {
     padding: 16px;
   }

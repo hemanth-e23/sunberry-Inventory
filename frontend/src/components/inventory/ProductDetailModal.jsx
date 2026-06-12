@@ -181,6 +181,7 @@ const ProductDetailModal = ({
           </div>
 
           {lots.length ? (
+            <div style={{ overflowX: 'auto' }}>
             <table className="simple-table compact">
               <thead>
                 <tr>
@@ -269,6 +270,7 @@ const ProductDetailModal = ({
                 })}
               </tbody>
             </table>
+            </div>
           ) : <span className="muted">No lots recorded</span>}
         </div>
         <footer className="modal-footer">

@@ -249,7 +249,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
             </header>
 
             {/* Summary row */}
-            <dl className="summary-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+            <dl className="summary-grid">
               <div><dt>Pallets</dt><dd>{licences.length}</dd></div>
               <div><dt>Total Cases</dt><dd>{fr.total_cases ?? 0}</dd></div>
               <div><dt>Cases/Pallet</dt><dd>{fr.cases_per_pallet ?? '—'}</dd></div>
@@ -689,7 +689,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                       {isFixingThis && (
                         <tr style={{ background: '#fffbeb' }}>
                           <td colSpan={colCount} style={{ padding: '12px 14px', borderTop: '1px solid #fde68a' }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: '2fr 2fr 1fr auto', gap: '10px', alignItems: 'end' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', alignItems: 'end' }}>
                               <div>
                                 <label style={{ fontSize: '11px', color: '#78350f', display: 'block', marginBottom: '2px', fontWeight: 600 }}>
                                   Licence Number

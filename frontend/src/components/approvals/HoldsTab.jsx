@@ -65,7 +65,7 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
               {isPalletHold ? (
                 /* Pallet hold summary */
                 <div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '13px', marginBottom: '10px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', fontSize: '13px', marginBottom: '10px' }}>
                     <div>
                       <span style={{ color: '#6b7280' }}>Pallets</span>
                       <div style={{ fontWeight: 600, marginTop: '2px' }}>{hold.palletLicenceIds.length} pallet{hold.palletLicenceIds.length !== 1 ? 's' : ''}</div>
@@ -76,6 +76,7 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
                     </div>
                   </div>
                   {hold.palletLicenceDetails?.length > 0 && (
+                    <div style={{ overflowX: 'auto' }}>
                     <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse' }}>
                       <thead>
                         <tr style={{ borderBottom: '1px solid #e5e7eb' }}>
@@ -94,11 +95,12 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
                         ))}
                       </tbody>
                     </table>
+                    </div>
                   )}
                 </div>
               ) : (
                 /* Lot hold summary */
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '13px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', fontSize: '13px' }}>
                   <div>
                     <span style={{ color: '#6b7280' }}>Lot Number</span>
                     <div style={{ fontWeight: 600, marginTop: '2px' }}>{receipt?.lotNo || '—'}</div>

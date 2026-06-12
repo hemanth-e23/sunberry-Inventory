@@ -100,7 +100,9 @@
   background: var(--color-surface, #ffffff);
   border: 1px solid var(--color-border, #e5e7eb);
   border-radius: 8px;
-  overflow: hidden;
+  /* Let the receipt table scroll sideways on small screens instead of clipping
+     its right-hand columns. */
+  overflow-x: auto;
 }
 
 .receipts-list table {

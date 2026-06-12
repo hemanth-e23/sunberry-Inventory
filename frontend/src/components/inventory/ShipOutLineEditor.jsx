@@ -176,7 +176,7 @@ const ShipOutLineEditor = ({ value, onChange, onRemove, canRemove, lineIndex }) 
         )}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '10px', marginBottom: '10px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', marginBottom: '10px' }}>
         <label>
           <span>Product <span className="required">*</span></span>
           <SearchableSelect

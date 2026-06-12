@@ -250,7 +250,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
 
             {/* Multi-product line breakdown */}
             {isMultiProduct && (
-              <div style={{ marginBottom: '10px', borderRadius: '8px', overflow: 'hidden', border: '1px solid #e5e7eb' }}>
+              <div style={{ marginBottom: '10px', borderRadius: '8px', overflowX: 'auto', border: '1px solid #e5e7eb' }}>
                 <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse' }}>
                   <thead>
                     <tr style={{ background: '#f1f5f9' }}>
@@ -328,7 +328,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
 
                   {/* Per-pallet details */}
                   {palletDetails.length > 0 && (
-                    <div style={{ maxHeight: '200px', overflowY: 'auto', borderRadius: '6px', border: '1px solid #bae6fd', overflow: 'hidden' }}>
+                    <div style={{ maxHeight: '200px', overflowY: 'auto', overflowX: 'auto', borderRadius: '6px', border: '1px solid #bae6fd' }}>
                       <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse' }}>
                         <thead>
                           <tr style={{ background: '#e0f2fe' }}>
@@ -356,7 +356,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
             {/* RM / non-pallet transfer: show source → dest rows */}
             {!hasPallets && (sourceRows.length > 0 || destRows.length > 0) && (
               <div style={{ background: '#f9fafb', borderRadius: '8px', padding: '10px 14px', marginBottom: '10px', fontSize: '13px' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px' }}>
                   <div>
                     <div style={{ fontWeight: 600, color: '#6b7280', marginBottom: '4px' }}>From</div>
                     {sourceRows.length > 0 ? (
