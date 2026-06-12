@@ -19,7 +19,7 @@ const HoldsTab = () => {
     products,
     categories,
     receipts,
-    users,
+    userNameMap,
     inventoryHoldActions,
     submitHoldAction,
   } = useAppData();
@@ -56,15 +56,9 @@ const HoldsTab = () => {
     return map;
   }, [categories]);
 
-  const userLookup = useMemo(() => {
-    const map = {};
-    users.forEach(u => {
-      const label = u.name || u.username;
-      map[u.id] = label;
-      map[u.username] = label;
-    });
-    return map;
-  }, [users]);
+  // Resolve names from the shared directory (loaded for every role) rather than
+  // the admin-only users list — that was the "Unknown user" source on holds.
+  const userLookup = userNameMap;
 
   // ─── FG products (have in-stock pallets) ──────────────────────────────────
   const fgProducts = useMemo(() => {

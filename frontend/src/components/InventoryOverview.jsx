@@ -59,7 +59,7 @@ const InventoryOverview = () => {
     activeReceipts: receipts,
     productCategories,
     categoryGroups,
-    users,
+    userNameMap,
     locationLookup,
     locationsTree,
     storageAreas,
@@ -113,15 +113,10 @@ const InventoryOverview = () => {
     return map;
   }, [productCategories]);
 
-  const userLookup = useMemo(() => {
-    const map = {};
-    users.forEach((user) => {
-      const label = user.name || user.username;
-      map[user.id] = label;
-      map[user.username] = label;
-    });
-    return map;
-  }, [users]);
+  // Resolve names from the shared directory (loaded for every role) rather than
+  // the admin-only users list, which is 403/empty or warehouse-filtered for
+  // most roles — that was the "Unknown user" source here.
+  const userLookup = userNameMap;
 
   const productOptions = useMemo(
     () => products.filter((product) => product.status === "active"),
