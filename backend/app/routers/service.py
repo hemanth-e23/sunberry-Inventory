@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -69,6 +69,9 @@ class AvailabilityItem(BaseModel):
 
 class AvailabilityRequest(BaseModel):
     items: List[AvailabilityItem]
+    # Optional plant scoping — when set, only that warehouse's inventory counts
+    # toward availability (sibling endpoints in this router take the same param).
+    warehouse_id: Optional[str] = None
 
 
 @router.get("/raw-materials")
@@ -223,18 +226,33 @@ async def check_availability(
             continue
 
         # Sum on-hand quantity from approved receipts with quantity > 0,
-        # excluding any quantity on QA hold (held material is not available to
-        # production).
-        on_hand = (
-            db.query(func.coalesce(func.sum(Receipt.quantity - func.coalesce(Receipt.held_quantity, 0)), 0))
+        # excluding QA-held material: subtract held_quantity, and skip lots
+        # flagged hold=True with no held_quantity recorded (a full-lot hold).
+        # Optionally scoped to one warehouse.
+        availability_q = (
+            db.query(
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                (Receipt.hold == True) & (func.coalesce(Receipt.held_quantity, 0) <= 0),  # noqa: E712
+                                0,
+                            ),
+                            else_=Receipt.quantity - func.coalesce(Receipt.held_quantity, 0),
+                        )
+                    ),
+                    0,
+                )
+            )
             .filter(
                 Receipt.product_id == product.id,
                 Receipt.status == ReceiptStatus.APPROVED,
                 Receipt.quantity > 0,
             )
-            .scalar()
         )
-        on_hand = float(on_hand)
+        if request.warehouse_id:
+            availability_q = availability_q.filter(Receipt.warehouse_id == request.warehouse_id)
+        on_hand = float(availability_q.scalar())
 
         sufficient = on_hand >= item.quantity_needed
         short = max(0, item.quantity_needed - on_hand) if not sufficient else 0

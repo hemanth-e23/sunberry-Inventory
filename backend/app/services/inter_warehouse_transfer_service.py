@@ -119,6 +119,19 @@ def _deduct_fg_pallets(db: Session, transfer: InterWarehouseTransfer, receipt: R
             detail=f"Some pallets are no longer available for shipment: {missing}"
         )
 
+    # The selected pallets must cover the transfer quantity. The UI enforces
+    # this too, but a direct API client could otherwise ship less while the
+    # transfer record claims the full amount.
+    selected_cases = sum(pl.cases or 0 for pl in licences)
+    if selected_cases < (transfer.quantity or 0):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Selected pallets cover {selected_cases} cases but the transfer "
+                f"is for {transfer.quantity}. Select more pallets or reduce the quantity."
+            ),
+        )
+
     for pl in licences:
         pl.status = "shipped"
         if pl.storage_row_id:

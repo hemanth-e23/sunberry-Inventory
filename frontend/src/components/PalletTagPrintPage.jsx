@@ -10,7 +10,7 @@ import PalletStickerLayout from './palletizer/PalletStickerLayout';
 import SearchableSelect from './SearchableSelect';
 import './Shared.css';
 import './PalletTagPrintPage.css';
-import { CATEGORY_TYPES, RECEIPT_STATUS } from '../constants';
+import { CATEGORY_TYPES, RECEIPT_STATUS, isRawMaterialType } from '../constants';
 
 const PRODUCT_TYPE_OPTIONS = [
   { value: 'all', label: 'All Types' },
@@ -90,7 +90,14 @@ const PalletTagPrintPage = () => {
         receiptCategory = categories.find((c) => c.id === product.categoryId);
         if (!receiptCategory) return false;
         if (companyFilter !== 'all' && receiptCategory.parentId !== companyFilter) return false;
-        if (productTypeFilter !== 'all' && receiptCategory.type !== productTypeFilter) return false;
+        if (productTypeFilter !== 'all') {
+          // Raw materials exist under BOTH 'raw' and the legacy 'raw-material'
+          // spelling in production data — strict equality misses the dominant one.
+          const matches = productTypeFilter === CATEGORY_TYPES.RAW_MATERIAL
+            ? isRawMaterialType(receiptCategory.type)
+            : receiptCategory.type === productTypeFilter;
+          if (!matches) return false;
+        }
       }
 
       // Filter by product
