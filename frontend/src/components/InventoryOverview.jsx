@@ -452,8 +452,10 @@ const InventoryOverview = () => {
         };
       })
       .filter((row) => {
-        if (holdFilter === "hold") return row.holdActive;
-        if (holdFilter === "clear") return !row.holdActive;
+        // Exclusion guards only — must fall through to the advanced filters
+        // below so "Hold Only" still respects an active search/expiry filter.
+        if (holdFilter === "hold" && !row.holdActive) return false;
+        if (holdFilter === "clear" && row.holdActive) return false;
 
         // Advanced filters
         if (expiryStartDate || expiryEndDate) {

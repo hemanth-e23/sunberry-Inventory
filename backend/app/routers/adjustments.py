@@ -43,7 +43,9 @@ async def get_adjustments(
     if submitted_by:
         query = query.filter(InventoryAdjustment.submitted_by == submitted_by)
 
-    adjustments = query.offset(skip).limit(limit).all()
+    # Order newest-first before limiting, otherwise the 100-row cap returns an
+    # arbitrary subset and the UI's recent/duplicate checks operate on noise.
+    adjustments = query.order_by(InventoryAdjustment.created_at.desc()).offset(skip).limit(limit).all()
     return adjustments
 
 @router.post("/adjustments", response_model=InventoryAdjustmentSchema)

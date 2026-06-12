@@ -75,10 +75,9 @@ const StagingOverview = () => {
     try {
       setLoading(true);
       setError('');
-      const statusParam = filterStatus === 'active' ? null : 'all';
-      const response = await apiClient.get('/inventory/staging/items', {
-        params: statusParam ? { status_filter: statusParam } : undefined,
-      });
+      // Never send status_filter='all' — the backend compares it literally and
+      // returns nothing. Fetch everything; 'active' is filtered client-side below.
+      const response = await apiClient.get('/inventory/staging/items');
       
       // Ensure response.data is an array
       if (Array.isArray(response.data)) {
@@ -195,12 +194,13 @@ const StagingOverview = () => {
   const filteredItems = stagingItems.filter(item => {
     // Calculate available quantity
     const available = item.quantity_staged - item.quantity_used - item.quantity_returned;
-    
-    // Exclude items with 0 or negative available quantity
-    if (available <= 0) {
+
+    // Only the "active" view hides used-up items; "all" must show history
+    // (used / returned items have available <= 0).
+    if (filterStatus === 'active' && available <= 0) {
       return false;
     }
-    
+
     if (filterStatus === 'active') {
       if (!['staged', 'partially_used', 'partially_returned'].includes(item.status)) {
         return false;

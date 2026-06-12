@@ -306,7 +306,9 @@ const AdjustmentsTab = () => {
   };
 
   // ─── Recent adjustments list ─────────────────────────────────────────────────
-  const recentAdjustments = inventoryAdjustments.slice().reverse().slice(0, 5);
+  // List is already newest-first (backend order + context prepends), so don't
+  // reverse — that showed the oldest entries and hid just-submitted ones.
+  const recentAdjustments = inventoryAdjustments.slice(0, 5);
 
   return (
     <div className="tab-panel">

@@ -90,7 +90,9 @@ async def get_hold_actions(
     if submitted_by:
         query = query.filter(InventoryHoldAction.submitted_by == submitted_by)
 
-    hold_actions = query.offset(skip).limit(limit).all()
+    # Order newest-first before limiting so the 100-row cap returns the most
+    # recent holds, not an arbitrary subset.
+    hold_actions = query.order_by(InventoryHoldAction.created_at.desc()).offset(skip).limit(limit).all()
     return [_hold_action_to_response(h, db) for h in hold_actions]
 
 @router.post("/hold-actions", response_model=InventoryHoldActionSchema)

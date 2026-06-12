@@ -321,7 +321,8 @@ const TransfersTab = () => {
     }
   };
 
-  const recentTransfers = inventoryTransfers.slice().reverse().slice(0, 4);
+  // List is already newest-first; don't reverse (that showed the oldest).
+  const recentTransfers = inventoryTransfers.slice(0, 4);
 
   return (
     <div className="tab-panel">
