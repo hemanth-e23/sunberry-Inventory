@@ -1,7 +1,5 @@
 import React, { useState, useCallback } from "react";
 import { formatDate } from "../../utils/dateUtils";
-import { formatUserName } from "../../utils/userDisplay";
-import { useAppData } from "../../context/AppDataContext";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
@@ -13,7 +11,6 @@ const holdActionOptions = [
 ];
 
 const HoldsReport = () => {
-  const { userNameMap } = useAppData();
   const [holdsStart, setHoldsStart] = useState(monthStart());
   const [holdsEnd, setHoldsEnd] = useState(today());
   const [holdsAction, setHoldsAction] = useState("all");
@@ -45,8 +42,8 @@ const HoldsReport = () => {
     { label: "Lot #", value: (r) => r.lot_number || "—" },
     { label: "Quantity", value: (r) => formatNumber(r.quantity) },
     { label: "Reason", value: (r) => r.reason || "—" },
-    { label: "Submitted By", value: (r) => r.submitted_by ? formatUserName(r.submitted_by, userNameMap) : "—" },
-    { label: "Approved By", value: (r) => r.approved_by ? formatUserName(r.approved_by, userNameMap) : "—" },
+    { label: "Submitted By", value: (r) => r.submitted_by || "—" },
+    { label: "Approved By", value: (r) => r.approved_by || "—" },
     { label: "Location", value: (r) => r.hold_location || "—" },
   ];
 
