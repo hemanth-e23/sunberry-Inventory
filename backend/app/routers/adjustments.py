@@ -108,6 +108,14 @@ async def update_adjustment(
             detail="You can only edit your own adjustments"
         )
 
+    # Only pending records may be edited — an approved/rejected adjustment is
+    # final, and editing it would desync the inventory it already mutated.
+    if adjustment.status != AdjustmentStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only pending adjustments can be edited"
+        )
+
     update_data = adjustment_update.dict(exclude_unset=True)
     for field, value in update_data.items():
         setattr(adjustment, field, value)

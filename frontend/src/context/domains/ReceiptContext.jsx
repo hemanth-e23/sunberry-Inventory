@@ -511,7 +511,8 @@ export const ReceiptProvider = ({ children }) => {
       if (updates.purchaseOrder !== undefined) updateData.purchase_order = updates.purchaseOrder || null;
       if (updates.vendorId !== undefined) updateData.vendor_id = updates.vendorId || null;
       if (updates.note !== undefined) updateData.note = updates.note || null;
-      if (updates.status !== undefined) updateData.status = updates.status;
+      // `status` is intentionally not sent here — the backend ignores it and
+      // status changes go through dedicated endpoints (resubmitReceipt etc.).
 
       Object.keys(updates).forEach((key) => {
         if (
@@ -545,6 +546,28 @@ export const ReceiptProvider = ({ children }) => {
     } catch (error) {
       console.error('Error updating receipt:', error);
       const errorMessage = error.response?.data?.detail || error.message || 'Failed to update receipt';
+      return { success: false, error: 'api_error', message: errorMessage };
+    }
+  };
+
+  // ─── resubmitReceipt ────────────────────────────────────────────────────────
+  // Corrected sent-back receipt goes back into the approval queue (→ reviewed)
+  // via the dedicated endpoint, not by pushing a status through the PUT.
+
+  const resubmitReceipt = async (id) => {
+    try {
+      const response = await apiClient.post(`/receipts/${id}/resubmit`, {});
+      setReceipts((prev) =>
+        prev.map((receipt) =>
+          receipt.id === id
+            ? { ...receipt, status: response.data.receipt?.status || RECEIPT_STATUS.REVIEWED }
+            : receipt,
+        ),
+      );
+      return { success: true };
+    } catch (error) {
+      console.error('Error resubmitting receipt:', error);
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to resubmit receipt';
       return { success: false, error: 'api_error', message: errorMessage };
     }
   };
@@ -698,6 +721,7 @@ export const ReceiptProvider = ({ children }) => {
     submitReceipt,
     updateReceiptStatus,
     updateReceipt,
+    resubmitReceipt,
     approveReceipt,
     rejectReceipt,
     sendBackReceipt,

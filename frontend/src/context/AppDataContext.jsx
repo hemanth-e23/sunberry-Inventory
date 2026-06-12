@@ -97,6 +97,7 @@ export const AppDataProvider = ({ children }) => {
     submitReceipt: receipt.submitReceipt,
     updateReceiptStatus: receipt.updateReceiptStatus,
     updateReceipt: receipt.updateReceipt,
+    resubmitReceipt: receipt.resubmitReceipt,
     approveReceipt: receipt.approveReceipt,
     rejectReceipt: receipt.rejectReceipt,
     sendBackReceipt: receipt.sendBackReceipt,

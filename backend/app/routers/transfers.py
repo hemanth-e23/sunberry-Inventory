@@ -1200,6 +1200,19 @@ async def update_transfer(
             detail="You can only edit your own transfers"
         )
 
+    # Only pre-approval transfers may be edited — once approved/rejected/voided
+    # the inventory effects are committed and must not be silently altered.
+    editable_statuses = {
+        TransferStatus.PENDING,
+        TransferStatus.SUBMITTED,
+        TransferStatus.FORKLIFT_SUBMITTED,
+    }
+    if transfer.status not in editable_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only pending transfers can be edited"
+        )
+
     update_data = transfer_update.dict(exclude_unset=True)
     for field, value in update_data.items():
         setattr(transfer, field, value)

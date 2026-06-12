@@ -138,6 +138,13 @@ async def update_hold_action(
             detail="You can only edit your own hold actions"
         )
 
+    # Only pending records may be edited — an approved/rejected hold is final.
+    if hold_action.status != HoldStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only pending hold actions can be edited"
+        )
+
     update_data = hold_action_update.dict(exclude_unset=True)
     for field, value in update_data.items():
         setattr(hold_action, field, value)

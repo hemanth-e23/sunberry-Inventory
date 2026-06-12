@@ -10,7 +10,7 @@ import './ReceiptCorrectionsPage.css';
 const ReceiptCorrectionsPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { receipts, products, categories, vendors, updateReceipt, updateReceiptStatus } = useAppData();
+  const { receipts, products, categories, vendors, updateReceipt, resubmitReceipt } = useAppData();
   
   const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [draft, setDraft] = useState({});
@@ -66,15 +66,15 @@ const ReceiptCorrectionsPage = () => {
     setDraft(prev => ({ ...prev, [field]: value }));
   };
 
-  const handleSaveAndResubmit = () => {
+  const handleSaveAndResubmit = async () => {
     if (!selectedReceipt) return;
-    
-    // Update the receipt with corrections and set status to "reviewed" so it returns to approval queue
-    updateReceipt(selectedReceipt.id, { ...draft, status: "reviewed" });
-    
-    // Update local state so UI reflects immediately
-    updateReceiptStatus(selectedReceipt.id, "reviewed", "warehouse-user");
-    
+
+    // Save the corrected fields, then move the receipt back into the approval
+    // queue via the dedicated resubmit endpoint (status is no longer pushed
+    // through the receipt PUT).
+    await updateReceipt(selectedReceipt.id, { ...draft });
+    await resubmitReceipt(selectedReceipt.id);
+
     // Close the detail view
     setSelectedReceipt(null);
     setDraft({});

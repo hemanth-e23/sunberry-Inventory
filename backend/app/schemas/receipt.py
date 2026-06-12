@@ -56,8 +56,13 @@ class ReceiptCreate(ReceiptBase):
     rawMaterialRowAllocations: Optional[List[dict]] = None
 
 class ReceiptUpdate(BaseSchema):
+    # NOTE: `quantity` and `status` are intentionally NOT editable here.
+    #  - `status` changes only through the dedicated /approve, /reject,
+    #    /send-back, /resubmit endpoints (prevents approval bypass).
+    #  - `quantity` for raw materials is derived from container_count ×
+    #    weight_per_container; edit those fields and it is recomputed
+    #    server-side. Editing it directly desynced rows/pallets/allocations.
     lot_number: Optional[str] = None
-    quantity: Optional[float] = None
     production_date: Optional[datetime] = None
     expiration_date: Optional[datetime] = None
     cases_per_pallet: Optional[int] = None
@@ -71,7 +76,6 @@ class ReceiptUpdate(BaseSchema):
     purchase_order: Optional[str] = None
     vendor_id: Optional[str] = None
     note: Optional[str] = None
-    status: Optional[str] = None
 
 class ReceiptAssignStorage(BaseSchema):
     location_id: Optional[str] = None

@@ -344,14 +344,73 @@ async def update_receipt(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only edit your own receipts"
         )
-    
+
+    # Only pre-approval / sent-back (corrections) receipts may be edited. An
+    # approved/rejected/depleted receipt is final — editing its fields would
+    # desync the pallets, storage rows, and allocations it already drives.
+    editable_statuses = {
+        ReceiptStatus.PENDING,
+        ReceiptStatus.RECORDED,
+        ReceiptStatus.REVIEWED,
+        ReceiptStatus.SENT_BACK,
+    }
+    if receipt.status not in editable_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only pending or sent-back receipts can be edited"
+        )
+
     update_data = receipt_update.dict(exclude_unset=True)
     for field, value in update_data.items():
         setattr(receipt, field, value)
-    
+
     db.commit()
     db.refresh(receipt)
     return receipt
+
+@router.post("/{receipt_id}/resubmit")
+async def resubmit_receipt(
+    receipt_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Resubmit a corrected receipt back into the approval queue.
+
+    Used by the Receipt Corrections page after a supervisor sends a receipt
+    back. Transitions a sent-back (or otherwise pre-approval) receipt to
+    `reviewed`. Status changes go through this dedicated endpoint rather than
+    the generic PUT so an approved receipt can never be reset for re-approval.
+    """
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Receipt not found"
+        )
+
+    if current_user.role == ROLE_WAREHOUSE and receipt.submitted_by != str(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only resubmit your own receipts"
+        )
+
+    resubmittable = {
+        ReceiptStatus.PENDING,
+        ReceiptStatus.RECORDED,
+        ReceiptStatus.REVIEWED,
+        ReceiptStatus.SENT_BACK,
+    }
+    if receipt.status not in resubmittable:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only sent-back or pending receipts can be resubmitted"
+        )
+
+    receipt.status = ReceiptStatus.REVIEWED
+    db.commit()
+    db.refresh(receipt)
+
+    return {"message": "Receipt resubmitted successfully", "receipt": receipt}
 
 @router.post("/{receipt_id}/approve")
 async def approve_receipt(

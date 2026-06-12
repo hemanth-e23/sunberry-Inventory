@@ -6,3 +6,4 @@ export const updateReceipt = (id, data) => apiClient.put(`/receipts/${id}`, data
 export const approveReceipt = (id) => apiClient.post(`/receipts/${id}/approve`, {});
 export const rejectReceipt = (id) => apiClient.post(`/receipts/${id}/reject`, {});
 export const sendBackReceipt = (id) => apiClient.post(`/receipts/${id}/send-back`, {});
+export const resubmitReceipt = (id) => apiClient.post(`/receipts/${id}/resubmit`, {});

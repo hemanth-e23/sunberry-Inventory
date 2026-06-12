@@ -24,7 +24,8 @@ class InventoryTransferCreate(InventoryTransferBase):
     pass
 
 class InventoryTransferUpdate(BaseSchema):
-    status: Optional[str] = None
+    # `status` is intentionally NOT editable here — status changes only through
+    # the dedicated /approve and /reject endpoints (prevents approval bypass).
     reason: Optional[str] = Field(None, max_length=1000)
 
 class PalletLicenceTransferRef(BaseSchema):
@@ -275,7 +276,8 @@ class InventoryAdjustmentCreate(InventoryAdjustmentBase):
     pass
 
 class InventoryAdjustmentUpdate(BaseSchema):
-    status: Optional[str] = None
+    # `status` is intentionally NOT editable here — status changes only through
+    # the dedicated /approve and /reject endpoints (prevents approval bypass).
     reason: Optional[str] = Field(None, max_length=1000)
 
 class InventoryAdjustment(InventoryAdjustmentBase):
@@ -306,7 +308,8 @@ class InventoryHoldActionCreate(InventoryHoldActionBase):
     pass
 
 class InventoryHoldActionUpdate(BaseSchema):
-    status: Optional[str] = None
+    # `status` is intentionally NOT editable here — status changes only through
+    # the dedicated /approve and /reject endpoints (prevents approval bypass).
     reason: Optional[str] = Field(None, max_length=1000)
 
 class InventoryHoldAction(InventoryHoldActionBase):
