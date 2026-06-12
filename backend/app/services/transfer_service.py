@@ -8,6 +8,7 @@ from app.enums import TransferStatus, PalletStatus, ReceiptStatus
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED
 from app.services.row_allocation import parse_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
+from app.utils.locations import warehouse_id_for_row
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +68,12 @@ def _apply_pallet_licence_internal_transfer(
                         src_row.product_id = None
             pl.storage_row_id = to_row_id
             pl.storage_area_id = to_row.storage_area_id
+            # Keep the pallet's warehouse consistent with the row it now sits in,
+            # otherwise a cross-warehouse move leaves it pickable only from the
+            # old warehouse's ship-out pool.
+            dest_wh = warehouse_id_for_row(db, to_row_id)
+            if dest_wh:
+                pl.warehouse_id = dest_wh
             to_row.occupied_pallets = (to_row.occupied_pallets or 0) + 1
             to_row.occupied_cases = (to_row.occupied_cases or 0) + pl.cases
             if not to_row.product_id:

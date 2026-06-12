@@ -16,7 +16,7 @@ from app.models import (
     ForkliftRequest, PalletLicence, Receipt, ReceiptAllocation,
     Category, ProductionLine, InventoryTransfer,
 )
-from app.enums import ForkliftRequestStatus, PalletStatus, ReceiptStatus
+from app.enums import ForkliftRequestStatus, PalletStatus, ReceiptStatus, TransferStatus
 from app.constants import (
     ROLE_FORKLIFT, ROLE_ADMIN, ROLE_SUPERVISOR,
     CATEGORY_FINISHED, DEFAULT_CASES_PER_PALLET, DEFAULT_EXPIRE_YEARS, DAYS_PER_YEAR,
@@ -332,6 +332,14 @@ def create_forklift_request(
     if existing:
         raise ValidationError(
             "You have an unsubmitted scanning session. Resume and submit it before starting a new one."
+        )
+
+    # A forklift user with no warehouse would mint pallets with warehouse_id=NULL
+    # that are invisible to every ship-out picker. Reject early with a clear
+    # message instead of silently creating unreachable inventory.
+    if not current_user.warehouse_id:
+        raise ValidationError(
+            "Your account has no warehouse assigned. Contact an admin before scanning pallets."
         )
 
     request_id = f"fr-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
@@ -1335,7 +1343,14 @@ def create_internal_transfer(
         destination_breakdown=destination_breakdown,
         pallet_licence_ids=[pl.id for pl, _ in licences],
         requested_by=str(current_user.id),
-        status=PalletStatus.PENDING,
+        # Use the transfer status enum (not the pallet enum, which only matched
+        # by string coincidence) and stamp the warehouse so plant approvers can
+        # actually see this pending transfer in their warehouse-filtered queue.
+        status=TransferStatus.PENDING,
+        warehouse_id=(
+            receipt.warehouse_id
+            or next((pl.warehouse_id for pl, _ in licences if pl.warehouse_id), None)
+        ),
     )
     db.add(tr)
     receipt.hold = True

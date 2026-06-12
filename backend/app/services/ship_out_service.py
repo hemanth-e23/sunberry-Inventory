@@ -31,6 +31,7 @@ from app.models import (
 )
 from app.models.inventory import ShipOutLotReservation
 from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
+from app.utils.locations import warehouse_id_for_row
 
 
 # ---------------------------------------------------------------------------
@@ -350,16 +351,19 @@ def _split_lot_allocation_by_receipt(
 def _partial_pallet_row(db: Session, warehouse_id: Optional[str]) -> Optional[StorageRow]:
     """The single storage row designated as the partial-pallet destination
     for this warehouse, if one exists."""
-    q = db.query(StorageRow).filter(
+    rows = db.query(StorageRow).filter(
         StorageRow.is_partial_pallet_location == True,  # noqa: E712
         StorageRow.is_active == True,  # noqa: E712
-    )
-    if warehouse_id:
-        # StorageRow has no direct warehouse_id; reach via storage_area or
-        # sub_location. We do a coarse filter: any partial row visible in the
-        # system. Refine if multi-warehouse partials conflict in practice.
-        pass
-    return q.first()
+    ).all()
+    if not warehouse_id:
+        return rows[0] if rows else None
+    # StorageRow has no direct warehouse_id; resolve via the storage area /
+    # sub-location → location → warehouse chain so a partial pull never homes
+    # the remainder pallet into another warehouse's row.
+    for row in rows:
+        if warehouse_id_for_row(db, row.id) == warehouse_id:
+            return row
+    return None
 
 
 def _blocked_rows_for_line(line: InventoryTransferLine) -> dict[str, set[str]]:
@@ -789,7 +793,10 @@ def scan_pick_v2(
                 f"Pallet {label} is not in stock (status: {pl.status})"
             ),
         }
-    if transfer.warehouse_id and pl.warehouse_id and pl.warehouse_id != transfer.warehouse_id:
+    # Reject pallets that don't belong to this order's warehouse — including
+    # NULL-warehouse pallets — to match _pallet_pool_for_product's filter, so a
+    # pallet the picker can't see can't be force-scanned either.
+    if transfer.warehouse_id and pl.warehouse_id != transfer.warehouse_id:
         _record_scan_event(db, transfer.id, pl, licence_number, on_list=False, scanned_by=user_id)
         return {
             "ok": False,
