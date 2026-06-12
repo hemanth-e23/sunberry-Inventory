@@ -191,11 +191,26 @@ const CycleCountingPage = () => {
         unit: 'pallets',
       };
     }
+    // Raw materials/ingredients are stored as a weight total (e.g. 19,000 lbs)
+    // but counted physically in containers (e.g. 38 barrels). Convert to the
+    // container count so the operator counts the same unit the system expects,
+    // instead of recording a 99% "shortage" by counting barrels against lbs.
     const qty = Number(item.quantity) || 0;
+    const wpc = Number(item.weightPerContainer || 0);
+    if (wpc > 0) {
+      const containers = qty / wpc;
+      const cu = item.containerUnit || 'containers';
+      return {
+        sysLabel: `${containers.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${cu}`,
+        expectedCount: Number(containers.toFixed(2)),
+        unit: cu,
+      };
+    }
+    const u = item.quantityUnits || 'units';
     return {
-      sysLabel: qty.toLocaleString(),
+      sysLabel: `${qty.toLocaleString()} ${u}`,
       expectedCount: qty,
-      unit: 'units',
+      unit: u,
     };
   };
 
@@ -249,7 +264,7 @@ const CycleCountingPage = () => {
     inventoryItems.forEach(item => {
       const info = getVarianceInfo(item);
       if (info === null) return;
-      const { expectedCount } = getQtyInfo(item);
+      const { expectedCount, unit } = getQtyInfo(item);
       const vPct = expectedCount > 0
         ? ((info.variance / expectedCount) * 100).toFixed(2)
         : '0';
@@ -261,25 +276,24 @@ const CycleCountingPage = () => {
         location: getLocationLabel(item),
         expectedQuantity: expectedCount,
         actualQuantity: info.actual,
+        unit,
         variance: info.variance,
         variancePercent: vPct,
         status: info.status,
       });
     });
 
-    const totalExpected = items.reduce((s, v) => s + v.expectedQuantity, 0);
-    const totalActual = items.reduce((s, v) => s + v.actualQuantity, 0);
-    const totalVariance = totalActual - totalExpected;
-    const variancePct = totalExpected > 0
-      ? ((totalVariance / totalExpected) * 100).toFixed(2)
-      : '0';
+    // Items span pallets / barrels / unit counts, so summing quantities across
+    // them is meaningless. Summarize by item-level variance counts instead.
+    const variancesCount = items.filter(i => i.status !== 'ok').length;
+    const shortages = items.filter(i => i.status === 'shortage').length;
+    const overages = items.filter(i => i.status === 'overage').length;
 
     const summary = {
       totalItems: items.length,
-      expectedValue: totalExpected,
-      actualValue: totalActual,
-      totalVariance,
-      varianceValue: variancePct,
+      variancesCount,
+      shortages,
+      overages,
     };
 
     await saveCycleCount({
@@ -417,10 +431,9 @@ const CycleCountingPage = () => {
 
   const varianceSummary = (() => {
     if (!submitted || submittedVariances.length === 0) return null;
-    const totalExpected = submittedVariances.reduce((s, v) => s + v.expectedQuantity, 0);
-    const totalActual = submittedVariances.reduce((s, v) => s + v.actualQuantity, 0);
-    const totalVariance = totalActual - totalExpected;
     const varianceItems = submittedVariances.filter(v => v.status !== 'ok');
+    const shortages = submittedVariances.filter(v => v.status === 'shortage').length;
+    const overages = submittedVariances.filter(v => v.status === 'overage').length;
     return (
       <div className="variance-summary-panel">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
@@ -434,19 +447,21 @@ const CycleCountingPage = () => {
             <div className="stat-label">Items Counted</div>
             <div className="stat-value">{submittedVariances.length}</div>
           </div>
+          {/* Counts, not summed quantities — items span pallets, barrels and
+              unit counts, so a single total would mix incompatible units. */}
           <div className="stat-item">
-            <div className="stat-label">System Total</div>
-            <div className="stat-value">{totalExpected.toLocaleString()}</div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-label">Physical Total</div>
-            <div className="stat-value">{totalActual.toLocaleString()}</div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-label">Total Variance</div>
-            <div className={`stat-value ${totalVariance !== 0 ? 'variance-negative' : ''}`}>
-              {totalVariance > 0 ? '+' : ''}{totalVariance.toLocaleString()}
+            <div className="stat-label">Items with Variance</div>
+            <div className={`stat-value ${varianceItems.length > 0 ? 'variance-negative' : ''}`}>
+              {varianceItems.length}
             </div>
+          </div>
+          <div className="stat-item">
+            <div className="stat-label">Shortages</div>
+            <div className="stat-value">{shortages}</div>
+          </div>
+          <div className="stat-item">
+            <div className="stat-label">Overages</div>
+            <div className="stat-value">{overages}</div>
           </div>
         </div>
         {varianceItems.length > 0 && (
@@ -474,8 +489,8 @@ const CycleCountingPage = () => {
                       <td style={{ fontFamily: 'monospace', fontWeight: 600 }}>{v.lotNo}</td>
                       <td>{v.expiryDate ? formatDate(v.expiryDate) : '—'}</td>
                       <td>{v.location}</td>
-                      <td className="text-right">{v.expectedQuantity.toLocaleString()}</td>
-                      <td className="text-right">{v.actualQuantity.toLocaleString()}</td>
+                      <td className="text-right">{v.expectedQuantity.toLocaleString()}{v.unit ? ` ${v.unit}` : ''}</td>
+                      <td className="text-right">{v.actualQuantity.toLocaleString()}{v.unit ? ` ${v.unit}` : ''}</td>
                       <td className={`text-right variance-${v.status}`}>
                         {v.variance > 0 ? '+' : ''}{v.variance.toLocaleString()}
                       </td>
@@ -810,8 +825,7 @@ const CycleCountingPage = () => {
                     <th>Date</th>
                     <th>Location</th>
                     <th>Items</th>
-                    <th className="text-right">Total Variance</th>
-                    <th className="text-right">Variance %</th>
+                    <th className="text-right">Variances</th>
                     <th>Performed By</th>
                     <th>Status</th>
                   </tr>
@@ -828,16 +842,13 @@ const CycleCountingPage = () => {
                         <td>{formatDate(count.countDate)}</td>
                         <td>{loc?.name || (count.location ? count.location : 'All Locations')}</td>
                         <td>{count.summary?.totalItems ?? 0}</td>
-                        <td className={`text-right ${count.summary?.totalVariance !== 0 ? 'variance-shortage' : 'variance-ok'}`}>
-                          {count.summary?.totalVariance > 0 ? '+' : ''}{count.summary?.totalVariance ?? 0}
-                        </td>
-                        <td className={`text-right ${count.summary?.totalVariance !== 0 ? 'variance-shortage' : 'variance-ok'}`}>
-                          {count.summary?.varianceValue ?? 0}%
+                        <td className={`text-right ${(count.summary?.variancesCount ?? 0) !== 0 ? 'variance-shortage' : 'variance-ok'}`}>
+                          {count.summary?.variancesCount ?? 0}
                         </td>
                         <td>{count.performedBy || '—'}</td>
                         <td>
-                          <span className={count.summary?.totalVariance === 0 ? 'status-ok' : 'status-warning'}>
-                            {count.summary?.totalVariance === 0 ? '✓ OK' : '⚠ Variance'}
+                          <span className={(count.summary?.variancesCount ?? 0) === 0 ? 'status-ok' : 'status-warning'}>
+                            {(count.summary?.variancesCount ?? 0) === 0 ? '✓ OK' : '⚠ Variance'}
                           </span>
                         </td>
                       </tr>
@@ -882,29 +893,18 @@ const CycleCountingPage = () => {
                       <span className="detail-value">{selectedCycleCount.summary?.totalItems ?? 0}</span>
                     </div>
                     <div className="detail-item">
-                      <span className="detail-label">System Total</span>
-                      <span className="detail-value">
-                        {(selectedCycleCount.summary?.expectedValue ?? 0).toLocaleString()}
+                      <span className="detail-label">Items with Variance</span>
+                      <span className={`detail-value ${(selectedCycleCount.summary?.variancesCount ?? 0) !== 0 ? 'variance-shortage' : 'variance-ok'}`}>
+                        {selectedCycleCount.summary?.variancesCount ?? 0}
                       </span>
                     </div>
                     <div className="detail-item">
-                      <span className="detail-label">Physical Total</span>
-                      <span className="detail-value">
-                        {(selectedCycleCount.summary?.actualValue ?? 0).toLocaleString()}
-                      </span>
+                      <span className="detail-label">Shortages</span>
+                      <span className="detail-value">{selectedCycleCount.summary?.shortages ?? 0}</span>
                     </div>
                     <div className="detail-item">
-                      <span className="detail-label">Total Variance</span>
-                      <span className={`detail-value ${selectedCycleCount.summary?.totalVariance !== 0 ? 'variance-shortage' : 'variance-ok'}`}>
-                        {selectedCycleCount.summary?.totalVariance > 0 ? '+' : ''}
-                        {(selectedCycleCount.summary?.totalVariance ?? 0).toLocaleString()}
-                      </span>
-                    </div>
-                    <div className="detail-item">
-                      <span className="detail-label">Variance %</span>
-                      <span className={`detail-value ${selectedCycleCount.summary?.totalVariance !== 0 ? 'variance-shortage' : 'variance-ok'}`}>
-                        {selectedCycleCount.summary?.varianceValue ?? 0}%
-                      </span>
+                      <span className="detail-label">Overages</span>
+                      <span className="detail-value">{selectedCycleCount.summary?.overages ?? 0}</span>
                     </div>
                   </div>
                 </div>
