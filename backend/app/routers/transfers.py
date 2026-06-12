@@ -253,10 +253,14 @@ async def create_transfer(
             detail="Quantity must be greater than zero"
         )
 
-    if transfer_data.quantity > receipt.quantity:
+    # Available excludes any quantity on QA hold — held inventory must not be
+    # transferred or shipped. (held_quantity is the real hold; receipt.hold is
+    # also set transiently by this endpoint while a transfer is pending.)
+    available = receipt.quantity - (receipt.held_quantity or 0)
+    if transfer_data.quantity > available:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Transfer quantity cannot exceed available quantity"
+            detail="Requested quantity exceeds available (on-hold inventory excluded)"
         )
 
     # Validate order number for shipped-out transfers

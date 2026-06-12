@@ -492,6 +492,16 @@ def approve_transfer(db: Session, transfer: InventoryTransfer, current_user) -> 
 
     # --- Raw materials / packaging shipped out ---
     if transfer.transfer_type == "shipped-out" and not finished:
+        # Re-check against on-hold inventory at approve time — held_quantity can
+        # change between create and approve. FG pallets get an is_held check
+        # above; raw materials are guarded here.
+        available = receipt.quantity - (receipt.held_quantity or 0)
+        if transfer.quantity > available:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=400,
+                detail="Requested quantity exceeds available (on-hold inventory excluded)"
+            )
         _apply_raw_material_ship_out(db, transfer, receipt)
 
     # --- Raw materials / packaging internal transfer ---
