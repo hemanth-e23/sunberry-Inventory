@@ -1,6 +1,6 @@
 import React, { lazy, Suspense, useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import './App.css';
 // Shared stylesheets used across many pages — imported here so they land in the
 // main CSS bundle and are available before any lazy page chunk loads (prevents FOUC).
@@ -70,8 +70,14 @@ const PageLoader = () => (
 const page = (el) => <ErrorBoundary>{el}</ErrorBoundary>;
 
 // Protected Route Component
+// Pages a read-only corporate viewer may open. Everything else admin-ranked is
+// an operational/mutating surface (receipts, approvals, master data, transfers,
+// cycle counting, ...) the viewer must not reach even by URL.
+const CORPORATE_VIEWER_ALLOWED_PATHS = ['/admin', '/admin/inventory', '/admin/reports'];
+
 function ProtectedRoute({ children, requiredRole, requiredFeature }) {
   const { user, isAuthenticated, loading } = useAuth();
+  const location = useLocation();
   const redirectTo = requiredRole === 'forklift' ? '/forklift/login' : '/login';
 
   if (loading) {
@@ -94,6 +100,11 @@ function ProtectedRoute({ children, requiredRole, requiredFeature }) {
       ? user?.role === 'forklift'   // forklift routes need the forklift role specifically
       : (ROLE_RANK[user?.role] ?? -1) >= (ROLE_RANK[requiredRole] ?? 0);
     if (!authorized) {
+      return <Navigate to="/unauthorized" replace />;
+    }
+    // corporate_viewer is read-only: rank gets it past view pages, but it must
+    // not open mutating pages even by direct URL.
+    if (user?.role === 'corporate_viewer' && !CORPORATE_VIEWER_ALLOWED_PATHS.includes(location.pathname)) {
       return <Navigate to="/unauthorized" replace />;
     }
   }

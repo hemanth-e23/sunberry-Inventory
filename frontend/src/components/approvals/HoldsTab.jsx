@@ -17,6 +17,7 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
   const { approveHoldAction, rejectHoldAction } = useAppData();
   const { confirm } = useConfirm();
   const { addToast } = useToast();
+  const [actingId, setActingId] = React.useState(null);
 
   if (pendingHolds.length === 0) {
     return (
@@ -147,10 +148,13 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
               <button
                 type="button"
                 className="secondary-button"
+                disabled={actingId === hold.id}
                 onClick={() => {
                   confirm(`Approve ${isPlacingHold ? 'placing on hold' : 'releasing from hold'}?`).then(async ok => {
                     if (!ok) return;
+                    setActingId(hold.id);
                     const res = await approveHoldAction(hold.id, user?.id || user?.username);
+                    setActingId(null);
                     if (!res?.success) addToast(res?.error || 'Failed to approve hold', 'error');
                   });
                 }}
@@ -161,10 +165,13 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
               <button
                 type="button"
                 className="secondary-button danger"
+                disabled={actingId === hold.id}
                 onClick={() => {
                   confirm('Reject this hold request?').then(async ok => {
                     if (!ok) return;
+                    setActingId(hold.id);
                     const res = await rejectHoldAction(hold.id, '', user?.id || user?.username);
+                    setActingId(null);
                     if (!res?.success) addToast(res?.error || 'Failed to reject hold', 'error');
                   });
                 }}

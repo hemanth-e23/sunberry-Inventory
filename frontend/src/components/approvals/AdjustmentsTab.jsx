@@ -37,6 +37,7 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
   const { user } = useAuth();
   const { approveAdjustment, rejectAdjustment } = useAppData();
   const { addToast } = useToast();
+  const [actingId, setActingId] = React.useState(null);
   const { confirm } = useConfirm();
 
   if (pendingAdjustments.length === 0) {
@@ -136,10 +137,13 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
               <button
                 type="button"
                 className="secondary-button"
+                disabled={actingId === adjustment.id}
                 onClick={() => {
                   confirm(`Approve this ${getAdjustmentTypeLabel(adjustment.adjustmentType).toLowerCase()} of ${adjQty} ${receipt?.quantityUnits || 'units'}?`).then(async ok => {
                     if (!ok) return;
+                    setActingId(adjustment.id);
                     const res = await approveAdjustment(adjustment.id, user?.id || user?.username);
+                    setActingId(null);
                     if (!res?.success) addToast(res?.error || 'Failed to approve adjustment', 'error');
                   });
                 }}
@@ -150,10 +154,13 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
               <button
                 type="button"
                 className="secondary-button danger"
+                disabled={actingId === adjustment.id}
                 onClick={() => {
                   confirm('Reject this adjustment?').then(async ok => {
                     if (!ok) return;
+                    setActingId(adjustment.id);
                     const res = await rejectAdjustment(adjustment.id, '', user?.id || user?.username);
+                    setActingId(null);
                     if (!res?.success) addToast(res?.error || 'Failed to reject adjustment', 'error');
                   });
                 }}

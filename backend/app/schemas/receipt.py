@@ -71,6 +71,7 @@ class ReceiptUpdate(BaseSchema):
     container_unit: Optional[str] = None
     weight_per_container: Optional[float] = None
     weight_unit: Optional[str] = None
+    receipt_date: Optional[datetime] = None
     production_date: Optional[datetime] = None
     expiration_date: Optional[datetime] = None
     cases_per_pallet: Optional[int] = None

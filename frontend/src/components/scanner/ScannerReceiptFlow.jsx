@@ -59,12 +59,20 @@ const ScannerReceiptFlow = () => {
   // anything. When online, drain is immediate. When offline, the operator
   // keeps scanning and items flush when network returns.
   const onScanSynced = useCallback((item, resp) => {
-    // The sync endpoint returns HTTP 200 even for a soft rejection (a duplicate
-    // pallet), with no `pallet` in the body. Treat that as a failure: drop the
-    // optimistic row and surface the message instead of a false success beep.
+    // The sync endpoint returns HTTP 200 even for soft outcomes with no
+    // `pallet` in the body:
+    //   - 'duplicate': nothing was recorded — drop the optimistic row, error tone.
+    //   - 'updated': the licence was already in this session and its location
+    //     was updated in place — the optimistic row is a duplicate of the
+    //     existing list row, so drop it and report success.
     if (resp.status === 'duplicate' || (!resp.pallet && resp.status !== 'updated')) {
       setPallets((prev) => prev.filter((p) => p._idempotency_key !== item.idempotency_key));
       showError(resp.message || 'Pallet already scanned');
+      return;
+    }
+    if (resp.status === 'updated' && !resp.pallet) {
+      setPallets((prev) => prev.filter((p) => p._idempotency_key !== item.idempotency_key));
+      showSuccess(resp.message || 'Moved to new location');
       return;
     }
     if (resp.pallet) {

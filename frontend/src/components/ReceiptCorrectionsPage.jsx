@@ -223,12 +223,11 @@ const ReceiptCorrectionsPage = () => {
                   </label>
 
                   <label>
-                    <span>Quantity</span>
-                    <input
-                      type="number"
-                      value={draft.quantity || ''}
-                      onChange={(e) => handleDraftChange('quantity', e.target.value)}
-                    />
+                    <span>Quantity (read-only)</span>
+                    {/* Quantity is derived server-side (container count × weight);
+                        correct the container fields via approvals instead of
+                        editing the number directly. */}
+                    <input type="number" value={draft.quantity || ''} readOnly disabled />
                   </label>
 
                   <label>
@@ -283,23 +282,16 @@ const ReceiptCorrectionsPage = () => {
                   </label>
 
                   <label>
-                    <span>SID</span>
-                    <input
-                      type="text"
-                      value={draft.sid || ''}
-                      onChange={(e) => handleDraftChange('sid', e.target.value)}
-                      placeholder="Supplier ID"
-                    />
+                    <span>SID (read-only)</span>
+                    {/* SID and Brix live on the PRODUCT, not the receipt — edits
+                        here could never persist. Shown for reference only; change
+                        them on the product in Master Data. */}
+                    <input type="text" value={draft.sid || ''} readOnly disabled placeholder="Supplier ID" />
                   </label>
 
                   <label>
-                    <span>Brix</span>
-                    <input
-                      type="text"
-                      value={draft.brix || ''}
-                      onChange={(e) => handleDraftChange('brix', e.target.value)}
-                      placeholder="Brix level"
-                    />
+                    <span>Brix (read-only)</span>
+                    <input type="text" value={draft.brix || ''} readOnly disabled placeholder="Brix level" />
                   </label>
 
                   <label className="full-width">

@@ -493,7 +493,10 @@ export const ReceiptProvider = ({ children }) => {
     try {
       const updateData = {};
       if (updates.lotNo !== undefined) updateData.lot_number = updates.lotNo;
-      if (updates.quantity !== undefined) updateData.quantity = Number(updates.quantity);
+      if (updates.receiptDate !== undefined)
+        updateData.receipt_date = updates.receiptDate
+          ? new Date(updates.receiptDate).toISOString()
+          : null;
       if (updates.productionDate !== undefined)
         updateData.production_date = updates.productionDate
           ? new Date(updates.productionDate).toISOString()
@@ -531,7 +534,7 @@ export const ReceiptProvider = ({ children }) => {
       Object.keys(updates).forEach((key) => {
         if (
           ![
-            'lotNo', 'quantity', 'productionDate', 'expiryDate', 'expiration',
+            'lotNo', 'quantity', 'receiptDate', 'productionDate', 'expiryDate', 'expiration',
             'casesPerPallet', 'fullPallets', 'partialCases', 'shift', 'lineNumber',
             'bol', 'purchaseOrder', 'vendorId', 'note', 'status',
             'quantityUnits', 'containerCount', 'containerUnit',

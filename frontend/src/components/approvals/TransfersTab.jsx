@@ -19,6 +19,9 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
   const { addToast } = useToast();
 
   const [transferScanProgress, setTransferScanProgress] = useState({});
+  // Transfer id currently being approved/rejected — disables its buttons so a
+  // slow request can't be double-submitted.
+  const [actingId, setActingId] = useState(null);
 
   // Poll scan progress for pending ship-out transfers (live update)
   useEffect(() => {
@@ -481,12 +484,17 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
               <button
                 type="button"
                 className="secondary-button"
+                disabled={actingId === transfer.id}
                 onClick={() => {
                   const msg = forkliftDone
                     ? `Approve ship-out order ${transfer.orderNumber || transfer.order_number}?\n\n${scannedCount}/${totalPallets} pallets scanned${skippedCount > 0 ? `, ${skippedCount} skipped` : ''}.\n\nThis will subtract ${transfer.quantity} cases from inventory.`
                     : 'Approve this transfer?';
-                  confirm(msg).then(ok => {
-                    if (ok) approveTransfer(transfer.id, user?.id || user?.username);
+                  confirm(msg).then(async ok => {
+                    if (!ok) return;
+                    setActingId(transfer.id);
+                    const res = await approveTransfer(transfer.id, user?.id || user?.username);
+                    setActingId(null);
+                    if (!res?.success) addToast(res?.error || 'Failed to approve transfer', 'error');
                   });
                 }}
                 style={{ marginRight: '8px' }}
@@ -517,9 +525,16 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                 <button
                   type="button"
                   className="secondary-button danger"
+                  disabled={actingId === transfer.id}
                   onClick={() => {
-                    confirm('Reject this transfer?').then(ok => {
-                      if (ok) rejectTransfer(transfer.id, user?.id || user?.username);
+                    confirm('Reject this transfer?').then(async ok => {
+                      if (!ok) return;
+                      setActingId(transfer.id);
+                      // NOTE: rejectTransfer is (id, reason, approverId) — the old
+                      // call passed the user id as the reason.
+                      const res = await rejectTransfer(transfer.id, '', user?.id || user?.username);
+                      setActingId(null);
+                      if (!res?.success) addToast(res?.error || 'Failed to reject transfer', 'error');
                     });
                   }}
                 >
