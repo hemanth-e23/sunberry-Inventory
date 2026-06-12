@@ -258,7 +258,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
 
             {/* Full details section */}
             <div style={{ background: '#f9fafb', borderRadius: '8px', padding: '12px 16px', marginBottom: '12px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '14px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', fontSize: '14px' }}>
                 <div>
                   <span style={{ color: '#6b7280', fontWeight: 500 }}>
                     {hasMixedLots ? `Lot Numbers (${lotEntries.length})` : 'Lot Number'}
@@ -797,7 +797,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
             {isEditing && (
               <div style={{ marginBottom: '12px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '12px' }}>
                 <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>Add Missing Pallet</h4>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '8px' }}>
                   <div>
                     <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '2px' }}>Licence Number</label>
                     <input

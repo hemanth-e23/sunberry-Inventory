@@ -116,7 +116,7 @@ const PalletPicker = ({ pallets = [], selectedIds = [], onChange, loading = fals
           <div style={panelHeaderStyle}>
             <span>Available ({filteredLeft.length})</span>
             {filteredLeft.length > 0 && (
-              <button type="button" onClick={addAll} style={{ fontSize: '11px', color: '#6366f1', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>
+              <button type="button" onClick={addAll} style={{ fontSize: '13px', color: '#6366f1', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 6px', fontWeight: 600 }}>
                 Add all
               </button>
             )}
@@ -160,7 +160,7 @@ const PalletPicker = ({ pallets = [], selectedIds = [], onChange, loading = fals
           <div style={panelHeaderStyle}>
             <span>Selected ({selectedPallets.length})</span>
             {selectedPallets.length > 0 && (
-              <button type="button" onClick={clearAll} style={{ fontSize: '11px', color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>
+              <button type="button" onClick={clearAll} style={{ fontSize: '13px', color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 6px', fontWeight: 600 }}>
                 Clear all
               </button>
             )}
