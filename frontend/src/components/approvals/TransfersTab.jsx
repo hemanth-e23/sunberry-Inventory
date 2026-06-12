@@ -470,10 +470,10 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
 
             <div className="requester-row">
               <span className="requester-avatar">
-                {(userNameMap[transfer.requestedBy || transfer.requested_by] || '?')[0].toUpperCase()}
+                {(userNameMap[transfer.submittedBy] || '?')[0].toUpperCase()}
               </span>
               <span className="requester-label">
-                <strong>{userNameMap[transfer.requestedBy || transfer.requested_by] || 'Unknown'}</strong> requested this · {formatTimeAgo(transfer.submittedAt || transfer.submitted_at)}
+                <strong>{userNameMap[transfer.submittedBy] || 'Unknown'}</strong> requested this · {formatTimeAgo(transfer.submittedAt || transfer.submitted_at)}
               </span>
             </div>
 

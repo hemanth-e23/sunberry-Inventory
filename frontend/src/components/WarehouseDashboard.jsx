@@ -56,10 +56,9 @@ const WarehouseDashboard = () => {
     )?.length || 0;
     
     // Pending transfers submitted by others
-    const pendingTransfersCount = inventoryTransfers?.filter(t => 
-      t.status === 'pending' && 
-      t.requestedBy !== currentUserId && 
-      t.requested_by !== currentUserId
+    const pendingTransfersCount = inventoryTransfers?.filter(t =>
+      t.status === 'pending' &&
+      t.submittedBy !== currentUserId
     )?.length || 0;
     
     return pendingReceiptsCount + pendingHoldsCount + pendingAdjustmentsCount + pendingTransfersCount;

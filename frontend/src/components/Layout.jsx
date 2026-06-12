@@ -234,7 +234,7 @@ function Sidebar({ isOpen, isCollapsed, onToggleCollapse, onClose }) {
       ) +
       filter(inventoryTransfers,
         t => t.status === TRANSFER_STATUS.PENDING,
-        ['requestedBy', 'requested_by']
+        ['submittedBy', 'submitted_by']
       )
     );
   }, [receipts, inventoryHoldActions, inventoryAdjustments, inventoryTransfers, user, role]);
