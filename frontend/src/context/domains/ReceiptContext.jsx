@@ -5,6 +5,7 @@ import { useAuth } from '../AuthContext';
 import apiClient from '../../api/client';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 import { getTodayDateKey, toDateKey } from '../../utils/dateUtils';
+import { fallbackUnit } from '../../utils/units';
 import {
   EPSILON,
   roundTo,
@@ -19,14 +20,16 @@ export { reassignFinishedGood };
 
 // ─── Receipt mapping ──────────────────────────────────────────────────────────
 
-const mapReceipt = (rec, products) => {
+const mapReceipt = (rec, products, categories = []) => {
   const product = products.find((p) => p.id === rec.product_id);
+  const categoryType = categories.find((c) => c.id === rec.category_id)?.type;
   return {
     id: rec.id,
     productId: rec.product_id,
     categoryId: rec.category_id || null,
     quantity: Number(rec.quantity) || 0,
-    quantityUnits: rec.unit || rec.quantity_units || 'cases',
+    quantityUnits:
+      rec.unit || rec.quantity_units || rec.weight_unit || rec.container_unit || fallbackUnit(categoryType),
     containerCount: rec.container_count || null,
     containerUnit: rec.container_unit || null,
     weightPerContainer: rec.weight_per_container || null,
@@ -113,7 +116,7 @@ export const ReceiptProvider = ({ children }) => {
     if (authLoading || !isAuthenticated) return;
     try {
       const response = await apiClient.get('/receipts/', { params: { limit: 10000 } });
-      const recs = response.data.map((rec) => mapReceipt(rec, products));
+      const recs = response.data.map((rec) => mapReceipt(rec, products, categories));
       setReceipts(recs);
     } catch (error) {
       console.error('Error fetching receipts:', error);
@@ -513,6 +516,15 @@ export const ReceiptProvider = ({ children }) => {
       if (updates.purchaseOrder !== undefined) updateData.purchase_order = updates.purchaseOrder || null;
       if (updates.vendorId !== undefined) updateData.vendor_id = updates.vendorId || null;
       if (updates.note !== undefined) updateData.note = updates.note || null;
+      // Unit + container/weight edits — let a mislabeled lot be repaired. The
+      // backend recomputes quantity from container_count × weight_per_container.
+      if (updates.quantityUnits !== undefined) updateData.unit = updates.quantityUnits || null;
+      if (updates.containerCount !== undefined)
+        updateData.container_count = updates.containerCount ? Number(updates.containerCount) : null;
+      if (updates.containerUnit !== undefined) updateData.container_unit = updates.containerUnit || null;
+      if (updates.weightPerContainer !== undefined)
+        updateData.weight_per_container = updates.weightPerContainer ? Number(updates.weightPerContainer) : null;
+      if (updates.weightUnit !== undefined) updateData.weight_unit = updates.weightUnit || null;
       // `status` is intentionally not sent here — the backend ignores it and
       // status changes go through dedicated endpoints (resubmitReceipt etc.).
 
@@ -522,6 +534,8 @@ export const ReceiptProvider = ({ children }) => {
             'lotNo', 'quantity', 'productionDate', 'expiryDate', 'expiration',
             'casesPerPallet', 'fullPallets', 'partialCases', 'shift', 'lineNumber',
             'bol', 'purchaseOrder', 'vendorId', 'note', 'status',
+            'quantityUnits', 'containerCount', 'containerUnit',
+            'weightPerContainer', 'weightUnit',
           ].includes(key)
         ) {
           if (key === 'sid' || key === 'fccCode') return;

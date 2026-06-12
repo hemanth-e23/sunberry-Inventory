@@ -283,7 +283,15 @@ def create_destination_receipt(
         category_id=source_receipt.category_id if source_receipt else None,
         lot_number=transfer.lot_number or (source_receipt.lot_number if source_receipt else None),
         quantity=transfer.quantity,
-        unit=transfer.unit,
+        # Prefer the source receipt's stored unit over transfer.unit, which
+        # defaults to "cases" — otherwise a transferred raw-material lot arrives
+        # mislabeled as cases. Also carry the barrels↔lbs conversion fields so
+        # the destination's adjustment/transfer forms keep the right UoM.
+        unit=(source_receipt.unit if source_receipt and source_receipt.unit else transfer.unit),
+        container_count=source_receipt.container_count if source_receipt else None,
+        container_unit=source_receipt.container_unit if source_receipt else None,
+        weight_per_container=source_receipt.weight_per_container if source_receipt else None,
+        weight_unit=source_receipt.weight_unit if source_receipt else None,
         warehouse_id=transfer.to_warehouse_id,
         submitted_by=receiver_user_id,
         approved_by=receiver_user_id,

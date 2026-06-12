@@ -125,7 +125,8 @@ const AdjustmentsTab = () => {
   // Top-of-form unit: most common display unit across entries (barrels if
   // most lots came in barrels; lbs/cases if mostly stored that way).
   const rmGlobal = useMemo(() => dominantDisplayUnit(rmEntries), [rmEntries]);
-  const rmGlobalUnit = rmGlobal?.unit || 'cases';
+  // RM/packaging form — never default to "cases" (those are finished goods).
+  const rmGlobalUnit = rmGlobal?.unit || 'units';
   const rmGlobalFactor = rmGlobal?.factor || 1;
   const rmEntriesAvailStorage = rmEntries.reduce((s, e) => s + e.available, 0);
 

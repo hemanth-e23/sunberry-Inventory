@@ -6,6 +6,7 @@ import { useAuth } from '../AuthContext';
 import apiClient from '../../api/client';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 import { getTodayDateKey, toDateKey } from '../../utils/dateUtils';
+import { fallbackUnit } from '../../utils/units';
 import {
   EPSILON,
   roundTo,
@@ -18,12 +19,14 @@ import {
 
 // ─── Local receipt mapper (mirrors ReceiptContext.mapReceipt) ─────────────────
 
-const mapReceiptFromApi = (rec, products) => ({
+const mapReceiptFromApi = (rec, products, categories = []) => ({
   id: rec.id,
   productId: rec.product_id,
   categoryId: rec.category_id || null,
   quantity: Number(rec.quantity) || 0,
-  quantityUnits: rec.unit || rec.quantity_units || 'cases',
+  quantityUnits:
+    rec.unit || rec.quantity_units || rec.weight_unit || rec.container_unit ||
+    fallbackUnit(categories.find((c) => c.id === rec.category_id)?.type),
   containerCount: rec.container_count || null,
   containerUnit: rec.container_unit || null,
   weightPerContainer: rec.weight_per_container || null,
@@ -463,7 +466,7 @@ export const InventoryProvider = ({ children }) => {
       updateTransferStatus(id, 'approved', approverId);
 
       const receiptsResponse = await apiClient.get('/receipts/', { params: { limit: 10000 } });
-      const recs = receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products));
+      const recs = receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products, categories));
       setReceipts(recs);
 
       return { success: true };
@@ -597,7 +600,7 @@ export const InventoryProvider = ({ children }) => {
         // Pallet hold: receipt_id is null on the hold action; refetch all receipts so
         // held_quantity and hold flag reflect the updated pallet is_held values.
         const receiptsResponse = await apiClient.get('/receipts/', { params: { limit: 10000 } });
-        const recs = receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products));
+        const recs = receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products, categories));
         setReceipts(recs);
       } else if (targetHold) {
         setReceipts((current) =>
@@ -855,7 +858,7 @@ export const InventoryProvider = ({ children }) => {
       await fetchForkliftRequests();
 
       const receiptsResponse = await apiClient.get('/receipts/', { params: { limit: 10000 } });
-      const recs = receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products));
+      const recs = receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products, categories));
       setReceipts(recs);
 
       return { success: true };

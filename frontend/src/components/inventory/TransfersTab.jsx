@@ -212,7 +212,8 @@ const TransfersTab = () => {
   }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap]);
 
   const rmGlobal = useMemo(() => dominantDisplayUnit(rmEntries), [rmEntries]);
-  const rmGlobalUnit = rmGlobal?.unit || 'cases';
+  // RM/packaging form — never default to "cases" (those are finished goods).
+  const rmGlobalUnit = rmGlobal?.unit || 'units';
   const rmGlobalFactor = rmGlobal?.factor || 1;
   const rmEntriesAvailStorage = rmEntries.reduce((s, e) => s + e.available, 0);
 

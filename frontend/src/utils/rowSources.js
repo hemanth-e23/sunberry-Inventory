@@ -52,7 +52,8 @@ const makeEntry = (overrides) => {
   // came in) when we have the container info, otherwise the storage unit.
   const wpc = overrides.weightPerContainer || null;
   const cu = overrides.containerUnit || null;
-  let displayUnit = overrides.unit || 'cases';
+  // This builder is raw-material / packaging only — never default to "cases".
+  let displayUnit = overrides.unit || 'units';
   let displayFactor = 1;
   if (wpc && cu) {
     displayUnit = cu;
@@ -92,7 +93,7 @@ export const buildEntriesForProduct = ({
 
   for (const receipt of matching) {
     const lot = receipt.lotNo || receipt.lot_number || receipt.id;
-    const unit = receipt.quantityUnits || 'cases';
+    const unit = receipt.quantityUnits || 'units';
     const { weightPerContainer, containerUnit } = containerInfoFromReceipt(receipt);
     const total = Number(receipt.quantity || 0);
 

@@ -63,6 +63,14 @@ class ReceiptUpdate(BaseSchema):
     #    weight_per_container; edit those fields and it is recomputed
     #    server-side. Editing it directly desynced rows/pallets/allocations.
     lot_number: Optional[str] = None
+    # unit + container/weight fields ARE editable so a mislabeled lot can be
+    # repaired. When container_count/weight_per_container change, the router
+    # recomputes quantity and unit from them (mirrors receipt creation).
+    unit: Optional[str] = None
+    container_count: Optional[float] = None
+    container_unit: Optional[str] = None
+    weight_per_container: Optional[float] = None
+    weight_unit: Optional[str] = None
     production_date: Optional[datetime] = None
     expiration_date: Optional[datetime] = None
     cases_per_pallet: Optional[int] = None

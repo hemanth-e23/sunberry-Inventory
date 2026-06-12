@@ -364,6 +364,17 @@ async def update_receipt(
     for field, value in update_data.items():
         setattr(receipt, field, value)
 
+    # If container/weight inputs changed, recompute the stored quantity and unit
+    # from them — same derivation as receipt creation — so the weight total and
+    # unit stay consistent (e.g. 40 barrels × 500 lbs = 20000 lbs).
+    if "container_count" in update_data or "weight_per_container" in update_data:
+        if receipt.container_count and receipt.weight_per_container and receipt.weight_unit:
+            receipt.quantity = round(float(receipt.container_count) * float(receipt.weight_per_container), 3)
+            receipt.unit = receipt.weight_unit
+        elif receipt.container_count and receipt.container_unit and not receipt.weight_per_container:
+            receipt.quantity = float(receipt.container_count)
+            receipt.unit = receipt.container_unit
+
     db.commit()
     db.refresh(receipt)
     return receipt
