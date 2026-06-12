@@ -8,7 +8,7 @@ from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE
 from app.services.ship_out_service import _release_row_capacity
 from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
-from app.services.row_allocation import parse_breakdown, deduct_rm_rows
+from app.services.row_allocation import parse_breakdown, deduct_rm_rows, deduct_rm_total
 
 # Adjustment types that reduce inventory quantity
 DEDUCTION_TYPES = frozenset({
@@ -80,10 +80,15 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
 
 
 def _apply_row_breakdown(db: Session, receipt: Receipt, adjustment: InventoryAdjustment) -> None:
-    """Deduct cases from the specific storage rows the operator picked, keeping
-    StorageRow.occupied_* and receipt.raw_material_row_allocations in sync via
-    the shared row-allocation helper."""
-    deduct_rm_rows(db, receipt, parse_breakdown(adjustment.source_breakdown), update_rows=True)
+    """Deduct from storage rows + receipt.raw_material_row_allocations via the
+    shared helper. When the operator picked specific rows, deduct exactly those;
+    otherwise prorate the adjustment across the lot's current allocations so a
+    plain quantity deduction no longer leaves rows/JSON untouched."""
+    deductions = parse_breakdown(adjustment.source_breakdown)
+    if deductions:
+        deduct_rm_rows(db, receipt, deductions, update_rows=True)
+    else:
+        deduct_rm_total(db, receipt, float(adjustment.quantity or 0), update_rows=True)
 
 
 def reject_adjustment(db: Session, adjustment: InventoryAdjustment, reason: str, current_user) -> InventoryAdjustment:

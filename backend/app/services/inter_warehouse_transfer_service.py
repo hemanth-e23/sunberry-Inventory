@@ -4,7 +4,6 @@ Handles source receipt linking, inventory deduction, destination receipt
 creation, and rollback on cancel.
 """
 import uuid
-import copy
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
@@ -369,46 +368,9 @@ def _restore_fg_pallets(db: Session, transfer: InterWarehouseTransfer, receipt: 
 
 
 def _restore_rm_from_breakdown(db: Session, transfer: InterWarehouseTransfer, receipt: Receipt):
-    """Restore RM row occupancy from source_breakdown."""
-    cases_per_pallet = float(receipt.cases_per_pallet or 40)
-
-    for entry in transfer.source_breakdown:
-        source_id = entry.get("id", "")
-        qty = float(entry.get("quantity", 0))
-        if not source_id.startswith("row-") or qty <= 0:
-            continue
-        row_id = source_id.removeprefix("row-")
-        row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
-        if row:
-            pallets_to_restore = qty / cases_per_pallet if cases_per_pallet > 0 else 0
-            row.occupied_cases = (row.occupied_cases or 0) + qty
-            row.occupied_pallets = (row.occupied_pallets or 0) + pallets_to_restore
-            if not row.product_id:
-                row.product_id = receipt.product_id
-
-    # Restore receipt.raw_material_row_allocations
-    if receipt.raw_material_row_allocations is not None:
-        allocs = copy.deepcopy(receipt.raw_material_row_allocations) if receipt.raw_material_row_allocations else []
-        for entry in transfer.source_breakdown:
-            source_id = entry.get("id", "")
-            qty = float(entry.get("quantity", 0))
-            if not source_id.startswith("row-"):
-                continue
-            row_id = source_id.removeprefix("row-")
-            pallets_to_restore = qty / cases_per_pallet if cases_per_pallet > 0 else 0
-            existing = next((a for a in allocs if a.get("rowId") == row_id), None)
-            if existing:
-                existing["pallets"] = float(existing.get("pallets", 0)) + pallets_to_restore
-            else:
-                row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
-                area = db.query(StorageArea).filter(StorageArea.id == row.storage_area_id).first() if row else None
-                allocs.append({
-                    "rowId": row_id,
-                    "areaId": row.storage_area_id if row else None,
-                    "areaName": area.name if area else "",
-                    "rowName": row.name if row else "",
-                    "pallets": pallets_to_restore,
-                })
-        receipt.raw_material_row_allocations = allocs
-
+    """Restore RM row occupancy + allocation JSON from source_breakdown via the
+    shared helper, so restore is exactly symmetric with the cases-based deduct
+    (the old inline version restored pallets only and wrote entries without a
+    cases field, which later mutations then mishandled)."""
+    add_rm_rows(db, receipt, parse_breakdown(transfer.source_breakdown), update_rows=True)
     receipt.quantity = receipt.quantity + transfer.quantity

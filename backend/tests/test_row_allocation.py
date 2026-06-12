@@ -63,6 +63,64 @@ def test_deduct_rm_total_prorates(db_session):
     assert by_row["B"]["cases"] == 50
 
 
+# ── Real production data shape: {rowId, pallets} with NO cases key ──────────
+# The receipt form and the IWT assign-storage modal write entries this way, so
+# every helper must normalize (cases = pallets × cases_per_pallet) instead of
+# assuming the cases key exists.
+
+def _receipt_pallets_only(allocs, cpp=50, quantity=None):
+    total = quantity if quantity is not None else sum(a["pallets"] * cpp for a in allocs)
+    r = Receipt(id="r", product_id="p", quantity=total,
+                unit="lbs", status="approved", cases_per_pallet=cpp)
+    r.raw_material_row_allocations = allocs
+    return r
+
+
+def test_deduct_rows_normalizes_pallets_only_entries(db_session):
+    # {rowId, pallets} shape: A=2 pallets (=100 cases @50), B=1 pallet (=50).
+    r = _receipt_pallets_only([{"rowId": "A", "pallets": 2}, {"rowId": "B", "pallets": 1}], cpp=50)
+    deduct_rm_rows(db_session, r, {"A": 40}, update_rows=False)
+    by_row = {a["rowId"]: a for a in r.raw_material_row_allocations}
+    assert by_row["A"]["cases"] == 60          # 100 - 40, derived then deducted
+    assert by_row["A"]["pallets"] == 60 / 50
+    # CRITICAL: the untouched pallets-only entry must survive verbatim.
+    assert "B" in by_row
+    assert by_row["B"] == {"rowId": "B", "pallets": 1}
+
+
+def test_deduct_total_prorates_pallets_only_entries(db_session):
+    r = _receipt_pallets_only([{"rowId": "A", "pallets": 2}, {"rowId": "B", "pallets": 2}], cpp=50)
+    # total = 200 effective cases; deduct 100 → 50% from each row.
+    deduct_rm_total(db_session, r, 100, update_rows=False)
+    by_row = {a["rowId"]: a for a in r.raw_material_row_allocations}
+    assert by_row["A"]["cases"] == 50
+    assert by_row["B"]["cases"] == 50
+
+
+def test_add_rows_normalizes_existing_pallets_only_entry(db_session):
+    r = _receipt_pallets_only([{"rowId": "A", "pallets": 2}], cpp=50)
+    add_rm_rows(db_session, r, {"A": 50}, update_rows=False)
+    by_row = {a["rowId"]: a for a in r.raw_material_row_allocations}
+    assert by_row["A"]["cases"] == 150  # 100 derived + 50 added
+    assert by_row["A"]["pallets"] == 3
+
+
+def test_deduct_then_add_round_trip_preserves_total(db_session):
+    """Internal row-to-row move on pallets-only data: deduct source, add dest —
+    the effective total must be conserved and no entry wiped."""
+    r = _receipt_pallets_only([{"rowId": "A", "pallets": 2}, {"rowId": "B", "pallets": 1}], cpp=50)
+    deduct_rm_rows(db_session, r, {"A": 100}, update_rows=False)  # empty A
+    add_rm_rows(db_session, r, {"C": 100}, update_rows=False)     # land in C
+    by_row = {a["rowId"]: a for a in r.raw_material_row_allocations}
+    assert "A" not in by_row                       # emptied, pruned
+    assert by_row["B"] == {"rowId": "B", "pallets": 1}  # untouched, intact
+    assert by_row["C"]["cases"] == 100
+    total = sum(
+        (a.get("cases") or (a.get("pallets", 0) * 50)) for a in r.raw_material_row_allocations
+    )
+    assert total == 150  # conserved (B's 50 + C's 100)
+
+
 @pytest.mark.integration
 def test_adjustment_keeps_allocation_in_sync(client, auth_headers, admin_auth_headers, db_session):
     db_session.add(CategoryGroup(id="g", name="G"))

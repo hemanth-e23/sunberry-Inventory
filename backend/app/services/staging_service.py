@@ -8,7 +8,7 @@ from app.models import (
 )
 from app.enums import ReceiptStatus, AdjustmentStatus
 from app.exceptions import ValidationError, NotFoundError
-from app.services.row_allocation import deduct_rm_total
+from app.services.row_allocation import deduct_rm_total, deduct_rm_rows, add_rm_rows
 
 
 def _compute_available_quantity(db: Session, receipt: Receipt) -> float:
@@ -383,11 +383,34 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
     )
     db.add(return_transfer)
 
-    # Update receipt location
-    receipt.location_id = request.to_location_id
-    receipt.sub_location_id = request.to_sub_location_id
-    if request.to_storage_row_id:
-        receipt.storage_row_id = request.to_storage_row_id
+    # Keep the allocation JSON in sync with the physical move above (rows were
+    # already updated inline): the returned quantity leaves the original row's
+    # entry and lands in the return row's entry.
+    if receipt.raw_material_row_allocations:
+        if staging_item.original_storage_row_id:
+            deduct_rm_rows(
+                db, receipt,
+                {staging_item.original_storage_row_id: float(request.quantity)},
+                update_rows=False,
+            )
+        if request.to_storage_row_id:
+            add_rm_rows(
+                db, receipt,
+                {request.to_storage_row_id: float(request.quantity)},
+                update_rows=False,
+            )
+
+    # Only re-home the receipt's primary location when this return completes the
+    # staged item — a partial return must not claim the whole lot moved.
+    is_full_return = (
+        staging_item.quantity_returned + request.quantity
+        >= staging_item.quantity_staged - staging_item.quantity_used
+    )
+    if is_full_return:
+        receipt.location_id = request.to_location_id
+        receipt.sub_location_id = request.to_sub_location_id
+        if request.to_storage_row_id:
+            receipt.storage_row_id = request.to_storage_row_id
 
     staging_item.quantity_returned += request.quantity
     staging_item.pallets_returned = (staging_item.pallets_returned or 0) + pallets_to_free
