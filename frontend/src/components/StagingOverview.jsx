@@ -29,6 +29,7 @@ const StagingOverview = () => {
   const [returnLocation, setReturnLocation] = useState('');
   const [returnSubLocation, setReturnSubLocation] = useState('');
   const [returnStorageRow, setReturnStorageRow] = useState('');
+  const [returnPallets, setReturnPallets] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   
   // Get available storage rows for return location
@@ -172,6 +173,7 @@ const StagingOverview = () => {
         to_location_id: returnLocation,
         to_sub_location_id: returnSubLocation || null,
         to_storage_row_id: returnStorageRow || null,
+        pallets: returnPallets === '' ? null : Number(returnPallets),
       });
       setShowReturnModal(false);
       setSelectedItem(null);
@@ -179,6 +181,7 @@ const StagingOverview = () => {
       setReturnLocation('');
       setReturnSubLocation('');
       setReturnStorageRow('');
+      setReturnPallets('');
       setError('');
       fetchStagingItems();
       alert('Item returned successfully!');
@@ -510,6 +513,19 @@ const StagingOverview = () => {
                   </p>
                 </label>
               )}
+            {returnStorageRow && (
+              <label>
+                <span>Pallets returned to this row:</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={returnPallets}
+                  onChange={(e) => setReturnPallets(e.target.value)}
+                  placeholder="Pallets placed back on the rack"
+                />
+              </label>
+            )}
             <div className="modal-actions">
               <button
                 onClick={() => setShowReturnModal(false)}

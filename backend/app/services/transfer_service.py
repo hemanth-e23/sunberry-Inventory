@@ -7,7 +7,7 @@ from app.models import Receipt, InventoryTransfer, StorageRow, StorageArea, Pall
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED
-from app.services.row_allocation import parse_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
+from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
 from app.utils.locations import warehouse_id_for_row
 
 
@@ -180,94 +180,43 @@ def _apply_finished_goods_occupancy_update(
 def _apply_raw_material_internal_transfer(
     db: Session, transfer: InventoryTransfer, receipt: Receipt
 ) -> None:
-    """Update storage row occupancies for raw material warehouse-transfers and update receipt location."""
-    cases_per_pallet = float(receipt.cases_per_pallet or 40)
+    """Update storage row occupancies + allocation JSON for raw material
+    warehouse-transfers, using the EXPLICIT per-row pallet counts the worker
+    entered (pallets-out at source, pallets-in at destination). Content (cases)
+    and pallets move independently — no cases/cases_per_pallet derivation."""
+    source_cases = parse_breakdown(transfer.source_breakdown)
+    source_pallets = parse_pallet_breakdown(transfer.source_breakdown)
+    dest_cases = parse_breakdown(transfer.destination_breakdown)
+    dest_pallets = parse_pallet_breakdown(transfer.destination_breakdown)
 
-    # Free source rows
-    if transfer.source_breakdown and isinstance(transfer.source_breakdown, list):
-        for source in transfer.source_breakdown:
-            source_id = source.get("id", "")
-            if not source_id.startswith("row-"):
-                continue
-            row_id = source_id.removeprefix("row-")
-            row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
-            if row:
-                cases_to_free = float(source.get("quantity", 0))
-                pallets_to_free = cases_to_free / cases_per_pallet if cases_per_pallet > 0 else 0
-                row.occupied_cases = max(0, (row.occupied_cases or 0) - cases_to_free)
-                row.occupied_pallets = max(0, (row.occupied_pallets or 0) - pallets_to_free)
-                if row.occupied_pallets <= 0:
-                    row.product_id = None
+    # Free source rows (content + explicit pallets) and sync the allocation JSON.
+    deduct_rm_rows(db, receipt, source_cases, pallets_by_row=source_pallets, update_rows=True)
+    # Reserve destination rows (content + explicit pallets) and sync the JSON.
+    add_rm_rows(db, receipt, dest_cases, pallets_by_row=dest_pallets, update_rows=True)
 
-    # Reserve destination rows and update receipt.storage_row_id
-    if transfer.destination_breakdown and isinstance(transfer.destination_breakdown, list):
-        dest_row_ids = []
-        for dest in transfer.destination_breakdown:
-            dest_id = dest.get("id", "")
-            if not dest_id.startswith("row-"):
-                continue
-            row_id = dest_id.removeprefix("row-")
-            dest_row_ids.append(row_id)
-            row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
-            if row:
-                cases_to_add = float(dest.get("quantity", 0))
-                pallets_to_add = cases_to_add / cases_per_pallet if cases_per_pallet > 0 else 0
-                row.occupied_cases = (row.occupied_cases or 0) + cases_to_add
-                row.occupied_pallets = (row.occupied_pallets or 0) + pallets_to_add
-                if not row.product_id:
-                    row.product_id = receipt.product_id
-
-        # Update receipt storage_row_id if transferring to a single destination row
-        if len(dest_row_ids) == 1:
-            receipt.storage_row_id = dest_row_ids[0]
-
-    # Keep the allocation JSON in sync with the row move above (was previously
-    # left stale, so the JSON kept pointing at the old rows after an internal
-    # transfer). Rows are already updated inline, so JSON-only here.
-    deduct_rm_rows(db, receipt, parse_breakdown(transfer.source_breakdown), update_rows=False)
-    add_rm_rows(db, receipt, parse_breakdown(transfer.destination_breakdown), update_rows=False)
+    # Update receipt.storage_row_id when there's a single destination row.
+    dest_row_ids = list(dest_cases.keys())
+    if len(dest_row_ids) == 1:
+        receipt.storage_row_id = dest_row_ids[0]
 
 
 def _apply_raw_material_ship_out(
     db: Session, transfer: InventoryTransfer, receipt: Receipt
 ) -> None:
-    """Free raw material/packaging storage row occupancy proportional to quantity shipped."""
-    transfer_quantity = float(transfer.quantity)
-    receipt_total = float(receipt.quantity)
-    if receipt_total <= 0:
+    """Free raw material/packaging storage row occupancy for a ship-out.
+
+    Live path: the ship-out carries a per-row ``source_breakdown`` with the
+    EXPLICIT pallets-out the worker entered, so free exactly that content +
+    pallets per row (no cases/cases_per_pallet). Legacy fallback (no per-row
+    breakdown): prorate content across the lot's allocations, with pallets
+    scaled to each row's real footprint."""
+    source_cases = parse_breakdown(transfer.source_breakdown)
+    if source_cases:
+        source_pallets = parse_pallet_breakdown(transfer.source_breakdown)
+        deduct_rm_rows(db, receipt, source_cases, pallets_by_row=source_pallets, update_rows=True)
         return
 
-    proportion_shipped = min(1.0, transfer_quantity / receipt_total)
-
-    if receipt.raw_material_row_allocations and isinstance(receipt.raw_material_row_allocations, list):
-        for alloc in receipt.raw_material_row_allocations:
-            row_id = alloc.get("rowId")
-            alloc_pallets = float(alloc.get("pallets", 0))
-            if not row_id or alloc_pallets <= 0:
-                continue
-            pallets_to_free = alloc_pallets * proportion_shipped
-            row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
-            if row and pallets_to_free > 0:
-                row.occupied_pallets = max(0, (row.occupied_pallets or 0) - pallets_to_free)
-                if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                    row.occupied_cases = max(0, (row.occupied_cases or 0) - pallets_to_free * receipt.cases_per_pallet)
-                if row.occupied_pallets <= 0:
-                    row.product_id = None
-    elif receipt.storage_row_id and receipt.pallets:
-        receipt_total_pallets = float(receipt.pallets)
-        if receipt_total_pallets > 0:
-            pallets_to_free = receipt_total_pallets * proportion_shipped
-            row = db.query(StorageRow).filter(StorageRow.id == receipt.storage_row_id).first()
-            if row and pallets_to_free > 0:
-                row.occupied_pallets = max(0, (row.occupied_pallets or 0) - pallets_to_free)
-                if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                    row.occupied_cases = max(0, (row.occupied_cases or 0) - pallets_to_free * receipt.cases_per_pallet)
-                if row.occupied_pallets <= 0:
-                    row.product_id = None
-
-    # Keep the allocation JSON in sync with the proportional row free above
-    # (was previously left stale after RM ship-outs). Rows already updated.
-    deduct_rm_total(db, receipt, transfer_quantity, update_rows=False)
+    deduct_rm_total(db, receipt, float(transfer.quantity), update_rows=True)
 
 
 def _update_receipt_allocation_json(

@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from app.models import Receipt, InterWarehouseTransfer, StorageRow, StorageArea, Category, PalletLicence
 from app.enums import ReceiptStatus
 from app.constants import CATEGORY_FINISHED
-from app.services.row_allocation import parse_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
+from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
 
 
 def _is_finished_goods(db: Session, receipt: Receipt) -> bool:
@@ -151,9 +151,16 @@ def _deduct_fg_pallets(db: Session, transfer: InterWarehouseTransfer, receipt: R
 
 
 def _deduct_rm_from_breakdown(db: Session, transfer: InterWarehouseTransfer, receipt: Receipt):
-    """Deduct RM/ingredient inventory from specific rows per source_breakdown,
+    """Deduct RM/ingredient inventory from specific source rows, freeing the
+    EXPLICIT pallets-out the sender entered per row (no cases/cases_per_pallet),
     keeping storage rows and the allocation JSON (cases + pallets) in sync."""
-    deduct_rm_rows(db, receipt, parse_breakdown(transfer.source_breakdown), update_rows=True)
+    deduct_rm_rows(
+        db,
+        receipt,
+        parse_breakdown(transfer.source_breakdown),
+        pallets_by_row=parse_pallet_breakdown(transfer.source_breakdown),
+        update_rows=True,
+    )
     receipt.quantity = max(0, receipt.quantity - transfer.quantity)
 
 
@@ -382,8 +389,13 @@ def _restore_fg_pallets(db: Session, transfer: InterWarehouseTransfer, receipt: 
 
 def _restore_rm_from_breakdown(db: Session, transfer: InterWarehouseTransfer, receipt: Receipt):
     """Restore RM row occupancy + allocation JSON from source_breakdown via the
-    shared helper, so restore is exactly symmetric with the cases-based deduct
-    (the old inline version restored pallets only and wrote entries without a
-    cases field, which later mutations then mishandled)."""
-    add_rm_rows(db, receipt, parse_breakdown(transfer.source_breakdown), update_rows=True)
+    shared helper, symmetric with the deduct: restore exactly the content and the
+    EXPLICIT pallets that were freed when the transfer shipped (no cases/cpp)."""
+    add_rm_rows(
+        db,
+        receipt,
+        parse_breakdown(transfer.source_breakdown),
+        pallets_by_row=parse_pallet_breakdown(transfer.source_breakdown),
+        update_rows=True,
+    )
     receipt.quantity = receipt.quantity + transfer.quantity

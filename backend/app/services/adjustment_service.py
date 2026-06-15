@@ -8,7 +8,7 @@ from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE
 from app.services.ship_out_service import _release_row_capacity
 from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
-from app.services.row_allocation import parse_breakdown, deduct_rm_rows, deduct_rm_total
+from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, deduct_rm_total
 
 # Adjustment types that reduce inventory quantity
 DEDUCTION_TYPES = frozenset({
@@ -86,7 +86,9 @@ def _apply_row_breakdown(db: Session, receipt: Receipt, adjustment: InventoryAdj
     plain quantity deduction no longer leaves rows/JSON untouched."""
     deductions = parse_breakdown(adjustment.source_breakdown)
     if deductions:
-        deduct_rm_rows(db, receipt, deductions, update_rows=True)
+        # Free exactly the pallets the operator entered per row (no cases/cpp).
+        pallets = parse_pallet_breakdown(adjustment.source_breakdown)
+        deduct_rm_rows(db, receipt, deductions, pallets_by_row=pallets, update_rows=True)
     else:
         deduct_rm_total(db, receipt, float(adjustment.quantity or 0), update_rows=True)
 

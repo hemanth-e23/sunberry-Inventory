@@ -99,6 +99,11 @@ class Receipt(ReceiptBase):
     id: str
     status: str
     pallets: Optional[float] = None
+    # Per-row content/pallet breakdown for RM/packaging lots — the All-Inventory
+    # and lot-trace views read this to show per-row pallets. Must be on the
+    # RESPONSE schema (it was previously only on the assign-storage request),
+    # otherwise the frontend never receives it and falls back to receipt.pallets.
+    raw_material_row_allocations: Optional[List[dict]] = None
     submitted_by: Optional[str] = None
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None

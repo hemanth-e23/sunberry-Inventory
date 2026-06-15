@@ -11,6 +11,58 @@ from app.exceptions import ValidationError, NotFoundError
 from app.services.row_allocation import deduct_rm_total, deduct_rm_rows, add_rm_rows
 
 
+def _lot_row_footprint(receipt: Receipt) -> dict:
+    """Current per-row ``{cases, pallets}`` footprint of an RM lot, from its
+    allocation JSON (multi-row) or its single ``storage_row_id``."""
+    footprint: dict = {}
+    allocs = receipt.raw_material_row_allocations
+    if allocs and isinstance(allocs, list):
+        for a in allocs:
+            rid = a.get("rowId")
+            if not rid:
+                continue
+            footprint[rid] = {
+                "cases": float(a.get("cases", 0) or 0),
+                "pallets": float(a.get("pallets", 0) or 0),
+            }
+    elif receipt.storage_row_id:
+        footprint[receipt.storage_row_id] = {
+            "cases": float(receipt.quantity or 0),
+            "pallets": float(receipt.pallets or 0),
+        }
+    return footprint
+
+
+def _stage_free_rack(db: Session, receipt: Receipt, staged_qty: float, staged_pallets: float) -> float:
+    """Free a lot's rack footprint when material is pulled for staging: remove
+    ``staged_qty`` content and ``staged_pallets`` pallets, distributed across the
+    lot's current rows by their real content / pallet share (never cases/cpp).
+    Returns the pallet count actually freed (the explicit number, or a
+    proportional estimate when none was supplied)."""
+    footprint = _lot_row_footprint(receipt)
+    total_cases = sum(r["cases"] for r in footprint.values())
+    total_pallets = sum(r["pallets"] for r in footprint.values())
+
+    if staged_pallets is None:
+        # No explicit count — estimate proportionally from the lot's real pallets.
+        staged_pallets = (
+            (staged_qty / float(receipt.quantity) * total_pallets)
+            if receipt.quantity and total_pallets > 0 else 0.0
+        )
+
+    content_by_row: dict = {}
+    pallets_by_row: dict = {}
+    for rid, r in footprint.items():
+        c = (staged_qty * r["cases"] / total_cases) if total_cases > 0 else 0.0
+        p = (staged_pallets * r["pallets"] / total_pallets) if total_pallets > 0 else 0.0
+        if c > 0 or p > 0:
+            content_by_row[rid] = c
+            pallets_by_row[rid] = p
+    if content_by_row:
+        deduct_rm_rows(db, receipt, content_by_row, pallets_by_row=pallets_by_row, update_rows=True)
+    return float(staged_pallets or 0)
+
+
 def _compute_available_quantity(db: Session, receipt: Receipt) -> float:
     """Calculate how much of receipt.quantity is free to stage (not currently in active staging)."""
     staged_items = db.query(StagingItem).filter(
@@ -140,21 +192,18 @@ def create_staging_transfer(db: Session, staging_data, current_user) -> dict:
             db.add(transfer)
             db.flush()
 
-            pallets_staged = None
-            if receipt.pallets and receipt.pallets > 0 and receipt.quantity > 0:
-                pallets_staged = (lot_request.quantity / receipt.quantity) * receipt.pallets
-
             original_storage_row_id = receipt.storage_row_id
+
+            # Free the rack at the moment material is physically pulled, using the
+            # EXPLICIT pallets the worker entered (falls back to a proportional
+            # estimate from the lot's real pallets when not supplied). Content and
+            # pallets come off independently — no cases/cases_per_pallet.
+            pallets_staged = _stage_free_rack(
+                db, receipt, float(lot_request.quantity), getattr(lot_request, "pallets", None)
+            )
 
             receipt.location_id = staging_data.staging_location_id
             receipt.sub_location_id = staging_data.staging_sub_location_id
-
-            staging_storage_row_id = None
-            if staging_data.staging_sub_location_id:
-                # Future: resolve staging row if sub-location uses rows
-                db.query(StorageRow).filter(
-                    StorageRow.sub_location_id == staging_data.staging_sub_location_id
-                ).all()
 
             staging_item_id = f"staging-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
             staging_item = StagingItem(
@@ -165,21 +214,10 @@ def create_staging_transfer(db: Session, staging_data, current_user) -> dict:
                 quantity_staged=lot_request.quantity,
                 pallets_staged=pallets_staged,
                 original_storage_row_id=original_storage_row_id,
-                staging_storage_row_id=staging_storage_row_id,
+                staging_storage_row_id=None,
                 staging_batch_id=staging_batch_id,
                 warehouse_id=current_user.warehouse_id,
             )
-
-            if staging_storage_row_id and pallets_staged:
-                staging_row = db.query(StorageRow).filter(StorageRow.id == staging_storage_row_id).first()
-                if staging_row:
-                    staging_row.occupied_pallets = (staging_row.occupied_pallets or 0) + pallets_staged
-                    if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                        staging_row.occupied_cases = (
-                            (staging_row.occupied_cases or 0) + pallets_staged * receipt.cases_per_pallet
-                        )
-                    if not staging_row.product_id:
-                        staging_row.product_id = item_request.product_id
 
             db.add(staging_item)
             created_transfers.append(transfer)
@@ -206,60 +244,15 @@ def mark_staging_used(db: Session, staging_item: StagingItem, request, current_u
     if not receipt:
         raise NotFoundError("Receipt for staging item")
 
-    # Proportional pallets to free
-    pallets_to_free = 0.0
-    if staging_item.pallets_staged and staging_item.pallets_staged > 0 and staging_item.quantity_staged > 0:
-        pallets_to_free = (request.quantity / staging_item.quantity_staged) * staging_item.pallets_staged
-
-    receipt_total = float(receipt.quantity)
-    quantity_staged = float(staging_item.quantity_staged)
-    quantity_used_now = float(request.quantity)
-
-    proportion_of_receipt_freed = 0.0
-    if receipt_total > 0 and quantity_staged > 0:
-        proportion_of_receipt_freed = (quantity_used_now / quantity_staged) * (quantity_staged / receipt_total)
-
-    # Multi-row raw material allocations
-    if receipt.raw_material_row_allocations and isinstance(receipt.raw_material_row_allocations, list):
-        for alloc in receipt.raw_material_row_allocations:
-            row_id = alloc.get("rowId")
-            alloc_pallets = float(alloc.get("pallets", 0))
-            if not row_id or alloc_pallets <= 0:
-                continue
-            pallets_to_free_from_row = alloc_pallets * proportion_of_receipt_freed
-            row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
-            if row and pallets_to_free_from_row > 0:
-                row.occupied_pallets = max(0, (row.occupied_pallets or 0) - pallets_to_free_from_row)
-                if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                    row.occupied_cases = max(
-                        0, (row.occupied_cases or 0) - pallets_to_free_from_row * receipt.cases_per_pallet
-                    )
-                if row.occupied_pallets <= 0:
-                    row.product_id = None
-    elif staging_item.original_storage_row_id and pallets_to_free > 0:
-        original_row = db.query(StorageRow).filter(StorageRow.id == staging_item.original_storage_row_id).first()
-        if original_row:
-            original_row.occupied_pallets = max(0, (original_row.occupied_pallets or 0) - pallets_to_free)
-            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                original_row.occupied_cases = max(
-                    0, (original_row.occupied_cases or 0) - pallets_to_free * receipt.cases_per_pallet
-                )
-            if original_row.occupied_pallets <= 0:
-                original_row.product_id = None
-
-    if staging_item.staging_storage_row_id and pallets_to_free > 0:
-        staging_row = db.query(StorageRow).filter(StorageRow.id == staging_item.staging_storage_row_id).first()
-        if staging_row:
-            staging_row.occupied_pallets = max(0, (staging_row.occupied_pallets or 0) - pallets_to_free)
-            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                staging_row.occupied_cases = max(
-                    0, (staging_row.occupied_cases or 0) - pallets_to_free * receipt.cases_per_pallet
-                )
-            if staging_row.occupied_pallets <= 0:
-                staging_row.product_id = None
+    # The rack was already freed when this material was pulled for staging, so
+    # consumption only reduces the lot total — no storage-row changes here.
+    # pallets_used is tracked for reporting (proportional to the staged pallets).
+    pallets_used_now = 0.0
+    if staging_item.pallets_staged and staging_item.quantity_staged > 0:
+        pallets_used_now = (request.quantity / staging_item.quantity_staged) * staging_item.pallets_staged
 
     staging_item.quantity_used += request.quantity
-    staging_item.pallets_used = (staging_item.pallets_used or 0) + pallets_to_free
+    staging_item.pallets_used = (staging_item.pallets_used or 0) + pallets_used_now
 
     if staging_item.quantity_used >= staging_item.quantity_staged:
         staging_item.status = "used"
@@ -284,12 +277,9 @@ def mark_staging_used(db: Session, staging_item: StagingItem, request, current_u
         approved_by=str(current_user.id),
         approved_at=datetime.now(timezone.utc),
     )
-    # Keep the allocation JSON in sync with the proportional row free above
-    # (was previously left stale after staging consumption). Rows already freed.
-    deduct_rm_total(db, receipt, request.quantity, update_rows=False)
-    receipt.quantity -= request.quantity
-    if receipt.quantity <= 0:
-        receipt.quantity = 0
+    # Rack/allocation already settled at staging time; consumption just reduces
+    # the lot total.
+    receipt.quantity = max(0, receipt.quantity - request.quantity)
     db.add(adjustment)
 
     return staging_item
@@ -317,53 +307,14 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
         if product and product.quantity_uom:
             unit = product.quantity_uom
 
-    # Proportional pallets to return
-    pallets_to_free = 0.0
-    if staging_item.pallets_staged and staging_item.pallets_staged > 0 and staging_item.quantity_staged > 0:
-        pallets_to_free = (request.quantity / staging_item.quantity_staged) * staging_item.pallets_staged
-
-    # Free original location row
-    if staging_item.original_storage_row_id and pallets_to_free > 0:
-        original_row = db.query(StorageRow).filter(StorageRow.id == staging_item.original_storage_row_id).first()
-        if original_row:
-            original_row.occupied_pallets = max(0, (original_row.occupied_pallets or 0) - pallets_to_free)
-            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                original_row.occupied_cases = max(
-                    0, (original_row.occupied_cases or 0) - pallets_to_free * receipt.cases_per_pallet
-                )
-            if original_row.occupied_pallets <= 0:
-                original_row.product_id = None
-
-    # Free staging row
-    if staging_item.staging_storage_row_id and pallets_to_free > 0:
-        staging_row = db.query(StorageRow).filter(StorageRow.id == staging_item.staging_storage_row_id).first()
-        if staging_row:
-            staging_row.occupied_pallets = max(0, (staging_row.occupied_pallets or 0) - pallets_to_free)
-            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                staging_row.occupied_cases = max(
-                    0, (staging_row.occupied_cases or 0) - pallets_to_free * receipt.cases_per_pallet
-                )
-            if staging_row.occupied_pallets <= 0:
-                staging_row.product_id = None
-
-    # Reserve pallets in return row
-    if request.to_storage_row_id and pallets_to_free > 0:
-        return_row = db.query(StorageRow).filter(StorageRow.id == request.to_storage_row_id).first()
-        if return_row:
-            current_occupied = return_row.occupied_pallets or 0
-            capacity = return_row.pallet_capacity or 0
-            if capacity > 0 and (current_occupied + pallets_to_free) > capacity:
-                raise ValidationError(
-                    f"Returning {pallets_to_free} pallets would exceed row capacity ({capacity}). "
-                    f"Currently occupied: {current_occupied}"
-                )
-            return_row.occupied_pallets = current_occupied + pallets_to_free
-            if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                return_row.occupied_cases = (
-                    (return_row.occupied_cases or 0) + pallets_to_free * receipt.cases_per_pallet
-                )
-            if not return_row.product_id:
-                return_row.product_id = receipt.product_id
+    # Pallets returned to the rack: the EXPLICIT count the worker entered, else a
+    # proportional estimate from what was staged. The source rack was already
+    # freed at staging time, so a return only ADDS to the chosen return row.
+    returned_pallets = (
+        float(request.pallets) if getattr(request, "pallets", None) is not None
+        else ((request.quantity / staging_item.quantity_staged) * (staging_item.pallets_staged or 0)
+              if staging_item.quantity_staged else 0.0)
+    )
 
     # Create return transfer (auto-completed)
     return_transfer_id = f"transfer-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
@@ -383,22 +334,15 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
     )
     db.add(return_transfer)
 
-    # Keep the allocation JSON in sync with the physical move above (rows were
-    # already updated inline): the returned quantity leaves the original row's
-    # entry and lands in the return row's entry.
-    if receipt.raw_material_row_allocations:
-        if staging_item.original_storage_row_id:
-            deduct_rm_rows(
-                db, receipt,
-                {staging_item.original_storage_row_id: float(request.quantity)},
-                update_rows=False,
-            )
-        if request.to_storage_row_id:
-            add_rm_rows(
-                db, receipt,
-                {request.to_storage_row_id: float(request.quantity)},
-                update_rows=False,
-            )
+    # Add the returned content + explicit pallets to the chosen return row (rows
+    # + allocation JSON), tracked independently — no cases/cases_per_pallet.
+    if request.to_storage_row_id:
+        add_rm_rows(
+            db, receipt,
+            {request.to_storage_row_id: float(request.quantity)},
+            pallets_by_row={request.to_storage_row_id: returned_pallets},
+            update_rows=True,
+        )
 
     # Only re-home the receipt's primary location when this return completes the
     # staged item — a partial return must not claim the whole lot moved.
@@ -413,7 +357,7 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
             receipt.storage_row_id = request.to_storage_row_id
 
     staging_item.quantity_returned += request.quantity
-    staging_item.pallets_returned = (staging_item.pallets_returned or 0) + pallets_to_free
+    staging_item.pallets_returned = (staging_item.pallets_returned or 0) + returned_pallets
 
     if staging_item.quantity_returned >= staging_item.quantity_staged - staging_item.quantity_used:
         staging_item.status = "returned" if staging_item.quantity_used == 0 else "partially_returned"

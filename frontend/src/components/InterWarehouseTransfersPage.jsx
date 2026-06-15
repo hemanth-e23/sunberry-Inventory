@@ -467,6 +467,9 @@ function ConfirmShipmentModal({ transfer, onClose, onConfirm }) {
 
   // RM row picker state
   const [rowSelections, setRowSelections] = useState({});
+  // Explicit pallets-out per source row (keyed by src.id). Undefined = proportional
+  // suggestion; explicit value (incl. '0') overrides.
+  const [rowPalletSelections, setRowPalletSelections] = useState({});
 
   // FG pallet picker state
   const [pallets, setPallets] = useState([]);
@@ -546,6 +549,7 @@ function ConfirmShipmentModal({ transfer, onClose, onConfirm }) {
     // Initialize row selections for RM
     if (!finished) {
       setRowSelections({});
+      setRowPalletSelections({});
     }
   }, [activeReceipt?.id, categories.length]);
 
@@ -641,23 +645,41 @@ function ConfirmShipmentModal({ transfer, onClose, onConfirm }) {
                 {selectedRmQty.toLocaleString()} / {transfer.quantity.toLocaleString()} {transfer.unit}
               </span>
             </div>
-            {availableSources.map(src => (
-              <div key={src.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                <span style={{ fontSize: 13, flex: 1 }}>
-                  {src.label} — <span style={{ color: '#6b7280' }}>{src.available.toLocaleString()} avail ({src.pallets} pallets)</span>
-                </span>
-                <input
-                  type="number"
-                  min="0"
-                  max={src.available}
-                  step="1"
-                  value={rowSelections[src.id] ?? ''}
-                  onChange={e => setRowSelections(prev => ({ ...prev, [src.id]: e.target.value }))}
-                  placeholder="0"
-                  style={{ ...inputStyle, width: 100 }}
-                />
-              </div>
-            ))}
+            {availableSources.map(src => {
+              const qty = Number(rowSelections[src.id] || 0);
+              const suggestedPallets = (qty > 0 && src.available > 0 && src.pallets > 0)
+                ? Math.max(0, Math.round((qty / src.available) * src.pallets))
+                : 0;
+              const palletDisplay = rowPalletSelections[src.id]
+                ?? (qty > 0 ? String(suggestedPallets) : '');
+              return (
+                <div key={src.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span style={{ fontSize: 13, flex: 1 }}>
+                    {src.label} — <span style={{ color: '#6b7280' }}>{src.available.toLocaleString()} avail ({src.pallets} pallets)</span>
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    max={src.available}
+                    step="1"
+                    value={rowSelections[src.id] ?? ''}
+                    onChange={e => setRowSelections(prev => ({ ...prev, [src.id]: e.target.value }))}
+                    placeholder="qty"
+                    style={{ ...inputStyle, width: 90 }}
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={palletDisplay}
+                    onChange={e => setRowPalletSelections(prev => ({ ...prev, [src.id]: e.target.value }))}
+                    placeholder="pallets"
+                    title="Pallets emptied from this row"
+                    style={{ ...inputStyle, width: 80 }}
+                  />
+                </div>
+              );
+            })}
             {availableSources.length === 1 && (
               <div style={{ marginTop: 4 }}>
                 <button type="button" onClick={() => setRowSelections({ [availableSources[0].id]: String(transfer.quantity) })}
@@ -758,11 +780,20 @@ function ConfirmShipmentModal({ transfer, onClose, onConfirm }) {
                 payload.pallet_licence_ids = selectedPalletIds;
               }
 
-              // RM: send source breakdown
+              // RM: send source breakdown with explicit pallets-out per row.
               if (isFG === false && availableSources.length > 0) {
                 payload.source_breakdown = Object.entries(rowSelections)
                   .filter(([, qty]) => Number(qty) > 0)
-                  .map(([rowId, qty]) => ({ id: `row-${rowId}`, quantity: Number(qty) }));
+                  .map(([rowId, qty]) => {
+                    const src = availableSources.find(s => s.id === rowId);
+                    const override = rowPalletSelections[rowId];
+                    const pallets = override !== undefined
+                      ? Math.max(0, Number(override) || 0)
+                      : (src && src.available > 0 && src.pallets > 0
+                          ? Math.max(0, Math.round((Number(qty) / src.available) * src.pallets))
+                          : 0);
+                    return { id: `row-${rowId}`, quantity: Number(qty), pallets };
+                  });
               }
 
               onConfirm(payload);

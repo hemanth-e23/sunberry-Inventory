@@ -63,6 +63,9 @@ const AdjustmentsTab = () => {
   });
   // Map of entry.key -> qty string the operator typed
   const [rmEntrySelections, setRmEntrySelections] = useState({});
+  // Per-source-row pallets to FREE (keyed by entry.key). Undefined = proportional
+  // suggestion; explicit value (incl. '0') overrides.
+  const [rmPalletSelections, setRmPalletSelections] = useState({});
   const [rmError, setRmError] = useState('');
   const [isSubmittingRm, setIsSubmittingRm] = useState(false);
 
@@ -121,6 +124,19 @@ const AdjustmentsTab = () => {
       subLocationMap,
     });
   }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap]);
+
+  // Proportional pallets-out suggestion for one source row (editable guess).
+  const suggestedPalletsOut = (entry, displayQty) => {
+    const contentStorage = Number(displayQty || 0) * (entry.displayFactor || 1);
+    if (!(entry.rowPallets > 0) || !(entry.available > 0) || contentStorage <= 0) return 0;
+    return Math.max(0, Math.round((contentStorage / entry.available) * entry.rowPallets));
+  };
+  // Effective pallets-out: explicit override wins, else the suggestion.
+  const resolvePalletsOut = (entry, displayQty) => {
+    const v = rmPalletSelections[entry.key];
+    if (v !== undefined) return Math.max(0, Number(v) || 0);
+    return suggestedPalletsOut(entry, displayQty);
+  };
 
   // Top-of-form unit: most common display unit across entries (barrels if
   // most lots came in barrels; lbs/cases if mostly stored that way).
@@ -255,10 +271,11 @@ const AdjustmentsTab = () => {
     setRmError('');
     const failures = [];
     for (const [receiptId, items] of groups.entries()) {
-      const sourceBreakdown = items.map(({ entry, storageQty }) => ({
-        id: entry.sourceId,
-        quantity: storageQty,
-      }));
+      const sourceBreakdown = items.map(({ entry, displayQty, storageQty }) => {
+        const e = { id: entry.sourceId, quantity: storageQty };
+        if (entry.rowId) e.pallets = resolvePalletsOut(entry, displayQty);
+        return e;
+      });
       const groupQty = items.reduce((s, it) => s + it.storageQty, 0);
       const result = await submitAdjustment({
         productId: rmForm.productId,
@@ -280,6 +297,7 @@ const AdjustmentsTab = () => {
       const count = groups.size;
       setRmForm({ categoryGroupId: '', categoryId: '', productId: '', adjustmentType: 'stock-correction', quantity: '', reason: '', recipient: '' });
       setRmEntrySelections({});
+      setRmPalletSelections({});
       addToast(
         count === 1
           ? 'Adjustment submitted successfully.'
@@ -465,6 +483,7 @@ const AdjustmentsTab = () => {
                   onChange={id => {
                     setRmForm(prev => ({ ...prev, productId: id, quantity: '' }));
                     setRmEntrySelections({});
+                    setRmPalletSelections({});
                   }}
                   placeholder="Select product"
                   searchPlaceholder="Search products..."
@@ -510,23 +529,44 @@ const AdjustmentsTab = () => {
                     {rmEntries.map(entry => {
                       const availDisp = entry.available / entry.displayFactor;
                       const showStorageHint = entry.displayUnit !== entry.unit;
+                      const dispQty = rmEntrySelections[entry.key] ?? '';
+                      const palletDisplay = rmPalletSelections[entry.key]
+                        ?? (Number(dispQty || 0) > 0 ? String(suggestedPalletsOut(entry, dispQty)) : '');
                       return (
-                        <label key={entry.key}>
-                          <span>
-                            Lot {entry.lotNumber} · {entry.locationLabel}
-                            {' — '}{availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} avail
-                            {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
-                          </span>
-                          <input
-                            type="number"
-                            min="0"
-                            max={availDisp}
-                            step="any"
-                            value={rmEntrySelections[entry.key] ?? ''}
-                            onChange={(e) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
-                            placeholder="0"
-                          />
-                        </label>
+                        <React.Fragment key={entry.key}>
+                          <label>
+                            <span>
+                              Lot {entry.lotNumber} · {entry.locationLabel}
+                              {' — '}{availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} avail
+                              {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
+                            </span>
+                            <input
+                              type="number"
+                              min="0"
+                              max={availDisp}
+                              step="any"
+                              value={dispQty}
+                              onChange={(e) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
+                              placeholder="0"
+                            />
+                          </label>
+                          {entry.rowId && (
+                            <label>
+                              <span>
+                                ↳ Pallets emptied from this row
+                                {entry.rowPallets ? ` (row holds ${entry.rowPallets})` : ''}
+                              </span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={palletDisplay}
+                                onChange={(e) => setRmPalletSelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
+                                placeholder="0"
+                              />
+                            </label>
+                          )}
+                        </React.Fragment>
                       );
                     })}
                   </div>

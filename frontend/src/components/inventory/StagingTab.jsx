@@ -364,7 +364,11 @@ const StagingTab = () => {
           quantity_needed: item.quantityNeeded,
           lots: item.lots.map(lot => ({
             receipt_id: lot.receiptId,
-            quantity: lot.quantity
+            quantity: lot.quantity,
+            // Pallets emptied from the rack (optional). Blank → backend estimates
+            // proportionally from the lot's real pallets.
+            pallets: (lot.pallets === '' || lot.pallets === undefined || lot.pallets === null)
+              ? null : Number(lot.pallets),
           }))
         }))
       };
@@ -537,6 +541,16 @@ const StagingTab = () => {
                                       style={{ width: '100px', padding: '0.25rem' }}
                                     />
                                     <span style={{ fontSize: '0.875rem', whiteSpace: 'nowrap' }}>{item.lots[0].unit || unit}</span>
+                                    <input
+                                      type="number"
+                                      value={item.lots[0].pallets ?? ''}
+                                      onChange={(e) => handleStagingLotChange(itemIndex, 0, 'pallets', e.target.value)}
+                                      min="0"
+                                      step="1"
+                                      placeholder="pallets"
+                                      title="Pallets emptied from the rack"
+                                      style={{ width: '80px', padding: '0.25rem' }}
+                                    />
                                     {item.lots.length > 1 && (
                                       <button
                                         type="button"
@@ -595,6 +609,16 @@ const StagingTab = () => {
                                         style={{ width: '100px', padding: '0.25rem' }}
                                       />
                                       <span style={{ fontSize: '0.875rem', whiteSpace: 'nowrap' }}>{lot.unit || unit}</span>
+                                      <input
+                                        type="number"
+                                        value={lot.pallets ?? ''}
+                                        onChange={(e) => handleStagingLotChange(itemIndex, lotIndex + 1, 'pallets', e.target.value)}
+                                        min="0"
+                                        step="1"
+                                        placeholder="pallets"
+                                        title="Pallets emptied from the rack"
+                                        style={{ width: '80px', padding: '0.25rem' }}
+                                      />
                                     </>
                                   )}
                                   <button

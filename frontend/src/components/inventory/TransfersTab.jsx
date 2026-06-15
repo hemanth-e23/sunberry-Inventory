@@ -45,11 +45,18 @@ const TransfersTab = () => {
     quantity: '',
     toLocation: '',
     toSubLocation: '',
+    toRowId: '',
     reason: '',
     transferType: 'warehouse-transfer',
     orderNumber: '',
   });
   const [rmEntrySelections, setRmEntrySelections] = useState({});
+  // Per-source-row pallets to FREE (keyed by entry.key). Undefined = use the
+  // proportional suggestion; an explicit value (incl. '0') overrides it.
+  const [rmPalletSelections, setRmPalletSelections] = useState({});
+  // Pallets to ADD at the destination row (warehouse transfer). Undefined =
+  // suggestion (sum of source pallets-out); explicit value overrides.
+  const [rmDestPallets, setRmDestPallets] = useState('');
   const [rmError, setRmError] = useState('');
   const [isSubmittingRm, setIsSubmittingRm] = useState(false);
 
@@ -98,6 +105,40 @@ const TransfersTab = () => {
         }))
       );
   }, [fgToLocationId, storageAreas]);
+
+  // RM/ingredient/packaging destination rows for the chosen sub-location.
+  // Rows are nested under sub-locations (not storage areas) for non-FG inventory.
+  const rmDestRows = useMemo(() => {
+    if (!rmForm.toLocation || !rmForm.toSubLocation) return [];
+    const sub = (subLocationMap[rmForm.toLocation] || []).find(s => s.id === rmForm.toSubLocation);
+    return (sub?.rows || [])
+      .filter(r => r.active !== false)
+      .map(r => {
+        const capacity = Number(r.palletCapacity || 0);
+        // RM rows track occupancy in pallet slots (default_cases_per_pallet is
+        // 0 for them), so "spaces" = capacity - occupied pallet slots. Soft hint
+        // only — never gates submit (over-fill is allowed).
+        const free = capacity > 0 ? Math.max(0, Math.round(capacity - Number(r.occupiedPallets || 0))) : null;
+        const label = free !== null ? `${r.name} — ${free} of ${capacity} spaces free` : r.name;
+        return { id: r.id, label };
+      });
+  }, [rmForm.toLocation, rmForm.toSubLocation, subLocationMap]);
+
+  // Proportional pallets-out suggestion for one source row, from the content the
+  // worker typed for it: round(contentMoved / rowContent × rowPallets). A guess
+  // only — fully editable, since the real footprint depends on how barrels are
+  // stacked (a lone barrel can occupy a whole pallet).
+  const suggestedPalletsOut = (entry, displayQty) => {
+    const contentStorage = Number(displayQty || 0) * (entry.displayFactor || 1);
+    if (!(entry.rowPallets > 0) || !(entry.available > 0) || contentStorage <= 0) return 0;
+    return Math.max(0, Math.round((contentStorage / entry.available) * entry.rowPallets));
+  };
+  // Effective pallets-out for a source entry: explicit override wins, else suggestion.
+  const resolvePalletsOut = (entry, displayQty) => {
+    const v = rmPalletSelections[entry.key];
+    if (v !== undefined) return Math.max(0, Number(v) || 0);
+    return suggestedPalletsOut(entry, displayQty);
+  };
 
   // ─── FG: load pallets ────────────────────────────────────────────────────────
   // Stale-response guard: only the LATEST fetch may apply — fast product
@@ -234,6 +275,10 @@ const TransfersTab = () => {
       setRmError('Choose a destination sub location.');
       return;
     }
+    if (rmForm.transferType !== 'shipped-out' && rmDestRows.length > 0 && !rmForm.toRowId) {
+      setRmError('Select a destination row.');
+      return;
+    }
     if (rmForm.transferType === 'shipped-out' && !rmForm.orderNumber.trim()) { setRmError('Order number is required.'); return; }
 
     const requestedStorage = requestedGlobal * rmGlobalFactor;
@@ -283,15 +328,33 @@ const TransfersTab = () => {
       groups.set(p.entry.receiptId, list);
     }
 
+    // Destination footprint (warehouse transfer): default = total pallets-out
+    // from the source rows; an explicit override is split across receipt groups
+    // proportionally to each group's pallets-out.
+    const totalOut = picks.reduce((s, p) => s + resolvePalletsOut(p.entry, p.displayQty), 0);
+    const hasDestRow = rmForm.transferType !== 'shipped-out' && !!rmForm.toRowId;
+    const effDestTotal = hasDestRow
+      ? (rmDestPallets !== '' ? Math.max(0, Number(rmDestPallets) || 0) : totalOut)
+      : 0;
+
     setIsSubmittingRm(true);
     setRmError('');
     const failures = [];
     for (const [receiptId, items] of groups.entries()) {
       const groupQty = items.reduce((s, it) => s + it.storageQty, 0);
-      const sourceBreakdown = items.map(({ entry, storageQty }) => ({
-        id: entry.sourceId,
-        quantity: storageQty,
-      }));
+      // Source breakdown carries the explicit pallets-out per row.
+      const sourceBreakdown = items.map(({ entry, displayQty, storageQty }) => {
+        const e = { id: entry.sourceId, quantity: storageQty };
+        if (entry.rowId) e.pallets = resolvePalletsOut(entry, displayQty);
+        return e;
+      });
+      const groupOut = items.reduce((s, it) => s + resolvePalletsOut(it.entry, it.displayQty), 0);
+      const groupDestPallets = !hasDestRow
+        ? 0
+        : (totalOut > 0 ? Math.round(effDestTotal * groupOut / totalOut) : effDestTotal);
+      const destinationBreakdown = hasDestRow
+        ? [{ id: `row-${rmForm.toRowId}`, quantity: groupQty, pallets: groupDestPallets }]
+        : undefined;
       const result = await submitTransfer({
         receiptId,
         quantity: groupQty,
@@ -301,6 +364,7 @@ const TransfersTab = () => {
         transferType: rmForm.transferType,
         orderNumber: rmForm.transferType === 'shipped-out' ? rmForm.orderNumber.trim() : null,
         sourceBreakdown,
+        ...(destinationBreakdown ? { destinationBreakdown } : {}),
       });
       if (!result.success) {
         failures.push(result.message || result.error || 'Submit failed');
@@ -310,8 +374,10 @@ const TransfersTab = () => {
 
     if (failures.length === 0) {
       const count = groups.size;
-      setRmForm({ productId: '', quantity: '', toLocation: '', toSubLocation: '', reason: '', transferType: 'warehouse-transfer', orderNumber: '' });
+      setRmForm({ productId: '', quantity: '', toLocation: '', toSubLocation: '', toRowId: '', reason: '', transferType: 'warehouse-transfer', orderNumber: '' });
       setRmEntrySelections({});
+      setRmPalletSelections({});
+      setRmDestPallets('');
       addToast(
         count === 1
           ? 'Transfer submitted successfully.'
@@ -464,7 +530,7 @@ const TransfersTab = () => {
               <span>Transfer Type</span>
               <select
                 value={rmForm.transferType}
-                onChange={(e) => setRmForm(prev => ({ ...prev, transferType: e.target.value, orderNumber: '', toLocation: '', toSubLocation: '' }))}
+                onChange={(e) => { setRmForm(prev => ({ ...prev, transferType: e.target.value, orderNumber: '', toLocation: '', toSubLocation: '', toRowId: '' })); setRmDestPallets(''); }}
               >
                 <option value="warehouse-transfer">Warehouse Transfer</option>
                 <option value="shipped-out">Shipped Out</option>
@@ -491,6 +557,8 @@ const TransfersTab = () => {
                 onChange={(id) => {
                   setRmForm(prev => ({ ...prev, productId: id, quantity: '' }));
                   setRmEntrySelections({});
+                  setRmPalletSelections({});
+                  setRmDestPallets('');
                 }}
                 placeholder="Select raw material / packaging product"
                 searchPlaceholder="Type to search products..."
@@ -535,23 +603,44 @@ const TransfersTab = () => {
                     {rmEntries.map(entry => {
                       const availDisp = entry.available / entry.displayFactor;
                       const showStorageHint = entry.displayUnit !== entry.unit;
+                      const dispQty = rmEntrySelections[entry.key] ?? '';
+                      const palletDisplay = rmPalletSelections[entry.key]
+                        ?? (Number(dispQty || 0) > 0 ? String(suggestedPalletsOut(entry, dispQty)) : '');
                       return (
-                        <label key={entry.key}>
-                          <span>
-                            Lot {entry.lotNumber} · {entry.locationLabel}
-                            {' — '}{availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} avail
-                            {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
-                          </span>
-                          <input
-                            type="number"
-                            min="0"
-                            max={availDisp}
-                            step="any"
-                            value={rmEntrySelections[entry.key] ?? ''}
-                            onChange={(e) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
-                            placeholder="0"
-                          />
-                        </label>
+                        <React.Fragment key={entry.key}>
+                          <label>
+                            <span>
+                              Lot {entry.lotNumber} · {entry.locationLabel}
+                              {' — '}{availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} avail
+                              {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
+                            </span>
+                            <input
+                              type="number"
+                              min="0"
+                              max={availDisp}
+                              step="any"
+                              value={dispQty}
+                              onChange={(e) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
+                              placeholder="0"
+                            />
+                          </label>
+                          {entry.rowId && (
+                            <label>
+                              <span>
+                                ↳ Pallets emptied from this row
+                                {entry.rowPallets ? ` (row holds ${entry.rowPallets})` : ''}
+                              </span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={palletDisplay}
+                                onChange={(e) => setRmPalletSelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
+                                placeholder="0"
+                              />
+                            </label>
+                          )}
+                        </React.Fragment>
                       );
                     })}
                   </div>
@@ -565,7 +654,7 @@ const TransfersTab = () => {
                   <span>To Location <span className="required">*</span></span>
                   <select
                     value={rmForm.toLocation}
-                    onChange={(e) => setRmForm(prev => ({ ...prev, toLocation: e.target.value, toSubLocation: '' }))}
+                    onChange={(e) => setRmForm(prev => ({ ...prev, toLocation: e.target.value, toSubLocation: '', toRowId: '' }))}
                   >
                     <option value="">Select location</option>
                     {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
@@ -575,7 +664,7 @@ const TransfersTab = () => {
                   <span>To Sub Location</span>
                   <select
                     value={rmForm.toSubLocation}
-                    onChange={(e) => setRmForm(prev => ({ ...prev, toSubLocation: e.target.value }))}
+                    onChange={(e) => setRmForm(prev => ({ ...prev, toSubLocation: e.target.value, toRowId: '' }))}
                     disabled={!rmForm.toLocation}
                   >
                     <option value="">Select</option>
@@ -586,6 +675,43 @@ const TransfersTab = () => {
                 </label>
               </div>
             )}
+
+            {rmForm.transferType !== 'shipped-out' && rmForm.toSubLocation && rmDestRows.length > 0 && (() => {
+              // Suggested pallets-in = total pallets-out from the source rows
+              // (footprint travels with the goods by default; worker overrides
+              // down for consolidation, up for spreading).
+              const totalOut = rmEntries.reduce(
+                (s, e) => s + resolvePalletsOut(e, rmEntrySelections[e.key]), 0,
+              );
+              const destPalletDisplay = rmDestPallets !== '' ? rmDestPallets : String(totalOut || '');
+              return (
+                <div className="two-col">
+                  <label>
+                    <span>To Row <span className="required">*</span></span>
+                    <select
+                      value={rmForm.toRowId}
+                      onChange={(e) => setRmForm(prev => ({ ...prev, toRowId: e.target.value }))}
+                    >
+                      <option value="">Select storage row</option>
+                      {rmDestRows.map(r => (
+                        <option key={r.id} value={r.id}>{r.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Pallets placed in this row</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={destPalletDisplay}
+                      onChange={(e) => setRmDestPallets(e.target.value)}
+                      placeholder="0"
+                    />
+                  </label>
+                </div>
+              );
+            })()}
 
             <label className="full-width">
               <span>{rmForm.transferType === 'shipped-out' ? 'Shipping Notes' : 'Reason / Notes'}</span>

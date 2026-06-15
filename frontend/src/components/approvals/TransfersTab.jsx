@@ -60,11 +60,12 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
     if (!breakdown || !Array.isArray(breakdown)) return [];
     return breakdown.map((item) => {
       const id = item?.id || '';
+      const pallets = (item?.pallets === undefined || item?.pallets === null) ? null : Number(item.pallets);
       if (id.startsWith('row-')) {
         const rowId = id.replace('row-', '');
-        return { label: rowLookup[rowId] || rowId, cases: item?.quantity || 0 };
+        return { label: rowLookup[rowId] || rowId, cases: item?.quantity || 0, pallets };
       }
-      return { label: id === 'floor' ? 'Floor Staging' : id, cases: item?.quantity || 0 };
+      return { label: id === 'floor' ? 'Floor Staging' : id, cases: item?.quantity || 0, pallets };
     });
   };
 
@@ -85,6 +86,9 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
         const priority = getPriorityLevel(days);
         const sourceRows = formatBreakdownRows(transfer.sourceBreakdown);
         const destRows = formatBreakdownRows(transfer.destinationBreakdown);
+        // Quantity unit comes from the lot itself (lbs/barrels/units for raw
+        // materials & packaging, cases for finished goods) — never hardcode "cases".
+        const unit = receipt?.quantityUnits || 'cases';
         const isShipOut = transfer.transferType === 'shipped-out' || transfer.transfer_type === 'shipped-out';
         const hasPallets = (transfer.palletLicenceIds || transfer.pallet_licence_ids || []).length > 0;
         const progress = transferScanProgress[transfer.id];
@@ -222,7 +226,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
             <dl className="summary-grid">
               <div>
                 <dt>Quantity</dt>
-                <dd>{transfer.quantity} cases</dd>
+                <dd>{transfer.quantity} {unit}</dd>
               </div>
               {isShipOut && (transfer.orderNumber || transfer.order_number) && (
                 <div>
@@ -364,7 +368,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                     <div style={{ fontWeight: 600, color: '#6b7280', marginBottom: '4px' }}>From</div>
                     {sourceRows.length > 0 ? (
                       <ul style={{ margin: 0, paddingLeft: '18px' }}>
-                        {sourceRows.map((r, i) => <li key={i}>{r.label} — {r.cases} cases</li>)}
+                        {sourceRows.map((r, i) => <li key={i}>{r.label} — {r.cases} {unit}{r.pallets !== null ? `, ${r.pallets} pallet${r.pallets === 1 ? '' : 's'}` : ''}</li>)}
                       </ul>
                     ) : (
                       <div>{locationLookupMap[transfer.fromLocation] || transfer.fromLocation || '—'}</div>
@@ -374,7 +378,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                     <div style={{ fontWeight: 600, color: '#6b7280', marginBottom: '4px' }}>To</div>
                     {destRows.length > 0 ? (
                       <ul style={{ margin: 0, paddingLeft: '18px' }}>
-                        {destRows.map((r, i) => <li key={i}>{r.label} — {r.cases} cases</li>)}
+                        {destRows.map((r, i) => <li key={i}>{r.label} — {r.cases} {unit}{r.pallets !== null ? `, ${r.pallets} pallet${r.pallets === 1 ? '' : 's'}` : ''}</li>)}
                       </ul>
                     ) : (
                       <div>{locationLookupMap[transfer.toLocation] || transfer.toLocation || '—'}</div>

@@ -547,17 +547,23 @@ async def assign_storage(
 
     # Handle multi-row RM allocations
     if data.raw_material_row_allocations and isinstance(data.raw_material_row_allocations, list):
-        receipt.raw_material_row_allocations = data.raw_material_row_allocations
-        total_pallets = 0
+        allocs_in = [
+            a for a in data.raw_material_row_allocations
+            if a.get("rowId") and float(a.get("pallets", 0) or 0) > 0
+        ]
+        total_pallets = sum(float(a.get("pallets", 0) or 0) for a in allocs_in)
+        # Row content = the ACTUAL transferred content, split across the chosen
+        # rows by pallet share — never pallets × cases_per_pallet (wrong for
+        # weight/drum lots). Pallets and content are tracked independently.
+        total_content = float(receipt.quantity or 0)
+        enriched = []
         first_row_id = None
-        for alloc in data.raw_material_row_allocations:
+        for alloc in allocs_in:
             row_id = alloc.get("rowId")
-            pallets_to_add = float(alloc.get("pallets", 0))
-            if not row_id or pallets_to_add <= 0:
-                continue
+            pallets_to_add = float(alloc.get("pallets", 0) or 0)
             if not first_row_id:
                 first_row_id = row_id
-            total_pallets += pallets_to_add
+            cases_to_add = (total_content * pallets_to_add / total_pallets) if total_pallets > 0 else 0
             storage_row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
             if storage_row:
                 current_occupied = storage_row.occupied_pallets or 0
@@ -568,12 +574,13 @@ async def assign_storage(
                         detail=f"Adding {pallets_to_add} pallets to row {storage_row.name} would exceed capacity ({capacity}). Currently occupied: {current_occupied}"
                     )
                 storage_row.occupied_pallets = current_occupied + pallets_to_add
-                if data.cases_per_pallet:
-                    storage_row.occupied_cases = (storage_row.occupied_cases or 0) + pallets_to_add * data.cases_per_pallet
+                storage_row.occupied_cases = (storage_row.occupied_cases or 0) + cases_to_add
                 if not storage_row.product_id:
                     storage_row.product_id = receipt.product_id
+            enriched.append({**alloc, "pallets": pallets_to_add, "cases": cases_to_add})
+        receipt.raw_material_row_allocations = enriched
         receipt.pallets = total_pallets
-        if len(data.raw_material_row_allocations) == 1 and first_row_id:
+        if len(enriched) == 1 and first_row_id:
             receipt.storage_row_id = first_row_id
 
     # Handle single-row allocation
@@ -591,8 +598,8 @@ async def assign_storage(
                     detail=f"Adding {pallets_to_add} pallets would exceed row capacity ({capacity}). Currently occupied: {current_occupied}"
                 )
             storage_row.occupied_pallets = current_occupied + pallets_to_add
-            if data.cases_per_pallet:
-                storage_row.occupied_cases = (storage_row.occupied_cases or 0) + pallets_to_add * data.cases_per_pallet
+            # Content = the actual transferred content placed here (not pallets × cpp).
+            storage_row.occupied_cases = (storage_row.occupied_cases or 0) + float(receipt.quantity or 0)
             if not storage_row.product_id:
                 storage_row.product_id = receipt.product_id
 

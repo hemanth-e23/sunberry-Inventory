@@ -393,10 +393,9 @@ def mark_request_item_used(
     )
     db.add(adjustment)
 
-    # Free rows and the allocation JSON proportionally (this path previously
-    # updated neither, so both drifted on every production consumption).
-    deduct_rm_total(db, receipt, quantity, update_rows=True)
-    # Update receipt quantity
+    # Consuming staged material: the rack was already freed when this material
+    # was pulled for staging, so consumption only reduces the lot total — no
+    # storage-row or allocation-JSON change here.
     receipt.quantity = max(0, receipt.quantity - quantity)
     if receipt.quantity <= 0:
         receipt.status = ReceiptStatus.DEPLETED
@@ -736,7 +735,7 @@ def notify_ingredient_used(
                 )
                 db.add(adjustment)
 
-                deduct_rm_total(db, receipt, use_qty, update_rows=True)
+                # Staged material: rack freed at staging, so only reduce the lot total.
                 receipt.quantity = max(0, receipt.quantity - use_qty)
                 if receipt.quantity <= 0:
                     receipt.status = ReceiptStatus.DEPLETED
@@ -910,7 +909,7 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
             )
             db.add(adjustment)
 
-            deduct_rm_total(db, receipt, use_qty, update_rows=True)
+            # Staged material: rack freed at staging, so only reduce the lot total.
             receipt.quantity = max(0, receipt.quantity - use_qty)
             if receipt.quantity <= 0:
                 receipt.status = ReceiptStatus.DEPLETED

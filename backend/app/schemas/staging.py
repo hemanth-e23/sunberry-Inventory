@@ -53,6 +53,9 @@ class StagingLotSuggestion(BaseSchema):
 class StagingLotRequest(BaseSchema):
     receipt_id: str
     quantity: float
+    # Explicit pallets emptied from the rack when staging this lot (worker-entered).
+    # None falls back to a proportional estimate from the lot's real pallets.
+    pallets: Optional[float] = None
 
 class StagingItemRequest(BaseSchema):
     product_id: str
@@ -74,3 +77,6 @@ class ReturnStagingRequest(BaseSchema):
     to_location_id: str
     to_sub_location_id: Optional[str] = None
     to_storage_row_id: Optional[str] = None
+    # Explicit pallets returned to the rack (worker-entered). None falls back to
+    # a proportional estimate from the staged pallets.
+    pallets: Optional[float] = None
