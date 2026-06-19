@@ -65,3 +65,8 @@ backend/.pytest_cache/
 backend/app/config.py
 .env.example
 .env.template
+
+# Local data import artifacts (one-off spreadsheets / SQL dumps at repo root).
+# Root-anchored so committed scripts under backend/scripts/ are unaffected.
+*.xlsx
+/*.sql
