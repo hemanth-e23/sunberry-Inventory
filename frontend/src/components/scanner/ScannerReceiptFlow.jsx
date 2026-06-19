@@ -7,42 +7,59 @@ import ScanFeedback from './ScanFeedback';
 import LicenceDisplay from './LicenceDisplay';
 import { useScanQueue } from '../../hooks/useScanQueue';
 import { removeScan } from '../../utils/scanQueue';
-import { isValidLicenceFormat, cleanScannedLicence, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
+import {
+  isValidLicenceFormat,
+  cleanScannedLicence,
+  parseLineFromLicence,
+  parseLineFromLot,
+  playSuccessTone,
+  playErrorTone,
+} from '../../utils/scannerFeedback';
 import { formatDateTime } from '../../utils/dateUtils';
-import { Scan, MapPin, Package, Check, RefreshCw, CheckCircle2, Cloud, CloudOff, AlertTriangle, Keyboard, Clock } from 'lucide-react';
+import {
+  Scan, MapPin, Package, Check, RefreshCw, CheckCircle2, Cloud, CloudOff,
+  AlertTriangle, Keyboard, Clock,
+} from 'lucide-react';
 import './ScannerReceiptFlow.css';
 
 const AUTO_SUBMIT_DISMISSED_KEY = 'forklift_auto_submit_dismissed_at';
 
+// Show the manual row picker only after this many failed row scans — default is
+// scan-the-barcode, not pick-from-a-long-list.
 const MAX_ROW_SCAN_ATTEMPTS = 3;
+
+// One driver, one gun, two production lines. Each line is its own scanning
+// session keyed by the L1/L2 suffix the pallet tag already carries. The gun
+// routes a scan to its line automatically; the two buttons up top only switch
+// which line is on screen (and trigger first-time setup).
+const LINE_CODES = ['L1', 'L2'];
+const lineLabel = (code) => (code === 'L1' ? 'Line 1' : code === 'L2' ? 'Line 2' : code);
+
+// Per-line states:
+//   needs-row  → product known, waiting for a destination row (scan or pick)
+//   scanning   → actively taking pallets
+//   row-full   → row hit capacity, needs a new row before more pallets
+//   gap        → a sequence gap was detected, awaiting skip / mark-missing
+const isRowState = (status) => status === 'needs-row' || status === 'row-full';
 
 const ScannerReceiptFlow = () => {
   const navigate = useNavigate();
-  const [step, setStep] = useState('checking');
-  const [firstLicence, setFirstLicence] = useState('');
-  const [requestId, setRequestId] = useState(null);
-  const [productName, setProductName] = useState('');
-  const [lotNumber, setLotNumber] = useState('');
+  const [booted, setBooted] = useState(false);
+
+  // lines: { L1: lineState, L2: lineState } — only present once set up.
+  const [lines, setLines] = useState({});
+  const [activeLine, setActiveLine] = useState(null);
+
   const [storageRows, setStorageRows] = useState([]);
-  const [selectedRowId, setSelectedRowId] = useState('');
-  const [licenceInput, setLicenceInput] = useState('');
-  const [isPartial, setIsPartial] = useState(false);
-  const [partialCases, setPartialCases] = useState('');
-  const [pallets, setPallets] = useState([]);
-  const [gapMissing, setGapMissing] = useState([]);
-  const [rowAvailable, setRowAvailable] = useState(null);
+  const [loadingRows, setLoadingRows] = useState(false);
+
+  const [scanInput, setScanInput] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [loadingRows, setLoadingRows] = useState(false);
-  const [rowScanInput, setRowScanInput] = useState('');
-  const [rowScanAttempts, setRowScanAttempts] = useState(0);
-  const [showManualRows, setShowManualRows] = useState(false);
-  const [resumeData, setResumeData] = useState(null);
-  const [feedback, setFeedback] = useState(null); // { kind: 'success'|'error', message }
   const [manualKeyboard, setManualKeyboard] = useState(false);
-  // Sessions auto-submitted by the 3h idle sweep that the user hasn't acknowledged yet.
-  // Dismissal is persisted to localStorage so the banner doesn't reappear after refresh.
+  const [feedback, setFeedback] = useState(null); // { kind: 'success'|'error', message }
   const [autoSubmittedNotice, setAutoSubmittedNotice] = useState(null);
+
   const inputRef = useRef(null);
 
   const showSuccess = useCallback((message) => {
@@ -55,103 +72,148 @@ const ScannerReceiptFlow = () => {
   }, []);
   const dismissFeedback = useCallback(() => setFeedback(null), []);
 
-  // Scan queue: every scan goes through here so a Wi-Fi blip doesn't lose
-  // anything. When online, drain is immediate. When offline, the operator
-  // keeps scanning and items flush when network returns.
+  const updateLine = useCallback((code, patch) => {
+    setLines((prev) => {
+      const cur = prev[code];
+      if (!cur) return prev;
+      const next = typeof patch === 'function' ? patch(cur) : { ...cur, ...patch };
+      return { ...prev, [code]: next };
+    });
+  }, []);
+
+  // ── Offline scan queue ─────────────────────────────────────────────────────
+  // Every scan flows through the queue (items carry their own requestId), so a
+  // Wi-Fi blip never loses work and L1/L2 scans coexist. Sync results resolve
+  // back into the right line by matching the item's requestId.
   const onScanSynced = useCallback((item, resp) => {
-    // The sync endpoint returns HTTP 200 even for soft outcomes with no
-    // `pallet` in the body:
-    //   - 'duplicate': nothing was recorded — drop the optimistic row, error tone.
-    //   - 'updated': the licence was already in this session and its location
-    //     was updated in place — the optimistic row is a duplicate of the
-    //     existing list row, so drop it and report success.
+    setLines((prev) => {
+      const code = Object.keys(prev).find((c) => prev[c].requestId === item.requestId);
+      if (!code) return prev;
+      const line = prev[code];
+      let pallets = line.pallets;
+      if (resp.status === 'duplicate' || (!resp.pallet && resp.status !== 'updated')) {
+        pallets = pallets.filter((p) => p._idempotency_key !== item.idempotency_key);
+      } else if (resp.status === 'updated' && !resp.pallet) {
+        pallets = pallets.filter((p) => p._idempotency_key !== item.idempotency_key);
+      } else if (resp.pallet) {
+        pallets = pallets.map((p) => (
+          p._idempotency_key === item.idempotency_key
+            ? { ...resp.pallet, _pending: false, _idempotency_key: undefined }
+            : p
+        ));
+      }
+      const patch = { pallets };
+      if (resp.row_available != null) patch.rowAvailable = resp.row_available;
+      if (resp.gap_detected && resp.gap_missing?.length) {
+        patch.gapMissing = resp.gap_missing;
+        patch.status = 'gap';
+      }
+      return { ...prev, [code]: { ...line, ...patch } };
+    });
+
     if (resp.status === 'duplicate' || (!resp.pallet && resp.status !== 'updated')) {
-      setPallets((prev) => prev.filter((p) => p._idempotency_key !== item.idempotency_key));
       showError(resp.message || 'Pallet already scanned');
-      return;
-    }
-    if (resp.status === 'updated' && !resp.pallet) {
-      setPallets((prev) => prev.filter((p) => p._idempotency_key !== item.idempotency_key));
+    } else if (resp.status === 'updated' && !resp.pallet) {
       showSuccess(resp.message || 'Moved to new location');
-      return;
+    } else {
+      showSuccess(resp.message || `Scanned ${resp.pallet?.licence_number || ''}`.trim());
     }
-    if (resp.pallet) {
-      setPallets((prev) => prev.map((p) => (
-        p._idempotency_key === item.idempotency_key
-          ? { ...resp.pallet, _pending: false, _idempotency_key: undefined }
-          : p
-      )));
-    }
-    if (resp.row_available != null) setRowAvailable(resp.row_available);
-    if (resp.gap_detected && resp.gap_missing?.length) {
-      setGapMissing(resp.gap_missing);
-      setStep('gap-prompt');
-    }
-    showSuccess(resp.message || `Scanned ${resp.pallet?.licence_number || ''}`.trim());
   }, [showSuccess, showError]);
 
   const onScanFailed = useCallback((item, err) => {
-    // No response = transient (offline, 5xx, timeout). Leave optimistic
-    // entry alone — the queue will keep retrying when the network returns.
+    // No response = transient (offline, 5xx, timeout): leave the optimistic row,
+    // the queue keeps retrying.
     if (!err?.response) return;
     const status = err.response.status;
-    // 5xx / 408 / 429 are retryable; queue keeps them as pending. Same UX.
     if (status >= 500 || status === 408 || status === 429) return;
 
-    // 4xx = server rejected this scan permanently (bad format slipped past
-    // client check, product mismatch, duplicate in another request, etc.).
-    // Drop both the optimistic row AND the failed queue entry so the
-    // operator's NetworkStatus chip stays clean and they don't have to
-    // manually "drop failed".
-    setPallets((prev) => prev.filter((p) => p._idempotency_key !== item.idempotency_key));
+    // 4xx = permanently rejected: drop the optimistic row + the failed item.
+    setLines((prev) => {
+      const code = Object.keys(prev).find((c) => prev[c].requestId === item.requestId);
+      if (!code) return prev;
+      const line = prev[code];
+      return {
+        ...prev,
+        [code]: { ...line, pallets: line.pallets.filter((p) => p._idempotency_key !== item.idempotency_key) },
+      };
+    });
     removeScan(item.id);
     showError(err.response.data?.detail || 'Scan rejected');
   }, [showError]);
+
   const {
     online,
     pendingCount,
     failedCount,
+    countsForRequest,
     enqueueScan,
     retryFailed,
     dropFailed,
+    clearRequest,
     drainNow,
   } = useScanQueue({ onSynced: onScanSynced, onFailed: onScanFailed });
 
-  // On mount: check for an active (interrupted) session for THIS user only.
-  // Multiple forklift users can scan simultaneously — each has their own session.
+  // ── Resume: rebuild BOTH lines from this driver's open scanning sessions ────
   useEffect(() => {
-    apiClient.get('/scanner/requests/active')
+    let cancelled = false;
+    apiClient.get('/scanner/requests', { params: { status_filter: 'scanning' } })
       .then((r) => {
-        if (r.data && r.data.pallet_count > 0) {
-          setResumeData(r.data);
-          setStep('resume-prompt');
-        } else {
-          setStep('scan-first');
+        if (cancelled) return;
+        const sessions = r.data || [];
+        const next = {};
+        for (const fr of sessions) {
+          const code = parseLineFromLot(fr.lot_number);
+          if (code !== 'L1' && code !== 'L2') continue;
+          if (next[code]) continue; // guard: one session per line
+          const pls = (fr.pallet_licences || []).filter((p) => p.status !== 'cancelled');
+          let lastRow = '';
+          for (let i = pls.length - 1; i >= 0; i -= 1) {
+            if (pls[i].storage_row_id) { lastRow = pls[i].storage_row_id; break; }
+          }
+          next[code] = {
+            requestId: fr.id,
+            productName: fr.product?.name || 'Product',
+            lotNumber: fr.lot_number || '',
+            selectedRowId: lastRow,
+            rowAvailable: null,
+            isPartial: false,
+            partialCases: '',
+            pallets: pls.map((p) => ({
+              id: p.id,
+              licence_number: p.licence_number,
+              storage_row_id: p.storage_row_id,
+              cases: p.cases,
+              is_partial: p.is_partial,
+              status: p.status,
+            })),
+            status: lastRow ? 'scanning' : 'needs-row',
+            gapMissing: [],
+            rowScanAttempts: 0,
+            showManualRows: false,
+          };
         }
+        setLines(next);
+        const firstCode = parseLineFromLot(sessions[0]?.lot_number);
+        const codes = Object.keys(next);
+        if (codes.length) setActiveLine(next[firstCode] ? firstCode : codes[0]);
+        setBooted(true);
       })
-      .catch(() => setStep('scan-first'));
+      .catch(() => { if (!cancelled) setBooted(true); });
+    return () => { cancelled = true; };
   }, []);
 
-  // On mount: check for sessions auto-submitted by the 3h idle sweep that the
-  // user hasn't acknowledged yet. Backend filters by scanned_by for forklift
-  // role, so this returns this user's submissions only.
+  // Auto-submitted notice (sessions closed by the per-driver 3h idle sweep).
   useEffect(() => {
     apiClient.get('/scanner/requests', { params: { status_filter: 'submitted' } })
       .then((r) => {
         const dismissedAt = parseInt(localStorage.getItem(AUTO_SUBMIT_DISMISSED_KEY) || '0', 10);
         const fresh = (r.data || []).filter((fr) => {
           if (!fr.auto_submitted_at) return false;
-          const t = new Date(fr.auto_submitted_at).getTime();
-          return t > dismissedAt;
+          return new Date(fr.auto_submitted_at).getTime() > dismissedAt;
         });
-        if (fresh.length > 0) {
-          setAutoSubmittedNotice({
-            count: fresh.length,
-            mostRecent: fresh[0],
-          });
-        }
+        if (fresh.length > 0) setAutoSubmittedNotice({ count: fresh.length, mostRecent: fresh[0] });
       })
-      .catch(() => { /* non-critical; banner just won't appear */ });
+      .catch(() => { /* non-critical */ });
   }, []);
 
   const dismissAutoSubmittedNotice = useCallback(() => {
@@ -159,26 +221,37 @@ const ScannerReceiptFlow = () => {
     setAutoSubmittedNotice(null);
   }, []);
 
-  // Keep the scan input focused at all times. HID scanners type into
-  // whatever has focus, so a lost focus means the scanner's keystrokes
-  // go nowhere. Refocus whenever any state change might have dropped it
-  // (step transition, overlay dismiss, scan accepted, manual toggle).
+  // Storage rows: fetched on mount and refreshed whenever the active line is
+  // waiting for a row, so capacity is current at the moment of choosing.
+  const fetchStorageRows = useCallback(() => {
+    setLoadingRows(true);
+    apiClient.get('/scanner/storage-rows')
+      .then((r) => setStorageRows(r.data || []))
+      .catch(() => setStorageRows([]))
+      .finally(() => setLoadingRows(false));
+  }, []);
+
+  useEffect(() => { fetchStorageRows(); }, [fetchStorageRows]);
+
+  const activeState = activeLine ? lines[activeLine] : null;
+  const activeStatus = activeState?.status || null;
+
   useEffect(() => {
-    if (manualKeyboard) return; // user wants the soft keyboard; don't steal focus
+    if (activeState && isRowState(activeState.status)) fetchStorageRows();
+  }, [activeLine, activeStatus, activeState, fetchStorageRows]);
+
+  // Keep the single shared scan input focused — HID scanners type into whatever
+  // has focus. One always-mounted input survives line switches without losing
+  // focus or the gun's keystrokes.
+  useEffect(() => {
+    if (manualKeyboard) return undefined;
     const id = requestAnimationFrame(() => inputRef.current?.focus());
     return () => cancelAnimationFrame(id);
-  }, [step, showManualRows, feedback, pallets.length, manualKeyboard]);
+  }, [activeLine, activeStatus, feedback, manualKeyboard, booted]);
 
-  // Aggressive focus guard: if anything else takes focus (taps elsewhere,
-  // overlay click, dropdown), pull it back to the scan input on the next
-  // tick. The manual-keyboard toggle short-circuits this so the operator
-  // can actually type when they need to.
   useEffect(() => {
     if (manualKeyboard) return undefined;
     const onFocusOut = () => {
-      // Don't fight interactive controls the operator legitimately tapped
-      // (buttons, links, the partial-cases input). Only refocus when the
-      // page-level focus has fallen back to body.
       setTimeout(() => {
         const ae = document.activeElement;
         if (!ae || ae === document.body) inputRef.current?.focus();
@@ -188,258 +261,242 @@ const ScannerReceiptFlow = () => {
     return () => document.removeEventListener('focusout', onFocusOut);
   }, [manualKeyboard]);
 
-  useEffect(() => {
-    if (requestId && (step === 'select-location' || step === 'scan')) {
-      setLoadingRows(true);
-      apiClient.get('/scanner/storage-rows')
-        .then((r) => setStorageRows(r.data || []))
-        .catch(() => setStorageRows([]))
-        .finally(() => setLoadingRows(false));
+  // ── Scan routing ───────────────────────────────────────────────────────────
+  // Strip junk keystrokes using any known line's lot, then read the line from
+  // the tag so we can route it. Falls back to the trimmed raw for a brand-new
+  // line (its lot isn't known until the session is created).
+  const resolveScan = useCallback((raw) => {
+    const trimmed = String(raw).trim();
+    for (const code of Object.keys(lines)) {
+      const lot = lines[code]?.lotNumber;
+      if (!lot) continue;
+      const cleaned = cleanScannedLicence(trimmed, lot);
+      if (isValidLicenceFormat(cleaned)) {
+        const line = parseLineFromLicence(cleaned);
+        if (line) return { cleaned, line };
+      }
     }
-  }, [requestId, step]);
+    const cleaned = cleanScannedLicence(trimmed);
+    return { cleaned, line: parseLineFromLicence(cleaned) };
+  }, [lines]);
 
-  const handleCreateRequest = async (e) => {
-    e?.preventDefault?.();
-    const lic = firstLicence.trim();
-    if (!lic) return;
-    setError('');
-
-    // Client-side shape check — catches accidental row/FCC scans before
-    // they hit the server. Format: {LOT}-{PRODUCT}-{NNN}.
-    if (!isValidLicenceFormat(lic)) {
-      setFirstLicence('');
-      const msg = 'Not a pallet licence — did you scan a row or FCC code?';
-      setError(msg);
-      showError(msg);
-      return;
-    }
-
+  const createLine = async (code, licence) => {
     setLoading(true);
     try {
-      const r = await apiClient.post('/scanner/requests', { licence_number: lic });
-      setRequestId(r.data.id);
+      const r = await apiClient.post('/scanner/requests', { licence_number: licence });
       const detail = await apiClient.get(`/scanner/requests/${r.data.id}`);
-      setProductName(detail.data.product?.name || 'Product');
-      setLotNumber(detail.data.lot_number || '');
-      setStep('select-location');
-      setFirstLicence('');
-      setRowScanAttempts(0);
-      setShowManualRows(false);
-      setRowScanInput('');
-      showSuccess(detail.data.product?.name || 'Session started');
+      setLines((prev) => ({
+        ...prev,
+        [code]: {
+          requestId: r.data.id,
+          productName: detail.data.product?.name || 'Product',
+          lotNumber: detail.data.lot_number || '',
+          selectedRowId: '',
+          rowAvailable: null,
+          isPartial: false,
+          partialCases: '',
+          pallets: [],
+          status: 'needs-row',
+          gapMissing: [],
+          rowScanAttempts: 0,
+          showManualRows: false,
+        },
+      }));
+      setActiveLine(code);
+      fetchStorageRows();
+      showSuccess(`${detail.data.product?.name || 'Line started'} — now set the ${lineLabel(code)} row`);
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Failed to create session';
-      setFirstLicence('');
-      setError(msg);
-      showError(msg);
+      showError(err.response?.data?.detail || 'Failed to start line');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleRowScan = (e) => {
-    e?.preventDefault?.();
-    const scanned = rowScanInput.trim().toUpperCase();
-    if (!scanned) return;
+  const selectRow = (code, rowId) => {
+    const row = storageRows.find((r) => r.id === rowId);
+    updateLine(code, { selectedRowId: rowId, rowAvailable: row ? row.available : null, status: 'scanning' });
     setError('');
+  };
 
-    // If the operator scanned a pallet licence instead of a row barcode,
-    // tell them exactly that — much more useful than "Row not found".
-    if (isValidLicenceFormat(rowScanInput.trim())) {
-      const msg = "That's a pallet licence — scan the row barcode instead.";
-      setRowScanInput('');
-      setError(msg);
-      showError(msg);
+  const handleRowScan = (code, raw) => {
+    const scanned = raw.trim().toUpperCase();
+    if (!scanned) return;
+    if (isValidLicenceFormat(raw.trim())) {
+      showError("That's a pallet licence — scan the row barcode instead.");
       return;
     }
-
     const match = storageRows.find((r) => {
       const rowName = (r.name || '').toUpperCase();
       const nameOnly = rowName.replace(/^FG[- ]?/, '');
-      return nameOnly === scanned || rowName === scanned || r.id === rowScanInput.trim();
+      return nameOnly === scanned || rowName === scanned || r.id === raw.trim();
     });
-
-    if (match) {
-      if (match.available <= 0) {
-        const msg = `${match.name} is full. Scan a different row.`;
-        setError(msg);
-        setRowScanInput('');
-        setRowScanAttempts((prev) => prev + 1);
-        showError(msg);
+    if (!match) {
+      const attempts = (lines[code]?.rowScanAttempts || 0) + 1;
+      if (attempts >= MAX_ROW_SCAN_ATTEMPTS) {
+        updateLine(code, { rowScanAttempts: attempts, showManualRows: true });
+        showError('Scan not recognized. Pick the row manually below.');
       } else {
-        handleSelectLocation(match.id);
-        showSuccess(`Row ${match.name}`);
+        updateLine(code, { rowScanAttempts: attempts });
+        showError(`Row not found. Try again (${attempts}/${MAX_ROW_SCAN_ATTEMPTS} before manual).`);
       }
-    } else {
-      const newAttempts = rowScanAttempts + 1;
-      setRowScanAttempts(newAttempts);
-      setRowScanInput('');
-      if (newAttempts >= MAX_ROW_SCAN_ATTEMPTS) {
-        const msg = 'Scan not recognized. Select the row manually below.';
-        setError(msg);
-        setShowManualRows(true);
-        showError(msg);
-      } else {
-        const msg = `Row not found. Try again (${newAttempts}/${MAX_ROW_SCAN_ATTEMPTS} before manual).`;
-        setError(msg);
-        showError('Row not found');
-      }
-    }
-  };
-
-  const handleSelectLocation = (rowId) => {
-    const row = storageRows.find((r) => r.id === rowId);
-    setSelectedRowId(rowId);
-    setRowAvailable(row ? row.available : null);
-    setError('');
-    setStep('scan');
-  };
-
-  const handleChangeRow = () => {
-    setStep('select-location');
-    setRowScanAttempts(0);
-    setShowManualRows(false);
-    setRowScanInput('');
-    setError('');
-  };
-
-  const handleScanPallet = (e) => {
-    e?.preventDefault?.();
-    // Trim any stray keystrokes that prefixed the scan because focus
-    // wasn't fully on the input when the gun fired. Uses the request's
-    // known lot_number as the anchor — no plant-specific hardcoding.
-    const lic = cleanScannedLicence(licenceInput, lotNumber);
-    if (!lic || !selectedRowId) return;
-    setError('');
-
-    // Shape check — accidental row/FCC scans never enter the list.
-    if (!isValidLicenceFormat(lic)) {
-      setLicenceInput('');
-      const msg = 'Not a pallet licence — did you scan a row or FCC code?';
-      setError(msg);
-      showError(msg);
       return;
     }
-
-    // Reject obvious duplicates client-side so an offline operator gets
-    // immediate feedback instead of a delayed server error after sync.
-    const alreadyHere = pallets.some((p) => p.licence_number === lic);
-    if (alreadyHere) {
-      setLicenceInput('');
-      setError('Already scanned this pallet.');
-      showError('Already scanned this pallet');
+    if (match.available <= 0) {
+      updateLine(code, (prev) => ({ ...prev, rowScanAttempts: (prev.rowScanAttempts || 0) + 1 }));
+      showError(`${match.name} is full. Scan a different row.`);
       return;
     }
+    selectRow(code, match.id);
+    showSuccess(`Row ${match.name}`);
+  };
 
+  const recordPallet = (code, licence) => {
+    const ls = lines[code];
+    if (!ls?.selectedRowId) return;
+    if (ls.pallets.some((p) => p.licence_number === licence)) {
+      showError('Already scanned this pallet.');
+      return;
+    }
     const payload = {
-      licence_number: lic,
-      storage_row_id: selectedRowId,
-      is_partial: isPartial,
-      partial_cases: isPartial && partialCases ? parseInt(partialCases, 10) : null,
+      licence_number: licence,
+      storage_row_id: ls.selectedRowId,
+      is_partial: ls.isPartial,
+      partial_cases: ls.isPartial && ls.partialCases ? parseInt(ls.partialCases, 10) : null,
     };
-
-    const item = enqueueScan({ requestId, payload });
-
-    // Optimistic entry — appears immediately whether online or not. The
-    // useScanQueue callbacks will replace/mark this row when sync resolves.
-    setPallets((prev) => [
-      ...prev,
-      {
-        id: `local-${item.id}`,
-        licence_number: lic,
-        storage_row_id: selectedRowId,
-        is_partial: isPartial,
-        cases: isPartial && partialCases ? parseInt(partialCases, 10) : null,
-        sequence: null,
-        status: 'pending',
-        _pending: true,
-        _failed: false,
-        _idempotency_key: item.idempotency_key,
-      },
-    ]);
-    setLicenceInput('');
-    setPartialCases('');
-    if (rowAvailable != null) setRowAvailable(Math.max(0, rowAvailable - 1));
+    const item = enqueueScan({ requestId: ls.requestId, payload });
+    updateLine(code, (prev) => {
+      const nextAvail = prev.rowAvailable != null ? Math.max(0, prev.rowAvailable - 1) : null;
+      return {
+        ...prev,
+        pallets: [
+          ...prev.pallets,
+          {
+            id: `local-${item.id}`,
+            licence_number: licence,
+            storage_row_id: prev.selectedRowId,
+            is_partial: prev.isPartial,
+            cases: prev.isPartial && prev.partialCases ? parseInt(prev.partialCases, 10) : null,
+            status: 'pending',
+            _pending: true,
+            _failed: false,
+            _idempotency_key: item.idempotency_key,
+          },
+        ],
+        partialCases: '',
+        rowAvailable: nextAvail,
+        ...((nextAvail != null && nextAvail <= 0)
+          ? { status: 'row-full', rowScanAttempts: 0, showManualRows: false }
+          : {}),
+      };
+    });
   };
 
-  const handleSkipGaps = () => setStep('scan');
-
-  const handleMarkMissing = async () => {
-    if (gapMissing.length === 0) return;
-    setLoading(true);
-    try {
-      await apiClient.post(`/scanner/requests/${requestId}/mark-missing`, { licence_numbers: gapMissing });
-      const fr = await apiClient.get(`/scanner/requests/${requestId}`);
-      setPallets(fr.data.pallet_licences?.filter((p) => p.status !== 'cancelled') || []);
-      setGapMissing([]);
-      setStep('scan');
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Failed');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSubmit = async () => {
-    setLoading(true);
-    try {
-      await apiClient.post(`/scanner/requests/${requestId}/submit`, {});
-      setStep('done');
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Submit failed');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleResume = () => {
-    if (!resumeData) return;
-    setRequestId(resumeData.id);
-    setProductName(resumeData.product_name || 'Product');
-    setLotNumber(resumeData.lot_number || '');
-    setPallets(resumeData.pallets || []);
-    setSelectedRowId(resumeData.last_row_id || '');
-    setResumeData(null);
-    setStep('scan');
-  };
-
-  const handleStartAnother = () => {
-    setStep('scan-first');
-    setFirstLicence('');
-    setRequestId(null);
-    setProductName('');
-    setLotNumber('');
-    setStorageRows([]);
-    setSelectedRowId('');
-    setLicenceInput('');
-    setIsPartial(false);
-    setPartialCases('');
-    setPallets([]);
-    setGapMissing([]);
-    setRowAvailable(null);
+  const handleScan = (e) => {
+    e?.preventDefault?.();
+    const raw = scanInput;
+    if (!raw.trim()) return;
+    setScanInput('');
     setError('');
-    setRowScanInput('');
-    setRowScanAttempts(0);
-    setShowManualRows(false);
-    setResumeData(null);
+
+    const active = activeLine ? lines[activeLine] : null;
+    const needsRow = active && isRowState(active.status);
+    const { cleaned, line } = resolveScan(raw);
+
+    // While the active line waits for a row, a non-pallet scan is the row barcode.
+    if (needsRow && !isValidLicenceFormat(cleaned)) {
+      handleRowScan(activeLine, raw);
+      return;
+    }
+
+    if (!isValidLicenceFormat(cleaned)) {
+      showError('Not a pallet licence — did you scan a row or FCC code?');
+      return;
+    }
+    if (!line) {
+      showError("Couldn't read the line (L1/L2) from this tag.");
+      return;
+    }
+    if (line !== 'L1' && line !== 'L2') {
+      showError('Only 2 lines are supported.');
+      return;
+    }
+
+    const target = lines[line];
+    if (!target) {
+      createLine(line, cleaned);
+      return;
+    }
+    if (isRowState(target.status)) {
+      setActiveLine(line);
+      showError(`Set a row for ${lineLabel(line)} before scanning into it.`);
+      return;
+    }
+    recordPallet(line, cleaned);
+    setActiveLine(line); // view follows the scan
   };
 
-  const getOnBack = () => {
-    switch (step) {
-      case 'resume-prompt': return () => navigate('/forklift');
-      case 'scan-first': return () => navigate('/forklift');
-      case 'select-location': return () => setStep('scan-first');
-      case 'scan': return () => handleChangeRow();
-      case 'gap-prompt': return () => setStep('scan');
-      case 'summary': return () => setStep('scan');
-      case 'done': return () => navigate('/forklift');
-      default: return () => navigate('/forklift');
+  const handleChangeRow = (code) => {
+    updateLine(code, { status: 'needs-row', rowScanAttempts: 0, showManualRows: false });
+    setActiveLine(code);
+    setError('');
+    fetchStorageRows();
+  };
+
+  const handleSkipGap = (code) => {
+    updateLine(code, { status: 'scanning', gapMissing: [] });
+  };
+
+  const handleMarkMissing = async (code) => {
+    const ls = lines[code];
+    if (!ls || ls.gapMissing.length === 0) return;
+    setLoading(true);
+    try {
+      await apiClient.post(`/scanner/requests/${ls.requestId}/mark-missing`, { licence_numbers: ls.gapMissing });
+      const fr = await apiClient.get(`/scanner/requests/${ls.requestId}`);
+      updateLine(code, {
+        pallets: (fr.data.pallet_licences || []).filter((p) => p.status !== 'cancelled'),
+        gapMissing: [],
+        status: 'scanning',
+      });
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to mark missing');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const selectedRow = storageRows.find((r) => r.id === selectedRowId);
-  const totalCases = pallets.reduce((s, p) => s + (p.cases || 0), 0);
+  const handleSubmitLine = async (code) => {
+    const ls = lines[code];
+    if (!ls) return;
+    const { pending, failed } = countsForRequest(ls.requestId);
+    if (pending > 0 || failed > 0) {
+      showError(pending > 0 ? 'Wait for scans to sync before submitting.' : 'Resolve failed scans before submitting.');
+      return;
+    }
+    if (ls.pallets.length === 0) {
+      showError('Scan at least one pallet before submitting.');
+      return;
+    }
+    setLoading(true);
+    try {
+      await apiClient.post(`/scanner/requests/${ls.requestId}/submit`, {});
+      clearRequest(ls.requestId);
+      setLines((prev) => {
+        const next = { ...prev };
+        delete next[code];
+        const remaining = Object.keys(next);
+        setActiveLine(remaining[0] || null);
+        return next;
+      });
+      showSuccess(`${lineLabel(code)} submitted — sent for approval`);
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Submit failed');
+    } finally {
+      setLoading(false);
+    }
+  };
 
+  // ── Derived UI bits ─────────────────────────────────────────────────────────
   const netStatus = (
     <NetworkStatus
       online={online}
@@ -451,14 +508,8 @@ const ScannerReceiptFlow = () => {
     />
   );
 
-  // Soft-keyboard suppression is handled by the kiosk browser at the OS
-  // level; we don't set inputMode="none" here because some kiosk shells
-  // interpret it as "no keyboard input at all" and break the HID scanner.
-  const scanInputProps = {
-    autoCapitalize: 'characters',
-    autoCorrect: 'off',
-    spellCheck: false,
-  };
+  const scanInputProps = { autoCapitalize: 'characters', autoCorrect: 'off', spellCheck: false };
+
   const manualToggle = (
     <button
       type="button"
@@ -477,424 +528,268 @@ const ScannerReceiptFlow = () => {
     return <Check size={14} color="#16a34a" />;
   };
 
+  const lineNeedsAttention = (code) => {
+    const ls = lines[code];
+    return !!ls && (ls.status === 'row-full' || ls.status === 'gap');
+  };
+
   const autoSubmittedBanner = autoSubmittedNotice ? (
-    <div
-      style={{
-        background: '#fef3c7',
-        border: '1px solid #fcd34d',
-        borderRadius: '8px',
-        padding: '12px 14px',
-        marginBottom: '14px',
-        display: 'flex',
-        gap: '10px',
-        alignItems: 'flex-start',
-      }}
-    >
+    <div className="scanner-receipt-autosubmit">
       <Clock size={20} color="#92400e" style={{ flexShrink: 0, marginTop: '2px' }} />
       <div style={{ flex: 1, fontSize: '13px', color: '#78350f', lineHeight: 1.4 }}>
         <div style={{ fontWeight: 600, marginBottom: '4px' }}>
           {autoSubmittedNotice.count === 1 ? 'Session auto-submitted' : `${autoSubmittedNotice.count} sessions auto-submitted`}
         </div>
         <div>
-          {autoSubmittedNotice.count === 1
-            ? `Your session from ${formatDateTime(autoSubmittedNotice.mostRecent.auto_submitted_at)} was auto-submitted after 3 hours of inactivity. It's awaiting supervisor approval.`
-            : `Your most recent was auto-submitted ${formatDateTime(autoSubmittedNotice.mostRecent.auto_submitted_at)} after 3 hours of inactivity. They're awaiting supervisor approval.`}
+          Auto-submitted {formatDateTime(autoSubmittedNotice.mostRecent.auto_submitted_at)} after 3 hours of
+          inactivity. Awaiting supervisor approval.
         </div>
       </div>
-      <button
-        type="button"
-        onClick={dismissAutoSubmittedNotice}
-        style={{
-          background: 'transparent',
-          border: '1px solid #d97706',
-          color: '#92400e',
-          padding: '4px 10px',
-          borderRadius: '6px',
-          fontSize: '12px',
-          fontWeight: 600,
-          cursor: 'pointer',
-          flexShrink: 0,
-        }}
-      >
+      <button type="button" className="scanner-receipt-autosubmit-btn" onClick={dismissAutoSubmittedNotice}>
         Got it
       </button>
     </div>
   ) : null;
 
-  // ── Checking for active session ──────────────────────────────────────────
-  if (step === 'checking') {
+  const lineTabs = (
+    <div className="scanner-receipt-linetabs">
+      {LINE_CODES.map((code) => {
+        const ls = lines[code];
+        const isActive = activeLine === code;
+        const classes = [
+          'scanner-receipt-linetab',
+          isActive ? 'active' : '',
+          ls ? 'live' : 'empty',
+          lineNeedsAttention(code) ? 'attention' : '',
+        ].filter(Boolean).join(' ');
+        return (
+          <button
+            key={code}
+            type="button"
+            className={classes}
+            onClick={() => setActiveLine(code)}
+          >
+            <span className="scanner-receipt-linetab-name">{lineLabel(code)}</span>
+            <span className="scanner-receipt-linetab-meta">
+              {ls ? `${ls.pallets.length} pallet${ls.pallets.length !== 1 ? 's' : ''}` : 'not started'}
+            </span>
+            {lineNeedsAttention(code) && <span className="scanner-receipt-linetab-badge" aria-hidden>!</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+  if (!booted) {
     return (
       <ScannerLayout title="Receipt Scan">
         <div className="scanner-receipt-flow">
-          <p className="scanner-receipt-instruction">Checking for active session…</p>
+          <p className="scanner-receipt-instruction">Checking for active sessions…</p>
         </div>
       </ScannerLayout>
     );
   }
 
-  // ── Resume prompt ────────────────────────────────────────────────────────
-  // Resume is the ONLY exit from a pending session. No "Start New" option here —
-  // forklift drivers must submit (or let the 3h auto-submit fire) before they
-  // can scan fresh, so no scan can be silently dropped.
-  if (step === 'resume-prompt' && resumeData) {
-    return (
-      <ScannerLayout title="Resume Session" showBack onBack={getOnBack()} headerExtra={netStatus}>
-        <div className="scanner-receipt-flow">
-          {autoSubmittedBanner}
-          <p className="scanner-receipt-instruction">You have an unfinished scan session. Resume to continue or submit it before starting a new one.</p>
-          <div className="scanner-receipt-resume-card">
-            <div className="scanner-receipt-product">{resumeData.product_name}</div>
-            <div className="scanner-receipt-resume-stats">
-              <span><strong>{resumeData.pallet_count}</strong> pallets scanned</span>
-              <span><strong>{(resumeData.total_cases || 0).toLocaleString()}</strong> cases</span>
+  const placeholder = activeState && isRowState(activeState.status)
+    ? `Scan the ${lineLabel(activeLine)} row barcode…`
+    : 'Scan pallet licence…';
+
+  const { pending: activePending, failed: activeFailed } = activeState
+    ? countsForRequest(activeState.requestId)
+    : { pending: 0, failed: 0 };
+  const availableRows = storageRows.filter((r) => r.available > 0);
+
+  return (
+    <ScannerLayout title="Receipt Scan" showBack onBack={() => navigate('/forklift')} headerExtra={netStatus}>
+      <div className="scanner-receipt-flow">
+        {autoSubmittedBanner}
+        {lineTabs}
+
+        <form onSubmit={handleScan} className="scanner-receipt-form">
+          <input
+            ref={inputRef}
+            type="text"
+            value={scanInput}
+            onChange={(e) => setScanInput(e.target.value)}
+            placeholder={placeholder}
+            className="scanner-receipt-input"
+            autoComplete="off"
+            autoFocus
+            {...scanInputProps}
+          />
+          <button type="submit" disabled={loading || !scanInput.trim()} className="scanner-receipt-btn">
+            {loading ? '…' : <Scan size={22} />}
+          </button>
+        </form>
+        {manualToggle}
+        {error && <div className="scanner-receipt-error">{error}</div>}
+
+        {/* ── Active line panel ── */}
+        {!activeState ? (
+          <div className="scanner-receipt-empty">
+            <p>{activeLine ? `Scan a ${lineLabel(activeLine)} pallet to start this line.` : 'Scan any pallet to start a line.'}</p>
+            <p className="scanner-receipt-empty-hint">The tag decides the line — scan and it routes itself.</p>
+          </div>
+        ) : (
+          <div className="scanner-receipt-panel">
+            <div className="scanner-receipt-product">
+              {activeState.productName} <span className="scanner-receipt-lot">· {activeState.lotNumber}</span>
             </div>
-          </div>
-          <div className="scanner-receipt-gap-btns">
-            <button
-              type="button"
-              className="scanner-receipt-btn"
-              onClick={handleResume}
-            >
-              Resume Session
-            </button>
-          </div>
-        </div>
-      </ScannerLayout>
-    );
-  }
 
-  // ── Scan first pallet ────────────────────────────────────────────────────
-  if (step === 'scan-first') {
-    return (
-      <ScannerLayout title="Receipt Scan" showBack onBack={getOnBack()} headerExtra={netStatus}>
-        <div className="scanner-receipt-flow">
-          {autoSubmittedBanner}
-          <p className="scanner-receipt-instruction">Scan the first pallet to identify the product</p>
-          <form onSubmit={handleCreateRequest} className="scanner-receipt-form">
-            <input
-              ref={inputRef}
-              type="text"
-              value={firstLicence}
-              onChange={(e) => setFirstLicence(e.target.value)}
-              placeholder="Scan licence plate…"
-              className="scanner-receipt-input"
-              autoComplete="off"
-              autoFocus
-              {...scanInputProps}
-            />
-            <button type="submit" disabled={loading || !firstLicence.trim()} className="scanner-receipt-btn">
-              {loading ? '…' : 'Start'}
-            </button>
-          </form>
-          {error && <div className="scanner-receipt-error">{error}</div>}
-          {manualToggle}
-        </div>
-        <ScanFeedback {...(feedback || {})} onDismiss={dismissFeedback} />
-      </ScannerLayout>
-    );
-  }
-
-  // ── Select location ──────────────────────────────────────────────────────
-  if (step === 'select-location') {
-    const availableRows = storageRows.filter((r) => r.available > 0);
-    return (
-      <ScannerLayout title="Select Row" showBack onBack={getOnBack()}>
-        <div className="scanner-receipt-flow">
-          <div className="scanner-receipt-product">{productName}</div>
-
-          {!showManualRows ? (
-            <>
-              <p className="scanner-receipt-instruction">Scan the destination row barcode</p>
-              {loadingRows ? (
-                <p className="scanner-receipt-loading">Loading storage rows…</p>
-              ) : (
-                <form onSubmit={handleRowScan} className="scanner-receipt-form">
-                  <input
-                    ref={inputRef}
-                    type="text"
-                    value={rowScanInput}
-                    onChange={(e) => setRowScanInput(e.target.value)}
-                    placeholder="Scan row name"
-                    className="scanner-receipt-input"
-                    autoComplete="off"
-                    autoFocus
-                    {...scanInputProps}
-                  />
-                  <button type="submit" disabled={!rowScanInput.trim()} className="scanner-receipt-btn">
-                    <Scan size={22} />
-                  </button>
-                </form>
-              )}
-              {error && <div className="scanner-receipt-error">{error}</div>}
-              {rowScanAttempts > 0 && rowScanAttempts < MAX_ROW_SCAN_ATTEMPTS && (
-                <button
-                  type="button"
-                  className="scanner-receipt-manual-link"
-                  onClick={() => setShowManualRows(true)}
-                >
-                  Select row manually instead
-                </button>
-              )}
-            </>
-          ) : (
-            <>
-              <p className="scanner-receipt-instruction">Choose a storage row</p>
-              <button
-                type="button"
-                className="scanner-receipt-try-scan-btn"
-                onClick={() => { setShowManualRows(false); setRowScanAttempts(0); setError(''); setRowScanInput(''); }}
-              >
-                <Scan size={16} /> Try scanning again
-              </button>
-              {loadingRows ? (
-                <p className="scanner-receipt-loading">Loading storage rows…</p>
-              ) : availableRows.length === 0 ? (
-                <div className="scanner-receipt-empty">
-                  <p>No storage rows with available space.</p>
-                  <p className="scanner-receipt-empty-hint">Add storage rows in Master Data or free up capacity.</p>
-                </div>
-              ) : (
-                <div className="scanner-receipt-rows">
-                  {availableRows.map((row) => (
+            {isRowState(activeState.status) ? (
+              <>
+                {activeState.status === 'row-full' && (
+                  <div className="scanner-receipt-error">Row is full. Scan a new row for {lineLabel(activeLine)}.</div>
+                )}
+                {!activeState.showManualRows ? (
+                  <>
+                    <p className="scanner-receipt-instruction">Scan the {lineLabel(activeLine)} row barcode.</p>
                     <button
-                      key={row.id}
                       type="button"
-                      className="scanner-receipt-row-btn"
-                      onClick={() => handleSelectLocation(row.id)}
+                      className="scanner-receipt-manual-link"
+                      onClick={() => updateLine(activeLine, { showManualRows: true })}
                     >
-                      <MapPin size={20} color="#1a472a" />
-                      <span>{row.name}</span>
-                      <span className="scanner-receipt-available">{row.available} free</span>
+                      Select row manually instead
                     </button>
+                  </>
+                ) : (
+                  <>
+                    <p className="scanner-receipt-instruction">Choose a storage row for {lineLabel(activeLine)}.</p>
+                    <button
+                      type="button"
+                      className="scanner-receipt-try-scan-btn"
+                      onClick={() => updateLine(activeLine, { showManualRows: false, rowScanAttempts: 0 })}
+                    >
+                      <Scan size={16} /> Try scanning again
+                    </button>
+                    {loadingRows ? (
+                      <p className="scanner-receipt-loading">Loading storage rows…</p>
+                    ) : availableRows.length === 0 ? (
+                      <div className="scanner-receipt-empty">
+                        <p>No storage rows with available space.</p>
+                        <p className="scanner-receipt-empty-hint">Free up capacity or add rows in Master Data.</p>
+                      </div>
+                    ) : (
+                      <div className="scanner-receipt-rows">
+                        {availableRows.map((row) => (
+                          <button
+                            key={row.id}
+                            type="button"
+                            className="scanner-receipt-row-btn"
+                            onClick={() => selectRow(activeLine, row.id)}
+                          >
+                            <MapPin size={20} color="#1a472a" />
+                            <span>{row.name}</span>
+                            <span className="scanner-receipt-available">{row.available} free</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="scanner-receipt-location-bar">
+                  <p className="scanner-receipt-location">
+                    <MapPin size={16} /> {storageRows.find((r) => r.id === activeState.selectedRowId)?.name || 'Row'}
+                    {activeState.rowAvailable !== null && (
+                      <span className="scanner-receipt-capacity">({activeState.rowAvailable} left)</span>
+                    )}
+                  </p>
+                  <button type="button" className="scanner-receipt-change-row-btn" onClick={() => handleChangeRow(activeLine)}>
+                    <RefreshCw size={14} /> Change Row
+                  </button>
+                </div>
+
+                <div className="scanner-receipt-toggle">
+                  <button
+                    type="button"
+                    className={!activeState.isPartial ? 'active' : ''}
+                    onClick={() => updateLine(activeLine, { isPartial: false })}
+                  >
+                    Full pallet
+                  </button>
+                  <button
+                    type="button"
+                    className={activeState.isPartial ? 'active' : ''}
+                    onClick={() => updateLine(activeLine, { isPartial: true })}
+                  >
+                    Partial pallet
+                  </button>
+                </div>
+                {activeState.isPartial && (
+                  <input
+                    type="number"
+                    min={1}
+                    max={999}
+                    value={activeState.partialCases}
+                    onChange={(e) => updateLine(activeLine, { partialCases: e.target.value })}
+                    placeholder="Number of cases"
+                    className="scanner-receipt-partial-input"
+                  />
+                )}
+
+                {activeState.status === 'gap' && (
+                  <div className="scanner-receipt-gap">
+                    <p className="scanner-receipt-instruction">Missing pallet(s) in sequence:</p>
+                    <ul className="scanner-receipt-gap-list">
+                      {activeState.gapMissing.map((ln) => <li key={ln}>{ln}</li>)}
+                    </ul>
+                    <div className="scanner-receipt-gap-btns">
+                      <button type="button" className="scanner-receipt-btn" onClick={() => handleSkipGap(activeLine)}>
+                        Skip for now — I&apos;ll rescan it
+                      </button>
+                      <button type="button" className="scanner-receipt-btn secondary" onClick={() => handleMarkMissing(activeLine)} disabled={loading}>
+                        Mark as Missing (sticker destroyed)
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="scanner-receipt-pallets">
+                  <div className="scanner-receipt-pallets-header">
+                    <h3>Scanned ({activeState.pallets.length})</h3>
+                    {activeState.pallets.length > 0 && (
+                      <span className="scanner-receipt-pallets-total">
+                        {activeState.pallets.reduce((s, p) => s + (p.cases || 0), 0).toLocaleString()} cases
+                      </span>
+                    )}
+                  </div>
+                  {activeState.pallets.slice(-10).reverse().map((p) => (
+                    <div
+                      key={p.id}
+                      className={`scanner-receipt-pallet-item${p._pending ? ' pallet-pending' : ''}${p._failed ? ' pallet-failed' : ''}`}
+                    >
+                      {p._pending || p._failed ? palletStatusIcon(p) : <Package size={14} color="#6b7280" />}
+                      <LicenceDisplay licence={p.licence_number} className="pallet-lic" />
+                      <span className="pallet-cases">{p.cases != null ? `${p.cases} cs` : '—'}</span>
+                    </div>
                   ))}
                 </div>
-              )}
-              {error && <div className="scanner-receipt-error">{error}</div>}
-            </>
-          )}
-        </div>
-        <ScanFeedback {...(feedback || {})} onDismiss={dismissFeedback} />
-      </ScannerLayout>
-    );
-  }
 
-  // ── Gap detected ─────────────────────────────────────────────────────────
-  if (step === 'gap-prompt') {
-    return (
-      <ScannerLayout title="Gap Detected" showBack onBack={getOnBack()}>
-        <div className="scanner-receipt-flow">
-          <p className="scanner-receipt-instruction">Missing pallet(s) in sequence:</p>
-          <ul className="scanner-receipt-gap-list">
-            {gapMissing.map((ln) => (
-              <li key={ln}>{ln}</li>
-            ))}
-          </ul>
-          <p className="scanner-receipt-instruction" style={{ marginTop: '0.5rem' }}>
-            If you just scanned the wrong code, choose <strong>Skip for now</strong> and rescan
-            the correct pallet — the gap will fill in automatically.
-          </p>
-          <div className="scanner-receipt-gap-btns">
-            <button type="button" className="scanner-receipt-btn" onClick={handleSkipGaps}>
-              Skip for now — I&apos;ll rescan it
-            </button>
-            <button type="button" className="scanner-receipt-btn secondary" onClick={handleMarkMissing} disabled={loading}>
-              Mark as Missing (sticker destroyed)
-            </button>
+                <button
+                  type="button"
+                  className="scanner-receipt-submit-btn"
+                  onClick={() => handleSubmitLine(activeLine)}
+                  disabled={loading || activeState.pallets.length === 0 || activePending > 0 || activeFailed > 0}
+                  title={activePending > 0 ? 'Wait for scans to sync before submitting' : (activeFailed > 0 ? 'Resolve failed scans before submitting' : '')}
+                >
+                  {loading
+                    ? 'Submitting…'
+                    : activePending > 0
+                      ? `Syncing… (${activePending})`
+                      : <><Check size={18} /> Submit {lineLabel(activeLine)} ({activeState.pallets.length})</>}
+                </button>
+              </>
+            )}
           </div>
-        </div>
-        <ScanFeedback {...(feedback || {})} onDismiss={dismissFeedback} />
-      </ScannerLayout>
-    );
-  }
-
-  // ── Scan pallets ─────────────────────────────────────────────────────────
-  if (step === 'scan') {
-    return (
-      <ScannerLayout title="Scan Pallets" showBack onBack={getOnBack()}>
-        <div className="scanner-receipt-flow">
-          <div className="scanner-receipt-location-bar">
-            <p className="scanner-receipt-location">
-              <MapPin size={16} /> {selectedRow?.name}
-              {rowAvailable !== null && <span className="scanner-receipt-capacity">({rowAvailable} left)</span>}
-            </p>
-            <button
-              type="button"
-              className="scanner-receipt-change-row-btn"
-              onClick={handleChangeRow}
-            >
-              <RefreshCw size={14} /> Change Row
-            </button>
-          </div>
-
-          <div className="scanner-receipt-toggle">
-            <button
-              type="button"
-              className={!isPartial ? 'active' : ''}
-              onClick={() => setIsPartial(false)}
-            >
-              Full pallet
-            </button>
-            <button
-              type="button"
-              className={isPartial ? 'active' : ''}
-              onClick={() => setIsPartial(true)}
-            >
-              Partial pallet
-            </button>
-          </div>
-          {isPartial && (
-            <input
-              type="number"
-              min={1}
-              max={999}
-              value={partialCases}
-              onChange={(e) => setPartialCases(e.target.value)}
-              placeholder="Number of cases"
-              className="scanner-receipt-partial-input"
-            />
-          )}
-          <form onSubmit={handleScanPallet} className="scanner-receipt-form">
-            <input
-              ref={inputRef}
-              type="text"
-              value={licenceInput}
-              onChange={(e) => setLicenceInput(e.target.value)}
-              placeholder="Scan pallet licence…"
-              className="scanner-receipt-input"
-              autoComplete="off"
-              autoFocus
-              {...scanInputProps}
-            />
-            <button
-              type="submit"
-              disabled={loading || !licenceInput.trim() || (isPartial && !partialCases)}
-              className="scanner-receipt-btn"
-            >
-              {loading ? '…' : <Scan size={22} />}
-            </button>
-          </form>
-          {manualToggle}
-          {error && <div className="scanner-receipt-error">{error}</div>}
-
-          <div className="scanner-receipt-pallets">
-            <div className="scanner-receipt-pallets-header">
-              <h3>Scanned ({pallets.length})</h3>
-              {pallets.length > 0 && (
-                <span className="scanner-receipt-pallets-total">{totalCases.toLocaleString()} cases</span>
-              )}
-            </div>
-            {pallets.slice(-10).reverse().map((p) => (
-              <div
-                key={p.id}
-                className={`scanner-receipt-pallet-item${p._pending ? ' pallet-pending' : ''}${p._failed ? ' pallet-failed' : ''}`}
-                title={p._failed ? p._failError : (p._pending ? (online ? 'Syncing…' : 'Pending sync (offline)') : 'Synced')}
-              >
-                {palletStatusIcon(p)}
-                <LicenceDisplay licence={p.licence_number} className="pallet-lic" />
-                <span className="pallet-cases">{p.cases != null ? `${p.cases} cs` : '—'}</span>
-              </div>
-            ))}
-          </div>
-
-          <button
-            type="button"
-            className="scanner-receipt-submit-btn"
-            onClick={() => setStep('summary')}
-            disabled={pallets.length === 0}
-          >
-            Review & Submit ({pallets.length})
-          </button>
-        </div>
-        <ScanFeedback {...(feedback || {})} onDismiss={dismissFeedback} />
-      </ScannerLayout>
-    );
-  }
-
-  // ── Summary ──────────────────────────────────────────────────────────────
-  if (step === 'summary') {
-    return (
-      <ScannerLayout title="Review" showBack onBack={getOnBack()} headerExtra={netStatus}>
-        <div className="scanner-receipt-flow">
-          <div className="scanner-receipt-product">{productName}</div>
-          <div className="scanner-receipt-summary-stats">
-            <div className="scanner-receipt-stat">
-              <span className="scanner-receipt-stat-value">{pallets.length}</span>
-              <span className="scanner-receipt-stat-label">Pallets</span>
-            </div>
-            <div className="scanner-receipt-stat">
-              <span className="scanner-receipt-stat-value">{totalCases.toLocaleString()}</span>
-              <span className="scanner-receipt-stat-label">Cases</span>
-            </div>
-            <div className="scanner-receipt-stat">
-              <span className="scanner-receipt-stat-value">{selectedRow?.name || '—'}</span>
-              <span className="scanner-receipt-stat-label">Row</span>
-            </div>
-          </div>
-          <div className="scanner-receipt-pallets">
-            <div className="scanner-receipt-pallets-header">
-              <h3>All Pallets</h3>
-            </div>
-            {pallets.map((p) => (
-              <div
-                key={p.id}
-                className={`scanner-receipt-pallet-item${p._pending ? ' pallet-pending' : ''}${p._failed ? ' pallet-failed' : ''}`}
-              >
-                {p._pending || p._failed ? palletStatusIcon(p) : <Package size={14} color="#6b7280" />}
-                <LicenceDisplay licence={p.licence_number} className="pallet-lic" />
-                <span className="pallet-cases">{p.cases != null ? `${p.cases} cs` : '—'}</span>
-              </div>
-            ))}
-          </div>
-          <div className="scanner-receipt-summary-btns">
-            <button type="button" className="scanner-receipt-btn secondary" onClick={() => setStep('scan')}>
-              Back
-            </button>
-            <button
-              type="button"
-              className="scanner-receipt-btn"
-              onClick={handleSubmit}
-              disabled={loading || pendingCount > 0 || failedCount > 0}
-              title={
-                pendingCount > 0
-                  ? 'Wait for all scans to sync before submitting'
-                  : failedCount > 0
-                    ? 'Resolve failed scans before submitting'
-                    : ''
-              }
-            >
-              {loading ? 'Submitting…' : (pendingCount > 0 ? `Syncing… (${pendingCount})` : <><Check size={18} /> Submit</>)}
-            </button>
-          </div>
-        </div>
-      </ScannerLayout>
-    );
-  }
-
-  // ── Done ─────────────────────────────────────────────────────────────────
-  if (step === 'done') {
-    return (
-      <ScannerLayout title="Submitted" showBack onBack={getOnBack()}>
-        <div className="scanner-receipt-flow done">
-          <CheckCircle2 size={64} className="scanner-receipt-done-icon" />
-          <h2 className="scanner-receipt-done-title">Submitted!</h2>
-          <p className="scanner-receipt-done-sub">
-            {pallets.length} pallet{pallets.length !== 1 ? 's' : ''} · {totalCases.toLocaleString()} cases<br />
-            Sent to supervisor for approval.
-          </p>
-          <div className="scanner-receipt-done-actions">
-            <button type="button" className="scanner-receipt-btn" onClick={handleStartAnother}>
-              <Package size={18} /> Scan Another Receipt
-            </button>
-            <button type="button" className="scanner-receipt-btn secondary" onClick={() => navigate('/forklift')}>
-              Back to Home
-            </button>
-          </div>
-        </div>
-      </ScannerLayout>
-    );
-  }
-
-  return null;
+        )}
+      </div>
+      <ScanFeedback {...(feedback || {})} onDismiss={dismissFeedback} />
+    </ScannerLayout>
+  );
 };
 
 export default ScannerReceiptFlow;

@@ -511,3 +511,114 @@
   background: #fee2e2;
   border-left: 3px solid #dc2626;
 }
+
+/* ── Two-line tabs (Line 1 / Line 2) ── */
+.scanner-receipt-linetabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.85rem;
+}
+
+.scanner-receipt-linetab {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: 0.6rem 0.75rem;
+  border: 2px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f9fafb;
+  cursor: pointer;
+  text-align: left;
+}
+
+.scanner-receipt-linetab.live {
+  background: #fff;
+  border-color: #cbd5e1;
+}
+
+.scanner-receipt-linetab.active {
+  border-color: #1a472a;
+  background: #f0fdf4;
+  box-shadow: 0 0 0 1px #1a472a inset;
+}
+
+.scanner-receipt-linetab.attention {
+  border-color: #d97706;
+  background: #fffbeb;
+}
+
+.scanner-receipt-linetab-name {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #111;
+}
+
+.scanner-receipt-linetab.empty .scanner-receipt-linetab-name {
+  color: #9ca3af;
+}
+
+.scanner-receipt-linetab-meta {
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+
+.scanner-receipt-linetab-badge {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #d97706;
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 800;
+  line-height: 20px;
+  text-align: center;
+}
+
+/* ── Active line panel ── */
+.scanner-receipt-panel {
+  margin-top: 0.25rem;
+}
+
+.scanner-receipt-lot {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #6b7280;
+}
+
+.scanner-receipt-gap {
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 10px;
+  padding: 0.75rem 0.9rem;
+  margin: 0.75rem 0;
+}
+
+/* ── Auto-submitted notice ── */
+.scanner-receipt-autosubmit {
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.scanner-receipt-autosubmit-btn {
+  background: transparent;
+  border: 1px solid #d97706;
+  color: #92400e;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}

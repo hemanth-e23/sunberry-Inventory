@@ -8,6 +8,7 @@ import {
   enqueueScan,
   listScans,
   removeScan,
+  removeScansForRequest,
   retryFailedScans,
   subscribeToScanQueue,
 } from '../utils/scanQueue';
@@ -81,17 +82,35 @@ export const useScanQueue = ({ onSynced, onFailed } = {}) => {
 
   const dropFailed = useCallback((id) => removeScan(id), []);
 
+  // Drop every queued item for a session — used when a line is submitted so its
+  // synced/leftover entries don't linger and gate the other line.
+  const clearRequest = useCallback((requestId) => removeScansForRequest(requestId), []);
+
   const pendingCount = queue.filter((it) => it.state === 'pending').length;
   const failedCount = queue.filter((it) => it.state === 'failed').length;
+
+  // Per-session counts so each line's submit is gated only by its own scans.
+  const countsForRequest = useCallback((requestId) => {
+    let pending = 0;
+    let failed = 0;
+    for (const it of queue) {
+      if (it.requestId !== requestId) continue;
+      if (it.state === 'pending') pending += 1;
+      else if (it.state === 'failed') failed += 1;
+    }
+    return { pending, failed };
+  }, [queue]);
 
   return {
     online,
     queue,
     pendingCount,
     failedCount,
+    countsForRequest,
     enqueueScan: enqueue,
     retryFailed: retry,
     dropFailed,
+    clearRequest,
     drainNow: drain,
   };
 };

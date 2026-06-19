@@ -153,3 +153,26 @@ export const splitLicenceForDisplay = (input) => {
   const idx = value.lastIndexOf('-');
   return { prefix: value.slice(0, idx), suffix: value.slice(idx) };
 };
+
+// Extract the production line (e.g. "L1" / "L2") from a lot number. Mirrors the
+// backend's _resolve_production_line: prefer a trailing "-L<n>" segment, else a
+// trailing "L<n>" suffix on the lot itself (the "MP06226L1" in "MP06226L1-…").
+// Returns "L1" (uppercased) or null.
+export const parseLineFromLot = (lot) => {
+  if (!lot) return null;
+  const value = String(lot).trim();
+  const lastSegment = value.split('-').pop();
+  if (/^L\d+$/i.test(lastSegment)) return lastSegment.toUpperCase();
+  const suffixMatch = value.match(/(L\d+)$/i);
+  return suffixMatch ? suffixMatch[1].toUpperCase() : null;
+};
+
+// Extract the production line from a full pallet tag. The lot is everything
+// before the product code + sequence — the "MP06226L1" in "MP06226L1-MANGO-001".
+// Used to route a scanned pallet to its line's session. Returns "L1" or null.
+export const parseLineFromLicence = (input) => {
+  if (!isValidLicenceFormat(input)) return null;
+  const parts = String(input).trim().split('-');
+  const lot = parts.slice(0, -2).join('-');
+  return parseLineFromLot(lot);
+};

@@ -232,39 +232,59 @@ def _touch_activity(fr: ForkliftRequest) -> None:
 
 
 def auto_close_stale_sessions(db: Session) -> dict:
-    """Sweep SCANNING sessions idle for more than STALE_FORKLIFT_SESSION_HOURS.
+    """Sweep SCANNING sessions when a DRIVER has been idle past
+    STALE_FORKLIFT_SESSION_HOURS across ALL their open lines.
 
-    Sessions with pallets → SUBMITTED (auto), surface in supervisor queue.
-    Sessions with no pallets → CANCELLED (auto), reason="empty_timeout".
+    Idle is measured per-driver, not per-session: one driver can serve two
+    lines with one gun, so a line that's been quiet for hours must NOT auto-close
+    while the other line is actively scanning. Only when the driver's most-recent
+    scan on *either* line is older than the cutoff do we close all of that
+    driver's sessions at once.
+
+    Per session, the decision is unchanged:
+      - has pallets  → SUBMITTED (auto), surfaces in supervisor queue.
+      - no pallets   → CANCELLED (auto), reason="empty_timeout".
 
     Called lazily on forklift active-session checks and supervisor list requests
     so no separate scheduler is required.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=STALE_FORKLIFT_SESSION_HOURS)
-    stale = db.query(ForkliftRequest).filter(
+    # Pull every open session (not just the stale ones) so we can compute each
+    # driver's most-recent activity across all their lines before deciding.
+    open_sessions = db.query(ForkliftRequest).filter(
         ForkliftRequest.status == ForkliftRequestStatus.SCANNING,
         ForkliftRequest.last_activity_at.isnot(None),
-        ForkliftRequest.last_activity_at < cutoff,
     ).all()
+
+    by_driver: dict = {}
+    for fr in open_sessions:
+        by_driver.setdefault(fr.scanned_by, []).append(fr)
+
     auto_submitted = 0
     auto_cancelled_empty = 0
     now = datetime.now(timezone.utc)
-    for fr in stale:
-        pending_count = db.query(func.count(PalletLicence.id)).filter(
-            PalletLicence.forklift_request_id == fr.id,
-            PalletLicence.status.in_([PalletStatus.PENDING, PalletStatus.MISSING_STICKER]),
-        ).scalar() or 0
-        if pending_count > 0:
-            fr.status = ForkliftRequestStatus.SUBMITTED
-            fr.submitted_at = now
-            fr.auto_submitted_at = now
-            auto_submitted += 1
-        else:
-            fr.status = ForkliftRequestStatus.CANCELLED
-            fr.cancelled_at = now
-            fr.cancelled_reason = "empty_timeout"
-            auto_cancelled_empty += 1
-    if stale:
+    closed_any = False
+    for sessions in by_driver.values():
+        last_activity = max(s.last_activity_at for s in sessions)
+        if last_activity >= cutoff:
+            continue  # driver still active on at least one line — leave all open
+        for fr in sessions:
+            pending_count = db.query(func.count(PalletLicence.id)).filter(
+                PalletLicence.forklift_request_id == fr.id,
+                PalletLicence.status.in_([PalletStatus.PENDING, PalletStatus.MISSING_STICKER]),
+            ).scalar() or 0
+            if pending_count > 0:
+                fr.status = ForkliftRequestStatus.SUBMITTED
+                fr.submitted_at = now
+                fr.auto_submitted_at = now
+                auto_submitted += 1
+            else:
+                fr.status = ForkliftRequestStatus.CANCELLED
+                fr.cancelled_at = now
+                fr.cancelled_reason = "empty_timeout"
+                auto_cancelled_empty += 1
+            closed_any = True
+    if closed_any:
         db.commit()
     return {
         "auto_submitted": auto_submitted,
@@ -319,20 +339,36 @@ def create_forklift_request(
 
     line_id = _resolve_production_line(db, lot_number) if lot_number else None
 
+    # Tags always carry a line (L1/L2). If we can't resolve one, the lot is
+    # malformed or the production line isn't configured — refuse rather than
+    # mint a line-less session that can't be routed.
+    if line_id is None:
+        raise ValidationError(
+            "Could not read the production line from this tag. Check the lot number."
+        )
+
     # Sweep stale sessions first so a sessions-idle-for-3h+ doesn't block this user.
     auto_close_stale_sessions(db)
 
-    # Strong rule: never silently destroy a user's scan work. If a SCANNING session
-    # already exists for this user, refuse to start a new one — they must submit
-    # the current one (manually or via the 3h auto-submit) before scanning fresh.
-    existing = db.query(ForkliftRequest).filter(
+    # One driver can serve two lines with one gun, so sessions are keyed per
+    # (driver, line) — not per driver. A second session for the SAME line is
+    # refused (resume it), but the other line may run concurrently.
+    #
+    # Strong rule still holds: never silently destroy scan work — a duplicate
+    # same-line session is rejected, not replaced.
+    active_sessions = db.query(ForkliftRequest).filter(
         ForkliftRequest.scanned_by == str(current_user.id),
         ForkliftRequest.status == ForkliftRequestStatus.SCANNING,
-    ).first()
-    if existing:
+    ).all()
+    if any(s.line_id == line_id for s in active_sessions):
         raise ValidationError(
-            "You have an unsubmitted scanning session. Resume and submit it before starting a new one."
+            "You already have an open session for this line. Resume and submit it before starting a new one."
         )
+
+    # One driver, two lines max for now.
+    distinct_lines = {s.line_id for s in active_sessions}
+    if line_id not in distinct_lines and len(distinct_lines) >= 2:
+        raise ValidationError("Only 2 lines are supported per driver.")
 
     # A forklift user with no warehouse would mint pallets with warehouse_id=NULL
     # that are invisible to every ship-out picker. Reject early with a clear
@@ -475,7 +511,15 @@ def scan_pallet(
 
     product = find_product_by_code(db, product_code)
     if not product or product.id != fr.product_id:
-        raise ValidationError("Product mismatch. Expected product for this lot.")
+        # Routing sent this tag to the session matching its line (L1/L2). If the
+        # product doesn't match, the pallet is almost certainly mis-stickered —
+        # name the line and what it's running so the operator can check.
+        line_label = fr.line.name if fr.line else "this line"
+        expected = fr.product.name if fr.product else "another product"
+        raise ValidationError(
+            f"This tag is for {line_label} but its product doesn't match what this "
+            f"line is running ({expected}). Check the sticker."
+        )
 
     row = _validate_storage_row(db, storage_row_id)
 
