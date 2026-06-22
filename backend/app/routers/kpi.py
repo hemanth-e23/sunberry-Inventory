@@ -99,6 +99,7 @@ async def get_production_today(
                 COALESCE(SUM(pl.cases), 0)::int                                    AS cases,
                 COUNT(*) FILTER (WHERE NOT pl.is_partial)::int                    AS full_pallets,
                 COUNT(*) FILTER (WHERE pl.is_partial)::int                        AS partial_pallets,
+                MIN(pl.scanned_at)                                                AS first_scan_at,
                 MAX(pl.scanned_at)                                                AS last_scan_at
             FROM pallet_licences pl
             WHERE pl.warehouse_id = :wid
@@ -121,6 +122,7 @@ async def get_production_today(
             "cases": r.cases,
             "full_pallets": r.full_pallets,
             "partial_pallets": r.partial_pallets,
+            "first_scan_at": r.first_scan_at.isoformat() if r.first_scan_at else None,
             "last_scan_at": r.last_scan_at.isoformat() if r.last_scan_at else None,
         }
 
@@ -139,6 +141,7 @@ async def get_production_today(
                 "cases": 0,
                 "full_pallets": 0,
                 "partial_pallets": 0,
+                "first_scan_at": None,
                 "last_scan_at": None,
             }
 
