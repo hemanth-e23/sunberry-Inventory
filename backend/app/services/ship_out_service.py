@@ -29,7 +29,7 @@ from app.models import (
     StorageRow,
     TransferScanEvent,
 )
-from app.models.inventory import ShipOutLotReservation
+from app.models.inventory import ShipOutLotReservation, TransferPalletSwap
 from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
 from app.utils.locations import warehouse_id_for_row
 
@@ -61,6 +61,22 @@ def _active_reservation_cases(
     return float(q.scalar() or 0.0)
 
 
+def _active_product_reservation_cases(
+    db: Session, product_id: str, exclude_line_ids: Optional[list] = None
+) -> float:
+    """Sum of cases reserved on active reservations for a product across ALL
+    lots (Phase D pools reservations at the product level — lot is decided live
+    at scan time). Counts legacy per-lot rows too, since the sum ignores
+    lot_number."""
+    q = db.query(func.coalesce(func.sum(ShipOutLotReservation.cases_reserved), 0.0)).filter(
+        ShipOutLotReservation.product_id == product_id,
+        ShipOutLotReservation.released_at.is_(None),
+    )
+    if exclude_line_ids:
+        q = q.filter(~ShipOutLotReservation.transfer_line_id.in_(exclude_line_ids))
+    return float(q.scalar() or 0.0)
+
+
 def _pallet_pool_for_product(
     db: Session, product_id: str, warehouse_id: Optional[str], lock: bool = False
 ):
@@ -78,11 +94,13 @@ def _pallet_pool_for_product(
     return q.all()
 
 
-def available_lots_for_product(
-    db: Session, product_id: str, warehouse_id: Optional[str]
+def _lot_entries_with_availability(
+    db: Session, product_id: str, warehouse_id: Optional[str], reserved_pool: float
 ) -> list[dict]:
-    """Return lots for a product, oldest first, with capacity minus active
-    reservations. Used by Phase 1's lot picker."""
+    """Lots for a product, oldest first, each with physical cases and a
+    `cases_available` computed by subtracting `reserved_pool` (a product-level
+    reservation total) from the OLDEST lots first — FIFO is how reservations
+    are assumed to consume stock. Used by both the creation and dock pickers."""
     pallets = _pallet_pool_for_product(db, product_id, warehouse_id, lock=False)
 
     by_lot: dict[str, dict] = {}
@@ -104,41 +122,59 @@ def available_lots_for_product(
         row_agg["cases"] += float(pl.cases or 0)
         row_agg["pallets"] += 1
 
-    # Pre-load row names for the rows we touched
     row_ids = {rid for entry in by_lot.values() for rid in entry["rows"].keys() if rid}
     row_lookup: dict[str, StorageRow] = {}
     if row_ids:
         for r in db.query(StorageRow).filter(StorageRow.id.in_(row_ids)).all():
             row_lookup[r.id] = r
 
-    out: list[dict] = []
+    entries = []
     for lot_number, entry in by_lot.items():
-        total_cases = sum(float(p.cases or 0) for p in entry["pallets"])
-        reserved = _active_reservation_cases(db, product_id, lot_number)
-        cases_available = max(0.0, total_cases - reserved)
-        if cases_available <= 0:
-            continue  # fully spoken for; hide from picker
-
-        rows_payload = []
-        for rid, agg in entry["rows"].items():
-            row = row_lookup.get(rid) if rid else None
-            rows_payload.append({
-                "row_id": rid or None,
-                "row_name": row.name if row else "Floor",
-                "cases": agg["cases"],
-                "pallets": agg["pallets"],
-            })
-
-        out.append({
+        entries.append({
             "lot_number": lot_number,
-            "cases_available": cases_available,
+            "physical_cases": sum(float(p.cases or 0) for p in entry["pallets"]),
             "pallets_available": len(entry["pallets"]),
             "oldest_at": entry["oldest_at"],
-            "rows": rows_payload,
+            "rows": [
+                {
+                    "row_id": rid or None,
+                    "row_name": (row_lookup.get(rid).name if rid and row_lookup.get(rid) else "Floor"),
+                    "cases": agg["cases"],
+                    "pallets": agg["pallets"],
+                }
+                for rid, agg in entry["rows"].items()
+            ],
         })
 
-    out.sort(key=lambda x: (x["oldest_at"] or datetime.max.replace(tzinfo=timezone.utc), x["lot_number"]))
-    return out
+    entries.sort(key=lambda x: (x["oldest_at"] or datetime.max.replace(tzinfo=timezone.utc), x["lot_number"]))
+
+    # Attribute the reservation pool to the oldest lots first.
+    remaining = max(0.0, reserved_pool)
+    for e in entries:
+        take = min(remaining, e["physical_cases"])
+        e["cases_available"] = max(0.0, e["physical_cases"] - take)
+        remaining -= take
+    return entries
+
+
+def available_lots_for_product(
+    db: Session, product_id: str, warehouse_id: Optional[str]
+) -> list[dict]:
+    """Lots for a product with capacity net of the product-level reservation
+    pool. Used by the creation-time lot picker (hides fully-spoken-for lots)."""
+    reserved = _active_product_reservation_cases(db, product_id)
+    entries = _lot_entries_with_availability(db, product_id, warehouse_id, reserved)
+    return [
+        {
+            "lot_number": e["lot_number"],
+            "cases_available": e["cases_available"],
+            "pallets_available": e["pallets_available"],
+            "oldest_at": e["oldest_at"],
+            "rows": e["rows"],
+        }
+        for e in entries
+        if e["cases_available"] > 0
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -181,20 +217,24 @@ def create_pick_list_v2(
     for pid in product_ids:
         pallet_pools[pid] = _pallet_pool_for_product(db, pid, target_warehouse_id, lock=True)
 
-    # 3. Per-lot capacity check.
-    for li, line in enumerate(data.lines):
-        pool = pallet_pools[line.product_id]
-        for la in line.lot_allocations:
-            in_lot = [pl for pl in pool if (pl.lot_number or "") == la.lot_number]
-            lot_total = sum(float(pl.cases or 0) for pl in in_lot)
-            already_reserved = _active_reservation_cases(db, line.product_id, la.lot_number)
-            free = max(0.0, lot_total - already_reserved)
-            if float(la.cases_requested) > free + 0.001:
-                raise ValidationError(
-                    f"Line {li + 1}, lot {la.lot_number}: requested "
-                    f"{la.cases_requested} cases but only {free} available "
-                    f"(total {lot_total}, reserved {already_reserved})"
-                )
+    # 3. Per-PRODUCT capacity check (Phase D: reservations pool at the product
+    # level — lots are advisory and the actual lot is chosen live at scan time).
+    requested_by_product: dict[str, float] = {}
+    for line in data.lines:
+        requested_by_product[line.product_id] = (
+            requested_by_product.get(line.product_id, 0.0) + float(line.cases_requested)
+        )
+    for pid, requested in requested_by_product.items():
+        pool = pallet_pools[pid]
+        product_total = sum(float(pl.cases or 0) for pl in pool)
+        already_reserved = _active_product_reservation_cases(db, pid)
+        free = max(0.0, product_total - already_reserved)
+        if requested > free + 0.001:
+            pname = products[pid].name if pid in products else pid
+            raise ValidationError(
+                f"{pname}: requested {requested:g} cases but only {free:g} "
+                f"available (total {product_total:g}, reserved {already_reserved:g})"
+            )
 
     # 4. Persist parent + lines + reservations.
     transfer_id = _new_id("transfer")
@@ -267,16 +307,16 @@ def create_pick_list_v2(
             ))
             line_seq_counter += 1
 
-            # One reservation per (sub-line, lot) — keeps reservation totals
-            # accurate per lot for the capacity check on future submits.
-            for e in lot_entries:
-                db.add(ShipOutLotReservation(
-                    id=_new_id("solr"),
-                    transfer_line_id=sub_id,
-                    product_id=line.product_id,
-                    lot_number=e["lot_number"],
-                    cases_reserved=e["cases_requested"],
-                ))
+            # One product-level reservation per sub-line (lot_number=NULL) —
+            # the order claims this many cases of the product; the actual lot is
+            # decided live at scan time, so the reservation isn't lot-pinned.
+            db.add(ShipOutLotReservation(
+                id=_new_id("solr"),
+                transfer_line_id=sub_id,
+                product_id=line.product_id,
+                lot_number=None,
+                cases_reserved=sub_total,
+            ))
 
     db.flush()
     return transfer
@@ -452,7 +492,13 @@ def scanner_view_for_transfer(
 
         for lot_number, totals in lot_totals.items():
             cases_remaining = max(0.0, totals["requested"] - totals["picked"])
-            if cases_remaining <= 0:
+            lot_complete = cases_remaining <= 0
+            has_picks = float(totals["picked"] or 0) > 0
+            # Open lots render normally. A fully-picked lot is kept visible only
+            # when something was picked from it — so the forklift can still
+            # Remove one of those pallets (a leaker found after it completed the
+            # lot). It then shows only the picked pallets, not fresh ones.
+            if lot_complete and not has_picks:
                 continue
             line_remaining_total += cases_remaining
 
@@ -512,6 +558,10 @@ def scanner_view_for_transfer(
                 for pl in pl_list_sorted:
                     pick = picked_lookup.get(pl.id)
                     is_picked = pick is not None
+                    # On a completed lot, only surface the already-picked
+                    # pallets (for Remove) — hide fresh ones.
+                    if lot_complete and not is_picked:
+                        continue
                     pallets_view.append({
                         "pallet_licence_id": pl.id,
                         "licence_number": pl.licence_number or "",
@@ -525,6 +575,9 @@ def scanner_view_for_transfer(
                     if not is_picked:
                         pending_pallets += 1
                         pending_cases += float(pl.cases or 0)
+                # On a completed lot, drop rows that have nothing picked to show.
+                if lot_complete and not pallets_view:
+                    continue
                 rows_payload.append({
                     "row_id": rid or None,
                     "row_name": row_obj.name if row_obj else "Floor",
@@ -602,13 +655,18 @@ def _route_pick_to_sub_line(
         if ln.receipt_id == pl_receipt:
             return ln, alloc
 
-    # 2. A sub-line for (product, receipt) exists but didn't list this lot.
+    # 2. A sub-line for (product, receipt) exists. Prefer an existing allocation
+    # for this lot — even a fully-picked one — so an over-pull adds onto it
+    # instead of creating a duplicate entry; otherwise add a fresh allocation.
     receipt_sub = next(
         (ln for ln in transfer.lines
          if ln.product_id == pl_product and ln.receipt_id == pl_receipt),
         None,
     )
     if receipt_sub is not None:
+        for alloc in (receipt_sub.lot_allocations or []):
+            if alloc.get("lot_number") == pl_lot:
+                return receipt_sub, alloc
         new_alloc = {
             "lot_number": pl_lot,
             "cases_requested": 0.0,
@@ -841,47 +899,24 @@ def scan_pick_v2(
 
     lot_remaining = max(0.0, total_planned - total_picked_for_lot)
 
-    if lot_remaining <= 0:
-        _record_scan_event(db, transfer.id, pl, licence_number, on_list=False, scanned_by=user_id)
-        if lot_was_planned:
-            return {
-                "ok": False,
-                "reject_reason": ShipOutScanReason.LINE_COMPLETE.value,
-                "message": (
-                    f"Lot {pl.lot_number} for this product is already fully "
-                    f"picked. Pallet {label} is not needed."
-                ),
-            }
-        # Lot wasn't on the plan at all — offer to swap a currently-open lot
-        # over to the scanned lot.
-        suggestion = _build_swap_suggestion(db, transfer, pl.product_id, pl.lot_number or "")
-        return {
-            "ok": False,
-            "reject_reason": ShipOutScanReason.WRONG_LOT_NEEDS_SWAP.value,
-            "swap_suggestion": suggestion,
-            "message": (
-                f"Pallet {label} is lot {pl.lot_number}, which isn't on this "
-                f"order's plan for this product. Use the escape hatch to swap."
-            ),
-        }
+    # Lots are advisory under soft totals — nothing here rejects the scan.
+    #   - planned lot already met its number → this is an over-pull (allowed;
+    #     flagged for the approver).
+    #   - lot wasn't on the plan at all → accepted with a FIFO hint so the
+    #     forklift sees what the recommended (oldest) lot was.
+    # Over-pull is against real IN_STOCK pallets, so there's no oversell risk.
+    is_overage = bool(lot_was_planned and lot_remaining <= 0.001)
+    lot_hint = (
+        None if lot_was_planned
+        else _build_swap_suggestion(db, transfer, pl.product_id, pl.lot_number or "")
+    )
 
-    # 4. Decide full pull vs partial pull against the lot-level remaining.
+    # 4. Full pull by default — whole pallets are never force-broken to hit an
+    # exact lot/line total. A partial pull happens only when the forklift
+    # explicitly asks for one (sends cases_to_consume).
     pallet_cases = float(pl.cases or 0)
 
-    if pallet_cases > lot_remaining + 0.001:
-        # This pallet would overshoot the lot's remaining need. Partial pull.
-        if cases_to_consume is None:
-            # First pass — ask the UI to confirm the partial pull.
-            return {
-                "ok": False,
-                "needs_partial_confirm": True,
-                "suggested_partial_cases": lot_remaining,
-                "line_id": candidate_allocs[0][0].id,
-                "message": (
-                    f"Pallet has {pallet_cases:g} cases but only {lot_remaining:g} "
-                    f"are needed. Confirm partial pull?"
-                ),
-            }
+    if cases_to_consume is not None:
         consumed = float(cases_to_consume)
         # Cases are discrete — a fractional partial pull would desync the receipt
         # from the rounded pallet remainder (minting or destroying cases).
@@ -894,11 +929,7 @@ def scan_pick_v2(
             raise ValidationError(
                 f"Invalid partial cases: {consumed} (pallet has {pallet_cases})"
             )
-        if consumed > lot_remaining + 0.001:
-            raise ValidationError(
-                f"Partial pull {consumed} exceeds lot need {lot_remaining}"
-            )
-        was_partial = True
+        was_partial = consumed < pallet_cases
     else:
         consumed = pallet_cases
         was_partial = False
@@ -914,6 +945,9 @@ def scan_pick_v2(
         "pallet_licence_id": pl.id,
         "cases_consumed": consumed,
         "was_partial": was_partial,
+        # Capture the origin row BEFORE the pallet is mutated below, so an
+        # unscan can restore the pallet to exactly where it came from.
+        "storage_row_id": pl.storage_row_id,
         "scanned_at": now.isoformat(),
         "scanned_by": user_id,
     }
@@ -994,24 +1028,20 @@ def scan_pick_v2(
             # (only the shipped portion; partials keep their remainder).
             receipt.quantity = max(0.0, float(receipt.quantity or 0) - consumed)
 
-    # 8. Release reservation capacity by the consumed amount. In the normal
-    # case the matched sub-line has its own reservation for this lot. In the
-    # drift case the new sub-line has no reservation — instead we walk the
-    # sibling sub-lines of (transfer, product, lot) and drain their
-    # reservations FIFO. Either way, the total reserved across (product, lot)
-    # decrements by `consumed`.
-    line_ids_for_product_lot = [
-        ln.id for ln in transfer.lines
-        if ln.product_id == pl.product_id
-        and any(a.get("lot_number") == (pl.lot_number or "") for a in (ln.lot_allocations or []))
+    # 8. Release reservation capacity by the consumed amount. Reservations pool
+    # at the product level (Phase D), so we drain this order's reservations for
+    # the pallet's product FIFO — regardless of lot — by `consumed`. The min()
+    # clamp means an over-pull simply drains the order's reservations to zero
+    # (never negative); over-pull is against real stock, so no oversell.
+    product_line_ids = [
+        ln.id for ln in transfer.lines if ln.product_id == pl.product_id
     ]
     remaining_to_release = consumed
-    if line_ids_for_product_lot:
+    if product_line_ids:
         sibling_reservations = (
             db.query(ShipOutLotReservation)
             .filter(
-                ShipOutLotReservation.transfer_line_id.in_(line_ids_for_product_lot),
-                ShipOutLotReservation.lot_number == (pl.lot_number or ""),
+                ShipOutLotReservation.transfer_line_id.in_(product_line_ids),
                 ShipOutLotReservation.released_at.is_(None),
             )
             .order_by(ShipOutLotReservation.created_at)
@@ -1054,9 +1084,195 @@ def scan_pick_v2(
         "lot_remaining": max(0.0, lot_remaining_after),
         "row_emptied": row_emptied,
         "partial_pallet_remaining": float(pl.cases or 0) if was_partial else None,
+        "is_overage": is_overage,
+        "lot_hint": lot_hint,
         "message": (
             f"Pulled {consumed:g} cases from pallet {label}"
             + (" (partial)" if was_partial else "")
+            + (" — over the ordered amount" if is_overage else "")
+            + (
+                f" — note: lot {pl.lot_number} isn't the recommended (oldest) lot"
+                if lot_hint else ""
+            )
+        ),
+    }
+
+
+def unscan_pick_v2(
+    db: Session, transfer: InventoryTransfer, pallet_licence_id: str,
+    reason: str, current_user
+) -> dict:
+    """Reverse a single recorded pick on an open (PENDING) v2 ship-out.
+
+    The forklift uses this when a pallet was scanned by mistake, or when a
+    scanned pallet turns out to be damaged (a leaker). Both reasons take the
+    cases back off the order and return the physical pallet to its origin row;
+    the difference is what happens to the pallet afterwards:
+
+      - ``wrong_pallet``  → fully back in shippable stock, free to re-scan.
+      - ``leaker_damaged`` → a PENDING pallet hold is created so a supervisor
+        reviews it; the pallet stays in inventory but is blocked from shipping.
+
+    Receipt on-hand is re-credited in both cases (the physical pallet still
+    exists), and the lot reservation is restored (the order still owes those
+    cases — the driver will pick a replacement). Partial-pull picks can't be
+    unscanned here (they'd require reconstituting a split pallet) — use an
+    inventory adjustment instead. Caller owns commit/rollback.
+    """
+    if transfer.transfer_type != TRANSFER_TYPE_SHIPPED_OUT:
+        raise ValidationError("Not a ship-out transfer")
+    if transfer.status != TransferStatus.PENDING:
+        raise ValidationError("Pick list is no longer open for scanning")
+    if reason not in ("wrong_pallet", "leaker_damaged"):
+        raise ValidationError("reason must be 'wrong_pallet' or 'leaker_damaged'")
+
+    user_id = str(current_user.id) if current_user else None
+
+    # 1. Locate the pick across all sub-lines.
+    target_line = None
+    pick_entry = None
+    pick_index = -1
+    for ln in (transfer.lines or []):
+        for i, p in enumerate(ln.picks or []):
+            if p.get("pallet_licence_id") == pallet_licence_id:
+                target_line, pick_entry, pick_index = ln, p, i
+                break
+        if pick_entry is not None:
+            break
+
+    if pick_entry is None:
+        raise ValidationError("That pallet is not on this order's picked list")
+    if pick_entry.get("was_partial"):
+        raise ValidationError(
+            "Partial pulls can't be removed here — correct with an inventory "
+            "adjustment instead."
+        )
+
+    consumed = float(pick_entry.get("cases_consumed") or 0)
+    pl = (
+        db.query(PalletLicence)
+        .filter(PalletLicence.id == pallet_licence_id)
+        .with_for_update()
+        .first()
+    )
+    if not pl:
+        raise NotFoundError("PalletLicence", pallet_licence_id)
+    lot_key = pl.lot_number or ""
+
+    # 2. Remove the pick from the sub-line (copy+reassign for JSON mutation).
+    target_line.picks = [
+        p for j, p in enumerate(target_line.picks or []) if j != pick_index
+    ]
+    target_line.cases_picked = max(0.0, float(target_line.cases_picked or 0) - consumed)
+
+    # Decrement the matching lot allocation's cases_picked (first match only).
+    new_allocs, decremented = [], False
+    for a in (target_line.lot_allocations or []):
+        if not decremented and a.get("lot_number") == lot_key:
+            new_allocs.append({
+                **a,
+                "cases_picked": max(0.0, float(a.get("cases_picked") or 0) - consumed),
+            })
+            decremented = True
+        else:
+            new_allocs.append(a)
+    target_line.lot_allocations = new_allocs
+
+    # Drop the pallet from the line + parent denormalized id lists.
+    target_line.pallet_licence_ids = [
+        x for x in (target_line.pallet_licence_ids or []) if x != pl.id
+    ]
+    transfer.pallet_licence_ids = [
+        x for x in (transfer.pallet_licence_ids or []) if x != pl.id
+    ]
+
+    # 3. Restore the pallet to its origin row, IN_STOCK.
+    pl.status = PalletStatus.IN_STOCK
+    pl.transfer_id = None
+    pl.cases = consumed  # full pull → the pallet held exactly `consumed` cases
+    origin_row_id = pick_entry.get("storage_row_id") or pl.storage_row_id
+    if origin_row_id:
+        row = db.query(StorageRow).filter(StorageRow.id == origin_row_id).first()
+        if row:
+            pl.storage_row_id = row.id
+            pl.storage_area_id = row.storage_area_id
+            _add_to_row(row, pl, consumed)
+
+    # 4. Re-credit the receipt's on-hand and rebuild its row allocation
+    # (inverse of the scan-time decrement).
+    if pl.receipt_id:
+        receipt = db.query(Receipt).filter(Receipt.id == pl.receipt_id).first()
+        if receipt:
+            receipt.quantity = float(receipt.quantity or 0) + consumed
+            _rebuild_receipt_allocation_from_licences(db, receipt)
+
+    # 5. Restore reservation capacity (product-level) — the order still owes
+    # these cases, so keep the product pool soft-locked against other orders.
+    db.add(ShipOutLotReservation(
+        id=_new_id("solr"),
+        transfer_line_id=target_line.id,
+        product_id=pl.product_id,
+        lot_number=None,
+        cases_reserved=consumed,
+    ))
+
+    # 6. Leaker → block the pallet from shipping via a PENDING pallet hold
+    # (supervisor reviews it; existing hold-approval flow flips is_held).
+    hold_created = False
+    if reason == "leaker_damaged":
+        import uuid as _uuid
+        from types import SimpleNamespace
+        from app.services import hold_service
+        from app.models import InventoryHoldAction
+        from app.enums import HoldStatus
+
+        hold_input = SimpleNamespace(
+            action="hold",
+            reason=f"Damaged at ship-out (order {transfer.order_number})",
+            pallet_licence_ids=[pl.id],
+            hold_items=None,
+            receipt_id=None,
+            total_quantity=None,
+        )
+        hold_dict = hold_service.validate_and_build_hold_dict(db, hold_input)
+        db.add(InventoryHoldAction(
+            id=f"hold-{_uuid.uuid4().hex[:12]}",
+            **hold_dict,
+            submitted_by=user_id,
+            warehouse_id=transfer.warehouse_id,
+            status=HoldStatus.PENDING,
+        ))
+        hold_created = True
+
+    # 7. Audit: a removal is recorded as a one-sided pallet swap (removed only).
+    db.add(TransferPalletSwap(
+        id=_new_id("swap"),
+        transfer_id=transfer.id,
+        transfer_line_id=target_line.id,
+        removed_pallet_id=pl.id,
+        added_pallet_id=None,
+        swapped_by=user_id,
+        reason=reason,
+        source="forklift",
+    ))
+
+    line_remaining_after = sum(
+        max(0.0, float(ln.cases_requested or 0) - float(ln.cases_picked or 0))
+        for ln in transfer.lines
+        if ln.product_id == pl.product_id
+    )
+
+    return {
+        "ok": True,
+        "removed_pallet_licence_id": pl.id,
+        "licence_number": pl.licence_number or pl.id,
+        "reason": reason,
+        "hold_created": hold_created,
+        "line_id": target_line.id,
+        "line_remaining": max(0.0, line_remaining_after),
+        "message": (
+            f"Removed pallet {pl.licence_number or pl.id} ({consumed:g} cases)"
+            + (" — placed on hold for review" if hold_created else "")
         ),
     }
 
@@ -1283,6 +1499,216 @@ def lot_escape_hatch(
         "swapped_to_lot": new_lot,
         "new_line_view": line_view,
         "message": f"Swapped lot {blocked_lot_number} → {new_lot} ({outstanding:g} cases)",
+    }
+
+
+def available_lots_for_line(
+    db: Session, transfer: InventoryTransfer, line_id: str
+) -> dict:
+    """All lots of a line's product, oldest first, for the reversible lot
+    picker. Unlike the old escape hatch this hides nothing — a lot the forklift
+    previously moved away from is still listed, so going back is just selecting
+    it again. Capacity nets out OTHER orders' product reservations (this order's
+    own free up when it retargets), attributed to the oldest lots first."""
+    if transfer.transfer_type != TRANSFER_TYPE_SHIPPED_OUT:
+        raise ValidationError("Not a ship-out transfer")
+    target_line = next((ln for ln in (transfer.lines or []) if ln.id == line_id), None)
+    if target_line is None:
+        raise NotFoundError("Transfer line", line_id)
+
+    product_id = target_line.product_id
+    sibling_ids = [ln.id for ln in (transfer.lines or []) if ln.product_id == product_id]
+
+    # Lots the line still has open allocations for (to flag "current").
+    current_lots: set = set()
+    for ln in (transfer.lines or []):
+        if ln.product_id != product_id:
+            continue
+        for alloc in (ln.lot_allocations or []):
+            open_cases = float(alloc.get("cases_requested") or 0) - float(alloc.get("cases_picked") or 0)
+            if open_cases > 0.001:
+                current_lots.add(alloc.get("lot_number") or "")
+
+    reserved_other = _active_product_reservation_cases(db, product_id, exclude_line_ids=sibling_ids)
+    entries = _lot_entries_with_availability(db, product_id, transfer.warehouse_id, reserved_other)
+
+    lots = []
+    for e in entries:
+        lots.append({
+            "lot_number": e["lot_number"],
+            "cases_available": e["cases_available"],
+            "pallets_available": e["pallets_available"],
+            "oldest_at": e["oldest_at"],
+            "is_current": e["lot_number"] in current_lots,
+            "is_recommended": False,  # set below
+            "rows": e["rows"],
+        })
+
+    # Recommended = oldest lot that actually has capacity to switch into.
+    for lot in lots:
+        if lot["cases_available"] > 0.001:
+            lot["is_recommended"] = True
+            break
+
+    return {"line_id": line_id, "product_id": product_id, "lots": lots}
+
+
+def retarget_lot(
+    db: Session, transfer: InventoryTransfer, line_id: str,
+    from_lot: str, to_lot: str, reason: Optional[str], current_user
+) -> dict:
+    """Move a line's outstanding cases from one lot to another, chosen
+    explicitly by the forklift. Reversible replacement for the one-way escape
+    hatch: any lot (including one previously left) can be the target, and if the
+    target can't cover everything we move what's available and leave the rest
+    open on the original lot (soft totals make that safe). Operates across all
+    sub-lines of the line's product."""
+    if transfer.transfer_type != TRANSFER_TYPE_SHIPPED_OUT:
+        raise ValidationError("Not a ship-out transfer")
+    if transfer.status != TransferStatus.PENDING:
+        raise ValidationError("Pick list is no longer open")
+    if from_lot == to_lot:
+        raise ValidationError("Choose a different lot to move to")
+
+    target_line = next((ln for ln in (transfer.lines or []) if ln.id == line_id), None)
+    if target_line is None:
+        raise NotFoundError("Transfer line", line_id)
+    product_id = target_line.product_id
+    sibling_subs = [ln for ln in (transfer.lines or []) if ln.product_id == product_id]
+
+    # Outstanding cases still owed on from_lot across all sub-lines.
+    outstanding = 0.0
+    for sub in sibling_subs:
+        for alloc in (sub.lot_allocations or []):
+            if alloc.get("lot_number") == from_lot:
+                outstanding += max(
+                    0.0,
+                    float(alloc.get("cases_requested") or 0) - float(alloc.get("cases_picked") or 0),
+                )
+    if outstanding <= 0.001:
+        raise ValidationError(f"Nothing left to move for lot {from_lot}")
+
+    # How much can the target lot absorb? Capacity nets out OTHER orders'
+    # product reservations (this order's own free up as it moves), attributed
+    # FIFO to the oldest lots — same model the picker shows.
+    pool = _pallet_pool_for_product(db, product_id, transfer.warehouse_id, lock=True)
+    sibling_ids = [s.id for s in sibling_subs]
+    reserved_other = _active_product_reservation_cases(db, product_id, exclude_line_ids=sibling_ids)
+    entries = _lot_entries_with_availability(db, product_id, transfer.warehouse_id, reserved_other)
+    to_lot_free = next((e["cases_available"] for e in entries if e["lot_number"] == to_lot), 0.0)
+    if to_lot_free <= 0.001:
+        raise ValidationError(f"Lot {to_lot} has no available capacity to move into")
+
+    moved = min(outstanding, to_lot_free)
+    now = datetime.now(timezone.utc)
+
+    # 1. Reduce from_lot's open allocation by `moved`, walking sub-lines.
+    to_reduce = moved
+    for sub in sibling_subs:
+        if to_reduce <= 0.001:
+            break
+        allocs = list(sub.lot_allocations or [])
+        changed = False
+        for i, alloc in enumerate(allocs):
+            if to_reduce <= 0.001:
+                break
+            if alloc.get("lot_number") != from_lot:
+                continue
+            req = float(alloc.get("cases_requested") or 0)
+            picked = float(alloc.get("cases_picked") or 0)
+            open_cases = max(0.0, req - picked)
+            if open_cases <= 0:
+                continue
+            take = min(to_reduce, open_cases)
+            allocs[i] = {
+                "lot_number": from_lot,
+                "cases_requested": req - take,
+                "cases_picked": picked,
+            }
+            sub.cases_requested = max(0.0, float(sub.cases_requested or 0) - take)
+            to_reduce -= take
+            changed = True
+        if changed:
+            sub.lot_allocations = allocs
+
+    # 2. Reservations pool at the product level, and the order's total cases for
+    # this product is unchanged by a lot move — so no reservation change here.
+
+    # 3. Split `moved` across to_lot receipts and attach to sub-lines.
+    chunks = _split_lot_allocation_by_receipt(db, pool, product_id, to_lot, moved)
+    if not chunks:
+        raise ValidationError(
+            f"Could not split {moved:g} cases across receipts for lot {to_lot}"
+        )
+    for receipt_id, alloc_cases in chunks:
+        existing_sub = next((s for s in sibling_subs if s.receipt_id == receipt_id), None)
+        if existing_sub is None:
+            new_sub = InventoryTransferLine(
+                id=_new_id("trln"),
+                transfer_id=transfer.id,
+                product_id=product_id,
+                receipt_id=receipt_id,
+                cases_requested=alloc_cases,
+                cases_picked=0.0,
+                pallet_licence_ids=[],
+                lot_allocations=[{
+                    "lot_number": to_lot,
+                    "cases_requested": alloc_cases,
+                    "cases_picked": 0.0,
+                }],
+                picks=[],
+                lot_swap_history=[],
+                line_seq=(target_line.line_seq or 0),
+            )
+            db.add(new_sub)
+            sibling_subs.append(new_sub)
+        else:
+            allocs = list(existing_sub.lot_allocations or [])
+            merged = False
+            for i, alloc in enumerate(allocs):
+                if alloc.get("lot_number") == to_lot:
+                    allocs[i] = {
+                        "lot_number": to_lot,
+                        "cases_requested": float(alloc.get("cases_requested") or 0) + alloc_cases,
+                        "cases_picked": float(alloc.get("cases_picked") or 0),
+                    }
+                    merged = True
+                    break
+            if not merged:
+                allocs.append({
+                    "lot_number": to_lot,
+                    "cases_requested": alloc_cases,
+                    "cases_picked": 0.0,
+                })
+            existing_sub.lot_allocations = allocs
+            existing_sub.cases_requested = float(existing_sub.cases_requested or 0) + alloc_cases
+
+    # 4. Audit only — record the move but do NOT block any lot or row, so the
+    # forklift can move back later.
+    swap_entry = {
+        "from_lot": from_lot,
+        "to_lot": to_lot,
+        "cases": moved,
+        "reason": reason,
+        "at": now.isoformat(),
+        "by": str(current_user.id) if current_user else None,
+        "blocked_row_ids": [],
+    }
+    target_line.lot_swap_history = list(target_line.lot_swap_history or []) + [swap_entry]
+
+    db.flush()
+    refreshed = scanner_view_for_transfer(db, transfer)
+    line_view = next((l for l in refreshed["lines"] if l["product_id"] == product_id), None)
+    leftover = outstanding - moved
+    return {
+        "moved_to_lot": to_lot,
+        "cases_moved": moved,
+        "cases_left_on_from_lot": max(0.0, leftover),
+        "new_line_view": line_view,
+        "message": (
+            f"Moved {moved:g} cases from lot {from_lot} → {to_lot}"
+            + (f"; {leftover:g} cases left on {from_lot}" if leftover > 0.001 else "")
+        ),
     }
 
 

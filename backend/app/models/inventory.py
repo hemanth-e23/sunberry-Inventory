@@ -103,7 +103,10 @@ class ShipOutLotReservation(Base):
         index=True,
     )
     product_id = Column(String(50), ForeignKey("products.id"), nullable=False)
-    lot_number = Column(String(100), nullable=False)
+    # Phase D: reservations pool at the PRODUCT level — NULL means "not pinned to
+    # a lot" (the lot is chosen live at scan time). Legacy rows may still carry a
+    # specific lot; the product-level sums ignore lot_number either way.
+    lot_number = Column(String(100), nullable=True)
     cases_reserved = Column(Float, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     released_at = Column(DateTime(timezone=True), nullable=True)

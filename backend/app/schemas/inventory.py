@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime, date
 from pydantic import Field
 from app.schemas.base import BaseSchema
@@ -240,6 +240,33 @@ class ScanPickResponseV2(BaseSchema):
     suggested_partial_cases: Optional[float] = None
     reject_reason: Optional[str] = None
     swap_suggestion: Optional[ScannerLotView] = None
+    # Soft-total flow: scan accepted but worth a non-blocking heads-up.
+    is_overage: bool = False  # pulled more than the line/lot planned
+    lot_hint: Optional[ScannerLotView] = None  # scanned an off-plan (non-FIFO) lot
+    message: Optional[str] = None
+
+
+# --- Phase 2: remove a scanned pallet (unscan) ------------------------------
+
+class UnscanPickRequestV2(BaseSchema):
+    """Forklift removes a pallet already scanned onto this order.
+
+    `reason` decides the pallet's fate after it comes off the order:
+      - "wrong_pallet": back into shippable stock, free to re-scan
+      - "leaker_damaged": a PENDING pallet hold is raised for supervisor review
+    """
+    pallet_licence_id: str = Field(..., min_length=1)
+    reason: Literal["wrong_pallet", "leaker_damaged"]
+
+
+class UnscanPickResponseV2(BaseSchema):
+    ok: bool
+    removed_pallet_licence_id: Optional[str] = None
+    licence_number: Optional[str] = None
+    reason: Optional[str] = None
+    hold_created: bool = False
+    line_id: Optional[str] = None
+    line_remaining: Optional[float] = None
     message: Optional[str] = None
 
 
@@ -258,6 +285,18 @@ class LotEscapeHatchResponse(BaseSchema):
     swapped_to_lot: Optional[str] = None  # null if no suitable lot found
     new_line_view: Optional[ScannerLineView] = None
     message: str
+
+
+# --- Phase 2: reversible lot picker -----------------------------------------
+
+class RetargetLotRequest(BaseSchema):
+    """Forklift moves a line's outstanding cases from one lot to another lot it
+    explicitly chose from the picker. Reversible — `to_lot` may be a lot the
+    line previously moved away from."""
+    line_id: str = Field(..., min_length=1)
+    from_lot: str = Field(..., min_length=1)
+    to_lot: str = Field(..., min_length=1)
+    reason: Optional[str] = Field(None, max_length=500)
 
 
 # Adjustment schemas

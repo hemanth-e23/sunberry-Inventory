@@ -174,7 +174,11 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
             String(a.lot_number).localeCompare(String(b.lot_number))
           );
         })();
-        const swaps = transfer.swaps || progress?.swaps || [];
+        const allSwaps = transfer.swaps || progress?.swaps || [];
+        // A removal (unscan) is recorded as a one-sided swap: removed pallet,
+        // no added pallet. Real swaps have both sides.
+        const swaps = allSwaps.filter((s) => s.added_pallet_id);
+        const removals = allSwaps.filter((s) => !s.added_pallet_id && s.removed_pallet_id);
         const headerTitle = isMultiProduct
           ? (transfer.orderNumber || transfer.order_number || `Order ${transfer.id.slice(-8)}`)
           : (product?.name || 'Unknown Product');
@@ -276,7 +280,14 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                         <td style={{ padding: '6px 10px', color: '#64748b' }}>{ln.product_fcc_code || '—'}</td>
                         <td style={{ padding: '6px 10px', color: '#64748b' }}>{ln.lot_number || '—'}</td>
                         <td style={{ padding: '6px 10px', textAlign: 'right' }}>{(ln.cases_requested || 0).toLocaleString()}</td>
-                        <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 600 }}>{(ln.cases_picked || 0).toLocaleString()}</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 600 }}>
+                          {(ln.cases_picked || 0).toLocaleString()}
+                          {(ln.cases_picked || 0) > (ln.cases_requested || 0) && (
+                            <span style={{ marginLeft: '6px', background: '#fef3c7', color: '#92400e', borderRadius: '4px', padding: '1px 5px', fontSize: '10px', fontWeight: 700 }}>
+                              +{((ln.cases_picked || 0) - (ln.cases_requested || 0)).toLocaleString()} over
+                            </span>
+                          )}
+                        </td>
                         <td style={{ padding: '6px 10px', textAlign: 'right' }}>{(ln.pallet_licence_ids || []).length}</td>
                       </tr>
                     ))}
@@ -298,6 +309,27 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                     <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{s.added_licence_number || '?'}</span>
                     {s.swapped_by_name || s.swapped_by ? ` · by ${s.swapped_by_name || s.swapped_by}` : ''}
                     {s.source ? ` (${s.source === 'forklift' ? 'forklift' : 'warehouse edit'})` : ''}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Removals: pallets the forklift took back off the order */}
+            {removals.length > 0 && (
+              <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '8px', padding: '8px 12px', marginBottom: '10px', fontSize: '12px', color: '#991b1b' }}>
+                <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+                  ⚠ {removals.length} pallet{removals.length !== 1 ? 's' : ''} removed during picking
+                </div>
+                {removals.map((s) => (
+                  <div key={s.id || s.removed_pallet_id}>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{s.removed_licence_number || '?'}</span>
+                    {' — '}
+                    {s.reason === 'leaker_damaged'
+                      ? 'damaged / leaker (placed on hold)'
+                      : s.reason === 'wrong_pallet'
+                        ? 'wrong pallet (returned to stock)'
+                        : (s.reason || 'removed')}
+                    {s.swapped_by_name || s.swapped_by ? ` · by ${s.swapped_by_name || s.swapped_by}` : ''}
                   </div>
                 ))}
               </div>

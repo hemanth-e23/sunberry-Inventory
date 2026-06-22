@@ -19,7 +19,8 @@ from app.schemas import (
     ShipOutPickListCreate, ScanPickRequest, ForkliftSubmitRequest,
     TransferEditRequest, TransferVoidRequest,
     # v2 lot-level ship-out
-    ShipOutPickListCreateV2, ScanPickRequestV2, LotEscapeHatchRequest,
+    ShipOutPickListCreateV2, ScanPickRequestV2, UnscanPickRequestV2, LotEscapeHatchRequest,
+    RetargetLotRequest,
 )
 from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus, ShipOutScanReason
@@ -116,6 +117,9 @@ def _transfer_to_response(transfer, db: Session) -> dict:
                 "lot_number": rcpt.lot_number if rcpt else None,
                 "cases_requested": ln.cases_requested,
                 "cases_picked": ln.cases_picked,
+                # Over-pull is allowed (totals are soft) — flag it so the
+                # approver sees when more shipped than was ordered.
+                "is_overage": float(ln.cases_picked or 0) > float(ln.cases_requested or 0) + 0.001,
                 "pallet_licence_ids": ln.pallet_licence_ids or [],
                 # v2 lot-level fields (populated by the new pick-list flow;
                 # backfilled for legacy rows by the migration)
@@ -1398,6 +1402,107 @@ async def scan_pick_v2_endpoint(
     try:
         result = ship_out_service.scan_pick_v2(
             db, transfer, data.licence_number, data.cases_to_consume, current_user
+        )
+    except Exception as e:
+        db.rollback()
+        from app.exceptions import ValidationError, NotFoundError
+        if isinstance(e, (ValidationError, NotFoundError)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise
+
+    db.commit()
+    return result
+
+
+@router.post("/transfers/{transfer_id}/unscan-pick-v2")
+async def unscan_pick_v2_endpoint(
+    transfer_id: str,
+    data: UnscanPickRequestV2,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+):
+    """Phase 2 remove-a-scan: take a scanned pallet back off the order.
+
+    `reason="wrong_pallet"` returns it to shippable stock; `reason="leaker_damaged"`
+    raises a PENDING pallet hold for supervisor review. Forklift may remove freely;
+    the removal surfaces on the approval view."""
+    from app.services import ship_out_service
+
+    transfer = (
+        db.query(InventoryTransfer)
+        .filter(InventoryTransfer.id == transfer_id)
+        .with_for_update()
+        .first()
+    )
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+    _ship_out_only(transfer)
+
+    try:
+        result = ship_out_service.unscan_pick_v2(
+            db, transfer, data.pallet_licence_id, data.reason, current_user
+        )
+    except Exception as e:
+        db.rollback()
+        from app.exceptions import ValidationError, NotFoundError
+        if isinstance(e, (ValidationError, NotFoundError)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise
+
+    db.commit()
+    return result
+
+
+@router.get("/transfers/{transfer_id}/lots-for-line")
+async def lots_for_line_endpoint(
+    transfer_id: str,
+    line_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+):
+    """Reversible lot picker: all lots of a line's product, oldest first, with
+    capacity + recommended/current flags. Nothing is hidden, so the forklift can
+    move back to a lot it previously left."""
+    from app.services import ship_out_service
+
+    transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == transfer_id).first()
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+    _ship_out_only(transfer)
+
+    try:
+        return ship_out_service.available_lots_for_line(db, transfer, line_id)
+    except Exception as e:
+        from app.exceptions import ValidationError, NotFoundError
+        if isinstance(e, (ValidationError, NotFoundError)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise
+
+
+@router.post("/transfers/{transfer_id}/retarget-lot")
+async def retarget_lot_endpoint(
+    transfer_id: str,
+    data: RetargetLotRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+):
+    """Reversible lot move: shift a line's outstanding cases to a forklift-chosen
+    lot. Moves what the target can cover and leaves the rest open (soft totals)."""
+    from app.services import ship_out_service
+
+    transfer = (
+        db.query(InventoryTransfer)
+        .filter(InventoryTransfer.id == transfer_id)
+        .with_for_update()
+        .first()
+    )
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+    _ship_out_only(transfer)
+
+    try:
+        result = ship_out_service.retarget_lot(
+            db, transfer, data.line_id, data.from_lot, data.to_lot, data.reason, current_user,
         )
     except Exception as e:
         db.rollback()

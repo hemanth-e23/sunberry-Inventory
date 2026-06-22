@@ -5,7 +5,6 @@ import ScannerLayout from './ScannerLayout';
 import ScanFeedback from './ScanFeedback';
 import LicenceDisplay from './LicenceDisplay';
 import { isValidLicenceFormat, playSuccessTone, playErrorTone } from '../../utils/scannerFeedback';
-import { SHIP_OUT_SCAN_REASON } from '../../constants';
 import {
   Truck, Scan, CheckCircle2, AlertTriangle, XCircle, ChevronRight,
   Package, MapPin, Hash, Send, RefreshCw, Keyboard, Ban, ArrowRight,
@@ -20,15 +19,16 @@ const POLL_INTERVAL = 4000;
  * Differences from v1:
  *   - Server returns a per-line / per-lot / per-row tree of pallets rather
  *     than a flat planned list. The forklift can scan ANY pallet whose
- *     full licence matches an open lot allocation on the order.
- *   - On a partial-pull (pallet has more cases than the line needs), the
- *     server returns `needs_partial_confirm` with a suggested amount; the
- *     forklift confirms and we re-submit with `cases_to_consume`.
- *   - On a scanned pallet from the wrong lot (right product), the server
- *     returns `WRONG_LOT_NEEDS_SWAP` with a `swap_suggestion`; the forklift
- *     can swap the line's lot via the lot-escape-hatch endpoint.
- *   - "Not accessible" button per row: marks the row blocked locally, and
- *     when all rows of a lot are blocked auto-triggers the escape hatch.
+ *     full licence matches the order's product.
+ *   - Soft totals: lots are advisory. Over-pulls and off-plan (non-FIFO) lots
+ *     are accepted (server flags `is_overage` / `lot_hint` as a heads-up).
+ *     Whole pallets are pulled by default — a partial pull only happens when
+ *     the forklift explicitly sends `cases_to_consume`.
+ *   - "Remove" on a picked pallet takes it back off the order (mistake →
+ *     back to stock; leaker → on hold) via the unscan endpoint.
+ *   - "Change lot" opens a reversible lot picker (all lots, oldest first) and
+ *     retargets the line's outstanding cases — fully reversible.
+ *   - "Not accessible" per row is a local visual aid only.
  */
 const ScannerShipOutFlowV2 = () => {
   const navigate = useNavigate();
@@ -55,10 +55,15 @@ const ScannerShipOutFlowV2 = () => {
   const [partialPrompt, setPartialPrompt] = useState(null);
   // { licenceNumber, suggestedCases, palletCases, lineId, lotNumber, message }
 
-  // Pending wrong-lot swap (modal driver) — pallet is in this scanned lot,
-  // but the order has a different lot allocated; user confirms swap.
-  const [swapPrompt, setSwapPrompt] = useState(null);
-  // { licenceNumber, scannedLot, blockedLot, lineId, message }
+  // Reversible lot picker (modal driver) — forklift opens the full lot list
+  // for a line and moves outstanding cases to a chosen lot.
+  const [lotPicker, setLotPicker] = useState(null);
+  // { lineId, fromLot, lots: [...], loading }
+
+  // Pending remove-a-scan (modal driver) — forklift wants to take a scanned
+  // pallet back off the order (mistake, or a leaker found after scanning).
+  const [removePrompt, setRemovePrompt] = useState(null);
+  // { palletLicenceId, licenceNumber }
 
   const inputRef = useRef(null);
 
@@ -206,23 +211,9 @@ const ScannerShipOutFlowV2 = () => {
     }
 
     if (!data.ok) {
-      if (data.reject_reason === SHIP_OUT_SCAN_REASON.WRONG_LOT_NEEDS_SWAP) {
-        // Offer the lot swap. We need to know which lot to swap OUT — that's
-        // any currently-open lot on a matching-product line. Find one from
-        // the view.
-        const scannedLot = data.swap_suggestion?.lot_number;
-        const blockedLot = pickFirstOpenLotForProductFromView(view, data.swap_suggestion);
-        if (scannedLot && blockedLot) {
-          setSwapPrompt({
-            licenceNumber: lic,
-            scannedLot,
-            blockedLot: blockedLot.lotNumber,
-            lineId: blockedLot.lineId,
-            message: data.message,
-          });
-          return;
-        }
-      }
+      // Wrong-lot pulls are no longer rejected (lots are advisory) — the server
+      // accepts them with a lot_hint. Remaining rejects are hard errors
+      // (not found, on hold, wrong warehouse/product).
       const msg = data.message || `Pallet "${lic}" not accepted.`;
       setScanFeedback({ type: 'err', msg });
       showOverlayError(msg);
@@ -234,7 +225,10 @@ const ScannerShipOutFlowV2 = () => {
     if (data.pick?.was_partial) {
       msg = `↳ Partial pull: ${data.pick.cases_consumed} cs. Remaining ${data.partial_pallet_remaining} cs → Partials row.`;
     }
-    setScanFeedback({ type: 'ok', msg });
+    // Over-pull or an off-plan (non-FIFO) lot is accepted, but flag it as a
+    // non-blocking heads-up rather than a clean success.
+    const advisory = data.is_overage || !!data.lot_hint;
+    setScanFeedback({ type: advisory ? 'warn' : 'ok', msg });
     showOverlaySuccess(msg);
     loadView(selectedTransfer.id);
   };
@@ -258,39 +252,8 @@ const ScannerShipOutFlowV2 = () => {
     }
   };
 
-  // Confirm a lot swap (forklift accepted that this is the right next lot)
-  const confirmSwap = async () => {
-    if (!swapPrompt) return;
-    setLoading(true);
-    try {
-      // First swap the lot, then re-scan the same pallet to actually pick it.
-      await apiClient.post(
-        `/inventory/transfers/${selectedTransfer.id}/lot-escape-hatch`,
-        {
-          line_id: swapPrompt.lineId,
-          blocked_lot_number: swapPrompt.blockedLot,
-          blocked_row_ids: [],
-          reason: `Forklift swap to scanned lot ${swapPrompt.scannedLot}`,
-        }
-      );
-      // Re-scan the pallet so the line records the pick on the new lot
-      const r = await callScanPick(swapPrompt.licenceNumber, null);
-      setSwapPrompt(null);
-      handleScanResponse(r.data, swapPrompt.licenceNumber);
-    } catch (err) {
-      const msg = err.response?.data?.detail || 'Swap failed';
-      setScanFeedback({ type: 'err', msg });
-      showOverlayError(msg);
-      setSwapPrompt(null);
-    } finally {
-      setLoading(false);
-      setTimeout(() => inputRef.current?.focus(), 100);
-    }
-  };
-
-  // Toggle a row's "not accessible" mark. Purely local — does NOT swap the
-  // lot automatically. The forklift may later un-mark the row, OR press
-  // the per-lot "Try next lot" button to explicitly escape.
+  // Toggle a row's "not accessible" mark. Purely local visual aid — the
+  // forklift just picks a different lot via "Change lot" when a rack is blocked.
   const toggleRowBlocked = (lineId, lotNumber, rowId) => {
     setBlockedRowsByLine((prev) => {
       const next = { ...prev };
@@ -316,42 +279,78 @@ const ScannerShipOutFlowV2 = () => {
     });
   };
 
-  // Explicit escape-hatch: forklift confirms the lot is unreachable and
-  // wants to swap to the next-oldest lot. Only enabled when at least one
-  // row is marked blocked (UI rule).
-  const swapLotToNext = async (lineId, lotNumber) => {
-    const lineMap = blockedRowsByLine[lineId] || {};
-    const blocked = lineMap[lotNumber] || [];
+  // Open the reversible lot picker for a line — fetches ALL lots (oldest
+  // first, recommended/current flagged) so the forklift can move to any lot,
+  // including one previously left.
+  const openLotPicker = async (lineId, fromLot) => {
+    setLotPicker({ lineId, fromLot, lots: [], loading: true });
+    try {
+      const r = await apiClient.get(
+        `/inventory/transfers/${selectedTransfer.id}/lots-for-line`,
+        { params: { line_id: lineId } }
+      );
+      setLotPicker({ lineId, fromLot, lots: r.data?.lots || [], loading: false });
+    } catch (err) {
+      const msg = err.response?.data?.detail || 'Could not load lots';
+      setScanFeedback({ type: 'err', msg });
+      showOverlayError(msg);
+      setLotPicker(null);
+    }
+  };
+
+  // Move the line's outstanding cases from the current lot to the chosen lot.
+  const confirmRetarget = async (toLot) => {
+    if (!lotPicker) return;
     setLoading(true);
     try {
-      await apiClient.post(
-        `/inventory/transfers/${selectedTransfer.id}/lot-escape-hatch`,
-        {
-          line_id: lineId,
-          blocked_lot_number: lotNumber,
-          blocked_row_ids: blocked.filter(Boolean),
-          reason: 'Forklift requested swap to next lot',
-        }
+      const r = await apiClient.post(
+        `/inventory/transfers/${selectedTransfer.id}/retarget-lot`,
+        { line_id: lotPicker.lineId, from_lot: lotPicker.fromLot, to_lot: toLot,
+          reason: 'Forklift changed lot at load time' }
       );
-      // Clear local blocks for this lot; new lot will surface in the view
-      setBlockedRowsByLine((prev) => {
-        const next = { ...prev };
-        if (next[lineId]) {
-          const lm = { ...next[lineId] };
-          delete lm[lotNumber];
-          if (Object.keys(lm).length === 0) delete next[lineId];
-          else next[lineId] = lm;
-        }
-        return next;
-      });
+      setLotPicker(null);
       await loadView(selectedTransfer.id);
-      setScanFeedback({ type: 'warn', msg: `Swapped lot ${lotNumber} → next available.` });
+      const msg = r.data?.message || `Moved to lot ${toLot}.`;
+      setScanFeedback({ type: 'warn', msg });
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Escape hatch failed';
+      const msg = err.response?.data?.detail || 'Lot change failed';
       setScanFeedback({ type: 'err', msg });
       showOverlayError(msg);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Remove a pallet already scanned onto this order. Opened from the picked
+  // pallet's "Remove" button; the forklift then chooses why.
+  const requestRemovePick = (pallet) => {
+    setRemovePrompt({
+      palletLicenceId: pallet.pallet_licence_id,
+      licenceNumber: pallet.licence_number,
+    });
+  };
+
+  const confirmRemovePick = async (reason) => {
+    if (!removePrompt) return;
+    setLoading(true);
+    try {
+      const r = await apiClient.post(
+        `/inventory/transfers/${selectedTransfer.id}/unscan-pick-v2`,
+        { pallet_licence_id: removePrompt.palletLicenceId, reason }
+      );
+      setRemovePrompt(null);
+      await loadView(selectedTransfer.id);
+      const msg = r.data?.message || 'Pallet removed from order.';
+      setScanFeedback({ type: 'warn', msg });
+      showOverlaySuccess(msg);
+    } catch (err) {
+      const msg = err.response?.data?.detail || 'Remove failed';
+      setScanFeedback({ type: 'err', msg });
+      showOverlayError(msg);
+      setRemovePrompt(null);
+    } finally {
+      setLoading(false);
+      setTimeout(() => inputRef.current?.focus(), 100);
     }
   };
 
@@ -533,7 +532,8 @@ const ScannerShipOutFlowV2 = () => {
               line={line}
               blockedRowsForLine={blockedRowsByLine[line.line_id] || {}}
               onToggleRowBlocked={toggleRowBlocked}
-              onSwapLotToNext={swapLotToNext}
+              onOpenLotPicker={openLotPicker}
+              onRemovePick={requestRemovePick}
             />
           ))}
         </div>
@@ -600,33 +600,110 @@ const ScannerShipOutFlowV2 = () => {
         </div>
       )}
 
-      {/* Wrong-lot swap modal */}
-      {swapPrompt && (
+      {/* Reversible lot picker modal */}
+      {lotPicker && (
         <div className="sso-except-overlay">
-          <div className="sso-except-dialog">
+          <div className="sso-except-dialog" style={{ maxWidth: '420px' }}>
             <ArrowRight size={32} color="#1e40af" />
-            <h3>Swap to scanned lot?</h3>
-            <p>{swapPrompt.message}</p>
+            <h3>Change lot</h3>
             <p style={{ fontSize: '13px', color: '#6b7280' }}>
-              Order had lot <strong>{swapPrompt.blockedLot}</strong> planned.
-              Scanned pallet is lot <strong>{swapPrompt.scannedLot}</strong>.
-              Swap the line to the scanned lot and pick this pallet?
+              Move the remaining cases off lot <strong>{lotPicker.fromLot}</strong> to
+              another lot. Oldest is recommended; you can move back anytime.
             </p>
+            {lotPicker.loading ? (
+              <p style={{ color: '#6b7280' }}>Loading lots…</p>
+            ) : (
+              <div style={{ width: '100%', maxHeight: '50vh', overflowY: 'auto' }}>
+                {lotPicker.lots.filter((l) => l.lot_number !== lotPicker.fromLot).length === 0 && (
+                  <p style={{ color: '#6b7280', fontSize: '13px' }}>No other lots available.</p>
+                )}
+                {lotPicker.lots
+                  .filter((l) => l.lot_number !== lotPicker.fromLot)
+                  .map((l) => {
+                    const disabled = loading || l.cases_available <= 0;
+                    return (
+                      <button
+                        key={l.lot_number}
+                        type="button"
+                        onClick={() => confirmRetarget(l.lot_number)}
+                        disabled={disabled}
+                        style={{
+                          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                          width: '100%', textAlign: 'left', gap: '8px',
+                          padding: '8px 10px', marginBottom: '6px',
+                          border: `1px solid ${l.is_recommended ? '#16a34a' : '#e5e7eb'}`,
+                          borderRadius: '6px',
+                          background: disabled ? '#f3f4f6' : 'white',
+                          cursor: disabled ? 'not-allowed' : 'pointer',
+                          opacity: disabled ? 0.6 : 1,
+                        }}
+                      >
+                        <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#1e40af' }}>
+                          Lot {l.lot_number}
+                          {l.is_recommended && (
+                            <span style={{ marginLeft: '6px', background: '#dcfce7', color: '#15803d', borderRadius: '4px', padding: '1px 5px', fontSize: '10px', fontWeight: 700 }}>oldest</span>
+                          )}
+                          {l.is_current && (
+                            <span style={{ marginLeft: '6px', background: '#eff6ff', color: '#1d4ed8', borderRadius: '4px', padding: '1px 5px', fontSize: '10px', fontWeight: 700 }}>current</span>
+                          )}
+                        </span>
+                        <span style={{ fontSize: '12px', color: '#475569' }}>
+                          {Math.round(l.cases_available).toLocaleString()} cs · {l.pallets_available} pl
+                        </span>
+                      </button>
+                    );
+                  })}
+              </div>
+            )}
             <div className="sso-dialog-actions">
               <button
                 type="button"
                 className="sso-secondary-btn"
-                onClick={() => { setSwapPrompt(null); setTimeout(() => inputRef.current?.focus(), 100); }}
+                onClick={() => { setLotPicker(null); setTimeout(() => inputRef.current?.focus(), 100); }}
               >
                 Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Remove-a-scan reason modal */}
+      {removePrompt && (
+        <div className="sso-except-overlay">
+          <div className="sso-except-dialog">
+            <XCircle size={32} color="#dc2626" />
+            <h3>Remove this pallet?</h3>
+            <p style={{ fontSize: '13px', color: '#6b7280' }}>
+              Pallet <strong>{removePrompt.licenceNumber}</strong> will come off
+              this order. Why are you removing it?
+            </p>
+            <div className="sso-dialog-actions" style={{ flexDirection: 'column', gap: '8px' }}>
+              <button
+                type="button"
+                className="sso-secondary-btn"
+                onClick={() => confirmRemovePick('wrong_pallet')}
+                disabled={loading}
+                title="Scanned by mistake — pallet goes back into shippable stock"
+              >
+                {loading ? 'Working…' : 'Wrong pallet (back to stock)'}
               </button>
               <button
                 type="button"
                 className="sso-primary-btn"
-                onClick={confirmSwap}
+                onClick={() => confirmRemovePick('leaker_damaged')}
+                disabled={loading}
+                title="Damaged/leaker — pallet goes on hold for supervisor review"
+              >
+                {loading ? 'Working…' : 'Damaged / leaker (put on hold)'}
+              </button>
+              <button
+                type="button"
+                className="sso-secondary-btn"
+                onClick={() => { setRemovePrompt(null); setTimeout(() => inputRef.current?.focus(), 100); }}
                 disabled={loading}
               >
-                {loading ? 'Working…' : `Swap → ${swapPrompt.scannedLot}`}
+                Cancel
               </button>
             </div>
           </div>
@@ -664,7 +741,7 @@ const ScannerShipOutFlowV2 = () => {
 
 // ── LineCard: one product line with its lots and rows ───────────────────────
 
-const LineCard = ({ line, blockedRowsForLine, onToggleRowBlocked, onSwapLotToNext }) => {
+const LineCard = ({ line, blockedRowsForLine, onToggleRowBlocked, onOpenLotPicker, onRemovePick }) => {
   return (
     <div style={{ border: '1.5px solid #e5e7eb', borderRadius: '8px', padding: '8px', marginBottom: '10px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
@@ -696,7 +773,8 @@ const LineCard = ({ line, blockedRowsForLine, onToggleRowBlocked, onSwapLotToNex
               lineId={line.line_id}
               lotBlockedRowIds={lotBlocked}
               onToggleRowBlocked={onToggleRowBlocked}
-              onSwapLotToNext={onSwapLotToNext}
+              onOpenLotPicker={onOpenLotPicker}
+              onRemovePick={onRemovePick}
             />
           );
         })
@@ -705,12 +783,7 @@ const LineCard = ({ line, blockedRowsForLine, onToggleRowBlocked, onSwapLotToNex
   );
 };
 
-const LotBlock = ({ lot, lineId, lotBlockedRowIds, onToggleRowBlocked, onSwapLotToNext }) => {
-  const accessibleRows = (lot.rows || []).filter(
-    (r) => (r.pallets_total || 0) > 0 && !lotBlockedRowIds.has(r.row_id || '')
-  );
-  const hasAnyBlocked = lotBlockedRowIds.size > 0;
-
+const LotBlock = ({ lot, lineId, lotBlockedRowIds, onToggleRowBlocked, onOpenLotPicker, onRemovePick }) => {
   return (
     <div style={{
       background: '#f9fafb',
@@ -725,29 +798,23 @@ const LotBlock = ({ lot, lineId, lotBlockedRowIds, onToggleRowBlocked, onSwapLot
         <span style={{ fontSize: '12px', color: '#475569', flex: 1, textAlign: 'right' }}>
           {lot.cases_remaining.toLocaleString()} cs remaining
         </span>
-        {hasAnyBlocked && (
-          <button
-            type="button"
-            onClick={() => onSwapLotToNext(lineId, lot.lot_number)}
-            style={{
-              background: '#fef3c7',
-              border: '1px solid #f59e0b',
-              color: '#92400e',
-              padding: '2px 8px',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '11px',
-              fontWeight: 600,
-            }}
-            title={
-              accessibleRows.length > 0
-                ? 'Swap anyway — there are still accessible rows in this lot'
-                : 'Swap to next available lot'
-            }
-          >
-            Try next lot
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => onOpenLotPicker(lineId, lot.lot_number)}
+          style={{
+            background: '#eff6ff',
+            border: '1px solid #93c5fd',
+            color: '#1d4ed8',
+            padding: '2px 8px',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '11px',
+            fontWeight: 600,
+          }}
+          title="Move the remaining cases to a different lot (reversible)"
+        >
+          Change lot
+        </button>
       </div>
       {(lot.rows || []).map((row) => {
         const isBlocked = row.is_blocked || lotBlockedRowIds.has(row.row_id || '');
@@ -759,6 +826,7 @@ const LotBlock = ({ lot, lineId, lotBlockedRowIds, onToggleRowBlocked, onSwapLot
             lineId={lineId}
             isBlocked={isBlocked}
             onToggleRowBlocked={onToggleRowBlocked}
+            onRemovePick={onRemovePick}
           />
         );
       })}
@@ -766,7 +834,7 @@ const LotBlock = ({ lot, lineId, lotBlockedRowIds, onToggleRowBlocked, onSwapLot
   );
 };
 
-const RowBlock = ({ row, lotNumber, lineId, isBlocked, onToggleRowBlocked }) => {
+const RowBlock = ({ row, lotNumber, lineId, isBlocked, onToggleRowBlocked, onRemovePick }) => {
   const isEmpty = (row.pallets_total || 0) === 0;
   return (
     <div style={{
@@ -847,34 +915,32 @@ const RowBlock = ({ row, lotNumber, lineId, isBlocked, onToggleRowBlocked }) => 
                   ? `✓ pulled ${p.cases_consumed ?? p.cases} cs${p.was_partial ? ' (partial)' : ''}`
                   : `${p.cases} cs`}
               </span>
+              {p.is_picked && !p.was_partial && onRemovePick && (
+                <button
+                  type="button"
+                  onClick={() => onRemovePick(p)}
+                  style={{
+                    background: 'none',
+                    border: '1px solid #fca5a5',
+                    color: '#dc2626',
+                    padding: '0px 5px',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontSize: '10px',
+                    fontWeight: 600,
+                    marginLeft: '4px',
+                  }}
+                  title="Remove this pallet from the order (mistake or leaker)"
+                >
+                  Remove
+                </button>
+              )}
             </div>
           ))}
         </div>
       )}
     </div>
   );
-};
-
-// Helpers --------------------------------------------------------------------
-
-// Given the scanner view, find a line whose product matches the scanned
-// pallet's swap_suggestion AND has at least one open lot allocation. Returns
-// { lineId, lotNumber } of the first open lot to swap OUT.
-const pickFirstOpenLotForProductFromView = (view, swapSuggestion) => {
-  if (!view || !swapSuggestion) return null;
-  // We don't know the product_id directly from swap_suggestion (it carries
-  // the new lot's rows). Heuristic: pick the first open lot on any line.
-  // For multi-product orders this could pick the wrong line, but the server
-  // will reject if the scanned pallet's product doesn't match — at which
-  // point the forklift re-tries on the right line. Good enough for v1.
-  for (const line of (view.lines || [])) {
-    for (const lot of (line.lots || [])) {
-      if (lot.cases_remaining > 0) {
-        return { lineId: line.line_id, lotNumber: lot.lot_number };
-      }
-    }
-  }
-  return null;
 };
 
 export default ScannerShipOutFlowV2;
