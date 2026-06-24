@@ -91,6 +91,19 @@ async def get_production_today(
 
     # Parse line number from licence_number: MP{DDD}{YY}L{N}-{product}-{seq}
     # Use regexp_match → text[]; first element is the L digit group.
+    #
+    # Production day is attributed by the forklift SESSION's created_at, NOT the
+    # pallet's scanned_at. Two reasons:
+    #   - Fix-ups: when a warehouse user adds a missed pallet to an already-
+    #     submitted request days later, add_pallet_to_request keeps it on the
+    #     ORIGINAL session. scanned_at is "today" but the session was created on
+    #     the real production day — so it counts then, not now.
+    #   - Overnight runs: the lot number rolls at midnight but the production day
+    #     runs 05:30→05:30. created_at is a real timestamp, so the window groups
+    #     a run that crosses midnight into one production day regardless of the
+    #     lot date flipping mid-run.
+    # The INNER join also drops manual / no-session pallets, which are out-of-band
+    # corrections we deliberately exclude from production KPI.
     rows = db.execute(
         text(
             """
@@ -102,10 +115,11 @@ async def get_production_today(
                 MIN(pl.scanned_at)                                                AS first_scan_at,
                 MAX(pl.scanned_at)                                                AS last_scan_at
             FROM pallet_licences pl
+            JOIN forklift_requests fr ON fr.id = pl.forklift_request_id
             WHERE pl.warehouse_id = :wid
               AND pl.is_deleted = false
-              AND pl.scanned_at >= :win_start
-              AND pl.scanned_at <  :win_end
+              AND fr.created_at >= :win_start
+              AND fr.created_at <  :win_end
               AND pl.licence_number ~ '^MP\\d{3}\\d{2}L\\d+-'
             GROUP BY 1
             """
