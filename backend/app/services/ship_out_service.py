@@ -487,20 +487,30 @@ def scanner_view_for_transfer(
                 blocked_combined.setdefault(lot, set()).update(rows)
 
         lots_payload = []
-        line_remaining_total = 0.0
         line_cases_requested = sum(float(s.cases_requested or 0) for s in sub_lines)
+        line_cases_picked = sum(float(s.cases_picked or 0) for s in sub_lines)
+        # Remaining is a PRODUCT-level figure: max(0, Σrequested − Σpicked)
+        # across every sub-line/lot — NOT the sum of per-lot clamped remainders.
+        # Lots are advisory under soft totals, so a pick that lands on one lot
+        # (a lot the forklift switched to mid-pick, or a drift lot whose
+        # cases_requested is 0) must still credit the product's outstanding
+        # total. Summing per-lot max(0, requested − picked) instead clamps those
+        # picks away, leaving the product looking under-picked forever and
+        # blocking the forklift — the 640/960 bug.
+        line_remaining_total = max(0.0, line_cases_requested - line_cases_picked)
+        product_complete = line_remaining_total <= 0.001
 
         for lot_number, totals in lot_totals.items():
             cases_remaining = max(0.0, totals["requested"] - totals["picked"])
-            lot_complete = cases_remaining <= 0
             has_picks = float(totals["picked"] or 0) > 0
-            # Open lots render normally. A fully-picked lot is kept visible only
-            # when something was picked from it — so the forklift can still
-            # Remove one of those pallets (a leaker found after it completed the
-            # lot). It then shows only the picked pallets, not fresh ones.
-            if lot_complete and not has_picks:
+            # Visibility is gated at the PRODUCT level, not per lot. While the
+            # product still owes cases, every lot keeps surfacing its fresh
+            # pallets so the forklift can fulfill from whichever lot is
+            # physically on the floor. Once the product's total is met, show
+            # only already-picked pallets (so a leaker can still be Removed),
+            # not fresh ones.
+            if product_complete and not has_picks:
                 continue
-            line_remaining_total += cases_remaining
 
             # Live pallets matching this product+lot+warehouse — both
             # IN_STOCK (still pending pick) AND SHIPPED-via-this-transfer
@@ -558,9 +568,9 @@ def scanner_view_for_transfer(
                 for pl in pl_list_sorted:
                     pick = picked_lookup.get(pl.id)
                     is_picked = pick is not None
-                    # On a completed lot, only surface the already-picked
-                    # pallets (for Remove) — hide fresh ones.
-                    if lot_complete and not is_picked:
+                    # Once the product's total is met, only surface the
+                    # already-picked pallets (for Remove) — hide fresh ones.
+                    if product_complete and not is_picked:
                         continue
                     pallets_view.append({
                         "pallet_licence_id": pl.id,
@@ -575,8 +585,9 @@ def scanner_view_for_transfer(
                     if not is_picked:
                         pending_pallets += 1
                         pending_cases += float(pl.cases or 0)
-                # On a completed lot, drop rows that have nothing picked to show.
-                if lot_complete and not pallets_view:
+                # When the product is complete, drop rows that have nothing
+                # picked to show.
+                if product_complete and not pallets_view:
                     continue
                 rows_payload.append({
                     "row_id": rid or None,
@@ -1064,16 +1075,20 @@ def scan_pick_v2(
     # 9. Audit scan event.
     _record_scan_event(db, transfer.id, pl, licence_number, on_list=True, scanned_by=user_id)
 
-    # Compute remaining at the UI-line level (sum across all sub-lines of
-    # this product), not just the sub-line we routed to.
-    line_remaining_after = sum(
-        max(
-            0.0,
-            float(ln.cases_requested or 0) - float(ln.cases_picked or 0),
-        )
-        for ln in transfer.lines
-        if ln.product_id == pl.product_id
+    # Compute remaining at the UI-line (product) level: clamp ONCE on the
+    # summed totals — max(0, Σrequested − Σpicked) — not as a sum of per-sub-line
+    # clamped remainders. The latter discards picks that landed on a drift or
+    # retargeted sub-line whose cases_requested is 0, wrongly keeping the line
+    # under-picked (mirrors scanner_view_for_transfer's product-level math).
+    line_req_total = sum(
+        float(ln.cases_requested or 0)
+        for ln in transfer.lines if ln.product_id == pl.product_id
     )
+    line_picked_total = sum(
+        float(ln.cases_picked or 0)
+        for ln in transfer.lines if ln.product_id == pl.product_id
+    )
+    line_remaining_after = max(0.0, line_req_total - line_picked_total)
     lot_remaining_after = lot_remaining - consumed
 
     return {

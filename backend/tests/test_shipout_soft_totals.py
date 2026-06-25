@@ -16,7 +16,7 @@ import pytest
 from app.models import (
     User, Warehouse, Category, Product, Location, SubLocation,
     StorageArea, StorageRow, Receipt, PalletLicence, InventoryHoldAction,
-    InventoryTransferLine,
+    InventoryTransfer, InventoryTransferLine,
 )
 from app.models.inventory import ShipOutLotReservation
 from app.utils.auth import get_password_hash
@@ -237,6 +237,87 @@ def test_reservations_are_product_level(db_session, base):
     ).all()
     assert res and all(r.lot_number is None for r in res)  # product-level, not lot-pinned
     assert sum(r.cases_reserved for r in res) == 50
+
+
+def test_picks_on_retargeted_lot_credit_product_total(db_session, base):
+    """Regression for order 06-12530 ("640 of 960").
+
+    After a lot change, picks can land on a sub-line whose cases_requested is 0
+    (the lot that was retargeted away, scanned anyway because that's what was on
+    the floor). Remaining must be the PRODUCT-level max(0, Σrequested − Σpicked),
+    not the sum of per-lot clamped remainders — otherwise those picks are clamped
+    away and the order looks under-picked forever, blocking the forklift.
+    """
+    _receipt(db_session, "r-a", "LOTA", 100, days_old=10)
+    _receipt(db_session, "r-b", "LOTB", 100, days_old=1)
+    _pallet(db_session, "pa1", "PA-1", "LOTA", "r-a", 50, days_old=10)
+    _pallet(db_session, "pa2", "PA-2", "LOTA", "r-a", 50, days_old=10)
+    _pallet(db_session, "pb1", "PB-1", "LOTB", "r-b", 50, days_old=1)
+    _pallet(db_session, "pb2", "PB-2", "LOTB", "r-b", 50, days_old=1)
+    db_session.commit()
+
+    t = _order(db_session, base["user"], "ORD-10", [_line("p-mango", 100, [("LOTA", 100)])])
+    line_id = t.lines[0].id
+
+    # Move the whole plan LOTA → LOTB before any pick: LOTA alloc now requested 0.
+    ship_out_service.retarget_lot(db_session, t, line_id, "LOTA", "LOTB", "blocked", base["user"])
+    db_session.expire(t)
+
+    # Forklift pulls one pallet of EACH lot: 50 from LOTA (lands on the
+    # requested=0 alloc) + 50 from LOTB. Product is now fully picked: 100/100.
+    ship_out_service.scan_pick_v2(db_session, t, "PA-1", None, base["user"])
+    ship_out_service.scan_pick_v2(db_session, t, "PB-1", None, base["user"])
+    db_session.expire(t)
+
+    fresh = db_session.query(InventoryTransfer).get(t.id)
+    view = ship_out_service.scanner_view_for_transfer(db_session, fresh)
+    mango_line = next(l for l in view["lines"] if l["product_id"] == "p-mango")
+
+    # The fix: product-level remaining is 0 (not the buggy 50 from clamping the
+    # LOTA over-pick away while LOTB still shows 50 outstanding).
+    assert mango_line["cases_remaining"] == 0
+    assert sum(l["cases_remaining"] for l in view["lines"]) == 0  # order shows DONE
+
+    # Product is complete, so only already-picked pallets surface (for Remove);
+    # the fresh PA-2 / PB-2 are hidden so the forklift can't keep over-pulling.
+    shown = [p for lot in mango_line["lots"] for row in lot["rows"] for p in row["pallets"]]
+    assert shown and all(p["is_picked"] for p in shown)
+
+
+def test_retargeted_away_lot_stays_scannable_until_product_done(db_session, base):
+    """While the product still owes cases, a lot that was retargeted away (its
+    alloc requested=0) must keep surfacing its fresh pallets — so the forklift
+    can fulfill from whatever lot is physically on the floor. This is the
+    unblock half of the 06-12530 fix."""
+    _receipt(db_session, "r-a", "LOTA", 100, days_old=10)
+    _receipt(db_session, "r-b", "LOTB", 100, days_old=1)
+    _pallet(db_session, "pa1", "PA-1", "LOTA", "r-a", 50, days_old=10)
+    _pallet(db_session, "pa2", "PA-2", "LOTA", "r-a", 50, days_old=10)
+    _pallet(db_session, "pb1", "PB-1", "LOTB", "r-b", 50, days_old=1)
+    db_session.commit()
+
+    t = _order(db_session, base["user"], "ORD-11", [_line("p-mango", 100, [("LOTA", 100)])])
+    line_id = t.lines[0].id
+    ship_out_service.retarget_lot(db_session, t, line_id, "LOTA", "LOTB", "blocked", base["user"])
+    db_session.expire(t)
+
+    # Only 50 picked so far — product still owes 50.
+    ship_out_service.scan_pick_v2(db_session, t, "PB-1", None, base["user"])
+    db_session.expire(t)
+
+    fresh = db_session.query(InventoryTransfer).get(t.id)
+    view = ship_out_service.scanner_view_for_transfer(db_session, fresh)
+    mango_line = next(l for l in view["lines"] if l["product_id"] == "p-mango")
+    assert mango_line["cases_remaining"] == 50
+
+    # The fresh, un-picked LOTA pallet (PA-1) is still offered even though LOTA's
+    # alloc was retargeted to requested=0 — old per-lot gating would have hidden it.
+    fresh_lots = {
+        p["lot_number"]
+        for lot in mango_line["lots"] for row in lot["rows"] for p in row["pallets"]
+        if not p["is_picked"]
+    }
+    assert "LOTA" in fresh_lots
 
 
 def test_second_order_cannot_over_reserve_product_pool(db_session, base):
