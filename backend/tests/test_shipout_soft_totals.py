@@ -223,10 +223,12 @@ def test_retarget_lot_and_back(db_session, base):
 
 
 # ---------------------------------------------------------------------------
-# D. Product-level reservation pool
+# D. Orders are advisory targets — no stock reservation, no cross-order block
 # ---------------------------------------------------------------------------
 
-def test_reservations_are_product_level(db_session, base):
+def test_order_creation_does_not_reserve_stock(db_session, base):
+    """Creating a ship-out order must NOT write any reservation — a pick list is
+    a target, not a stock lock (the truck may arrive days late or never)."""
     _receipt(db_session, "r-a", "LOTA", 50, days_old=10)
     _pallet(db_session, "pa1", "PA-1", "LOTA", "r-a", 50, days_old=10)
     db_session.commit()
@@ -235,8 +237,7 @@ def test_reservations_are_product_level(db_session, base):
     res = db_session.query(ShipOutLotReservation).filter(
         ShipOutLotReservation.transfer_line_id.in_([ln.id for ln in t.lines])
     ).all()
-    assert res and all(r.lot_number is None for r in res)  # product-level, not lot-pinned
-    assert sum(r.cases_reserved for r in res) == 50
+    assert res == []  # advisory model: nothing is reserved / hidden from others
 
 
 def test_picks_on_retargeted_lot_credit_product_total(db_session, base):
@@ -320,12 +321,21 @@ def test_retargeted_away_lot_stays_scannable_until_product_done(db_session, base
     assert "LOTA" in fresh_lots
 
 
-def test_second_order_cannot_over_reserve_product_pool(db_session, base):
+def test_second_order_is_allowed_even_when_stock_is_short(db_session, base):
+    """A second order for the same product is always allowed, even if together
+    the two orders exceed physical stock. Stock is never hidden or locked per
+    order; whoever scans a pallet first gets it, and an already-shipped pallet
+    can't be scanned again, so there's no oversell."""
     _receipt(db_session, "r-a", "LOTA", 60, days_old=10)
     _pallet(db_session, "pa1", "PA-1", "LOTA", "r-a", 50, days_old=10)
     db_session.commit()  # only 50 physical cases in stock
 
     _order(db_session, base["user"], "ORD-8", [_line("p-mango", 50, [("LOTA", 50)])])
-    # Second order for the same product has no pool left.
-    with pytest.raises(ValidationError, match="available"):
-        _order(db_session, base["user"], "ORD-9", [_line("p-mango", 50, [("LOTA", 50)])])
+    # Second order for the same product is NOT blocked — used to raise.
+    t2 = _order(db_session, base["user"], "ORD-9", [_line("p-mango", 50, [("LOTA", 50)])])
+    assert t2.status == TransferStatus.PENDING
+    # Still no reservations anywhere for this product.
+    assert db_session.query(ShipOutLotReservation).filter(
+        ShipOutLotReservation.product_id == "p-mango",
+        ShipOutLotReservation.released_at.is_(None),
+    ).count() == 0

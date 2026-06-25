@@ -204,9 +204,17 @@ def create_pick_list_v2(
                 f"Line {li + 1}: lot allocations must each request > 0 cases"
             )
 
-    # 2. Lock pallet pools per product, then validate per-lot capacity.
-    # We lock the candidate pallet rows so that another concurrent submit on
-    # the same (product, lot) sees our reservation before deciding capacity.
+    # 2. Fetch the live pallet pool per product (used only to split each lot
+    # allocation across its real receipts below).
+    #
+    # Ship-out orders are ADVISORY targets, not stock locks. A pick list can sit
+    # pending for days — the truck may arrive late or never — so creating an
+    # order must never reserve capacity or hide stock from other orders. We
+    # therefore do NOT gate on available capacity here and do NOT create any
+    # ShipOutLotReservation below: an order can be created whether the stock is
+    # on hand or not, and every lot/row stays freely visible to every order.
+    # Correctness is enforced at SCAN time instead (right product, in stock, not
+    # on hold; a shipped pallet can't be scanned twice, so there's no oversell).
     product_ids = {ln.product_id for ln in data.lines}
     products = {p.id: p for p in db.query(Product).filter(Product.id.in_(product_ids)).all()}
     for pid in product_ids:
@@ -215,28 +223,9 @@ def create_pick_list_v2(
 
     pallet_pools: dict[str, list[PalletLicence]] = {}
     for pid in product_ids:
-        pallet_pools[pid] = _pallet_pool_for_product(db, pid, target_warehouse_id, lock=True)
+        pallet_pools[pid] = _pallet_pool_for_product(db, pid, target_warehouse_id, lock=False)
 
-    # 3. Per-PRODUCT capacity check (Phase D: reservations pool at the product
-    # level — lots are advisory and the actual lot is chosen live at scan time).
-    requested_by_product: dict[str, float] = {}
-    for line in data.lines:
-        requested_by_product[line.product_id] = (
-            requested_by_product.get(line.product_id, 0.0) + float(line.cases_requested)
-        )
-    for pid, requested in requested_by_product.items():
-        pool = pallet_pools[pid]
-        product_total = sum(float(pl.cases or 0) for pl in pool)
-        already_reserved = _active_product_reservation_cases(db, pid)
-        free = max(0.0, product_total - already_reserved)
-        if requested > free + 0.001:
-            pname = products[pid].name if pid in products else pid
-            raise ValidationError(
-                f"{pname}: requested {requested:g} cases but only {free:g} "
-                f"available (total {product_total:g}, reserved {already_reserved:g})"
-            )
-
-    # 4. Persist parent + lines + reservations.
+    # 3. Persist parent + lines (no reservations — see note above).
     transfer_id = _new_id("transfer")
     total_cases = float(sum(float(ln.cases_requested) for ln in data.lines))
 
@@ -307,16 +296,12 @@ def create_pick_list_v2(
             ))
             line_seq_counter += 1
 
-            # One product-level reservation per sub-line (lot_number=NULL) —
-            # the order claims this many cases of the product; the actual lot is
-            # decided live at scan time, so the reservation isn't lot-pinned.
-            db.add(ShipOutLotReservation(
-                id=_new_id("solr"),
-                transfer_line_id=sub_id,
-                product_id=line.product_id,
-                lot_number=None,
-                cases_reserved=sub_total,
-            ))
+            # NOTE: intentionally NO ShipOutLotReservation is created. Ship-out
+            # orders are advisory targets, not stock locks — reserving here would
+            # silently hide the oldest lots/rows from other orders (FIFO
+            # attribution) while a truck is delayed, which is exactly the
+            # behaviour we want to avoid. Stock stays freely visible to every
+            # order; oversell is prevented at scan time, not by reservations.
 
     db.flush()
     return transfer
