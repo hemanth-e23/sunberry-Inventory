@@ -14,13 +14,21 @@ const num = (v) => Number(v || 0).toLocaleString();
 const palletRows = (line) =>
   (line.picks || []).map((p) => ({
     licence: p.licence_number || "—",
-    lot: p.lot_number || line.lot_number || "—",
+    lot: p.lot_number || "—",
     rack: p.rack || "—",
     cases: num(p.cases),
     partial: p.was_partial ? "Yes" : "No",
     scannedBy: p.scanned_by || "—",
     scannedAt: p.scanned_at ? formatDateTime(p.scanned_at) : "—",
   }));
+
+// "150 of 200 cases · SHORT 50" style fulfilment summary for a product or order.
+const fulfilText = (requested, shipped, short, over) => {
+  const base = `${num(shipped)} of ${num(requested)} cases`;
+  if (Number(short) > 0) return `${base}  ·  SHORT ${num(short)}`;
+  if (Number(over) > 0) return `${base}  ·  OVER ${num(over)}`;
+  return `${base}  ·  COMPLETE`;
+};
 
 const fileBase = (data) => sanitizeFileName(`ship-out-order-${data.order_number || "order"}`);
 
@@ -55,14 +63,20 @@ export const exportOrderPDF = (data) => {
   y += 22;
 
   // Meta block (two columns of label/value pairs)
+  const tt = data.totals || {};
+  const overShort = Number(tt.cases_over) > 0
+    ? ["Over", num(tt.cases_over)]
+    : ["Short", num(tt.cases_short)];
   const meta = [
     ["Created By", data.created_by || "—"],
     ["Created", data.created_at ? formatDateTime(data.created_at) : "—"],
     ["Approved By", data.approved_by || "—"],
     ["Approved", data.approved_at ? formatDateTime(data.approved_at) : "—"],
-    ["Total Cases", num(data.totals?.cases_picked)],
-    ["Pallets", num(data.totals?.pallet_count)],
-    ["Products", num(data.totals?.line_count)],
+    ["Requested", num(tt.cases_requested)],
+    ["Shipped", num(tt.cases_picked)],
+    overShort,
+    ["Products", num(tt.product_count)],
+    ["Pallets", num(tt.pallet_count)],
     ["Printed", formatDate(new Date().toISOString())],
   ];
   const colW = (pageW - marginX * 2) / 2;
@@ -78,13 +92,21 @@ export const exportOrderPDF = (data) => {
     doc.setTextColor(20);
     doc.text(String(value), x + 90, y);
   });
-  y += 28;
+  y += 26;
 
-  // One section per product line
+  // Full-width fulfilment summary line
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(11);
+  doc.setTextColor(Number(tt.cases_short) > 0 ? 180 : 30, Number(tt.cases_short) > 0 ? 60 : 30, 30);
+  doc.text(`Fulfilment:  ${fulfilText(tt.cases_requested, tt.cases_picked, tt.cases_short, tt.cases_over)}`, marginX, y);
+  y += 24;
+
+  // One section per product
   (data.lines || []).forEach((line) => {
     const rows = palletRows(line);
+    const lots = (line.lots || []);
     const heading = `${line.product_name || "—"}  (${line.product_code || "—"})`;
-    const subheading = `${num(line.cases_picked)} cases${line.lot_number ? `  ·  Lot ${line.lot_number}` : ""}  ·  ${rows.length} pallets`;
+    const subheading = `${fulfilText(line.cases_requested, line.cases_picked, line.cases_short, line.cases_over)}${lots.length ? `  ·  ${lots.length > 1 ? "Lots" : "Lot"} ${lots.join(", ")}` : ""}  ·  ${rows.length} pallets`;
 
     if (y > doc.internal.pageSize.getHeight() - 120) {
       doc.addPage();
@@ -100,6 +122,15 @@ export const exportOrderPDF = (data) => {
     doc.setTextColor(110);
     doc.text(subheading, marginX, y);
     y += 8;
+
+    if (rows.length === 0) {
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(9);
+      doc.setTextColor(150);
+      doc.text("No pallets scanned for this product.", marginX, y + 10);
+      y += 30;
+      return;
+    }
 
     doc.autoTable({
       startY: y,
@@ -143,11 +174,13 @@ export const exportOrderExcel = async (data) => {
   titleRow.font = { bold: true, size: 16 };
   ws.mergeCells(titleRow.number, 1, titleRow.number, 7);
 
+  const tt = data.totals || {};
   const metaPairs = [
     ["Created By", data.created_by || "—", "Created", data.created_at ? formatDateTime(data.created_at) : "—"],
     ["Approved By", data.approved_by || "—", "Approved", data.approved_at ? formatDateTime(data.approved_at) : "—"],
-    ["Total Cases", num(data.totals?.cases_picked), "Pallets", num(data.totals?.pallet_count)],
-    ["Products", num(data.totals?.line_count), "", ""],
+    ["Requested", num(tt.cases_requested), "Shipped", num(tt.cases_picked)],
+    [Number(tt.cases_over) > 0 ? "Over" : "Short", Number(tt.cases_over) > 0 ? num(tt.cases_over) : num(tt.cases_short), "Fulfilment", fulfilText(tt.cases_requested, tt.cases_picked, tt.cases_short, tt.cases_over)],
+    ["Products", num(tt.product_count), "Pallets", num(tt.pallet_count)],
   ];
   metaPairs.forEach((p) => {
     const row = ws.addRow(p);
@@ -157,8 +190,9 @@ export const exportOrderExcel = async (data) => {
   ws.addRow([]);
 
   (data.lines || []).forEach((line) => {
+    const lots = (line.lots || []);
     const hdr = ws.addRow([
-      `${line.product_name || "—"} (${line.product_code || "—"}) — ${num(line.cases_picked)} cases${line.lot_number ? ` · Lot ${line.lot_number}` : ""}`,
+      `${line.product_name || "—"} (${line.product_code || "—"}) — ${fulfilText(line.cases_requested, line.cases_picked, line.cases_short, line.cases_over)}${lots.length ? ` · ${lots.length > 1 ? "Lots" : "Lot"} ${lots.join(", ")}` : ""}`,
     ]);
     hdr.font = { bold: true, size: 12 };
     ws.mergeCells(hdr.number, 1, hdr.number, 7);
@@ -168,9 +202,14 @@ export const exportOrderExcel = async (data) => {
       cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
       cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF57C00" } };
     });
-    palletRows(line).forEach((r) => {
-      ws.addRow([r.licence, r.lot, r.rack, r.cases, r.partial, r.scannedBy, r.scannedAt]);
-    });
+    const rows = palletRows(line);
+    if (rows.length === 0) {
+      ws.addRow(["No pallets scanned for this product"]);
+    } else {
+      rows.forEach((r) => {
+        ws.addRow([r.licence, r.lot, r.rack, r.cases, r.partial, r.scannedBy, r.scannedAt]);
+      });
+    }
     ws.addRow([]);
   });
 
@@ -184,17 +223,29 @@ export const exportOrderExcel = async (data) => {
 // ── CSV: metadata header lines, then a flat per-pallet table ──────────────────
 export const exportOrderCSV = (data) => {
   const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+  const tt = data.totals || {};
   const lines = [];
   lines.push([esc("Ship-Out Order"), esc(data.order_number || "")].join(","));
   lines.push([esc("Created By"), esc(data.created_by || ""), esc("Created"), esc(data.created_at ? formatDateTime(data.created_at) : "")].join(","));
   lines.push([esc("Approved By"), esc(data.approved_by || ""), esc("Approved"), esc(data.approved_at ? formatDateTime(data.approved_at) : "")].join(","));
-  lines.push([esc("Total Cases"), esc(num(data.totals?.cases_picked)), esc("Pallets"), esc(num(data.totals?.pallet_count)), esc("Products"), esc(num(data.totals?.line_count))].join(","));
+  lines.push([esc("Requested"), esc(num(tt.cases_requested)), esc("Shipped"), esc(num(tt.cases_picked)), esc(Number(tt.cases_over) > 0 ? "Over" : "Short"), esc(Number(tt.cases_over) > 0 ? num(tt.cases_over) : num(tt.cases_short))].join(","));
+  lines.push([esc("Products"), esc(num(tt.product_count)), esc("Pallets"), esc(num(tt.pallet_count))].join(","));
   lines.push("");
-  lines.push(["Product", "Code", "Lot #", "Licence #", "Rack", "Cases", "Partial", "Scanned By", "Scanned At"].map(esc).join(","));
+  // Per-product requested/shipped/short, then the per-pallet rows.
+  lines.push(["Product", "Code", "Lot #", "Licence #", "Rack", "Cases", "Partial", "Scanned By", "Scanned At", "Product Requested", "Product Shipped", "Product Short"].map(esc).join(","));
   (data.lines || []).forEach((line) => {
-    palletRows(line).forEach((r) => {
+    const rows = palletRows(line);
+    if (rows.length === 0) {
+      lines.push([
+        line.product_name, line.product_code, "", "(no pallets scanned)", "", "0", "", "", "",
+        num(line.cases_requested), num(line.cases_picked), num(line.cases_short),
+      ].map(esc).join(","));
+      return;
+    }
+    rows.forEach((r) => {
       lines.push([
         line.product_name, line.product_code, r.lot, r.licence, r.rack, r.cases, r.partial, r.scannedBy, r.scannedAt,
+        num(line.cases_requested), num(line.cases_picked), num(line.cases_short),
       ].map(esc).join(","));
     });
   });

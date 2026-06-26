@@ -442,8 +442,13 @@
   font-size: 22px;
   font-weight: 700;
   line-height: 1.1;
-  color: var(--color-primary, #f57c00);
+  color: var(--color-text-primary, #111827);
 }
+
+.ship-stat--ship .ship-stat-value { color: var(--color-primary, #f57c00); }
+.ship-stat--short .ship-stat-value { color: #dc2626; }
+.ship-stat--over .ship-stat-value { color: #b45309; }
+.ship-stat--ok .ship-stat-value { color: #16a34a; }
 
 .ship-stat-label {
   font-size: 11px;
@@ -451,6 +456,44 @@
   letter-spacing: 0.04em;
   color: var(--color-text-secondary, #6b7280);
   margin-top: 2px;
+}
+
+.ship-fulfil-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: -6px;
+}
+
+.ship-fulfil-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary, #111827);
+}
+
+.ship-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 11px;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 999px;
+}
+
+.ship-badge--ok {
+  background: rgba(22, 163, 74, 0.12);
+  color: #15803d;
+}
+
+.ship-badge--short {
+  background: rgba(220, 38, 38, 0.1);
+  color: #b91c1c;
+}
+
+.ship-badge--over {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
 }
 
 .ship-export-bar {

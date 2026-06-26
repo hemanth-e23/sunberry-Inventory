@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     Receipt, InventoryTransfer, InventoryTransferLine, InventoryAdjustment, InventoryHoldAction,
     Category, Product, Vendor, User, CycleCount, Location, SubLocation, StorageRow,
-    InterWarehouseTransfer, Warehouse, PalletLicence, TransferScanEvent,
+    InterWarehouseTransfer, Warehouse, PalletLicence,
 )
 from app.enums import TransferStatus, AdjustmentStatus, HoldStatus, InterWarehouseStatus, ReceiptStatus
 from app.constants import CATEGORY_FINISHED
@@ -574,52 +574,70 @@ def build_shipment_detail(
             )
         return pallet_cache[pallet_id]
 
-    lines = []
+    # Aggregate the transfer's lines by PRODUCT, not by line. A single product
+    # is often split into several lines: the FIFO suggestion proposes one line
+    # per lot, and a forklift scanning a non-suggested lot adds a drift line.
+    # We collapse them so each product shows once, with requested = sum of the
+    # planned cases (across all its suggested lines) and shipped = what was
+    # actually scanned. Un-scanned suggestion lots stop appearing as products;
+    # they only feed the product's requested total. This is how "Short" is
+    # surfaced: requested 500 / shipped 300 → short 200.
+    products: dict = {}  # insertion-ordered (py3.7+): preserves line order
     pallet_count = 0
     sorted_lines = sorted(transfer.lines or [], key=lambda ln: (ln.line_seq or 0))
     for ln in sorted_lines:
         receipt = db.query(Receipt).filter(Receipt.id == ln.receipt_id).first()
-        pname, pcode = product_info(db, ln.product_id)
+        key = ln.product_id or f"line-{ln.id}"
+        if key not in products:
+            pname, pcode = product_info(db, ln.product_id)
+            products[key] = {
+                "product_id": ln.product_id,
+                "product_name": pname,
+                "product_code": pcode,
+                "cases_requested": 0.0,
+                "cases_picked": 0.0,
+                "lots": [],
+                "picks": [],
+            }
+        pr = products[key]
+        pr["cases_requested"] += float(ln.cases_requested or 0)
+        pr["cases_picked"] += float(ln.cases_picked or 0)
 
-        picks = []
         for pk in (ln.picks or []):
             pallet = cached_pallet(pk.get("pallet_licence_id"))
-            picks.append({
+            lot = (pallet.lot_number if pallet else None) or (receipt.lot_number if receipt else None)
+            pr["picks"].append({
                 "licence_number": pallet.licence_number if pallet else None,
-                "lot_number": (pallet.lot_number if pallet else None) or (receipt.lot_number if receipt else None),
+                "lot_number": lot,
                 "rack": cached_row_name(pk.get("storage_row_id")),
                 "cases": round(float(pk.get("cases_consumed") or 0), 2),
                 "was_partial": bool(pk.get("was_partial")),
                 "scanned_by": cached_user_name(pk.get("scanned_by")),
                 "scanned_at": pk.get("scanned_at"),
             })
-        pallet_count += len(picks)
+            if lot and lot not in pr["lots"]:
+                pr["lots"].append(lot)
+            pallet_count += 1
 
+    lines = []
+    for pr in products.values():
+        pr["picks"].sort(key=lambda p: p.get("scanned_at") or "")
+        requested = round(pr["cases_requested"], 2)
+        shipped = round(pr["cases_picked"], 2)
         lines.append({
-            "line_id": ln.id,
-            "product_name": pname,
-            "product_code": pcode,
-            "lot_number": receipt.lot_number if receipt else None,
-            "cases_requested": round(float(ln.cases_requested or 0), 2),
-            "cases_picked": round(float(ln.cases_picked or 0), 2),
-            "lot_allocations": ln.lot_allocations or [],
-            "picks": picks,
+            "product_id": pr["product_id"],
+            "product_name": pr["product_name"],
+            "product_code": pr["product_code"],
+            "lots": pr["lots"],
+            "cases_requested": requested,
+            "cases_picked": shipped,
+            "cases_short": round(max(0.0, requested - shipped), 2),
+            "cases_over": round(max(0.0, shipped - requested), 2),
+            "picks": pr["picks"],
         })
 
-    scan_events = []
-    events = (
-        db.query(TransferScanEvent)
-        .filter(TransferScanEvent.transfer_id == transfer.id)
-        .order_by(TransferScanEvent.scanned_at.asc())
-        .all()
-    )
-    for ev in events:
-        scan_events.append({
-            "licence_number": ev.licence_number,
-            "on_list": bool(ev.on_list),
-            "scanned_by": cached_user_name(ev.scanned_by),
-            "scanned_at": ev.scanned_at,
-        })
+    total_requested = round(sum(l["cases_requested"] for l in lines), 2)
+    total_shipped = round(sum(l["cases_picked"] for l in lines), 2)
 
     return {
         "transfer_id": transfer.id,
@@ -630,12 +648,14 @@ def build_shipment_detail(
         "approved_at": transfer.approved_at,
         "unit": transfer.unit or "cases",
         "totals": {
-            "cases_picked": round(sum(l["cases_picked"] for l in lines), 2),
-            "line_count": len(lines),
+            "cases_requested": total_requested,
+            "cases_picked": total_shipped,
+            "cases_short": round(max(0.0, total_requested - total_shipped), 2),
+            "cases_over": round(max(0.0, total_shipped - total_requested), 2),
+            "product_count": len(lines),
             "pallet_count": pallet_count,
         },
         "lines": lines,
-        "scan_events": scan_events,
     }
 
 
