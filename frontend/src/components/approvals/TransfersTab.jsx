@@ -12,6 +12,29 @@ const getPriorityLevel = (days) => {
   return { level: 'high', label: 'Urgent', color: '#ef4444' };
 };
 
+// Small pill used for the product summary tags (Req / Picked / pallets / lots).
+const tagStyle = {
+  background: '#f1f5f9',
+  color: '#475569',
+  borderRadius: '6px',
+  padding: '2px 8px',
+  fontSize: '11px',
+  fontWeight: 600,
+  whiteSpace: 'nowrap',
+};
+
+// Product-level fulfilment badge. Short/Over/Complete are reconciled at the
+// PRODUCT level, not per lot — lots are advisory (FIFO is a suggestion), so a
+// pick from a different lot than requested is not "over"; it only matters
+// whether the product's total picked matches its total requested.
+const FulfilBadge = ({ requested, picked, short, over }) => {
+  const base = { display: 'inline-flex', alignItems: 'center', gap: '3px', borderRadius: '999px', padding: '2px 10px', fontSize: '11px', fontWeight: 700, whiteSpace: 'nowrap' };
+  if (short > 0) return <span style={{ ...base, background: '#fef2f2', color: '#b91c1c' }}>⚠ Short {short.toLocaleString()}</span>;
+  if (over > 0) return <span style={{ ...base, background: '#fef3c7', color: '#92400e' }}>⚠ Over {over.toLocaleString()}</span>;
+  if (requested > 0 && picked >= requested) return <span style={{ ...base, background: '#f0fdf4', color: '#15803d' }}>✓ Complete</span>;
+  return null;
+};
+
 const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLookup, locationLookupMap, userNameMap }) => {
   const { user } = useAuth();
   const { approveTransfer, rejectTransfer, fetchTransferScanProgress, voidShipOutTransfer } = useAppData();
@@ -95,7 +118,16 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
         const pickList = progress?.pick_list || [];
         const scannedCount = pickList.filter(p => p.is_scanned).length;
         const skippedCount = pickList.filter(p => p.is_skipped).length;
-        const totalPallets = pickList.length || progress?.total_pallets || 0;
+        // Progress is measured in CASES against the order's fixed requested
+        // total — NOT pallets/pallets. The pick list is built from pallets as
+        // they're scanned, so its length always equals the scanned count
+        // ("6/6", then "7/7"), which tells the approver nothing. Cases give a
+        // real denominator that stays put while picking proceeds.
+        const requestedCases = Number(transfer.quantity) || 0;
+        const pickedCases = pickList
+          .filter(p => p.is_scanned)
+          .reduce((s, p) => s + (Number(p.cases) || 0), 0);
+        const overCases = Math.max(0, pickedCases - requestedCases);
         const forkliftDone = !!(progress?.forklift_submitted_at || transfer.forklift_submitted_at);
         const lastScan = progress?.last_scan;
         const exceptions = progress?.exceptions || [];
@@ -103,76 +135,54 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
         const transferLines = transfer.lines || null;
         const isMultiProduct = Array.isArray(transferLines) && transferLines.length > 0;
 
-        // Aggregate DB sub-lines by (product, lot) for display. A single UI
-        // line can fan out to multiple DB rows (one per receipt) under v2 —
-        // and drift sub-lines can add extra rows for the same lot. The
-        // approver thinks in lots, so we collapse the receipt-level split.
-        const aggregatedLines = (() => {
+        // Aggregate DB sub-lines by PRODUCT for display (matching the order
+        // detail report). A single product can fan out to many DB rows — one
+        // per receipt/lot under v2, plus drift sub-lines when a pallet from an
+        // off-plan lot is scanned. The approver only cares whether each
+        // product's total picked matches its total requested; the lots that
+        // satisfied it are advisory (FIFO is a suggestion), so picking lot B
+        // instead of the requested lot A is NOT an overage. Reconciling per
+        // lot produced false "+N over" / "short" pairs — we reconcile per
+        // product instead and surface the lots as a single tag.
+        const productLines = (() => {
           if (!isMultiProduct) return [];
           const map = new Map();
           for (const ln of transferLines) {
-            const palletCount = (ln.pallet_licence_ids || []).length;
+            const key = ln.product_id || `line-${ln.id}`;
+            const e = map.get(key) || {
+              id: key,
+              product_name: ln.product_name,
+              product_fcc_code: ln.product_fcc_code,
+              cases_requested: 0,
+              cases_picked: 0,
+              pallet_count: 0,
+              lots: new Set(),
+            };
+            e.cases_requested += Number(ln.cases_requested) || 0;
+            e.cases_picked += Number(ln.cases_picked) || 0;
+            e.pallet_count += (ln.pallet_licence_ids || []).length;
             const allocs = ln.lot_allocations || [];
-
-            if (allocs.length === 0) {
-              // Legacy / v1 lines with no lot_allocations — keyed by line's
-              // own lot_number (derived from receipt on the backend).
-              const key = `${ln.product_id}__${ln.lot_number || '—'}`;
-              const e = map.get(key) || {
-                id: key,
-                product_name: ln.product_name,
-                product_fcc_code: ln.product_fcc_code,
-                lot_number: ln.lot_number || '—',
-                cases_requested: 0,
-                cases_picked: 0,
-                pallet_licence_ids: [],
-              };
-              e.cases_requested += Number(ln.cases_requested) || 0;
-              e.cases_picked += Number(ln.cases_picked) || 0;
-              e.pallet_licence_ids = e.pallet_licence_ids.concat(ln.pallet_licence_ids || []);
-              map.set(key, e);
-              continue;
-            }
-
-            const totalPicked = allocs.reduce((s, a) => s + (Number(a.cases_picked) || 0), 0);
-            allocs.forEach((alloc, idx) => {
-              const lot = alloc.lot_number || '—';
-              const key = `${ln.product_id}__${lot}`;
-              const e = map.get(key) || {
-                id: key,
-                product_name: ln.product_name,
-                product_fcc_code: ln.product_fcc_code,
-                lot_number: lot,
-                cases_requested: 0,
-                cases_picked: 0,
-                pallet_licence_ids: [],
-              };
-              e.cases_requested += Number(alloc.cases_requested) || 0;
-              e.cases_picked += Number(alloc.cases_picked) || 0;
-              // Pallet attribution: in the common case a sub-line has one
-              // lot allocation, so all of its pallets belong here. With
-              // multiple lot allocations on a sub-line (rare — drift or
-              // escape hatch), split proportionally to cases_picked.
-              if (allocs.length === 1) {
-                if (idx === 0) {
-                  e.pallet_licence_ids = e.pallet_licence_ids.concat(ln.pallet_licence_ids || []);
+            if (allocs.length > 0) {
+              // Only surface lots that actually participated (requested or
+              // picked) — empty placeholder allocations shouldn't show up.
+              for (const a of allocs) {
+                if ((Number(a.cases_requested) || 0) > 0 || (Number(a.cases_picked) || 0) > 0) {
+                  if (a.lot_number) e.lots.add(a.lot_number);
                 }
-              } else if (totalPicked > 0 && (Number(alloc.cases_picked) || 0) > 0) {
-                const share = Math.round(
-                  palletCount * ((Number(alloc.cases_picked) || 0) / totalPicked)
-                );
-                // Approximate — exact pallet→lot resolution would need
-                // pallet enrichment, which we skip for the approver view.
-                e.pallet_licence_ids = e.pallet_licence_ids.concat(
-                  (ln.pallet_licence_ids || []).slice(0, share)
-                );
               }
-              map.set(key, e);
-            });
+            } else if (ln.lot_number) {
+              e.lots.add(ln.lot_number);
+            }
+            map.set(key, e);
           }
-          return Array.from(map.values()).sort((a, b) =>
-            String(a.lot_number).localeCompare(String(b.lot_number))
-          );
+          return Array.from(map.values())
+            .map((e) => ({
+              ...e,
+              lots: Array.from(e.lots),
+              cases_short: Math.max(0, e.cases_requested - e.cases_picked),
+              cases_over: Math.max(0, e.cases_picked - e.cases_requested),
+            }))
+            .sort((a, b) => String(a.product_name).localeCompare(String(b.product_name)));
         })();
         const allSwaps = transfer.swaps || progress?.swaps || [];
         // A removal (unscan) is recorded as a one-sided swap: removed pallet,
@@ -259,40 +269,37 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
               </div>
             )}
 
-            {/* Multi-product line breakdown */}
+            {/* Multi-product line breakdown — one block per PRODUCT (lots are
+                advisory and collapsed into a tag). Capped to keep the card
+                compact when several orders are combined. */}
             {isMultiProduct && (
-              <div style={{ marginBottom: '10px', borderRadius: '8px', overflowX: 'auto', border: '1px solid #e5e7eb' }}>
-                <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr style={{ background: '#f1f5f9' }}>
-                      <th style={{ textAlign: 'left', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>Product</th>
-                      <th style={{ textAlign: 'left', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>FCC</th>
-                      <th style={{ textAlign: 'left', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>Lot #</th>
-                      <th style={{ textAlign: 'right', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>Requested</th>
-                      <th style={{ textAlign: 'right', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>Picked</th>
-                      <th style={{ textAlign: 'right', padding: '6px 10px', color: '#1e293b', fontWeight: 600 }}>Pallets</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {aggregatedLines.map((ln, i) => (
-                      <tr key={ln.id} style={{ borderTop: i ? '1px solid #e5e7eb' : 'none', background: i % 2 === 0 ? '#fafbfc' : 'white' }}>
-                        <td style={{ padding: '6px 10px' }}>{ln.product_name || ln.product_id}</td>
-                        <td style={{ padding: '6px 10px', color: '#64748b' }}>{ln.product_fcc_code || '—'}</td>
-                        <td style={{ padding: '6px 10px', color: '#64748b' }}>{ln.lot_number || '—'}</td>
-                        <td style={{ padding: '6px 10px', textAlign: 'right' }}>{(ln.cases_requested || 0).toLocaleString()}</td>
-                        <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 600 }}>
-                          {(ln.cases_picked || 0).toLocaleString()}
-                          {(ln.cases_picked || 0) > (ln.cases_requested || 0) && (
-                            <span style={{ marginLeft: '6px', background: '#fef3c7', color: '#92400e', borderRadius: '4px', padding: '1px 5px', fontSize: '10px', fontWeight: 700 }}>
-                              +{((ln.cases_picked || 0) - (ln.cases_requested || 0)).toLocaleString()} over
-                            </span>
-                          )}
-                        </td>
-                        <td style={{ padding: '6px 10px', textAlign: 'right' }}>{(ln.pallet_licence_ids || []).length}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div style={{ marginBottom: '10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {productLines.slice(0, 2).map((ln) => (
+                  <div key={ln.id} style={{ border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px 12px', background: '#fafbfc' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', flexWrap: 'wrap' }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: '13px', color: '#1e293b' }}>{ln.product_name || ln.product_id}</div>
+                        <div style={{ fontSize: '11px', color: '#64748b' }}>{ln.product_fcc_code || '—'}</div>
+                      </div>
+                      <FulfilBadge requested={ln.cases_requested} picked={ln.cases_picked} short={ln.cases_short} over={ln.cases_over} />
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' }}>
+                      <span style={tagStyle}>Req {ln.cases_requested.toLocaleString()}</span>
+                      <span style={tagStyle}>Picked {ln.cases_picked.toLocaleString()}</span>
+                      <span style={tagStyle}>{ln.pallet_count} pallet{ln.pallet_count === 1 ? '' : 's'}</span>
+                      {ln.lots.length > 0 && (
+                        <span style={{ ...tagStyle, background: '#eef2ff', color: '#4338ca' }}>
+                          {ln.lots.length > 1 ? `Lots ${ln.lots.join(', ')}` : `Lot ${ln.lots[0]}`}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {productLines.length > 2 && (
+                  <div style={{ fontSize: '12px', color: '#64748b', padding: '2px 4px' }}>
+                    +{productLines.length - 2} more product{productLines.length - 2 === 1 ? '' : 's'} — open the order to see all
+                  </div>
+                )}
               </div>
             )}
 
@@ -423,22 +430,38 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
             {/* Ship-out pallet pick list with scan status */}
             {isShipOut && hasPallets && (
               <div style={{ marginBottom: '10px' }}>
-                {/* Progress header */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                {/* Progress header — pallets scanned (count only, no fake
+                    denominator) + real case progress against the order total. */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', gap: '8px', flexWrap: 'wrap' }}>
                   <div style={{ fontWeight: 600, fontSize: '13px', color: '#374151' }}>
                     Pallet Pick List
                   </div>
                   <div style={{ fontSize: '13px', color: '#6b7280' }}>
                     <span style={{ color: '#22c55e', fontWeight: 700 }}>{scannedCount}</span>
-                    {skippedCount > 0 && <span style={{ color: '#f59e0b', fontWeight: 700 }}> + {skippedCount} skipped</span>}
-                    <span> / {totalPallets} pallets</span>
+                    <span> pallet{scannedCount === 1 ? '' : 's'} scanned</span>
+                    {skippedCount > 0 && <span style={{ color: '#f59e0b', fontWeight: 700 }}> · {skippedCount} skipped</span>}
+                    {requestedCases > 0 && (
+                      <>
+                        <span> · </span>
+                        <span style={{ fontWeight: 700, color: overCases > 0 ? '#92400e' : '#374151' }}>
+                          {pickedCases.toLocaleString()}
+                        </span>
+                        <span> / {requestedCases.toLocaleString()} cases</span>
+                        {overCases > 0 && (
+                          <span style={{ marginLeft: '6px', background: '#fef3c7', color: '#92400e', borderRadius: '4px', padding: '1px 5px', fontSize: '10px', fontWeight: 700 }}>
+                            +{overCases.toLocaleString()} over
+                          </span>
+                        )}
+                      </>
+                    )}
                   </div>
                 </div>
 
-                {/* Progress bar */}
-                {totalPallets > 0 && (
+                {/* Progress bar — fills by cases against the requested total;
+                    turns amber once picked exceeds requested (over-pull). */}
+                {requestedCases > 0 && (
                   <div style={{ height: '6px', background: '#e5e7eb', borderRadius: '999px', overflow: 'hidden', marginBottom: '8px' }}>
-                    <div style={{ height: '100%', width: `${(scannedCount / totalPallets) * 100}%`, background: 'linear-gradient(90deg, #22c55e, #16a34a)', borderRadius: '999px', transition: 'width 0.4s' }} />
+                    <div style={{ height: '100%', width: `${Math.min(100, (pickedCases / requestedCases) * 100)}%`, background: overCases > 0 ? 'linear-gradient(90deg, #f59e0b, #d97706)' : 'linear-gradient(90deg, #22c55e, #16a34a)', borderRadius: '999px', transition: 'width 0.4s' }} />
                   </div>
                 )}
 
@@ -523,7 +546,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                 disabled={actingId === transfer.id}
                 onClick={() => {
                   const msg = forkliftDone
-                    ? `Approve ship-out order ${transfer.orderNumber || transfer.order_number}?\n\n${scannedCount}/${totalPallets} pallets scanned${skippedCount > 0 ? `, ${skippedCount} skipped` : ''}.\n\nThis will subtract ${transfer.quantity} cases from inventory.`
+                    ? `Approve ship-out order ${transfer.orderNumber || transfer.order_number}?\n\n${scannedCount} pallet${scannedCount === 1 ? '' : 's'} scanned · ${pickedCases.toLocaleString()}/${requestedCases.toLocaleString()} cases${skippedCount > 0 ? `, ${skippedCount} skipped` : ''}.\n\nThis will subtract ${pickedCases.toLocaleString()} cases from inventory.`
                     : 'Approve this transfer?';
                   confirm(msg).then(async ok => {
                     if (!ok) return;

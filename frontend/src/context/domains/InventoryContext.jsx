@@ -4,7 +4,7 @@ import { useLocationContext as useLocation } from './LocationContext';
 import { useReceipt } from './ReceiptContext';
 import { useAuth } from '../AuthContext';
 import apiClient from '../../api/client';
-import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
+import { CATEGORY_TYPES, RECEIPT_STATUS, TRANSFER_STATUS } from '../../constants';
 import { getTodayDateKey, toDateKey } from '../../utils/dateUtils';
 import { fallbackUnit } from '../../utils/units';
 import {
@@ -1063,6 +1063,10 @@ export const InventoryProvider = ({ children }) => {
       const response = await apiClient.post(`/inventory/transfers/${transferId}/void`, {
         reason: reason || null,
       });
+      // Mark the transfer voided locally so it drops out of the pending queue
+      // immediately — otherwise the card lingers until a manual refresh
+      // refetches it with the new status (same pattern as reject/approve).
+      updateTransferStatus(transferId, TRANSFER_STATUS.VOIDED);
       return { success: true, transfer: response.data?.transfer || response.data };
     } catch (error) {
       console.error('Error voiding ship-out transfer:', error);
