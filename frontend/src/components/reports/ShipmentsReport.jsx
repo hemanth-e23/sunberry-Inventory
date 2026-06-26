@@ -1,9 +1,33 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import { formatDate } from "../../utils/dateUtils";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
 import ShipmentDetailModal from "./ShipmentDetailModal";
+
+// Collapse the per-line API rows into one summary row per order (transfer), so
+// an order with several products/lots shows up once instead of many times.
+const groupByOrder = (rows) => {
+  const map = new Map();
+  for (const r of rows) {
+    const key = r.transfer_id || r.order_number;
+    if (!map.has(key)) {
+      map.set(key, {
+        transfer_id: r.transfer_id,
+        order_number: r.order_number,
+        ship_date: r.ship_date,
+        requested_by: r.requested_by,
+        approved_by: r.approved_by,
+        products: new Set(),
+        total_cases: 0,
+      });
+    }
+    const g = map.get(key);
+    if (r.product_name) g.products.add(r.product_name);
+    g.total_cases += Number(r.cases || 0);
+  }
+  return Array.from(map.values()).map((g) => ({ ...g, product_count: g.products.size }));
+};
 
 const ShipmentsReport = ({ productOptions }) => {
   const [shipStart, setShipStart] = useState(monthStart());
@@ -53,14 +77,19 @@ const ShipmentsReport = ({ productOptions }) => {
     }
   }, []);
 
-  const shipmentCols = [
+  const orderRows = useMemo(() => groupByOrder(shipData?.rows || []), [shipData]);
+
+  const orderCols = [
     { label: "Ship Date", value: (r) => formatDate(r.ship_date) },
     { label: "Order #", value: (r) => r.order_number || "—" },
-    { label: "Product", value: (r) => r.product_name },
-    { label: "Code", value: (r) => r.product_code },
-    { label: "Lot #", value: (r) => r.lot_number || "—" },
-    { label: "Cases", value: (r) => formatNumber(r.cases) },
+    {
+      label: "Products",
+      value: (r) => `${r.product_count} ${r.product_count === 1 ? "product" : "products"}`,
+    },
+    { label: "Total Cases", className: "num", value: (r) => formatNumber(r.total_cases) },
+    { label: "Created By", value: (r) => r.requested_by || "—" },
     { label: "Approved By", value: (r) => r.approved_by || "—" },
+    { label: "", className: "row-action", value: () => "View →" },
   ];
 
   return (
@@ -98,15 +127,15 @@ const ShipmentsReport = ({ productOptions }) => {
       {shipData && (
         <>
           <SummaryCards cards={[
-            { label: "Total Shipments", value: formatNumber(shipData.totals?.shipment_count) },
+            { label: "Orders", value: formatNumber(orderRows.length) },
             { label: "Total Cases Shipped", value: formatNumber(shipData.totals?.total_cases), highlight: true },
           ]} />
           <div className="reports-section">
             <div className="reports-section-header">
-              <div><h3>Shipment History</h3><p>All approved ship-outs in the selected period. Click a row for full order details.</p></div>
-              <ExportButtons columns={shipmentCols} rows={shipData.rows || []} fileBaseName="shipments" />
+              <div><h3>Shipment History</h3><p>One row per approved order — click any order to see who created, scanned and approved it, with rack, lot and pallet detail.</p></div>
+              <ExportButtons columns={orderCols.filter((c) => c.label)} rows={orderRows} fileBaseName="shipments" />
             </div>
-            <ReportTable columns={shipmentCols} rows={shipData.rows || []} emptyMessage="No shipments found." onRowClick={(row) => openDetail(row.transfer_id)} />
+            <ReportTable columns={orderCols} rows={orderRows} emptyMessage="No orders found." onRowClick={(row) => openDetail(row.transfer_id)} />
           </div>
         </>
       )}
