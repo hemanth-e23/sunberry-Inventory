@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     Receipt, InventoryTransfer, InventoryTransferLine, InventoryAdjustment, InventoryHoldAction,
     Category, Product, Vendor, User, CycleCount, Location, SubLocation, StorageRow,
-    InterWarehouseTransfer, Warehouse,
+    InterWarehouseTransfer, Warehouse, PalletLicence, TransferScanEvent,
 )
 from app.enums import TransferStatus, AdjustmentStatus, HoldStatus, InterWarehouseStatus, ReceiptStatus
 from app.constants import CATEGORY_FINISHED
@@ -440,17 +440,24 @@ def build_shipments_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     product_id: Optional[str] = None,
+    order_number: Optional[str] = None,
 ) -> dict:
+    order_number = (order_number or "").strip()
     query = db.query(InventoryTransfer).filter(
         InventoryTransfer.transfer_type == "shipped-out",
         InventoryTransfer.status == TransferStatus.APPROVED,
     )
     if warehouse_id:
         query = query.filter(InventoryTransfer.warehouse_id == warehouse_id)
-    if start_date:
-        query = query.filter(InventoryTransfer.approved_at >= parse_dt_start(start_date))
-    if end_date:
-        query = query.filter(InventoryTransfer.approved_at <= parse_dt_end(end_date))
+    # When searching by order number, ignore the date range so the order can be
+    # pulled up regardless of when it shipped.
+    if order_number:
+        query = query.filter(InventoryTransfer.order_number.ilike(f"%{order_number}%"))
+    else:
+        if start_date:
+            query = query.filter(InventoryTransfer.approved_at >= parse_dt_start(start_date))
+        if end_date:
+            query = query.filter(InventoryTransfer.approved_at <= parse_dt_end(end_date))
 
     transfers = query.order_by(InventoryTransfer.approved_at.desc()).all()
 
@@ -517,6 +524,119 @@ def build_shipments_report(
     }
 
     return {"rows": rows, "totals": totals}
+
+
+def build_shipment_detail(
+    db: Session,
+    transfer_id: str,
+    warehouse_id: Optional[str] = None,
+) -> Optional[dict]:
+    """Full provenance for a single approved ship-out order: who created /
+    approved it, plus every line with its pallet-level picks (licence number,
+    origin rack, lot, cases, and the forklift worker who scanned each pallet)."""
+    query = db.query(InventoryTransfer).filter(
+        InventoryTransfer.id == transfer_id,
+        InventoryTransfer.transfer_type == "shipped-out",
+        InventoryTransfer.status == TransferStatus.APPROVED,
+    )
+    if warehouse_id:
+        query = query.filter(InventoryTransfer.warehouse_id == warehouse_id)
+    transfer = query.first()
+    if not transfer:
+        return None
+
+    # Per-order lookup caches to avoid N+1 across many picks.
+    row_name_cache: dict = {}
+    user_name_cache: dict = {}
+    pallet_cache: dict = {}
+
+    def cached_row_name(row_id: Optional[str]) -> Optional[str]:
+        if not row_id:
+            return None
+        if row_id not in row_name_cache:
+            row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
+            row_name_cache[row_id] = row.name if row else row_id
+        return row_name_cache[row_id]
+
+    def cached_user_name(user_id: Optional[str]) -> Optional[str]:
+        if not user_id:
+            return None
+        if user_id not in user_name_cache:
+            user_name_cache[user_id] = user_name(db, user_id)
+        return user_name_cache[user_id]
+
+    def cached_pallet(pallet_id: Optional[str]):
+        if not pallet_id:
+            return None
+        if pallet_id not in pallet_cache:
+            pallet_cache[pallet_id] = (
+                db.query(PalletLicence).filter(PalletLicence.id == pallet_id).first()
+            )
+        return pallet_cache[pallet_id]
+
+    lines = []
+    pallet_count = 0
+    sorted_lines = sorted(transfer.lines or [], key=lambda ln: (ln.line_seq or 0))
+    for ln in sorted_lines:
+        receipt = db.query(Receipt).filter(Receipt.id == ln.receipt_id).first()
+        pname, pcode = product_info(db, ln.product_id)
+
+        picks = []
+        for pk in (ln.picks or []):
+            pallet = cached_pallet(pk.get("pallet_licence_id"))
+            picks.append({
+                "licence_number": pallet.licence_number if pallet else None,
+                "lot_number": (pallet.lot_number if pallet else None) or (receipt.lot_number if receipt else None),
+                "rack": cached_row_name(pk.get("storage_row_id")),
+                "cases": round(float(pk.get("cases_consumed") or 0), 2),
+                "was_partial": bool(pk.get("was_partial")),
+                "scanned_by": cached_user_name(pk.get("scanned_by")),
+                "scanned_at": pk.get("scanned_at"),
+            })
+        pallet_count += len(picks)
+
+        lines.append({
+            "line_id": ln.id,
+            "product_name": pname,
+            "product_code": pcode,
+            "lot_number": receipt.lot_number if receipt else None,
+            "cases_requested": round(float(ln.cases_requested or 0), 2),
+            "cases_picked": round(float(ln.cases_picked or 0), 2),
+            "lot_allocations": ln.lot_allocations or [],
+            "picks": picks,
+        })
+
+    scan_events = []
+    events = (
+        db.query(TransferScanEvent)
+        .filter(TransferScanEvent.transfer_id == transfer.id)
+        .order_by(TransferScanEvent.scanned_at.asc())
+        .all()
+    )
+    for ev in events:
+        scan_events.append({
+            "licence_number": ev.licence_number,
+            "on_list": bool(ev.on_list),
+            "scanned_by": cached_user_name(ev.scanned_by),
+            "scanned_at": ev.scanned_at,
+        })
+
+    return {
+        "transfer_id": transfer.id,
+        "order_number": transfer.order_number,
+        "created_by": user_name(db, transfer.requested_by),
+        "created_at": transfer.submitted_at,
+        "approved_by": user_name(db, transfer.approved_by),
+        "approved_at": transfer.approved_at,
+        "unit": transfer.unit or "cases",
+        "totals": {
+            "cases_picked": round(sum(l["cases_picked"] for l in lines), 2),
+            "line_count": len(lines),
+            "pallet_count": pallet_count,
+        },
+        "lines": lines,
+        "scan_events": scan_events,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

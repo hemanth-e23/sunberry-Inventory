@@ -3,14 +3,21 @@ import { formatDate } from "../../utils/dateUtils";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
+import ShipmentDetailModal from "./ShipmentDetailModal";
 
 const ShipmentsReport = ({ productOptions }) => {
   const [shipStart, setShipStart] = useState(monthStart());
   const [shipEnd, setShipEnd] = useState(today());
   const [shipProduct, setShipProduct] = useState("");
+  const [shipOrder, setShipOrder] = useState("");
   const [shipData, setShipData] = useState(null);
   const [shipLoading, setShipLoading] = useState(false);
   const [shipError, setShipError] = useState(null);
+
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailData, setDetailData] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState(null);
 
   const fetchShipments = useCallback(async () => {
     setShipLoading(true);
@@ -20,6 +27,7 @@ const ShipmentsReport = ({ productOptions }) => {
         start_date: shipStart || undefined,
         end_date: shipEnd || undefined,
         product_id: shipProduct || undefined,
+        order_number: shipOrder.trim() || undefined,
       });
       setShipData(data);
     } catch (e) {
@@ -27,7 +35,23 @@ const ShipmentsReport = ({ productOptions }) => {
     } finally {
       setShipLoading(false);
     }
-  }, [shipStart, shipEnd, shipProduct]);
+  }, [shipStart, shipEnd, shipProduct, shipOrder]);
+
+  const openDetail = useCallback(async (transferId) => {
+    if (!transferId) return;
+    setDetailOpen(true);
+    setDetailData(null);
+    setDetailError(null);
+    setDetailLoading(true);
+    try {
+      const data = await apiFetch(`/reports/shipments/${transferId}`);
+      setDetailData(data);
+    } catch (e) {
+      setDetailError(apiError(e));
+    } finally {
+      setDetailLoading(false);
+    }
+  }, []);
 
   const shipmentCols = [
     { label: "Ship Date", value: (r) => formatDate(r.ship_date) },
@@ -49,11 +73,21 @@ const ShipmentsReport = ({ productOptions }) => {
           <QuickRange onRange={(s, e) => { setShipStart(s); setShipEnd(e); }} />
         </div>
         <div className="filter-row">
+          <label><span>Order #</span>
+            <input
+              type="text"
+              value={shipOrder}
+              placeholder="Search any order #"
+              onChange={(e) => setShipOrder(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") fetchShipments(); }}
+            />
+          </label>
           <label><span>Product</span>
             <SearchableSelect options={productOptions} value={shipProduct} onChange={setShipProduct} allowEmptyOption emptyLabel="All Products" />
           </label>
           <RunButton onClick={fetchShipments} loading={shipLoading} />
         </div>
+        <p className="filter-hint">Tip: enter an Order # to pull it up across all dates, then click a row for full provenance.</p>
       </div>
 
       {shipLoading && <LoadingBox />}
@@ -69,13 +103,21 @@ const ShipmentsReport = ({ productOptions }) => {
           ]} />
           <div className="reports-section">
             <div className="reports-section-header">
-              <div><h3>Shipment History</h3><p>All approved ship-outs in the selected period.</p></div>
+              <div><h3>Shipment History</h3><p>All approved ship-outs in the selected period. Click a row for full order details.</p></div>
               <ExportButtons columns={shipmentCols} rows={shipData.rows || []} fileBaseName="shipments" />
             </div>
-            <ReportTable columns={shipmentCols} rows={shipData.rows || []} emptyMessage="No shipments found." />
+            <ReportTable columns={shipmentCols} rows={shipData.rows || []} emptyMessage="No shipments found." onRowClick={(row) => openDetail(row.transfer_id)} />
           </div>
         </>
       )}
+
+      <ShipmentDetailModal
+        isOpen={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        loading={detailLoading}
+        error={detailError}
+        data={detailData}
+      />
     </section>
   );
 };

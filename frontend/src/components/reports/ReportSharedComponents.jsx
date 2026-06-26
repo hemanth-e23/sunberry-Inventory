@@ -80,7 +80,7 @@ export const ExportButtons = ({ columns, rows, fileBaseName }) => {
 // Reusable table
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const ReportTable = ({ columns, rows, emptyMessage = "No data for the selected filters." }) => (
+export const ReportTable = ({ columns, rows, emptyMessage = "No data for the selected filters.", onRowClick }) => (
   <div className="table-wrapper">
     <table className="report-table">
       <thead>
@@ -91,7 +91,14 @@ export const ReportTable = ({ columns, rows, emptyMessage = "No data for the sel
           <tr><td colSpan={columns.length} className="empty-state">{emptyMessage}</td></tr>
         ) : (
           rows.map((row, i) => (
-            <tr key={row.id || i}>
+            <tr
+              key={row.id || i}
+              className={onRowClick ? "clickable" : undefined}
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
+              role={onRowClick ? "button" : undefined}
+              tabIndex={onRowClick ? 0 : undefined}
+              onKeyDown={onRowClick ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onRowClick(row); } } : undefined}
+            >
               {columns.map((c) => <td key={c.label} className={c.className}>{(c.renderValue || c.value)(row)}</td>)}
             </tr>
           ))

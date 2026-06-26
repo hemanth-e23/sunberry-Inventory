@@ -139,6 +139,7 @@
 }
 
 .filter-row input[type="date"],
+.filter-row input[type="text"],
 .filter-select {
   border: 1px solid var(--color-border-strong);
   padding: 9px 12px;
@@ -150,6 +151,7 @@
 }
 
 .filter-row input[type="date"]:focus,
+.filter-row input[type="text"]:focus,
 .filter-select:focus {
   outline: none;
   border-color: var(--color-primary);
@@ -342,6 +344,91 @@
 
 .report-table tbody tr:hover td {
   background: var(--color-canvas);
+}
+
+.report-table tbody tr.clickable {
+  cursor: pointer;
+}
+
+.report-table tbody tr.clickable:hover td {
+  background: rgba(249, 115, 22, 0.06);
+}
+
+.report-table tbody tr.clickable:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+.filter-hint {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+/* ── Shipment detail modal ───────────────────────────────────────────── */
+.shipment-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.shipment-detail-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px 20px;
+  flex: 1 1 320px;
+}
+
+.shipment-detail-meta .meta-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.shipment-detail-meta .meta-value {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary, #111827);
+}
+
+.shipment-detail-line {
+  margin-top: 20px;
+}
+
+.shipment-detail-line-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.shipment-detail-line-head h4 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--color-text-primary, #111827);
+}
+
+.shipment-detail-line-head .line-code {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.shipment-detail-line-head .line-cases {
+  font-size: 13px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.report-subtable {
+  font-size: 13px;
 }
 
 .empty-state {

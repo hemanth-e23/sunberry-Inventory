@@ -8,6 +8,7 @@ from app.services.report_builders import (
     build_point_in_time_snapshot,
     build_activity_ledger,
     build_shipments_report,
+    build_shipment_detail,
     build_movement_ledger,
     build_lot_trace,
     build_holds_report,
@@ -93,17 +94,41 @@ async def shipments_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     product_id: Optional[str] = None,
+    order_number: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    """All approved shipped-out transfers in the date range."""
+    """All approved shipped-out transfers in the date range.
+
+    When `order_number` is supplied the date range is ignored, so an order can
+    be pulled up regardless of when it shipped.
+    """
     return build_shipments_report(
         db,
         warehouse_id=warehouse_filter(current_user),
         start_date=start_date,
         end_date=end_date,
         product_id=product_id,
+        order_number=order_number,
     )
+
+
+@router.get("/shipments/{transfer_id}")
+async def shipment_detail(
+    transfer_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Full provenance for a single approved ship-out order — creator, approver,
+    and pallet-level picks (licence number, origin rack, lot, scanner)."""
+    detail = build_shipment_detail(
+        db,
+        transfer_id,
+        warehouse_id=warehouse_filter(current_user),
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Ship-out order not found")
+    return detail
 
 
 # ─────────────────────────────────────────────────────────────────────────────
