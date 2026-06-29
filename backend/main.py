@@ -8,6 +8,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 import uvicorn
 import time
 import logging
+import uuid
+import traceback as traceback_mod
 from collections import defaultdict
 from typing import Dict, Tuple
 
@@ -75,13 +77,23 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 def _request_user_repr(request: Request) -> str:
     """Short identifier for the user behind a request, for log lines.
-    Returns '-' if the request is unauthenticated or auth never ran."""
+    Returns '-' if the request is unauthenticated or auth never ran.
+
+    MUST NEVER trigger a DB load. This runs in the logging path AFTER the
+    route's session has closed; if the request committed or rolled back, the
+    cached User is expired+detached and touching an instrumented column
+    (user.username) raises DetachedInstanceError — which previously masked the
+    real 4xx as a CORS-less 500. We prefer a plain string captured by auth
+    while the session was live, and otherwise read straight from __dict__ so
+    SQLAlchemy never tries to refresh."""
+    cached = getattr(request.state, "current_user_repr", None)
+    if cached:
+        return cached
     user = getattr(request.state, "current_user", None)
     if not user:
         return "-"
-    username = getattr(user, "username", "?")
-    role = getattr(user, "role", "?")
-    return f"{username}({role})"
+    d = getattr(user, "__dict__", {})
+    return f"{d.get('username', '?')}({d.get('role', '?')})"
 
 
 def _safe_body_for_log(body: bytes, path: str) -> str:
@@ -100,13 +112,78 @@ def _safe_body_for_log(body: bytes, path: str) -> str:
     return text
 
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """Log every error response (status >= 400) with the user, path, request
-    body, and duration. This is the audit trail that lets a supervisor diagnose
-    'the forklift driver scanned X and got an error' after the fact.
+# Plain-English hints for exception types that are otherwise cryptic, so a
+# supervisor reading the log doesn't have to decode a stack trace.
+_EXC_HINTS = {
+    "DetachedInstanceError": "a database object was read after its session "
+                             "closed (it was expired by a commit/rollback, "
+                             "then accessed later in the request)",
+    "IntegrityError": "a database constraint was violated (a duplicate, or a "
+                      "required value was missing)",
+    "OperationalError": "the database was unreachable or a query timed out",
+    "DataError": "a value did not fit its database column type",
+    "ProgrammingError": "a database schema mismatch (a column/table the code "
+                        "expects is missing — often a migration not applied)",
+}
 
-    Successful responses are NOT logged here (would be too noisy). Successful
-    operations leave their own footprint in the DB.
+
+def _log_request_error(request: Request, status: int, *, body: bytes = b"",
+                       reason=None, exc: BaseException = None) -> None:
+    """Emit ONE human-readable banner for a failed request, with clear
+    START (╔ … ▼) and END (╚ … ✗) markers and a short request id tying every
+    line together. Includes a full traceback only for real crashes (5xx).
+
+    Never raises: logging must not turn one error into another.
+    """
+    try:
+        req_id = getattr(request.state, "request_id", None) or "------"
+        start = getattr(request.state, "start_time", None)
+        took = f"   took={int((time.time() - start) * 1000)}ms" if start else ""
+        level = logging.ERROR if status >= 500 else logging.WARNING
+
+        lines = [
+            f"╔═ ERROR ▼ req={req_id} " + "═" * 38,
+            f"║ {request.method} {request.url.path}",
+            f"║ user={_request_user_repr(request)}   status={status}{took}",
+        ]
+        if reason:
+            lines.append(f"║ reason: {reason}")
+        safe_body = _safe_body_for_log(body, request.url.path)
+        if safe_body:
+            lines.append(f"║ body: {safe_body}")
+        if exc is not None:
+            hint = _EXC_HINTS.get(type(exc).__name__)
+            if hint:
+                lines.append(f"║ cause: {type(exc).__name__} — {hint}")
+            else:
+                lines.append(f"║ cause: {type(exc).__name__}: {exc}")
+            lines.append("║ ── traceback " + "─" * 40)
+            tb = "".join(traceback_mod.format_exception(
+                type(exc), exc, exc.__traceback__))
+            for tl in tb.rstrip().splitlines():
+                lines.append(f"║   {tl}")
+        lines.append(f"╚═ END ✗ req={req_id} " + "═" * 40)
+
+        request.state.error_logged = True
+        logger.log(level, "\n" + "\n".join(lines))
+    except Exception:
+        # Absolute last resort — a logging failure must never break the request.
+        try:
+            logger.error("error-banner logging failed for %s %s (status=%s)",
+                         request.method, request.url.path, status)
+        except Exception:
+            pass
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Log a single banner for every FAILED request (status >= 400 or an
+    unhandled exception) with the user, path, body, timing, and — for real
+    crashes — the traceback. This is the audit trail that lets a supervisor
+    diagnose 'the forklift driver scanned X and got an error' after the fact.
+
+    Successful responses are NOT logged (would be too noisy). The 4xx detail
+    and 5xx traceback are produced here, in one place, so each error yields
+    exactly one clean banner.
     """
     async def dispatch(self, request: Request, call_next):
         # Buffer the body up front so we can both log it and let the route
@@ -117,22 +194,26 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             return {"type": "http.request", "body": body, "more_body": False}
 
         request = Request(request.scope, receive=receive)
+        request.state.request_id = uuid.uuid4().hex[:6]
+        request.state.start_time = time.time()
 
-        start = time.time()
-        response = await call_next(request)
-        duration_ms = int((time.time() - start) * 1000)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            # An exception escaped the inner handlers; ServerErrorMiddleware
+            # (just outside us) will turn it into a 500. Log it once here, with
+            # the full traceback, then re-raise so the 500 response is produced.
+            _log_request_error(request, 500, body=body, exc=exc)
+            raise
 
-        if response.status_code >= 400:
-            level = logging.ERROR if response.status_code >= 500 else logging.WARNING
-            logger.log(
-                level,
-                "status=%d user=%s method=%s path=%s duration_ms=%d body=%s",
+        if response.status_code >= 400 and not getattr(
+            request.state, "error_logged", False
+        ):
+            _log_request_error(
+                request,
                 response.status_code,
-                _request_user_repr(request),
-                request.method,
-                request.url.path,
-                duration_ms,
-                _safe_body_for_log(body, request.url.path),
+                body=body,
+                reason=getattr(request.state, "error_reason", None),
             )
         return response
 
@@ -188,7 +269,10 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
     Logging is handled by RequestLoggingMiddleware (it logs the full path,
     user, body, and the resolved status), so this handler does not log here.
+    It only stashes the REAL detail (even when the client-facing detail is
+    made generic in production) so the log banner shows the true reason.
     """
+    request.state.error_reason = exc.detail
     if settings.DEBUG or exc.status_code in (400, 409):
         detail = exc.detail
     elif exc.status_code == 404:
@@ -205,14 +289,17 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Handle validation errors - hide details in production"""
+    """Handle validation errors - hide details in production.
+
+    The real validation errors are stashed for the log banner (logging itself
+    is done once, by RequestLoggingMiddleware)."""
+    request.state.error_reason = f"validation: {exc.errors()}"
     if settings.DEBUG:
         return JSONResponse(
             status_code=422,
             content={"detail": exc.errors(), "body": exc.body}
         )
     else:
-        logger.warning(f"Validation error: {exc.errors()} - Path: {request.url.path}")
         return JSONResponse(
             status_code=422,
             content={"detail": "Invalid input data"}
@@ -220,9 +307,14 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    """Handle all other exceptions - hide details in production"""
-    logger.exception(f"Unhandled exception: {exc} - Path: {request.url.path}")
-    
+    """Handle all other exceptions - hide details in production.
+
+    The middleware normally logs the banner+traceback as the exception passes
+    through it; this guard logs here only if it somehow didn't (e.g. an
+    exception raised outside RequestLoggingMiddleware), avoiding a duplicate."""
+    if not getattr(request.state, "error_logged", False):
+        _log_request_error(request, 500, exc=exc)
+
     if settings.DEBUG:
         import traceback
         return JSONResponse(

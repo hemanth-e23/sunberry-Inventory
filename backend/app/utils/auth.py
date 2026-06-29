@@ -163,6 +163,12 @@ def get_current_user(
     # Stash the authenticated user on request.state so the logging middleware
     # in main.py can attribute error responses to a specific username/role.
     request.state.current_user = user
+    # Also capture a plain-string identity NOW, while the session is live. The
+    # logging middleware runs after the route's session has closed; if the
+    # request committed or rolled back, `user` is expired+detached and reading
+    # user.username there raises DetachedInstanceError. A precomputed string is
+    # immune to that.
+    request.state.current_user_repr = f"{user.username}({user.role})"
 
     # For corporate users: check X-View-Warehouse header to scope their view
     if user.role in CORPORATE_ROLES:
