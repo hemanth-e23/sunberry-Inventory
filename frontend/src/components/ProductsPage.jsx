@@ -35,6 +35,7 @@ const ProductsPage = () => {
     productCategories,
     categoryGroups,
     products,
+    packageSizes,
     productsLoading,
     addProduct,
     updateProduct,
@@ -98,6 +99,7 @@ const ProductsPage = () => {
       quantityUom: 'cases',
       inventoryTracked: true,
       galPerCase: '',
+      packageSizeId: '',
       customerName: '',
       customerItemNumber: '',
       customerUpc: '',
@@ -122,6 +124,7 @@ const ProductsPage = () => {
       quantityUom: formData.quantityUom || 'cases',
       inventoryTracked: formData.inventoryTracked,
       galPerCase: formData.galPerCase != null && formData.galPerCase !== '' ? Number(formData.galPerCase) : null,
+      packageSizeId: formData.packageSizeId || null,
       customerName: formData.customerName.trim() || '',
       customerItemNumber: formData.customerItemNumber.trim() || '',
       customerUpc: formData.customerUpc.trim() || '',
@@ -157,6 +160,7 @@ const ProductsPage = () => {
       quantityUom: product.quantityUom || 'cases',
       inventoryTracked: product.inventoryTracked !== false,
       galPerCase: product.galPerCase ?? '',
+      packageSizeId: product.packageSizeId ?? '',
       customerName: product.customerName || '',
       customerItemNumber: product.customerItemNumber || '',
       customerUpc: product.customerUpc || '',
@@ -315,6 +319,21 @@ const ProductsPage = () => {
                         value={formData.galPerCase}
                         onChange={(e) => setFormData(prev => ({ ...prev, galPerCase: e.target.value }))}
                       />
+                    </label>
+
+                    <label>
+                      <span>Package Size <span className="muted small">(sets BOL case weight)</span></span>
+                      <select
+                        value={formData.packageSizeId}
+                        onChange={(e) => setFormData(prev => ({ ...prev, packageSizeId: e.target.value }))}
+                      >
+                        <option value="">— None (not shipped on BOL) —</option>
+                        {(packageSizes || []).map(s => (
+                          <option key={s.id} value={s.id}>
+                            {s.label}{s.caseWeight != null ? ` — ${s.caseWeight} lb/case` : ''}
+                          </option>
+                        ))}
+                      </select>
                     </label>
 
                     <div className="full-width" style={{ marginTop: '8px', paddingTop: '12px', borderTop: '1px dashed var(--color-border)' }}>

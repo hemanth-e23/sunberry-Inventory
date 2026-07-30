@@ -1,10 +1,11 @@
-import React from "react";
-import { FileText, FileSpreadsheet, FileDown, CheckCircle2, AlertTriangle } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { FileText, FileSpreadsheet, FileDown, Printer, CheckCircle2, AlertTriangle } from "lucide-react";
 import Modal from "../Modal";
 import { formatDateTime } from "../../utils/dateUtils";
 import { LoadingBox, ErrorBox } from "./ReportSharedComponents";
-import { formatNumber } from "./reportUtils";
+import { formatNumber, apiFetch, apiError } from "./reportUtils";
 import { exportOrderPDF, exportOrderExcel, exportOrderCSV } from "./shipmentDocExport";
+import ShipOutDocuments from "../ShipOutDocuments";
 
 const MetaItem = ({ label, value }) => (
   <div className="ship-meta-item">
@@ -38,8 +39,40 @@ const ShipmentDetailModal = ({ isOpen, onClose, loading, error, data }) => {
   const title = data ? `Order ${data.order_number || "—"}` : "Order Details";
   const t = data?.totals || {};
 
+  // Official shipping documents (frozen at BOL generation). Loaded on demand
+  // from the transfer's document_snapshot so the user can re-print the Packing
+  // Slip / BOL straight from this report.
+  const [docs, setDocs] = useState(null);
+  const [docsBusy, setDocsBusy] = useState(false);
+  const [docsError, setDocsError] = useState(null);
+
+  // Reset when the modal switches to a different order (or closes).
+  useEffect(() => {
+    setDocs(null);
+    setDocsBusy(false);
+    setDocsError(null);
+  }, [data?.transfer_id, isOpen]);
+
+  const loadDocs = async () => {
+    if (!data?.transfer_id) return;
+    setDocsBusy(true);
+    setDocsError(null);
+    try {
+      const snapshot = await apiFetch(`/inventory/transfers/${data.transfer_id}/documents`);
+      setDocs(snapshot);
+    } catch (e) {
+      setDocsError(
+        e?.response?.status === 404
+          ? "No Packing Slip / BOL for this order — documents haven't been generated yet."
+          : apiError(e),
+      );
+    } finally {
+      setDocsBusy(false);
+    }
+  };
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={title} size="xl">
+    <Modal isOpen={isOpen} onClose={onClose} title={title} size="xxl">
       {loading && <LoadingBox />}
       {error && <ErrorBox message={error} />}
       {!loading && !error && data && (
@@ -80,8 +113,19 @@ const ShipmentDetailModal = ({ isOpen, onClose, loading, error, data }) => {
               <button type="button" onClick={() => exportOrderPDF(data)}><FileDown size={15} /> PDF</button>
               <button type="button" onClick={() => exportOrderExcel(data)}><FileSpreadsheet size={15} /> Excel</button>
               <button type="button" onClick={() => exportOrderCSV(data)}><FileText size={15} /> CSV</button>
+              {!docs && (
+                <button type="button" onClick={loadDocs} disabled={docsBusy}>
+                  <Printer size={15} /> {docsBusy ? "Loading…" : "BOL / Packing Slip"}
+                </button>
+              )}
             </div>
           </div>
+
+          {docsError && <ErrorBox message={docsError} />}
+
+          {/* Official Packing Slip + Bill of Lading — each with its own Print
+              button (window.print() isolates the doc via ShipOutDocuments.css). */}
+          {docs && <ShipOutDocuments snapshot={docs} />}
 
           {/* One section per product (FIFO sub-lines already merged server-side) */}
           {(data.lines || []).map((line) => (

@@ -35,7 +35,50 @@ class InventoryTransfer(Base):
     voided_by = Column(String(50), ForeignKey("users.id"), nullable=True)
     voided_reason = Column(Text, nullable=True)
 
+    # ---- Scheduled ship-out lifecycle (SHIP-OUT-SCHEDULING-SPEC.md) ----
+    # All nullable so this migration is additive and non-breaking; only ship-out
+    # orders created via the new scheduled flow populate them. `status` (above)
+    # carries the ShipOutLifecycle value for these orders.
+    scheduled_date = Column(Date, nullable=True)              # planned ship day
+    appointment_time = Column(String(20), nullable=True)     # e.g. "07:00 AM EST" (= time slot, editable)
+    ship_to_location_id = Column(String(50), ForeignKey("ship_to_locations.id"), nullable=True)
+    po_number = Column(String(100), nullable=True)
+    carrier = Column(String(100), nullable=True)             # self-populating (carriers table)
+    pallet_type_id = Column(String(50), ForeignKey("pallet_types.id"), nullable=True)
+    # Yard check-in (Step 3). Optional here, required at doc generation (§ kickoff decisions).
+    driver_name = Column(String(100), nullable=True)
+    driver_license = Column(String(50), nullable=True)
+    truck_number = Column(String(50), nullable=True)
+    truck_license = Column(String(50), nullable=True)       # tractor/truck license plate
+    trailer_number = Column(String(50), nullable=True)
+    trailer_license = Column(String(50), nullable=True)     # trailer license plate
+    time_in = Column(DateTime(timezone=True), nullable=True)
+    checked_in_at = Column(DateTime(timezone=True), nullable=True)
+    checked_in_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    # Departure (Step 6): seal + time-out entered at doc generation.
+    seal_number = Column(String(50), nullable=True)
+    time_out = Column(DateTime(timezone=True), nullable=True)
+    # Reconcile / docs audit + lock.
+    reconciled_at = Column(DateTime(timezone=True), nullable=True)
+    reconciled_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    ship_short = Column(Boolean, default=False, nullable=False, server_default="false")
+    docs_generated_at = Column(DateTime(timezone=True), nullable=True)
+    docs_generated_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    is_locked = Column(Boolean, default=False, nullable=False, server_default="false")
+    # Worker override of the computed pallet count (§5.1); NULL = use computed.
+    pallet_count_override = Column(Integer, nullable=True)
+    scheduled_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    # Documents (SPEC §5.4/Task 8): assigned BOL number + frozen snapshot of all
+    # printed values, so a reprint reproduces the doc exactly.
+    bol_number = Column(String(30), nullable=True)
+    document_snapshot = Column(JSON, nullable=True)
+    # Void & regenerate audit (§5.4): each voided doc's snapshot is archived here
+    # [{snapshot, voided_by, voided_at, reason}]; its BOL number is burned.
+    voided_documents = Column(JSON, nullable=True)
+
     receipt = relationship("Receipt", backref="transfers")
+    ship_to_location = relationship("ShipToLocation")
+    pallet_type = relationship("PalletType")
     from_location = relationship("Location", foreign_keys=[from_location_id], backref="transfers_from")
     from_sub_location = relationship("SubLocation", foreign_keys=[from_sub_location_id], backref="transfers_from")
     to_location = relationship("Location", foreign_keys=[to_location_id], backref="transfers_to")
@@ -65,7 +108,12 @@ class InventoryTransferLine(Base):
     id = Column(String(50), primary_key=True)
     transfer_id = Column(String(50), ForeignKey("inventory_transfers.id", ondelete="CASCADE"), nullable=False, index=True)
     product_id = Column(String(50), ForeignKey("products.id"), nullable=False, index=True)
-    receipt_id = Column(String(50), ForeignKey("receipts.id"), nullable=False, index=True)
+    # Nullable for scheduled orders: a scheduled order (created before stock
+    # exists) carries one "planning" line per product with NO receipt and empty
+    # lot_allocations. Actual picks attach as receipt-pinned drift sub-lines at
+    # scan time via _route_pick_to_sub_line (SPEC Task 2/4). Legacy lot-based
+    # lines still set a real receipt_id.
+    receipt_id = Column(String(50), ForeignKey("receipts.id"), nullable=True, index=True)
     cases_requested = Column(Float, nullable=False)
     cases_picked = Column(Float, nullable=False, default=0)
     pallet_licence_ids = Column(JSON, nullable=True)
@@ -76,6 +124,10 @@ class InventoryTransferLine(Base):
     picks = Column(JSON, nullable=True)
     # Audit of escape-hatch swaps: [{from_lot, to_lot, reason, at, by}]
     lot_swap_history = Column(JSON, nullable=True)
+    # Manual attribution (SPEC §5.3): cases loaded but not scannable (no sticker).
+    # Paperwork only — NOT deducted from inventory. [{lot_number, cases, reason,
+    # who, at}]. shipped = cases_picked + Σ manual_attributions.cases.
+    manual_attributions = Column(JSON, nullable=True)
     line_seq = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

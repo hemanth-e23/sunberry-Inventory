@@ -27,6 +27,7 @@ const WarehouseDashboard = lazy(() => import('./components/WarehouseDashboard'))
 const SupervisorDashboard = lazy(() => import('./components/SupervisorDashboard'));
 const MasterDataPage = lazy(() => import('./components/MasterDataPage'));
 const InventoryActionsPage = lazy(() => import('./components/InventoryActionsPage'));
+const OutgoingDashboard = lazy(() => import('./components/OutgoingDashboard'));
 const ReportsPage = lazy(() => import('./components/ReportsPage'));
 const ReceiptCorrectionsPage = lazy(() => import('./components/ReceiptCorrectionsPage'));
 const CycleCountingPage = lazy(() => import('./components/CycleCountingPage'));
@@ -299,6 +300,14 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
+        <Route path="/admin/outgoing" element={
+          <ProtectedRoute requiredRole="admin">
+            <Layout>
+              {page(<OutgoingDashboard />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
         <Route path="/admin/staging" element={
           <ProtectedRoute requiredRole="admin" requiredFeature="staging">
             <Layout>
@@ -401,6 +410,14 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
+        <Route path="/warehouse/outgoing" element={
+          <ProtectedRoute requiredRole="warehouse">
+            <Layout>
+              {page(<OutgoingDashboard />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
         <Route path="/warehouse/staging" element={
           <ProtectedRoute requiredRole="warehouse" requiredFeature="staging">
             <Layout>
@@ -477,6 +494,14 @@ function AppRoutes() {
         <Route path="/supervisor/inventory-actions" element={
           <ProtectedRoute requiredRole="supervisor">
             {inventoryActionsElement}
+          </ProtectedRoute>
+        } />
+
+        <Route path="/supervisor/outgoing" element={
+          <ProtectedRoute requiredRole="supervisor">
+            <Layout>
+              {page(<OutgoingDashboard />)}
+            </Layout>
           </ProtectedRoute>
         } />
 

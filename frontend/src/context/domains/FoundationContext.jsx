@@ -38,6 +38,7 @@ const mapProduct = (prod) => ({
   active: prod.is_active !== false,
   inventoryTracked: prod.inventory_tracked !== false,
   galPerCase: prod.gal_per_case ?? null,
+  packageSizeId: prod.package_size_id ?? null,
   customerName: prod.customer_name || '',
   customerItemNumber: prod.customer_item_number || '',
   customerUpc: prod.customer_upc || '',
@@ -106,6 +107,43 @@ export const FoundationProvider = ({ children }) => {
     staleTime: 5 * 60 * 1000,
   });
 
+  const { data: rawPackageSizes = [] } = useQuery({
+    queryKey: ['package-sizes'],
+    queryFn: () => apiClient.get('/master-data/package-sizes').then(r => r.data),
+    enabled,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const { data: palletTypes = [] } = useQuery({
+    queryKey: ['pallet-types'],
+    queryFn: () => apiClient.get('/master-data/pallet-types').then(r => r.data),
+    enabled,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const { data: shipToLocations = [] } = useQuery({
+    queryKey: ['ship-to-locations'],
+    queryFn: () => apiClient.get('/master-data/ship-to-locations').then(r => r.data),
+    enabled,
+    staleTime: 60 * 1000,
+  });
+
+  const { data: carriers = [] } = useQuery({
+    queryKey: ['carriers'],
+    queryFn: () => apiClient.get('/master-data/carriers').then(r => r.data),
+    enabled,
+    staleTime: 60 * 1000,
+  });
+
+  // Create a scheduled ship-out order (Task 2). On success, refresh the
+  // self-populating ship-to/carrier lists so new entries appear in type-aheads.
+  const createScheduledOrder = async (payload) => {
+    const { data } = await apiClient.post('/inventory/ship-out/schedule', payload);
+    queryClient.invalidateQueries({ queryKey: ['ship-to-locations'] });
+    queryClient.invalidateQueries({ queryKey: ['carriers'] });
+    return data;
+  };
+
   // ─── Derived state ──────────────────────────────────────────────────────────
 
   const categoryGroupsMapped = useMemo(
@@ -121,6 +159,29 @@ export const FoundationProvider = ({ children }) => {
   const products = useMemo(() => rawProducts.map(mapProduct), [rawProducts]);
 
   const vendors = useMemo(() => rawVendors.map(mapVendor), [rawVendors]);
+
+  // Package sizes come from the API already snake_cased; expose case_weight as
+  // caseWeight for the master-data editor. Ordered by the API (sort_order).
+  const packageSizes = useMemo(
+    () => rawPackageSizes.map(s => ({
+      id: s.id,
+      label: s.label,
+      caseWeight: s.case_weight ?? null,
+      sortOrder: s.sort_order,
+      isActive: s.is_active !== false,
+    })),
+    [rawPackageSizes]
+  );
+
+  const updatePackageSize = async (id, updates) => {
+    const body = {};
+    if (updates.caseWeight !== undefined) body.case_weight = updates.caseWeight != null && updates.caseWeight !== '' ? Number(updates.caseWeight) : null;
+    if (updates.label !== undefined) body.label = updates.label;
+    if (updates.isActive !== undefined) body.is_active = updates.isActive;
+    const { data } = await apiClient.put(`/master-data/package-sizes/${id}`, body);
+    queryClient.setQueryData(['package-sizes'], (old = []) => old.map(s => s.id === id ? data : s));
+    return data;
+  };
 
   // ─── Category mutations ─────────────────────────────────────────────────────
 
@@ -195,6 +256,7 @@ export const FoundationProvider = ({ children }) => {
       is_active: product.active !== undefined ? product.active : true,
       inventory_tracked: product.inventoryTracked !== undefined ? product.inventoryTracked : true,
       gal_per_case: product.galPerCase != null && product.galPerCase !== '' ? Number(product.galPerCase) : null,
+      package_size_id: product.packageSizeId || null,
       customer_name: product.customerName?.trim() || null,
       customer_item_number: product.customerItemNumber?.trim() || null,
       customer_upc: product.customerUpc?.trim() || null,
@@ -227,6 +289,7 @@ export const FoundationProvider = ({ children }) => {
     if (updates.quantityUom !== undefined) updateData.quantity_uom = updates.quantityUom || null;
     if (updates.inventoryTracked !== undefined) updateData.inventory_tracked = updates.inventoryTracked;
     if (updates.galPerCase !== undefined) updateData.gal_per_case = updates.galPerCase != null && updates.galPerCase !== '' ? Number(updates.galPerCase) : null;
+    if (updates.packageSizeId !== undefined) updateData.package_size_id = updates.packageSizeId || null;
     if (updates.customerName !== undefined) updateData.customer_name = updates.customerName?.trim() || null;
     if (updates.customerItemNumber !== undefined) updateData.customer_item_number = updates.customerItemNumber?.trim() || null;
     if (updates.customerUpc !== undefined) updateData.customer_upc = updates.customerUpc?.trim() || null;
@@ -301,6 +364,12 @@ export const FoundationProvider = ({ children }) => {
     categoryGroupsMapped,
     products,
     vendors,
+    packageSizes,
+    updatePackageSize,
+    palletTypes,
+    shipToLocations,
+    carriers,
+    createScheduledOrder,
     productsLoading,
     categoriesLoading,
     addCategory,

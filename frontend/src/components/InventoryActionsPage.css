@@ -478,3 +478,18 @@
     transform: translateY(-1px);
     box-shadow: var(--shadow-sm) !important;
 }
+
+/* Two-column responsive field grid for the Schedule Ship-Out form (Task 2) */
+.action-form .form-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.action-form .form-grid-2 label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+@media (max-width: 640px) {
+  .action-form .form-grid-2 { grid-template-columns: 1fr; }
+}

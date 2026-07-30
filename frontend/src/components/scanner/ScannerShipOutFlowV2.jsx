@@ -53,6 +53,7 @@ const ScannerShipOutFlowV2 = () => {
 
   // Pending partial-pull confirmation (modal driver).
   const [partialPrompt, setPartialPrompt] = useState(null);
+  const [liveLoadPrompt, setLiveLoadPrompt] = useState(null);
   // { licenceNumber, suggestedCases, palletCases, lineId, lotNumber, message }
 
   // Reversible lot picker (modal driver) — forklift opens the full lot list
@@ -81,6 +82,10 @@ const ScannerShipOutFlowV2 = () => {
     playErrorTone();
     setOverlay({ kind: 'error', message });
   }, []);
+  // Gentle, non-alarming overlay — e.g. a pallet already scanned onto this load.
+  const showOverlayInfo = useCallback((message) => {
+    setOverlay({ kind: 'info', message });
+  }, []);
   const dismissOverlay = useCallback(() => setOverlay(null), []);
 
   // ── Data loaders ──────────────────────────────────────────────────────────
@@ -88,11 +93,10 @@ const ScannerShipOutFlowV2 = () => {
   const loadOrders = useCallback(async () => {
     setLoadingOrders(true);
     try {
-      // Forklift can only list pending ship-outs; backend enforces both
-      // params for this role.
-      const r = await apiClient.get('/inventory/transfers', {
-        params: { status: 'pending', transfer_type: 'shipped-out' },
-      });
+      // Gun queue: checked-in / loading orders for this warehouse, status-based
+      // and date-independent (SPEC §5.6). Includes legacy pending orders until
+      // the old flow is retired.
+      const r = await apiClient.get('/inventory/ship-out/gun');
       setTransfers(r.data || []);
     } catch (err) {
       console.error('loadOrders failed:', err.response?.data || err);
@@ -158,12 +162,13 @@ const ScannerShipOutFlowV2 = () => {
 
   // ── Scan handler ──────────────────────────────────────────────────────────
 
-  const callScanPick = async (licenceNumber, casesToConsume) => {
+  const callScanPick = async (licenceNumber, casesToConsume, allowLiveLoad = false) => {
     return apiClient.post(
       `/inventory/transfers/${selectedTransfer.id}/scan-pick-v2`,
       {
         licence_number: licenceNumber,
         ...(casesToConsume != null ? { cases_to_consume: casesToConsume } : {}),
+        ...(allowLiveLoad ? { allow_live_load: true } : {}),
       }
     );
   };
@@ -210,6 +215,31 @@ const ScannerShipOutFlowV2 = () => {
       return;
     }
 
+    // Live-load: pallet is fresh off the palletizer (PENDING). Confirm to load direct.
+    if (!data.ok && data.reject_reason === 'live_load_needs_confirm') {
+      setLiveLoadPrompt({ licenceNumber: lic, message: data.message });
+      return;
+    }
+
+    // Double-scan of a pallet already on THIS load — reassure, don't alarm.
+    if (!data.ok && data.reject_reason === 'already_on_this_order') {
+      const msg = data.message || `Pallet "${lic}" is already on this load.`;
+      setScanFeedback({ type: 'warn', msg });
+      showOverlayInfo(msg);
+      return;
+    }
+
+    // Quantity reached — this product's ordered cases are already loaded, so the
+    // gun stops here (scheduled orders). Not an error the loader did wrong; show
+    // it as a clear "reached" heads-up and refresh so the ✓ badge is current.
+    if (!data.ok && data.reject_reason === 'line_complete') {
+      const msg = data.message || `Quantity reached for "${lic}".`;
+      setScanFeedback({ type: 'warn', msg });
+      showOverlayInfo(msg);
+      loadView(selectedTransfer.id);
+      return;
+    }
+
     if (!data.ok) {
       // Wrong-lot pulls are no longer rejected (lots are advisory) — the server
       // accepts them with a lot_hint. Remaining rejects are hard errors
@@ -234,6 +264,24 @@ const ScannerShipOutFlowV2 = () => {
   };
 
   // Confirm a partial pull
+  const confirmLiveLoad = async () => {
+    if (!liveLoadPrompt) return;
+    setLoading(true);
+    try {
+      const r = await callScanPick(liveLoadPrompt.licenceNumber, null, true);
+      setLiveLoadPrompt(null);
+      handleScanResponse(r.data, liveLoadPrompt.licenceNumber);
+    } catch (err) {
+      setLiveLoadPrompt(null);
+      const msg = err.response?.data?.detail || 'Live-load failed';
+      setScanFeedback({ type: 'err', msg });
+      showOverlayError(msg);
+    } finally {
+      setLoading(false);
+      setTimeout(() => inputRef.current?.focus(), 100);
+    }
+  };
+
   const confirmPartialPull = async () => {
     if (!partialPrompt) return;
     setLoading(true);
@@ -410,6 +458,9 @@ const ScannerShipOutFlowV2 = () => {
                   <div className="sso-order-icon"><Truck size={28} /></div>
                   <div className="sso-order-info">
                     <strong>Order #{t.order_number || t.id.slice(-8)}</strong>
+                    {(t.customer_name || t.appointment_time) && (
+                      <span>{[t.customer_name, t.appointment_time].filter(Boolean).join(' · ')}</span>
+                    )}
                     <span>{t.quantity} cases · {(t.lines || []).length} line{(t.lines || []).length !== 1 ? 's' : ''}</span>
                     {t.forklift_submitted_at && <span className="sso-submitted-badge">Submitted</span>}
                   </div>
@@ -432,7 +483,7 @@ const ScannerShipOutFlowV2 = () => {
           </div>
           <h2 className="sso-done-title">Pick list submitted!</h2>
           <p className="sso-done-sub">
-            Order #{selectedTransfer?.order_number} has been sent for approval.
+            Order #{selectedTransfer?.order_number} submitted — the warehouse office will reconcile and print the paperwork.
           </p>
           <button
             type="button"
@@ -561,7 +612,7 @@ const ScannerShipOutFlowV2 = () => {
             disabled={submitting || !allDone}
           >
             <Send size={18} />
-            Submit for Approval
+            Done — Submit Load
           </button>
         </div>
       </div>
@@ -569,6 +620,29 @@ const ScannerShipOutFlowV2 = () => {
       <ScanFeedback {...(overlay || {})} onDismiss={dismissOverlay} />
 
       {/* Partial confirmation modal */}
+      {liveLoadPrompt && (
+        <div className="sso-except-overlay">
+          <div className="sso-except-dialog">
+            <Truck size={32} color="#2563eb" />
+            <h3>Live-load from production?</h3>
+            <p>{liveLoadPrompt.message}</p>
+            <p style={{ fontSize: '13px', color: '#6b7280' }}>
+              This pallet is fresh off the line (not yet put away). Confirm to load it
+              straight onto the truck.
+            </p>
+            <div className="sso-dialog-actions">
+              <button type="button" className="sso-secondary-btn"
+                onClick={() => { setLiveLoadPrompt(null); setTimeout(() => inputRef.current?.focus(), 100); }}>
+                Cancel
+              </button>
+              <button type="button" className="sso-primary-btn" onClick={confirmLiveLoad} disabled={loading}>
+                {loading ? 'Working…' : 'Live-load onto truck'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {partialPrompt && (
         <div className="sso-except-overlay">
           <div className="sso-except-dialog">
@@ -759,9 +833,13 @@ const LineCard = ({ line, blockedRowsForLine, onToggleRowBlocked, onOpenLotPicke
         </span>
       </div>
 
-      {(line.lots || []).length === 0 ? (
+      {line.cases_remaining <= 0 ? (
         <div style={{ fontSize: '12px', color: '#16a34a', padding: '6px' }}>
           ✓ Line complete
+        </div>
+      ) : (line.lots || []).length === 0 ? (
+        <div style={{ fontSize: '12px', color: '#b45309', padding: '6px' }}>
+          ⚠ No pallets in racks for this product — live-load from production or ask the office.
         </div>
       ) : (
         (line.lots || []).map((lot) => {
@@ -794,27 +872,39 @@ const LotBlock = ({ lot, lineId, lotBlockedRowIds, onToggleRowBlocked, onOpenLot
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px', gap: '6px' }}>
         <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#1e40af', fontSize: '13px' }}>
           Lot {lot.lot_number}
+          {lot.is_fifo_suggested && (
+            <span style={{
+              marginLeft: '6px', background: '#dcfce7', color: '#15803d',
+              border: '1px solid #86efac', borderRadius: '4px',
+              padding: '1px 6px', fontSize: '10px', fontWeight: 700,
+              fontFamily: 'inherit', verticalAlign: '1px',
+            }}>FIFO — pull first</span>
+          )}
         </span>
         <span style={{ fontSize: '12px', color: '#475569', flex: 1, textAlign: 'right' }}>
-          {lot.cases_remaining.toLocaleString()} cs remaining
+          {lot.is_advisory
+            ? `${lot.cases_remaining.toLocaleString()} cs available`
+            : `${lot.cases_remaining.toLocaleString()} cs remaining`}
         </span>
-        <button
-          type="button"
-          onClick={() => onOpenLotPicker(lineId, lot.lot_number)}
-          style={{
-            background: '#eff6ff',
-            border: '1px solid #93c5fd',
-            color: '#1d4ed8',
-            padding: '2px 8px',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '11px',
-            fontWeight: 600,
-          }}
-          title="Move the remaining cases to a different lot (reversible)"
-        >
-          Change lot
-        </button>
+        {!lot.is_advisory && (
+          <button
+            type="button"
+            onClick={() => onOpenLotPicker(lineId, lot.lot_number)}
+            style={{
+              background: '#eff6ff',
+              border: '1px solid #93c5fd',
+              color: '#1d4ed8',
+              padding: '2px 8px',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '11px',
+              fontWeight: 600,
+            }}
+            title="Move the remaining cases to a different lot (reversible)"
+          >
+            Change lot
+          </button>
+        )}
       </div>
       {(lot.rows || []).map((row) => {
         const isBlocked = row.is_blocked || lotBlockedRowIds.has(row.row_id || '');
@@ -888,6 +978,7 @@ const RowBlock = ({ row, lotNumber, lineId, isBlocked, onToggleRowBlocked, onRem
                 display: 'flex',
                 gap: '6px',
                 alignItems: 'center',
+                flexWrap: 'wrap',
                 fontSize: '11px',
                 padding: '2px 4px',
                 color: p.is_picked ? '#166534' : '#374151',

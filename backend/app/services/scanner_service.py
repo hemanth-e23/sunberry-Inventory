@@ -18,7 +18,7 @@ from app.models import (
 )
 from app.enums import ForkliftRequestStatus, PalletStatus, ReceiptStatus, TransferStatus
 from app.constants import (
-    ROLE_FORKLIFT, ROLE_ADMIN, ROLE_SUPERVISOR,
+    ROLE_FORKLIFT, ROLE_ADMIN, ROLE_SUPERVISOR, ROLE_WAREHOUSE, APPROVAL_ROLES,
     CATEGORY_FINISHED, DEFAULT_CASES_PER_PALLET, DEFAULT_EXPIRE_YEARS, DAYS_PER_YEAR,
     STALE_FORKLIFT_SESSION_HOURS,
 )
@@ -211,9 +211,14 @@ def _require_modifiable(fr: ForkliftRequest) -> None:
         raise ValidationError("Cannot modify approved or rejected request")
 
 
-def _require_admin_or_supervisor(user: User) -> None:
-    if user.role not in (ROLE_ADMIN, ROLE_SUPERVISOR):
-        raise ForbiddenError("Only admin or supervisor can perform this action")
+def _require_forklift_approver(user: User) -> None:
+    """Who may review / approve / edit a forklift request. Mirrors receipt and
+    transfer approval: the approval roles (admin / superadmin / corporate_admin /
+    supervisor) PLUS warehouse workers. Warehouse workers may act on OTHER users'
+    requests; the self-approval block is enforced per-action (approve / reject).
+    Forklift and anyone else: 403."""
+    if user.role not in APPROVAL_ROLES and user.role != ROLE_WAREHOUSE:
+        raise ForbiddenError("You are not authorized to review this forklift request")
 
 
 def _validate_storage_row(db: Session, row_id: str) -> StorageRow:
@@ -724,8 +729,27 @@ def mark_not_produced(
             PalletLicence.licence_number == lic_num,
         ).first()
         if existing:
-            # Already exists somewhere — leave it alone, the supervisor can't
-            # turn a real pallet into "not produced" via this path.
+            # A CANCELLED / MISSING leftover (e.g. from a rejected session) still
+            # holds this unique licence number but does NOT cover the sequence
+            # gap, so the UI keeps flagging it as missing. Because licence_number
+            # is unique we can't insert a fresh NOT_PRODUCED row alongside it —
+            # revive this one as the not-produced marker for THIS request instead
+            # of silently skipping (that was the "Skip did nothing" bug).
+            if existing.status not in _COVERED_PALLET_STATUSES_FOR_GAPS:
+                existing.forklift_request_id = request_id
+                existing.product_id = fr.product_id
+                existing.lot_number = lot_number
+                existing.sequence = seq
+                existing.cases = 0
+                existing.is_partial = False
+                existing.status = PalletStatus.NOT_PRODUCED
+                existing.scanned_by = str(current_user.id)
+                existing.scanned_at = datetime.now(timezone.utc)
+                existing.warehouse_id = fr.warehouse_id
+                inserted += 1
+                continue
+            # A real, covering pallet — the supervisor can't turn a scanned
+            # pallet into "not produced" via this path.
             skipped.append({"licence_number": lic_num, "reason": "already_exists"})
             continue
         pl_id = f"pl-{uuid.uuid4().hex[:12]}"
@@ -778,7 +802,7 @@ def update_forklift_request(
     current_user: User,
 ) -> ForkliftRequest:
     """Update forklift request fields (checker corrections by admin/supervisor)."""
-    _require_admin_or_supervisor(current_user)
+    _require_forklift_approver(current_user)
 
     fr = _get_forklift_request_with_relations(db, request_id)
     _require_modifiable(fr)
@@ -907,9 +931,16 @@ def approve_forklift_request(
     before approval. Reason: previously gaps were silently dropped, and the
     same missing sequences resurfaced on the next session against the lot.
     """
-    _require_admin_or_supervisor(current_user)
+    _require_forklift_approver(current_user)
 
     fr = _get_forklift_request_with_relations(db, request_id)
+    # A warehouse worker may approve OTHER users' requests, never their own
+    # (mirrors receipt/transfer self-approval blocks).
+    if current_user.role == ROLE_WAREHOUSE and str(fr.scanned_by) == str(current_user.id):
+        raise ForbiddenError(
+            "You cannot approve your own forklift request. Only other users' "
+            "requests can be approved."
+        )
     _require_submitted(fr)
 
     if not fr.shift_id:
@@ -1089,9 +1120,15 @@ def reject_forklift_request(
     current_user: User,
 ) -> dict:
     """Reject a forklift request — marks all pallet licences as cancelled."""
-    _require_admin_or_supervisor(current_user)
+    _require_forklift_approver(current_user)
 
     fr = _get_forklift_request(db, request_id)
+    # Warehouse workers can reject OTHER users' requests, never their own.
+    if current_user.role == ROLE_WAREHOUSE and str(fr.scanned_by) == str(current_user.id):
+        raise ForbiddenError(
+            "You cannot reject your own forklift request. Only other users' "
+            "requests can be rejected."
+        )
     _require_submitted(fr)
 
     db.query(PalletLicence).filter(
@@ -1112,7 +1149,7 @@ def remove_pallet_licence(
     current_user: User,
 ) -> dict:
     """Remove a pallet licence from a forklift request (supervisor correction)."""
-    _require_admin_or_supervisor(current_user)
+    _require_forklift_approver(current_user)
 
     fr = _get_forklift_request(db, request_id)
     _require_modifiable(fr)
@@ -1158,7 +1195,7 @@ def update_pallet_licence(
     guessed licence number with the real sticker's number, assigns a storage
     row, and flips status MISSING_STICKER → PENDING.
     """
-    _require_admin_or_supervisor(current_user)
+    _require_forklift_approver(current_user)
 
     fr = _get_forklift_request(db, request_id)
     _require_modifiable(fr)
@@ -1233,7 +1270,7 @@ def add_pallet_to_request(
     current_user: User,
 ) -> dict:
     """Add a pallet licence to a forklift request (supervisor correction for missed scans)."""
-    _require_admin_or_supervisor(current_user)
+    _require_forklift_approver(current_user)
 
     fr = db.query(ForkliftRequest).options(
         joinedload(ForkliftRequest.pallet_licences),

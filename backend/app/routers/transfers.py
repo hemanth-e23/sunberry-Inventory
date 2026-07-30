@@ -2,7 +2,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date as dt_date
 import json
 import uuid
 import copy
@@ -21,9 +21,13 @@ from app.schemas import (
     # v2 lot-level ship-out
     ShipOutPickListCreateV2, ScanPickRequestV2, UnscanPickRequestV2, LotEscapeHatchRequest,
     RetargetLotRequest,
+    # scheduled ship-out (Task 2/3/4/6/7/8)
+    ScheduledOrderCreate, RescheduleRequest, CheckInRequest,
+    SelectPalletRequest, AdjustPalletCasesRequest, ManualAttributionRequest, RemoveManualAttributionRequest,
+    ReconcileRequest, GenerateDocsRequest, VoidDocsRequest,
 )
 from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
-from app.enums import TransferStatus, PalletStatus, ReceiptStatus, ShipOutScanReason
+from app.enums import TransferStatus, PalletStatus, ReceiptStatus, ShipOutScanReason, ShipOutLifecycle
 from app.services import transfer_service
 from app.constants import (
     ROLE_FORKLIFT, ROLE_WAREHOUSE, APPROVAL_ROLES,
@@ -823,6 +827,7 @@ async def get_transfer_scan_progress(
                 "cases": pl.cases or 0,
                 "lot_number": pl.lot_number or "",
                 "location": location_label,
+                "is_partial": bool(pl.is_partial),
                 "is_scanned": pl_id in scanned_pl_ids,
                 "is_skipped": pl_id in skipped_ids,
                 "scanned_at": scan_evt["scanned_at"] if scan_evt else None,
@@ -882,15 +887,24 @@ async def forklift_submit_transfer(
     if not transfer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
     _ship_out_only(transfer)
-    if transfer.status not in (TransferStatus.PENDING,):
+    # Legacy `pending` orders keep the old submit → forklift_submitted handoff.
+    # New scheduled-lifecycle orders (checked_in/scanning) record the driver's
+    # "done" (forklift_submitted_at shows the Submitted badge on the gun) but
+    # KEEP their lifecycle status — the warehouse worker closes the order via
+    # reconcile, not approval (SPEC: no approval in this flow).
+    new_flow = transfer.status in (
+        ShipOutLifecycle.CHECKED_IN.value, ShipOutLifecycle.SCANNING.value,
+    )
+    if transfer.status not in (TransferStatus.PENDING,) and not new_flow:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transfer cannot be submitted in its current state")
 
     transfer.forklift_submitted_at = datetime.now(timezone.utc)
     transfer.forklift_notes = data.notes or None
     transfer.skipped_pallet_ids = data.skipped_pallet_ids or []
-    # Only flip status for new multi-line orders; legacy single-receipt ship-outs
-    # keep the previous status semantics so existing approval UI sees them unchanged.
-    if transfer.lines:
+    # Only flip status for legacy multi-line orders; new-flow orders stay in
+    # their lifecycle status so reconcile (which requires scanning/checked_in)
+    # still works.
+    if transfer.lines and not new_flow:
         transfer.status = TransferStatus.FORKLIFT_SUBMITTED
     db.commit()
     db.refresh(transfer)
@@ -1352,6 +1366,368 @@ async def create_ship_out_pick_list_v2(
     return response
 
 
+@router.post("/ship-out/schedule")
+async def create_scheduled_ship_out(
+    data: ScheduledOrderCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Task 2: corporate/warehouse creates a SCHEDULED ship-out order (product +
+    cases lines, no lots). Starts as `scheduled` — NOT on the forklift gun until
+    yard check-in. Any ship-out-capable role except forklift may create."""
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+
+    target_warehouse_id = resolve_warehouse_for_write(current_user)
+
+    # Soft warn for a duplicate order number that's still open (not blocking).
+    open_statuses = [
+        ShipOutLifecycle.SCHEDULED.value, ShipOutLifecycle.CHECKED_IN.value,
+        ShipOutLifecycle.SCANNING.value, ShipOutLifecycle.RECONCILED.value,
+        ShipOutLifecycle.COMPLETE.value,
+    ]
+    dup_query = db.query(InventoryTransfer).filter(
+        InventoryTransfer.order_number == data.order_number,
+        InventoryTransfer.transfer_type == TRANSFER_TYPE_SHIPPED_OUT,
+        InventoryTransfer.status.in_(open_statuses),
+    )
+    if target_warehouse_id:
+        dup_query = dup_query.filter(InventoryTransfer.warehouse_id == target_warehouse_id)
+    duplicate_warning = dup_query.first()
+
+    try:
+        transfer = ship_out_service.create_scheduled_order(
+            db, data, current_user, target_warehouse_id
+        )
+    except Exception as e:
+        db.rollback()
+        from app.exceptions import ValidationError, NotFoundError
+        if isinstance(e, (ValidationError, NotFoundError)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise
+
+    db.commit()
+    db.refresh(transfer)
+    response = _transfer_to_response(transfer, db)
+    if duplicate_warning:
+        response["warning"] = (
+            f"Order number {data.order_number} already has another open ship-out "
+            f"({duplicate_warning.id})."
+        )
+    return response
+
+
+@router.get("/ship-out/scheduled")
+async def list_scheduled_ship_outs(
+    date: dt_date,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Task 3: scheduled ship-out orders for a given day (Outgoing dashboard)."""
+    from app.services import ship_out_service
+    wh_id = warehouse_filter(current_user)
+    return ship_out_service.list_scheduled_orders(db, wh_id, date)
+
+
+@router.get("/ship-out/scheduled/overdue")
+async def list_overdue_ship_outs(
+    before: dt_date,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Task 3: orders whose ship date has passed but never checked in."""
+    from app.services import ship_out_service
+    wh_id = warehouse_filter(current_user)
+    return ship_out_service.list_overdue_scheduled(db, wh_id, before)
+
+
+@router.patch("/transfers/{transfer_id}/reschedule")
+async def reschedule_ship_out(
+    transfer_id: str,
+    data: RescheduleRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Task 3: postpone/prepone a scheduled order (pre-loading only)."""
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    from app.exceptions import ValidationError
+    transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == transfer_id).first()
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+    _ship_out_only(transfer)
+    try:
+        ship_out_service.reschedule_order(db, transfer, data.scheduled_date, data.appointment_time, current_user)
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    db.commit()
+    db.refresh(transfer)
+    return _transfer_to_response(transfer, db)
+
+
+@router.post("/transfers/{transfer_id}/cancel-scheduled")
+async def cancel_scheduled_ship_out(
+    transfer_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Task 3: cancel a scheduled order (pre-loading only)."""
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    from app.exceptions import ValidationError
+    transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == transfer_id).first()
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+    _ship_out_only(transfer)
+    try:
+        ship_out_service.cancel_scheduled_order(db, transfer, current_user)
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    db.commit()
+    db.refresh(transfer)
+    return _transfer_to_response(transfer, db)
+
+
+@router.post("/transfers/{transfer_id}/restore-scheduled")
+async def restore_cancelled_ship_out(
+    transfer_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Undo an accidental cancel — order returns to SCHEDULED."""
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    from app.exceptions import ValidationError
+    transfer = _get_shipout_or_404(db, transfer_id, lock=True)
+    try:
+        ship_out_service.restore_cancelled_order(db, transfer, current_user)
+    except ValidationError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    db.commit()
+    db.refresh(transfer)
+    return _transfer_to_response(transfer, db)
+
+
+@router.post("/transfers/{transfer_id}/check-in")
+async def check_in_ship_out(
+    transfer_id: str,
+    data: CheckInRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Task 4: yard check-in — record driver/trailer/time-in and release the
+    order to the forklift gun (status -> checked_in)."""
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    from app.exceptions import ValidationError
+    transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == transfer_id).first()
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+    _ship_out_only(transfer)
+    try:
+        ship_out_service.check_in_order(db, transfer, data, current_user)
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    db.commit()
+    db.refresh(transfer)
+    return _transfer_to_response(transfer, db)
+
+
+@router.get("/ship-out/gun")
+async def list_gun_queue(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Task 4: the forklift gun queue — checked-in / loading orders for the
+    caller's warehouse (status-based, date-independent; SPEC §5.6)."""
+    from app.services import ship_out_service
+    wh_id = warehouse_filter(current_user)
+    orders = ship_out_service.list_gun_orders(db, wh_id)
+    out = []
+    for t in orders:
+        d = _transfer_to_response(t, db)
+        d.update(ship_out_service.gun_order_extras(t))
+        out.append(d)
+    return out
+
+
+def _get_shipout_or_404(db, transfer_id, lock=False):
+    q = db.query(InventoryTransfer).filter(InventoryTransfer.id == transfer_id)
+    if lock:
+        q = q.with_for_update()
+    transfer = q.first()
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+    _ship_out_only(transfer)
+    return transfer
+
+
+# ---- Task 6: worker pallet-select ----
+@router.get("/transfers/{transfer_id}/selectable-pallets")
+async def get_selectable_pallets(
+    transfer_id: str, product_id: str, q: str = None,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    from app.services import ship_out_service
+    transfer = _get_shipout_or_404(db, transfer_id)
+    return ship_out_service.list_selectable_pallets(db, transfer, product_id, q)
+
+
+@router.post("/transfers/{transfer_id}/select-pallet")
+async def select_pallet_endpoint(
+    transfer_id: str, data: SelectPalletRequest,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    from app.exceptions import ValidationError
+    transfer = _get_shipout_or_404(db, transfer_id, lock=True)
+    try:
+        result = ship_out_service.select_pallet(db, transfer, data.licence_number, current_user)
+    except ValidationError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    db.commit()
+    return result
+
+
+@router.post("/transfers/{transfer_id}/adjust-pallet-cases")
+async def adjust_pallet_cases_endpoint(
+    transfer_id: str, data: AdjustPalletCasesRequest,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    """Trim a fully-scanned pallet to a partial (ship N, return the rest to the
+    Partials rack) so an over-shipped load can hit the ordered total."""
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    from app.exceptions import ValidationError
+    transfer = _get_shipout_or_404(db, transfer_id, lock=True)
+    try:
+        result = ship_out_service.adjust_scanned_pallet_cases(
+            db, transfer, data.pallet_licence_id, data.cases, current_user,
+        )
+    except ValidationError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    db.commit()
+    return result
+
+
+# ---- Task 7: reconcile + manual attribution ----
+@router.get("/transfers/{transfer_id}/reconcile")
+async def get_reconcile(
+    transfer_id: str,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    from app.services import ship_out_service
+    transfer = _get_shipout_or_404(db, transfer_id)
+    return ship_out_service.order_reconcile_summary(db, transfer)
+
+
+@router.post("/transfers/{transfer_id}/manual-attribution")
+async def add_manual_attribution_endpoint(
+    transfer_id: str, data: ManualAttributionRequest,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    from app.exceptions import ValidationError
+    transfer = _get_shipout_or_404(db, transfer_id, lock=True)
+    try:
+        ship_out_service.add_manual_attribution(db, transfer, data.product_id, data.lot_number,
+                                                data.cases, data.reason, current_user)
+    except ValidationError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    db.commit()
+    return ship_out_service.order_reconcile_summary(db, transfer)
+
+
+@router.post("/transfers/{transfer_id}/manual-attribution/remove")
+async def remove_manual_attribution_endpoint(
+    transfer_id: str, data: RemoveManualAttributionRequest,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    transfer = _get_shipout_or_404(db, transfer_id, lock=True)
+    ship_out_service.remove_manual_attribution(db, transfer, data.line_id, data.index)
+    db.commit()
+    return ship_out_service.order_reconcile_summary(db, transfer)
+
+
+@router.post("/transfers/{transfer_id}/reconcile")
+async def reconcile_endpoint(
+    transfer_id: str, data: ReconcileRequest,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    from app.exceptions import ValidationError
+    transfer = _get_shipout_or_404(db, transfer_id, lock=True)
+    try:
+        ship_out_service.reconcile_order(db, transfer, data.confirm_short, data.confirm_over, current_user)
+    except ValidationError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    db.commit()
+    db.refresh(transfer)
+    return _transfer_to_response(transfer, db)
+
+
+# ---- Task 8: seal + documents ----
+@router.post("/transfers/{transfer_id}/generate-documents")
+async def generate_documents_endpoint(
+    transfer_id: str, data: GenerateDocsRequest,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    from app.exceptions import ValidationError
+    transfer = _get_shipout_or_404(db, transfer_id, lock=True)
+    try:
+        snapshot = ship_out_service.generate_documents(
+            db, transfer, data.seal_number, data.time_out, data.pallet_count_override, current_user)
+    except ValidationError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    db.commit()
+    return snapshot
+
+
+@router.post("/transfers/{transfer_id}/void-documents")
+async def void_documents_endpoint(
+    transfer_id: str, data: VoidDocsRequest,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    """SPEC §5.4: void generated docs (archived + BOL number burned) so the
+    order can be corrected and regenerated. Warehouse role or higher."""
+    _require_warehouse_role_or_higher(current_user)
+    from app.services import ship_out_service
+    from app.exceptions import ValidationError
+    transfer = _get_shipout_or_404(db, transfer_id, lock=True)
+    try:
+        ship_out_service.void_documents(db, transfer, data.reason, current_user)
+    except ValidationError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    db.commit()
+    db.refresh(transfer)
+    return _transfer_to_response(transfer, db)
+
+
+@router.get("/transfers/{transfer_id}/documents")
+async def get_documents_endpoint(
+    transfer_id: str,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    transfer = _get_shipout_or_404(db, transfer_id)
+    if not transfer.document_snapshot:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No documents generated yet")
+    return transfer.document_snapshot
+
+
 @router.get("/transfers/{transfer_id}/scanner-view")
 async def get_scanner_view(
     transfer_id: str,
@@ -1401,7 +1777,8 @@ async def scan_pick_v2_endpoint(
 
     try:
         result = ship_out_service.scan_pick_v2(
-            db, transfer, data.licence_number, data.cases_to_consume, current_user
+            db, transfer, data.licence_number, data.cases_to_consume, current_user,
+            allow_live_load=data.allow_live_load,
         )
     except Exception as e:
         db.rollback()

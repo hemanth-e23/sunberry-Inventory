@@ -947,11 +947,11 @@ export const InventoryProvider = ({ children }) => {
 
   const markPalletsNotProduced = async (requestId, licenceNumbers) => {
     try {
-      await apiClient.post(`/scanner/requests/${requestId}/mark-not-produced`, {
+      const resp = await apiClient.post(`/scanner/requests/${requestId}/mark-not-produced`, {
         licence_numbers: licenceNumbers,
       });
       await fetchForkliftRequests();
-      return { success: true };
+      return { success: true, data: resp.data };
     } catch (error) {
       console.error('Error marking pallets not produced:', error);
       const msg = error.response?.data?.detail || error.message || 'Mark not-produced failed';

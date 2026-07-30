@@ -8,7 +8,7 @@ from app.database import get_db
 from app.models import (
     Location, SubLocation, StorageArea, StorageRow,
     ProductionShift, ProductionLine, Warehouse, WarehouseCategoryAccess, CategoryGroup,
-    PalletLicence,
+    PalletLicence, PackageSize, ShipToLocation, Carrier, PalletType,
 )
 from app.enums import PalletStatus
 from app.schemas import (
@@ -20,6 +20,8 @@ from app.schemas import (
     ProductionLine as ProductionLineSchema, ProductionLineCreate, ProductionLineUpdate,
     WarehouseFull, WarehouseCreate, WarehouseUpdate,
     WarehouseCategoryAccessOut, WarehouseCategoryAccessCreate,
+    PackageSize as PackageSizeSchema, PackageSizeCreate, PackageSizeUpdate,
+    ShipToLocationOut, CarrierOut, PalletTypeOut,
 )
 from app.utils.auth import get_current_active_user, require_role, warehouse_filter, require_superadmin
 from app.constants import ROLE_SUPERADMIN
@@ -578,3 +580,99 @@ async def update_production_line(
     db.commit()
     db.refresh(line)
     return line
+
+
+# ---------------------------------------------------------------------------
+# Package sizes (SPEC §7.1) — case weight is set once per size; every product
+# of that size inherits it. List is open to any authed user (product form
+# dropdown); mutations are admin-only.
+# ---------------------------------------------------------------------------
+import uuid as _uuid
+
+
+@router.get("/package-sizes", response_model=List[PackageSizeSchema])
+async def get_package_sizes(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    return (
+        db.query(PackageSize)
+        .order_by(PackageSize.sort_order, PackageSize.label)
+        .all()
+    )
+
+
+@router.post("/package-sizes", response_model=PackageSizeSchema)
+async def create_package_size(
+    data: PackageSizeCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role("admin")),
+):
+    if db.query(PackageSize).filter(func.lower(PackageSize.label) == data.label.lower()).first():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A package size with that label already exists")
+    ps = PackageSize(id=f"pkgsize-{_uuid.uuid4().hex[:12]}", **data.dict())
+    db.add(ps)
+    db.commit()
+    db.refresh(ps)
+    return ps
+
+
+@router.put("/package-sizes/{size_id}", response_model=PackageSizeSchema)
+async def update_package_size(
+    size_id: str,
+    data: PackageSizeUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role("admin")),
+):
+    ps = db.query(PackageSize).filter(PackageSize.id == size_id).first()
+    if not ps:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Package size not found")
+    for field, value in data.dict(exclude_unset=True).items():
+        setattr(ps, field, value)
+    db.commit()
+    db.refresh(ps)
+    return ps
+
+
+# ---------------------------------------------------------------------------
+# Self-populating ship-out master data (SPEC §7.2) — read lists feed the
+# scheduled-order form's type-aheads/dropdowns. Rows are created on first use
+# by the order-create endpoint, so no create endpoints here.
+# ---------------------------------------------------------------------------
+@router.get("/ship-to-locations", response_model=List[ShipToLocationOut])
+async def get_ship_to_locations(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    return (
+        db.query(ShipToLocation)
+        .filter(ShipToLocation.is_active == True)
+        .order_by(ShipToLocation.customer_name, ShipToLocation.location_name)
+        .all()
+    )
+
+
+@router.get("/carriers", response_model=List[CarrierOut])
+async def get_carriers(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    return (
+        db.query(Carrier)
+        .filter(Carrier.is_active == True)
+        .order_by(Carrier.name)
+        .all()
+    )
+
+
+@router.get("/pallet-types", response_model=List[PalletTypeOut])
+async def get_pallet_types(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    return (
+        db.query(PalletType)
+        .filter(PalletType.is_active == True)
+        .order_by(PalletType.is_default.desc(), PalletType.name)
+        .all()
+    )

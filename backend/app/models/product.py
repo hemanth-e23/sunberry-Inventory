@@ -57,6 +57,11 @@ class Product(Base):
     quantity_uom = Column(String(20))
     inventory_tracked = Column(Boolean, default=True)
     gal_per_case = Column(Float, nullable=True)
+    # Package size (16/32/64/128 oz) drives the case weight used on the BOL —
+    # weight is a property of the size, not the flavor, so it's set once per
+    # size (package_sizes.case_weight) instead of on every product. Nullable:
+    # only finished goods that ship on a BOL need it (SPEC §7.1).
+    package_size_id = Column(String(50), ForeignKey("package_sizes.id"), nullable=True)
     customer_name = Column(String(50), nullable=True)
     customer_item_number = Column(String(30), nullable=True)
     customer_upc = Column(String(20), nullable=True)
@@ -65,6 +70,7 @@ class Product(Base):
 
     category = relationship("Category", backref="products")
     vendor = relationship("Vendor", backref="products")
+    package_size = relationship("PackageSize")
 
 
 class WarehouseCategoryAccess(Base):

@@ -6,10 +6,14 @@ import TransfersTab from './inventory/TransfersTab';
 import HoldsTab from './inventory/HoldsTab';
 import AdjustmentsTab from './inventory/AdjustmentsTab';
 import ShipOutTab from './inventory/ShipOutTab';
+import ScheduleShipOutTab from './inventory/ScheduleShipOutTab';
 import './Shared.css';
 import './InventoryActionsPage.css';
 
-const TAB_OPTIONS = ['transfers', 'holds', 'adjustments', 'shipout'];
+// The legacy lot-based 'shipout' tab is retired (Task 9) — the scheduled flow
+// replaces it. ShipOutTab.jsx is kept in the tree for reference/rollback.
+const TAB_OPTIONS = ['transfers', 'holds', 'adjustments', 'schedule'];
+const TAB_LABELS = { schedule: 'Ship Out' };
 
 const InventoryActionsPage = () => {
   const navigate = useNavigate();
@@ -36,7 +40,7 @@ const InventoryActionsPage = () => {
             className={`tab-button ${activeTab === tab ? 'active' : ''}`}
             onClick={() => setActiveTab(tab)}
           >
-            {tab === 'shipout' ? 'Ship Out' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+            {TAB_LABELS[tab] || (tab.charAt(0).toUpperCase() + tab.slice(1))}
           </button>
         ))}
       </div>
@@ -45,6 +49,7 @@ const InventoryActionsPage = () => {
       {activeTab === 'holds' && <HoldsTab />}
       {activeTab === 'adjustments' && <AdjustmentsTab />}
       {activeTab === 'shipout' && <ShipOutTab />}
+      {activeTab === 'schedule' && <ScheduleShipOutTab />}
     </div>
   );
 };

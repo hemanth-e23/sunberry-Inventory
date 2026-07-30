@@ -8,7 +8,7 @@ import {
   Home, FileText, Eye, Zap, CheckCircle, ClipboardList,
   Printer, BarChart3, Package, Database, Users,
   Layers, AlertCircle, Menu, FileSpreadsheet,
-  Shield, ChevronLeft,
+  Shield, ChevronLeft, Truck,
 } from 'lucide-react';
 import * as notificationService from '../api/notificationService';
 import apiClient from '../api/client';
@@ -254,6 +254,7 @@ function Sidebar({ isOpen, isCollapsed, onToggleCollapse, onClose }) {
     opsItems.push(
       { label: 'Inventory', icon: Eye, to: `${prefix}/inventory` },
       { label: 'Inventory Actions', icon: Zap, to: `${prefix}/inventory-actions` },
+      { label: 'Outgoing', icon: Truck, to: `${prefix}/outgoing` },
     );
     sections.push({ group: 'Operations', items: opsItems });
 

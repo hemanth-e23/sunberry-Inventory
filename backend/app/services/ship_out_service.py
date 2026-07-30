@@ -13,18 +13,22 @@ Differs from the v1 flow in `transfer_service` in two key ways:
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import and_ as sa_and, func, or_ as sa_or
+from sqlalchemy import and_ as sa_and, func, or_ as sa_or, text as sa_text
 from sqlalchemy.orm import Session
 
 from app.constants import TRANSFER_TYPE_SHIPPED_OUT
-from app.enums import PalletStatus, ShipOutScanReason, TransferStatus
+from app.enums import PalletStatus, ShipOutScanReason, TransferStatus, ShipOutLifecycle
 from app.exceptions import NotFoundError, ValidationError
 from app.models import (
+    Carrier,
     InventoryTransfer,
     InventoryTransferLine,
+    PackageSize,
     PalletLicence,
+    PalletType,
     Product,
     Receipt,
+    ShipToLocation,
     StorageArea,
     StorageRow,
     TransferScanEvent,
@@ -180,6 +184,809 @@ def available_lots_for_product(
 # ---------------------------------------------------------------------------
 # Phase 1 — create pick list
 # ---------------------------------------------------------------------------
+
+def _resolve_ship_to(db: Session, ship_to) -> Optional[str]:
+    """Resolve a ship-to input to a ShipToLocation id. Uses the existing row when
+    an id is given; otherwise self-populates a new one (SPEC §7.2)."""
+    if ship_to is None:
+        return None
+    if getattr(ship_to, "id", None):
+        loc = db.query(ShipToLocation).filter(ShipToLocation.id == ship_to.id).first()
+        if not loc:
+            raise NotFoundError(f"Ship-to location not found: {ship_to.id}")
+        return loc.id
+    if not (ship_to.location_name and ship_to.customer_name):
+        return None
+    # Find-or-create by (customer, location) so repeated "new" entries for the
+    # same place don't pile up duplicate rows.
+    existing = db.query(ShipToLocation).filter(
+        func.lower(ShipToLocation.customer_name) == ship_to.customer_name.strip().lower(),
+        func.lower(ShipToLocation.location_name) == ship_to.location_name.strip().lower(),
+    ).first()
+    if existing:
+        return existing.id
+    loc = ShipToLocation(
+        id=_new_id("shipto"),
+        customer_name=ship_to.customer_name.strip(),
+        location_name=ship_to.location_name.strip(),
+        address_line1=(ship_to.address_line1 or None),
+        address_line2=(ship_to.address_line2 or None),
+        city=(ship_to.city or None),
+        state=(ship_to.state or None),
+        zip_code=(ship_to.zip_code or None),
+    )
+    db.add(loc)
+    db.flush()
+    return loc.id
+
+
+def _resolve_carrier_name(db: Session, name: Optional[str]) -> Optional[str]:
+    """Find-or-create a Carrier by name (self-populating) and return the canonical
+    name string stored on the order (SPEC §7.2)."""
+    if not name or not name.strip():
+        return None
+    name = name.strip()
+    existing = db.query(Carrier).filter(func.lower(Carrier.name) == name.lower()).first()
+    if existing:
+        return existing.name
+    db.add(Carrier(id=_new_id("carrier"), name=name))
+    db.flush()
+    return name
+
+
+def create_scheduled_order(
+    db: Session, data, current_user, target_warehouse_id: Optional[str]
+) -> InventoryTransfer:
+    """Create a SCHEDULED ship-out order (SPEC Task 2).
+
+    Corporate/warehouse plans an order in advance: order number, date + appointment,
+    ship-to, PO, carrier, pallet type, and product lines (product + cases — NO lots;
+    lots are chosen live at scan time). One "planning" line per product carries the
+    requested cases with a NULL receipt. Status is SCHEDULED, so the order does NOT
+    appear on the forklift gun until yard check-in (Task 3).
+    """
+    if not data.lines:
+        raise ValidationError("Scheduled order has no lines")
+
+    # Validate products + cases.
+    product_ids = {ln.product_id for ln in data.lines}
+    products = {p.id: p for p in db.query(Product).filter(Product.id.in_(product_ids)).all()}
+    for ln in data.lines:
+        if ln.product_id not in products:
+            raise ValidationError(f"Product not found: {ln.product_id}")
+        if float(ln.cases_requested) <= 0:
+            raise ValidationError(f"Line for {ln.product_id}: cases must be > 0")
+    if len(product_ids) != len(data.lines):
+        raise ValidationError("Duplicate product on multiple lines — combine into one line")
+
+    # Validate pallet type if provided.
+    if data.pallet_type_id:
+        if not db.query(PalletType).filter(PalletType.id == data.pallet_type_id).first():
+            raise ValidationError(f"Pallet type not found: {data.pallet_type_id}")
+
+    ship_to_id = _resolve_ship_to(db, data.ship_to)
+    carrier_name = _resolve_carrier_name(db, data.carrier)
+
+    transfer_id = _new_id("transfer")
+    total_cases = float(sum(float(ln.cases_requested) for ln in data.lines))
+
+    transfer = InventoryTransfer(
+        id=transfer_id,
+        receipt_id=None,
+        quantity=total_cases,
+        unit="cases",
+        transfer_type=TRANSFER_TYPE_SHIPPED_OUT,
+        order_number=data.order_number,
+        pallet_licence_ids=[],
+        requested_by=str(current_user.id),
+        scheduled_by=str(current_user.id),
+        warehouse_id=target_warehouse_id,
+        status=ShipOutLifecycle.SCHEDULED.value,
+        scheduled_date=data.scheduled_date,
+        appointment_time=(data.appointment_time or None),
+        po_number=(data.po_number or None),
+        carrier=carrier_name,
+        pallet_type_id=(data.pallet_type_id or None),
+        ship_to_location_id=ship_to_id,
+    )
+    db.add(transfer)
+
+    # One planning line per product: NULL receipt, empty lot_allocations. Actual
+    # picks attach as receipt-pinned drift sub-lines at scan time.
+    #
+    # line_seq is UI_LINE_INDEX * 1000 (matching create_pick_list_v2): the
+    # scanner view groups sub-lines into UI lines by `line_seq // 1000`, so a
+    # bare `i` (0,1,2,…) would collapse every product into group 0 — merging a
+    # multi-product order into a single line that never reads complete. Drift
+    # sub-lines added at scan time use line_seq=1_000_000 and fold into their
+    # product's group.
+    for i, line in enumerate(data.lines):
+        db.add(InventoryTransferLine(
+            id=_new_id("trln"),
+            transfer_id=transfer_id,
+            product_id=line.product_id,
+            receipt_id=None,
+            cases_requested=float(line.cases_requested),
+            cases_picked=0.0,
+            pallet_licence_ids=[],
+            lot_allocations=[],
+            picks=[],
+            lot_swap_history=[],
+            line_seq=i * 1000,
+        ))
+
+    db.flush()
+    return transfer
+
+
+# ---------------------------------------------------------------------------
+# Outgoing dashboard (SPEC Task 3): list by day, overdue, reschedule, cancel.
+# ---------------------------------------------------------------------------
+
+# Lifecycle → display label for the dashboard.
+_STATUS_LABELS = {
+    ShipOutLifecycle.SCHEDULED.value: "Scheduled",
+    ShipOutLifecycle.CHECKED_IN.value: "Checked In",
+    ShipOutLifecycle.SCANNING.value: "Loading",
+    ShipOutLifecycle.RECONCILED.value: "Reconciled",
+    ShipOutLifecycle.COMPLETE.value: "Complete",
+    ShipOutLifecycle.DOCS_GENERATED.value: "Shipped",
+    ShipOutLifecycle.CANCELLED.value: "Cancelled",
+}
+
+# Reschedule/cancel are allowed only before loading starts. Mid-scan changes
+# would strand already-shipped pallets (handled by manual SQL, SPEC §3).
+_RESCHEDULABLE = {ShipOutLifecycle.SCHEDULED.value, ShipOutLifecycle.CHECKED_IN.value}
+
+# Statuses at which a ship-out order is open for forklift scanning / on the gun.
+# Includes legacy PENDING so the old lot-based flow keeps working until it is
+# retired at Task 9 (clean cutover).
+_SCANNABLE_STATUSES = {
+    TransferStatus.PENDING.value,
+    ShipOutLifecycle.CHECKED_IN.value,
+    ShipOutLifecycle.SCANNING.value,
+}
+
+
+def _assert_scannable(transfer: InventoryTransfer) -> None:
+    if transfer.transfer_type != TRANSFER_TYPE_SHIPPED_OUT:
+        raise ValidationError("Not a ship-out transfer")
+    if transfer.status not in _SCANNABLE_STATUSES:
+        raise ValidationError("This order isn't open for scanning — check the truck in first.")
+
+
+def check_in_order(db: Session, transfer: InventoryTransfer, data, user) -> InventoryTransfer:
+    """Task 4: yard check-in. Captures driver/trailer/time-in and releases the
+    order to the forklift gun (status -> CHECKED_IN). Driver fields are optional
+    here and required only at doc generation.
+
+    Also serves as "Edit Check-In": details can be completed/corrected while the
+    order is CHECKED_IN, SCANNING or RECONCILED (docs require driver/trailer/seal,
+    so there must be a path to fill them after loading starts). Editing never
+    regresses the lifecycle status and never bumps the original time-in."""
+    editable = (
+        ShipOutLifecycle.SCHEDULED.value, ShipOutLifecycle.CHECKED_IN.value,
+        ShipOutLifecycle.SCANNING.value, ShipOutLifecycle.RECONCILED.value,
+    )
+    if transfer.status not in editable:
+        raise ValidationError("Check-in details can't be changed on this order anymore.")
+    # Carrier is pre-filled from the schedule; update it if the yard corrects it
+    # (resolve so a new name joins the type-ahead master list).
+    if data.carrier is not None:
+        transfer.carrier = _resolve_carrier_name(db, data.carrier)
+    transfer.driver_name = (data.driver_name or None)
+    transfer.driver_license = (data.driver_license or None)
+    transfer.truck_number = (data.truck_number or None)
+    transfer.truck_license = (data.truck_license or None)
+    transfer.trailer_number = (data.trailer_number or None)
+    transfer.trailer_license = (data.trailer_license or None)
+    # time_in: explicit value wins; otherwise stamp once at first check-in and
+    # preserve it on later edits.
+    if data.time_in is not None:
+        transfer.time_in = data.time_in
+    elif not transfer.time_in:
+        transfer.time_in = datetime.now(timezone.utc)
+    if transfer.status == ShipOutLifecycle.SCHEDULED.value:
+        transfer.checked_in_at = datetime.now(timezone.utc)
+        transfer.checked_in_by = str(user.id)
+        transfer.status = ShipOutLifecycle.CHECKED_IN.value
+    return transfer
+
+
+def list_gun_orders(db: Session, warehouse_id: Optional[str]) -> list:
+    """Task 4: the forklift gun queue — every order currently open for scanning
+    in this warehouse, regardless of scheduled date (check-in proves the truck is
+    here; SPEC §5.6). Returns ORM transfers, newest-checked-in first; the router
+    maps them to the response shape the scanner expects."""
+    q = db.query(InventoryTransfer).filter(
+        InventoryTransfer.transfer_type == TRANSFER_TYPE_SHIPPED_OUT,
+        InventoryTransfer.status.in_(list(_SCANNABLE_STATUSES)),
+    )
+    if warehouse_id:
+        q = q.filter(InventoryTransfer.warehouse_id == warehouse_id)
+    return q.order_by(InventoryTransfer.checked_in_at.desc().nullslast(),
+                      InventoryTransfer.submitted_at.desc()).all()
+
+
+def gun_order_extras(t: InventoryTransfer) -> dict:
+    """Display extras merged onto the transfer response for the gun queue."""
+    loc = t.ship_to_location
+    return {
+        "status_label": _STATUS_LABELS.get(t.status, (t.status or "").replace("_", " ").title()),
+        "appointment_time": t.appointment_time,
+        "carrier": t.carrier,
+        "customer_name": loc.customer_name if loc else None,
+        "location": (f"{loc.city}, {loc.state}" if loc and loc.city else (loc.location_name if loc else None)),
+    }
+
+
+def _scheduled_order_summary(db: Session, t: InventoryTransfer) -> dict:
+    """Compact row for the Outgoing dashboard."""
+    loc = t.ship_to_location
+    lines = list(t.lines or [])
+    # Collapse by PRODUCT, not by line. FIFO picking splits one ordered product
+    # across a sub-line per source lot/receipt, so a single-product order can
+    # carry several lines — counting lines would misreport "3 products" for one
+    # Mango order shipped from 3 lots.
+    by_product: dict = {}
+    total_cases = 0.0
+    for ln in lines:
+        cases = float(ln.cases_requested or 0)
+        total_cases += cases
+        pname = ln.product.name if ln.product else ln.product_id
+        entry = by_product.setdefault(ln.product_id, {"product": pname, "cases": 0.0})
+        entry["cases"] += cases
+    detail = list(by_product.values())
+    status = t.status or ""
+    label = _STATUS_LABELS.get(status, status.replace("_", " ").title())
+    if status == ShipOutLifecycle.DOCS_GENERATED.value and t.ship_short:
+        label = "Shipped Short"
+    return {
+        "id": t.id,
+        "order_number": t.order_number,
+        "status": status,
+        "status_label": label,
+        "scheduled_date": t.scheduled_date.isoformat() if t.scheduled_date else None,
+        "appointment_time": t.appointment_time,
+        "carrier": t.carrier,
+        "po_number": t.po_number,
+        "customer_name": loc.customer_name if loc else None,
+        "ship_to_name": loc.location_name if loc else None,
+        "location": (
+            f"{loc.city}, {loc.state}" if loc and loc.city else (loc.location_name if loc else None)
+        ),
+        "total_cases": total_cases,
+        "detail": detail,
+        "can_modify": status in _RESCHEDULABLE,
+        # Check-in details so the dashboard can pre-fill the edit modal.
+        "driver_name": t.driver_name,
+        "driver_license": t.driver_license,
+        "truck_number": t.truck_number,
+        "truck_license": t.truck_license,
+        "trailer_number": t.trailer_number,
+        "trailer_license": t.trailer_license,
+    }
+
+
+def _scheduled_base_query(db: Session, warehouse_id: Optional[str]):
+    q = db.query(InventoryTransfer).filter(
+        InventoryTransfer.transfer_type == TRANSFER_TYPE_SHIPPED_OUT,
+        InventoryTransfer.scheduled_date.isnot(None),
+    )
+    if warehouse_id:
+        q = q.filter(InventoryTransfer.warehouse_id == warehouse_id)
+    return q
+
+
+def list_scheduled_orders(db: Session, warehouse_id: Optional[str], on_date) -> list:
+    rows = (
+        _scheduled_base_query(db, warehouse_id)
+        .filter(InventoryTransfer.scheduled_date == on_date)
+        .order_by(InventoryTransfer.appointment_time, InventoryTransfer.order_number)
+        .all()
+    )
+    return [_scheduled_order_summary(db, t) for t in rows]
+
+
+def list_overdue_scheduled(db: Session, warehouse_id: Optional[str], before_date) -> list:
+    """Orders whose ship date has passed but never checked in (still SCHEDULED)."""
+    rows = (
+        _scheduled_base_query(db, warehouse_id)
+        .filter(
+            InventoryTransfer.scheduled_date < before_date,
+            InventoryTransfer.status == ShipOutLifecycle.SCHEDULED.value,
+        )
+        .order_by(InventoryTransfer.scheduled_date, InventoryTransfer.order_number)
+        .all()
+    )
+    return [_scheduled_order_summary(db, t) for t in rows]
+
+
+def reschedule_order(db: Session, transfer: InventoryTransfer, new_date, new_appointment, user) -> InventoryTransfer:
+    """Postpone/prepone a scheduled order. Rescheduling a checked-in order returns
+    it to SCHEDULED and clears yard check-in (it leaves the gun) — a new truck
+    checks in on the new day (SPEC test 11)."""
+    if transfer.status not in _RESCHEDULABLE:
+        raise ValidationError(
+            "This order is already being loaded or completed and can't be rescheduled from the dashboard."
+        )
+    if new_date is not None:
+        transfer.scheduled_date = new_date
+    if new_appointment is not None:
+        transfer.appointment_time = new_appointment or None
+    # Returning to SCHEDULED removes it from the gun and drops stale check-in.
+    transfer.status = ShipOutLifecycle.SCHEDULED.value
+    transfer.driver_name = None
+    transfer.driver_license = None
+    transfer.truck_number = None
+    transfer.truck_license = None
+    transfer.trailer_number = None
+    transfer.trailer_license = None
+    transfer.time_in = None
+    transfer.checked_in_at = None
+    transfer.checked_in_by = None
+    return transfer
+
+
+def cancel_scheduled_order(db: Session, transfer: InventoryTransfer, user) -> InventoryTransfer:
+    if transfer.status not in _RESCHEDULABLE:
+        raise ValidationError(
+            "This order is already being loaded or completed and can't be cancelled from the dashboard."
+        )
+    transfer.status = ShipOutLifecycle.CANCELLED.value
+    transfer.voided_at = datetime.now(timezone.utc)
+    transfer.voided_by = str(user.id)
+    transfer.voided_reason = "Cancelled from Outgoing dashboard"
+    return transfer
+
+
+def restore_cancelled_order(db: Session, transfer: InventoryTransfer, user) -> InventoryTransfer:
+    """Undo an accidental cancel: the order returns to SCHEDULED on its original
+    date (cancelled rows stay visible on the dashboard, so this is one click)."""
+    if transfer.status != ShipOutLifecycle.CANCELLED.value:
+        raise ValidationError("Only a cancelled order can be restored.")
+    transfer.status = ShipOutLifecycle.SCHEDULED.value
+    transfer.voided_at = None
+    transfer.voided_by = None
+    transfer.voided_reason = None
+    return transfer
+
+
+# ---------------------------------------------------------------------------
+# Task 6: worker pallet-select (desktop rescue for unscanned loads).
+# ---------------------------------------------------------------------------
+def list_selectable_pallets(db: Session, transfer: InventoryTransfer, product_id: str, query: Optional[str]) -> list:
+    """Pallets of a product available to add to this order by licence — IN_STOCK
+    plus PENDING (live-load). Whole pallets only (SPEC §5.8)."""
+    q = db.query(PalletLicence).filter(
+        PalletLicence.product_id == product_id,
+        PalletLicence.is_held == False,  # noqa: E712
+        PalletLicence.is_deleted == False,  # noqa: E712
+        PalletLicence.status.in_([PalletStatus.IN_STOCK, PalletStatus.PENDING]),
+    )
+    if transfer.warehouse_id:
+        q = q.filter(PalletLicence.warehouse_id == transfer.warehouse_id)
+    if query:
+        q = q.filter(PalletLicence.licence_number.ilike(f"%{query.strip()}%"))
+    rows = q.order_by(PalletLicence.lot_number, PalletLicence.sequence).limit(500).all()
+    out = []
+    for pl in rows:
+        row = pl.storage_row
+        out.append({
+            "pallet_licence_id": pl.id,
+            "licence_number": pl.licence_number,
+            "lot_number": pl.lot_number,
+            "cases": int(pl.cases or 0),
+            "row": (row.name if row else None),
+            "status": pl.status,
+            "is_live": pl.status == PalletStatus.PENDING,
+        })
+    return out
+
+
+def select_pallet(db: Session, transfer: InventoryTransfer, licence_number: str, current_user) -> dict:
+    """Add an exact pallet to the order by licence — SAME pick routine as a gun
+    scan (SHIPPED, receipt decremented, rack freed) tagged picked_via=manual_select.
+    Allows PENDING (live-load) pallets."""
+    return scan_pick_v2(
+        db, transfer, licence_number, None, current_user,
+        allow_live_load=True, picked_via="manual_select",
+    )
+
+
+def adjust_scanned_pallet_cases(
+    db: Session, transfer: InventoryTransfer, pallet_licence_id: str,
+    cases: int, current_user,
+) -> dict:
+    """Trim a fully-scanned pallet down to a PARTIAL so a load isn't stuck over.
+
+    Example: 28 pallets × 40 cases = 1,120 scanned against a 1,100 order (+20).
+    Whole pallets can't be un-shipped case-by-case, so this reduces one pallet to
+    `cases` on the truck and returns the remainder to the warehouse Partials rack
+    (SPEC §5.8 partial-pull). Mechanically: full un-scan (restore the pallet) then
+    a partial re-pick of `cases`. Caller owns commit/rollback."""
+    _assert_not_locked(transfer)
+    _assert_scannable(transfer)
+    pl = db.query(PalletLicence).filter(PalletLicence.id == pallet_licence_id).first()
+    if not pl:
+        raise NotFoundError("PalletLicence", pallet_licence_id)
+
+    # Locate the pick entry so we know how many cases it currently ships.
+    pick = None
+    for ln in (transfer.lines or []):
+        for p in (ln.picks or []):
+            if p.get("pallet_licence_id") == pallet_licence_id:
+                pick = p
+                break
+        if pick:
+            break
+    if pick is None:
+        raise ValidationError("That pallet isn't on this order's scanned list.")
+    if pick.get("was_partial"):
+        raise ValidationError(
+            "This pallet already shipped as a partial — correct the remainder with "
+            "an inventory adjustment instead."
+        )
+
+    current = int(round(float(pick.get("cases_consumed") or 0)))
+    try:
+        cases = int(cases)
+    except (TypeError, ValueError):
+        raise ValidationError("Enter a whole number of cases.")
+    if cases <= 0:
+        raise ValidationError("To take the whole pallet off the truck, use Remove instead.")
+    if cases > current:
+        raise ValidationError(f"This pallet only has {current} cases on the truck.")
+    if cases == current:
+        return {"ok": True, "shipped": cases, "returned": 0, "message": "No change."}
+
+    # Fail before mutating if there's nowhere to home the remainder.
+    if not _partial_pallet_row(db, transfer.warehouse_id):
+        raise ValidationError(
+            "No partial-pallet rack is configured for this warehouse. Set "
+            "`is_partial_pallet_location = true` on one storage row, then retry."
+        )
+
+    licence = pl.licence_number
+    unscan_pick_v2(db, transfer, pallet_licence_id, "wrong_pallet", current_user)
+    db.flush()
+    res = scan_pick_v2(
+        db, transfer, licence, float(cases), current_user,
+        allow_live_load=True, picked_via="manual_select",
+    )
+    if not res.get("ok"):
+        raise ValidationError(res.get("message") or "Could not adjust this pallet.")
+
+    returned = current - cases
+    return {
+        "ok": True, "shipped": cases, "returned": returned,
+        "message": f"{cases} cs stay on the truck · {returned} cs returned to the Partials rack.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task 7: reconcile + manual attribution.
+# ---------------------------------------------------------------------------
+def _line_shipped_cases(line: InventoryTransferLine) -> float:
+    scanned = float(line.cases_picked or 0)
+    manual = sum(float(m.get("cases") or 0) for m in (line.manual_attributions or []))
+    return scanned + manual
+
+
+def order_reconcile_summary(db: Session, transfer: InventoryTransfer) -> dict:
+    """Per-product ordered / scanned / manual / shipped / remaining, collapsed to
+    the planning line so multi sub-line orders read cleanly."""
+    import math
+    by_product: dict = {}
+    cpp_by_product: dict = {}
+    for ln in (transfer.lines or []):
+        p = by_product.setdefault(ln.product_id, {
+            "product_id": ln.product_id,
+            "product_name": (ln.product.name if ln.product else ln.product_id),
+            "ordered": 0.0, "scanned": 0.0, "manual": 0.0,
+            "manual_attributions": [], "line_ids": [],
+        })
+        if ln.product_id not in cpp_by_product and ln.product:
+            cpp_by_product[ln.product_id] = ln.product.default_cases_per_pallet
+        p["ordered"] += float(ln.cases_requested or 0)
+        p["scanned"] += float(ln.cases_picked or 0)
+        for m in (ln.manual_attributions or []):
+            p["manual"] += float(m.get("cases") or 0)
+            p["manual_attributions"].append({**m, "line_id": ln.id})
+        p["line_ids"].append(ln.id)
+    lines = []
+    any_short = any_over = False
+    # Auto pallet count = Σ ceil(shipped / cases-per-pallet) per product — the
+    # same figure generate_documents() puts on the BOL when Pallet Override is
+    # left blank. Surfaced here so the "Seal & Generate" modal can show it.
+    computed_pallet_count = 0
+    for p in by_product.values():
+        shipped = p["scanned"] + p["manual"]
+        remaining = max(0.0, p["ordered"] - shipped)
+        if shipped < p["ordered"]:
+            any_short = True
+        if shipped > p["ordered"]:
+            any_over = True
+        cpp = cpp_by_product.get(p["product_id"])
+        if cpp and shipped > 0:
+            computed_pallet_count += int(math.ceil(shipped / cpp))
+        lines.append({**p, "shipped": shipped, "remaining": remaining})
+    loc = transfer.ship_to_location
+    return {
+        "id": transfer.id, "order_number": transfer.order_number, "status": transfer.status,
+        "lines": lines, "any_short": any_short, "any_over": any_over,
+        "computed_pallet_count": computed_pallet_count,
+        # Header context so the order-detail page can render customer/truck info
+        # without a second request.
+        "customer_name": loc.customer_name if loc else None,
+        "ship_to_name": loc.location_name if loc else None,
+        "location": (
+            f"{loc.city}, {loc.state}" if loc and loc.city else (loc.location_name if loc else None)
+        ),
+        "scheduled_date": transfer.scheduled_date.isoformat() if transfer.scheduled_date else None,
+        "appointment_time": transfer.appointment_time,
+        "carrier": transfer.carrier,
+        "po_number": transfer.po_number,
+        "driver_name": transfer.driver_name,
+        "driver_license": transfer.driver_license,
+        "truck_number": transfer.truck_number,
+        "truck_license": transfer.truck_license,
+        "trailer_number": transfer.trailer_number,
+        "trailer_license": transfer.trailer_license,
+        "seal_number": transfer.seal_number,
+        "time_in": transfer.time_in.isoformat() if transfer.time_in else None,
+        "time_out": transfer.time_out.isoformat() if transfer.time_out else None,
+        "bol_number": transfer.bol_number,
+        "ship_short": bool(transfer.ship_short),
+    }
+
+
+def _assert_not_locked(transfer: InventoryTransfer) -> None:
+    if transfer.is_locked or transfer.status == ShipOutLifecycle.DOCS_GENERATED.value:
+        raise ValidationError(
+            "This order is locked — documents were generated. Void & regenerate to make changes."
+        )
+
+
+def add_manual_attribution(db: Session, transfer: InventoryTransfer, product_id: str,
+                           lot_number: str, cases: float, reason: str, current_user) -> None:
+    """Record unscanned cases by lot — paperwork only, NO inventory deduction
+    (SPEC §5.3). Attaches to the product's planning line."""
+    _assert_not_locked(transfer)
+    if cases <= 0:
+        raise ValidationError("Manual attribution cases must be > 0")
+    if not lot_number:
+        raise ValidationError("A lot number is required for manual attribution")
+    line = next((ln for ln in (transfer.lines or [])
+                 if ln.product_id == product_id and ln.receipt_id is None), None)
+    if line is None:
+        line = next((ln for ln in (transfer.lines or []) if ln.product_id == product_id), None)
+    if line is None:
+        raise ValidationError("Product is not on this order")
+    entry = {
+        "lot_number": lot_number, "cases": float(cases), "reason": (reason or None),
+        "who": str(current_user.id), "at": datetime.now(timezone.utc).isoformat(),
+    }
+    line.manual_attributions = list(line.manual_attributions or []) + [entry]
+
+
+def remove_manual_attribution(db: Session, transfer: InventoryTransfer, line_id: str, index: int) -> None:
+    _assert_not_locked(transfer)
+    line = next((ln for ln in (transfer.lines or []) if ln.id == line_id), None)
+    if line is None:
+        raise ValidationError("Line not found")
+    ma = list(line.manual_attributions or [])
+    if 0 <= index < len(ma):
+        ma.pop(index)
+        line.manual_attributions = ma
+
+
+def reconcile_order(db: Session, transfer: InventoryTransfer, confirm_short: bool,
+                    confirm_over: bool, current_user) -> InventoryTransfer:
+    """Close the ordered-vs-shipped gap. Short/over require explicit confirmation
+    (SPEC step 5). Sets status RECONCILED and the ship_short flag."""
+    if transfer.status not in (ShipOutLifecycle.SCANNING.value, ShipOutLifecycle.CHECKED_IN.value,
+                               ShipOutLifecycle.RECONCILED.value):
+        raise ValidationError("Order isn't in a state that can be reconciled.")
+    summary = order_reconcile_summary(db, transfer)
+    if summary["any_short"] and not confirm_short:
+        raise ValidationError("SHORT_CONFIRM_REQUIRED")
+    if summary["any_over"] and not confirm_over:
+        raise ValidationError("OVER_CONFIRM_REQUIRED")
+    transfer.ship_short = bool(summary["any_short"])
+    transfer.reconciled_at = datetime.now(timezone.utc)
+    transfer.reconciled_by = str(current_user.id)
+    transfer.status = ShipOutLifecycle.RECONCILED.value
+    return transfer
+
+
+# ---------------------------------------------------------------------------
+# Task 8: seal + document generation (Packing Slip + BOL).
+# ---------------------------------------------------------------------------
+_SHIP_FROM = {
+    "name": "SUNBERRY PAW PAW BEVERAGES LIMITED LLC",
+    "address": "815 S KALAMAZOO ST", "city_state_zip": "PAW PAW, MI 49079",
+}
+_BILL_TO = {
+    "name": "SUNBERRY LIMITED, LLC",
+    "lines": ["PO BOX 426", "BRIGHTON MI 48116 US"],
+}
+_NMFC = "73227"
+_FREIGHT_CLASS = "60"
+_FREIGHT_DESC = "FOODSTUFF OTHER THAN FROZEN"
+
+
+def _shipped_by_product_lot(transfer: InventoryTransfer):
+    """Returns (rows_by_product_lot, cases_by_product). rows: {(pid,lot): cases}
+    from scanned lot_allocations + manual attributions."""
+    rows: dict = {}
+    by_product: dict = {}
+    for ln in (transfer.lines or []):
+        pid = ln.product_id
+        for a in (ln.lot_allocations or []):
+            picked = float(a.get("cases_picked") or 0)
+            if picked > 0:
+                lot = a.get("lot_number") or ""
+                rows[(pid, lot)] = rows.get((pid, lot), 0.0) + picked
+                by_product[pid] = by_product.get(pid, 0.0) + picked
+        for m in (ln.manual_attributions or []):
+            c = float(m.get("cases") or 0)
+            if c > 0:
+                lot = m.get("lot_number") or ""
+                rows[(pid, lot)] = rows.get((pid, lot), 0.0) + c
+                by_product[pid] = by_product.get(pid, 0.0) + c
+    return rows, by_product
+
+
+def _computed_pallet_count(db: Session, by_product: dict, products: dict) -> int:
+    import math
+    total = 0
+    for pid, cases in by_product.items():
+        cpp = products[pid].default_cases_per_pallet
+        total += int(math.ceil(cases / cpp)) if cpp else 0
+    return total
+
+
+def generate_documents(db: Session, transfer: InventoryTransfer, seal_number: Optional[str],
+                       time_out, pallet_count_override: Optional[int], current_user) -> dict:
+    """Generate Packing Slip + BOL from ACTUAL shipped, freeze a snapshot, assign
+    a BOL number, and lock the order (SPEC step 6 / §5.4/5.9)."""
+    if transfer.is_locked and transfer.document_snapshot:
+        return transfer.document_snapshot
+    if transfer.status not in (ShipOutLifecycle.RECONCILED.value, ShipOutLifecycle.COMPLETE.value):
+        raise ValidationError("Reconcile the order before generating documents.")
+
+    # Kickoff decision: driver name/license and seal are REQUIRED here — a BOL
+    # must not print with blank driver or seal fields. Tractor/truck # and
+    # trailer # are OPTIONAL: some loads (e.g. customer pickups) have no
+    # tractor/trailer to record, so they print blank rather than block the BOL.
+    effective_seal = seal_number or transfer.seal_number
+    missing_info = []
+    if not (transfer.driver_name or "").strip():
+        missing_info.append("driver name")
+    if not (transfer.driver_license or "").strip():
+        missing_info.append("driver license #")
+    if not (effective_seal or "").strip():
+        missing_info.append("seal #")
+    if missing_info:
+        raise ValidationError(
+            "Missing required info for the BOL: " + ", ".join(missing_info)
+            + ". Use Edit Check-In to complete driver details."
+        )
+
+    rows, by_product = _shipped_by_product_lot(transfer)
+    if not by_product:
+        raise ValidationError("Nothing has shipped on this order yet.")
+    products = {p.id: p for p in db.query(Product).filter(Product.id.in_(list(by_product))).all()}
+
+    # §5.9: fail loudly on missing master data.
+    missing = []
+    for pid in by_product:
+        p = products.get(pid)
+        weight = p.package_size.case_weight if (p and p.package_size) else None
+        if not weight:
+            missing.append(f"{p.name if p else pid} (case weight)")
+        if not (p and p.default_cases_per_pallet):
+            missing.append(f"{p.name if p else pid} (cases per pallet)")
+    if missing:
+        raise ValidationError("Missing master data — set it before generating docs: " + "; ".join(sorted(set(missing))))
+
+    pallet_count = pallet_count_override if pallet_count_override is not None else _computed_pallet_count(db, by_product, products)
+    if pallet_count_override is not None:
+        transfer.pallet_count_override = pallet_count_override
+
+    pallet_weight = transfer.pallet_type.pallet_weight if transfer.pallet_type else 60.0
+    product_weight = sum(cases * (products[pid].package_size.case_weight) for pid, cases in by_product.items())
+    total_weight = round(product_weight + pallet_count * pallet_weight, 1)
+
+    # Packing-slip lines: one per (item, lot), grouped.
+    slip_lines = []
+    for (pid, lot), cases in sorted(rows.items(), key=lambda kv: (products[kv[0][0]].name, kv[0][1])):
+        p = products[pid]
+        slip_lines.append({
+            "order_number": transfer.order_number, "po_number": transfer.po_number,
+            "item": p.fcc_code or p.short_code or p.id, "description": p.name,
+            "quantity": int(cases), "uom": "CS", "lot_number": lot or None,
+        })
+    # Pallet line on the slip (chargeable pallets).
+    pt = transfer.pallet_type
+    if pt and pallet_count:
+        slip_lines.append({
+            "order_number": None, "po_number": None,
+            "item": pt.item_code, "description": pt.description,
+            "quantity": pallet_count, "uom": "EA", "lot_number": None,
+        })
+
+    loc = transfer.ship_to_location
+    if transfer.bol_number:
+        bol_number = transfer.bol_number
+    else:
+        seq = db.execute(sa_text("SELECT nextval('bol_number_seq')")).scalar()
+        bol_number = f"{seq:03d}"
+
+    snapshot = {
+        "bol_number": bol_number,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "ship_from": _SHIP_FROM, "bill_to": _BILL_TO,
+        "ship_to": ({
+            "customer_name": loc.customer_name, "location_name": loc.location_name,
+            "address_line1": loc.address_line1, "address_line2": loc.address_line2,
+            "city": loc.city, "state": loc.state, "zip_code": loc.zip_code,
+        } if loc else None),
+        "order_number": transfer.order_number, "po_number": transfer.po_number,
+        "carrier": transfer.carrier, "appointment_time": transfer.appointment_time,
+        "ship_date": transfer.scheduled_date.isoformat() if transfer.scheduled_date else None,
+        "slip_lines": slip_lines,
+        "total_cases": int(sum(by_product.values())),
+        "pallet_count": pallet_count,
+        "weight": {"product": round(product_weight, 1), "pallets": round(pallet_count * pallet_weight, 1), "total": total_weight},
+        "nmfc": _NMFC, "freight_class": _FREIGHT_CLASS, "freight_description": _FREIGHT_DESC,
+        "driver_name": transfer.driver_name, "driver_license": transfer.driver_license,
+        "truck_number": transfer.truck_number, "truck_license": transfer.truck_license,
+        "trailer_number": transfer.trailer_number,
+        "trailer_license": transfer.trailer_license, "seal_number": (seal_number or transfer.seal_number),
+        "time_in": transfer.time_in.isoformat() if transfer.time_in else None,
+        "time_out": (time_out.isoformat() if time_out else (transfer.time_out.isoformat() if transfer.time_out else None)),
+        "ship_short": bool(transfer.ship_short),
+    }
+
+    transfer.bol_number = bol_number
+    transfer.document_snapshot = snapshot
+    transfer.seal_number = seal_number or transfer.seal_number
+    if time_out is not None:
+        transfer.time_out = time_out
+    transfer.docs_generated_at = datetime.now(timezone.utc)
+    transfer.docs_generated_by = str(current_user.id)
+    transfer.status = ShipOutLifecycle.DOCS_GENERATED.value
+    transfer.is_locked = True
+    return snapshot
+
+
+def void_documents(db: Session, transfer: InventoryTransfer, reason: str, current_user) -> InventoryTransfer:
+    """SPEC §5.4: explicitly void generated documents so the order can be
+    corrected and regenerated. The old snapshot is archived and its BOL number
+    BURNED (the sequence only moves forward); the order returns to RECONCILED
+    unlocked."""
+    if not (transfer.is_locked and transfer.document_snapshot):
+        raise ValidationError("This order has no generated documents to void.")
+    if not (reason or "").strip():
+        raise ValidationError("A reason is required to void documents.")
+    archive = list(transfer.voided_documents or [])
+    archive.append({
+        "snapshot": transfer.document_snapshot,
+        "voided_by": str(current_user.id),
+        "voided_at": datetime.now(timezone.utc).isoformat(),
+        "reason": reason.strip(),
+    })
+    transfer.voided_documents = archive
+    transfer.document_snapshot = None
+    transfer.bol_number = None  # burned — regeneration draws a fresh number
+    transfer.is_locked = False
+    transfer.docs_generated_at = None
+    transfer.docs_generated_by = None
+    transfer.status = ShipOutLifecycle.RECONCILED.value
+    return transfer
+
 
 def create_pick_list_v2(
     db: Session, data, current_user, target_warehouse_id: Optional[str]
@@ -485,6 +1292,25 @@ def scanner_view_for_transfer(
         line_remaining_total = max(0.0, line_cases_requested - line_cases_picked)
         product_complete = line_remaining_total <= 0.001
 
+        # Scheduled orders plan by product+cases only (no lot allocations), so
+        # there is nothing in lot_totals to render. Surface LIVE lots for the
+        # product — oldest first (FIFO) — as advisory guidance so the forklift
+        # knows which lot/rack to pull from, exactly like the old flow's
+        # "FIFO or specific lot" view. Any lot is acceptable at scan time.
+        advisory_mode = not any(
+            float(a.get("cases_requested") or 0) > 0
+            for s in sub_lines for a in (s.lot_allocations or [])
+        )
+        fifo_first_lot = None
+        if advisory_mode and not product_complete:
+            for entry in available_lots_for_product(db, product_id, transfer.warehouse_id):
+                lot = entry.get("lot_number") or ""
+                if not lot:
+                    continue
+                if fifo_first_lot is None:
+                    fifo_first_lot = lot
+                lot_totals.setdefault(lot, {"requested": 0.0, "picked": 0.0})
+
         for lot_number, totals in lot_totals.items():
             cases_remaining = max(0.0, totals["requested"] - totals["picked"])
             has_picks = float(totals["picked"] or 0) > 0
@@ -586,11 +1412,18 @@ def scanner_view_for_transfer(
                 })
             rows_payload.sort(key=lambda r: (r["is_blocked"], r["row_name"] or ""))
 
+            # Advisory lots (scheduled orders): per-lot "remaining" is
+            # meaningless — show what's physically AVAILABLE in the lot.
+            if advisory_mode:
+                cases_remaining = sum(float(r["cases_total"] or 0) for r in rows_payload)
+
             lots_payload.append({
                 "lot_number": lot_number,
                 "cases_remaining": cases_remaining,
                 "rows": rows_payload,
                 "is_suggested_swap": False,
+                "is_advisory": advisory_mode,
+                "is_fifo_suggested": advisory_mode and lot_number == fifo_first_lot,
             })
 
         lines_payload.append({
@@ -794,17 +1627,18 @@ def _build_swap_suggestion(
 
 def scan_pick_v2(
     db: Session, transfer: InventoryTransfer, licence_number: str,
-    cases_to_consume: Optional[float], current_user
+    cases_to_consume: Optional[float], current_user,
+    allow_live_load: bool = False, picked_via: str = "scan",
 ) -> dict:
     """Process a forklift scan against a v2 ship-out transfer.
 
     Returns a dict matching `ScanPickResponseV2`. Caller is responsible for
     commit/rollback.
     """
-    if transfer.transfer_type != TRANSFER_TYPE_SHIPPED_OUT:
-        raise ValidationError("Not a ship-out transfer")
-    if transfer.status != TransferStatus.PENDING:
-        raise ValidationError("Pick list is no longer open for scanning")
+    _assert_scannable(transfer)
+    # First scan of a checked-in truck flips it to "loading" (stays on the gun).
+    if transfer.status == ShipOutLifecycle.CHECKED_IN.value:
+        transfer.status = ShipOutLifecycle.SCANNING.value
 
     user_id = str(current_user.id) if current_user else None
 
@@ -838,13 +1672,36 @@ def scan_pick_v2(
             "reject_reason": ShipOutScanReason.PALLET_UNAVAILABLE.value,
             "message": f"Pallet {label} is on hold",
         }
-    if pl.status != PalletStatus.IN_STOCK:
+    # Live-load (SPEC §5.7): a PENDING pallet is fresh off the palletizer (its
+    # receipt isn't approved yet). Accept it behind a one-tap confirm instead of
+    # rejecting. On confirm it ships direct; next-day receipt approval only
+    # touches still-PENDING pallets, so this one is naturally skipped.
+    is_live_load = pl.status == PalletStatus.PENDING
+    if is_live_load and not allow_live_load:
         _record_scan_event(db, transfer.id, pl, licence_number, on_list=False, scanned_by=user_id)
+        return {
+            "ok": False,
+            "reject_reason": ShipOutScanReason.LIVE_LOAD_NEEDS_CONFIRM.value,
+            "message": f"Pallet {label} is from today's production. Live-load it onto the truck?",
+        }
+    if pl.status not in (PalletStatus.IN_STOCK, PalletStatus.PENDING):
+        _record_scan_event(db, transfer.id, pl, licence_number, on_list=False, scanned_by=user_id)
+        # Distinguish "the worker already scanned this pallet onto THIS order"
+        # (a harmless double-scan — reassure, don't alarm) from "it shipped on a
+        # different order" (a genuine unavailable pallet).
+        if pl.status == PalletStatus.SHIPPED and pl.transfer_id == transfer.id:
+            return {
+                "ok": False,
+                "reject_reason": ShipOutScanReason.ALREADY_ON_THIS_ORDER.value,
+                "message": f"Pallet {label} is already on this load — you scanned it already.",
+            }
         return {
             "ok": False,
             "reject_reason": ShipOutScanReason.PALLET_UNAVAILABLE.value,
             "message": (
-                f"Pallet {label} is not in stock (status: {pl.status})"
+                f"Pallet {label} already shipped out on another order"
+                if pl.status == PalletStatus.SHIPPED
+                else f"Pallet {label} is not in stock (status: {pl.status})"
             ),
         }
     # Reject pallets that don't belong to this order's warehouse — including
@@ -885,27 +1742,101 @@ def scan_pick_v2(
         for alloc in (ln.lot_allocations or []):
             if alloc.get("lot_number") != (pl.lot_number or ""):
                 continue
-            lot_was_planned = True
             req = float(alloc.get("cases_requested") or 0)
             picked = float(alloc.get("cases_picked") or 0)
+            # Drift allocs (created BY earlier scans, cases_requested == 0) are
+            # not plans — treating them as planned made every second scan of a
+            # lot read as "over the ordered amount" on scheduled orders.
+            if req > 0:
+                lot_was_planned = True
             total_planned += req
             total_picked_for_lot += picked
             if req - picked > 0:
                 candidate_allocs.append((ln, alloc))
 
-    lot_remaining = max(0.0, total_planned - total_picked_for_lot)
-
-    # Lots are advisory under soft totals — nothing here rejects the scan.
-    #   - planned lot already met its number → this is an over-pull (allowed;
-    #     flagged for the approver).
-    #   - lot wasn't on the plan at all → accepted with a FIFO hint so the
-    #     forklift sees what the recommended (oldest) lot was.
-    # Over-pull is against real IN_STOCK pallets, so there's no oversell risk.
-    is_overage = bool(lot_was_planned and lot_remaining <= 0.001)
-    lot_hint = (
-        None if lot_was_planned
-        else _build_swap_suggestion(db, transfer, pl.product_id, pl.lot_number or "")
+    # Scheduled orders (SPEC Task 2) plan by PRODUCT + cases only — lots are
+    # chosen live at scan time. When no lot was ever planned for this product,
+    # any lot is acceptable and "over" means the product's ordered total is
+    # exceeded, not some per-lot number.
+    product_ordered = sum(float(ln.cases_requested or 0) for ln in lines_for_product)
+    product_picked = sum(float(ln.cases_picked or 0) for ln in lines_for_product)
+    has_planned_lots = any(
+        float(a.get("cases_requested") or 0) > 0
+        for ln in lines_for_product for a in (ln.lot_allocations or [])
     )
+
+    if has_planned_lots:
+        lot_remaining = max(0.0, total_planned - total_picked_for_lot)
+        # Lots are advisory under soft totals — nothing here rejects the scan.
+        is_overage = bool(lot_was_planned and lot_remaining <= 0.001)
+        lot_hint = (
+            None if lot_was_planned
+            else _build_swap_suggestion(db, transfer, pl.product_id, pl.lot_number or "")
+        )
+    else:
+        lot_remaining = max(0.0, product_ordered - product_picked)
+        is_overage = False  # finalized below once `consumed` is known
+        lot_hint = None
+
+    # 3b. Hard stop at the ordered quantity — GUN ONLY, scheduled orders.
+    # The forklift scanner stops the loader once a product's ordered cases are
+    # met (mirrors the legacy v1 scanner's "quantity reached / line complete").
+    # Two behaviours:
+    #   (a) product already at/over its ordered total  → refuse the scan.
+    #   (b) this whole pallet would overshoot the total → offer a partial pull
+    #       of exactly what's still needed; the remainder goes to the Partials
+    #       rack once the forklift confirms (client re-scans with
+    #       cases_to_consume = suggested_partial_cases).
+    # Scoped deliberately:
+    #   • picked_via == "scan"      → gun only; office paths (Select-pallets,
+    #     Fix-over-ship) use picked_via="manual_select" and stay permissive so
+    #     supervisors can still correct a load.
+    #   • not has_planned_lots      → scheduled orders (plan by product+cases).
+    #     Lot-planned orders keep the soft-total behaviour they were built with.
+    #   • cases_to_consume is None  → only the first, whole-pallet scan; the
+    #     partial-confirm re-scan (cases_to_consume set) passes straight through.
+    if (
+        picked_via == "scan"
+        and not has_planned_lots
+        and cases_to_consume is None
+        and product_ordered > 0.001
+    ):
+        product_remaining_before = max(0.0, product_ordered - product_picked)
+        prod = db.query(Product).filter(Product.id == pl.product_id).first()
+        prod_label = (prod.short_code or prod.name) if prod else "this product"
+        ordered_i = int(round(product_ordered))
+        picked_i = int(round(product_picked))
+
+        # (a) Line already complete — quantity reached.
+        if product_remaining_before <= 0.001:
+            _record_scan_event(db, transfer.id, pl, licence_number, on_list=False, scanned_by=user_id)
+            return {
+                "ok": False,
+                "reject_reason": ShipOutScanReason.LINE_COMPLETE.value,
+                "message": (
+                    f"Quantity reached for {prod_label} — "
+                    f"{picked_i}/{ordered_i} cases already loaded."
+                ),
+            }
+
+        # (b) This pallet would push the product past its ordered total — offer
+        # a partial pull of just what's needed (remainder → Partials rack).
+        pallet_cases_now = float(pl.cases or 0)
+        needed = int(round(product_remaining_before))
+        if pallet_cases_now > product_remaining_before + 0.001 and needed > 0:
+            leftover = int(round(pallet_cases_now - needed))
+            return {
+                "ok": False,
+                "needs_partial_confirm": True,
+                "suggested_partial_cases": float(needed),
+                "line_id": lines_for_product[0].id,
+                "message": (
+                    f"{prod_label} needs {needed} more cs to finish "
+                    f"({picked_i}/{ordered_i}). This pallet has "
+                    f"{int(round(pallet_cases_now))} cs — pull {needed} and move "
+                    f"{leftover} cs to the Partials rack?"
+                ),
+            }
 
     # 4. Full pull by default — whole pallets are never force-broken to hit an
     # exact lot/line total. A partial pull happens only when the forklift
@@ -930,6 +1861,11 @@ def scan_pick_v2(
         consumed = pallet_cases
         was_partial = False
 
+    # Scheduled orders: over = this pull pushes the PRODUCT past its ordered
+    # total (judged post-pick, since any lot is acceptable).
+    if not has_planned_lots:
+        is_overage = (product_picked + consumed) > product_ordered + 0.001
+
     # 5. Route the pick to the sub-line whose receipt_id matches this pallet's,
     # so receipt-filtered reports stay accurate. Drift case (pallet's receipt
     # wasn't in the original split) creates a fresh sub-line.
@@ -946,6 +1882,10 @@ def scan_pick_v2(
         "storage_row_id": pl.storage_row_id,
         "scanned_at": now.isoformat(),
         "scanned_by": user_id,
+        # SPEC §5.7/§5.8: how this pallet joined the order and whether it was a
+        # fresh-off-the-line (PENDING) pallet loaded direct to the truck.
+        "picked_via": picked_via,
+        "live_loaded": bool(is_live_load),
     }
 
     # Append to the line's picks (JSON column — copy + reassign so SQLAlchemy
@@ -1119,10 +2059,7 @@ def unscan_pick_v2(
     unscanned here (they'd require reconstituting a split pallet) — use an
     inventory adjustment instead. Caller owns commit/rollback.
     """
-    if transfer.transfer_type != TRANSFER_TYPE_SHIPPED_OUT:
-        raise ValidationError("Not a ship-out transfer")
-    if transfer.status != TransferStatus.PENDING:
-        raise ValidationError("Pick list is no longer open for scanning")
+    _assert_scannable(transfer)
     if reason not in ("wrong_pallet", "leaker_damaged"):
         raise ValidationError("reason must be 'wrong_pallet' or 'leaker_damaged'")
 
@@ -1295,10 +2232,7 @@ def lot_escape_hatch(
     (closing them out), and the outstanding cases are re-split across the
     new lot's receipts.
     """
-    if transfer.transfer_type != TRANSFER_TYPE_SHIPPED_OUT:
-        raise ValidationError("Not a ship-out transfer")
-    if transfer.status != TransferStatus.PENDING:
-        raise ValidationError("Pick list is no longer open")
+    _assert_scannable(transfer)
 
     target_line: Optional[InventoryTransferLine] = None
     for ln in (transfer.lines or []):
@@ -1563,10 +2497,7 @@ def retarget_lot(
     target can't cover everything we move what's available and leave the rest
     open on the original lot (soft totals make that safe). Operates across all
     sub-lines of the line's product."""
-    if transfer.transfer_type != TRANSFER_TYPE_SHIPPED_OUT:
-        raise ValidationError("Not a ship-out transfer")
-    if transfer.status != TransferStatus.PENDING:
-        raise ValidationError("Pick list is no longer open")
+    _assert_scannable(transfer)
     if from_lot == to_lot:
         raise ValidationError("Choose a different lot to move to")
 

@@ -566,6 +566,17 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                                     setAddingMissingLicence(null);
                                     if (!result?.success) {
                                       addToast(result?.error || 'Skip failed', 'error');
+                                    } else if ((result.data?.count || 0) === 0) {
+                                      // Nothing changed — surface why instead of a silent no-op.
+                                      const reason = result.data?.skipped?.[0]?.reason;
+                                      addToast(
+                                        reason === 'already_exists'
+                                          ? `${m.licence_number} is a real scanned pallet — use Fix, not Skip.`
+                                          : `Couldn't mark ${m.licence_number} not-produced (${reason || 'no change'}).`,
+                                        'warning',
+                                      );
+                                    } else {
+                                      addToast(`${m.licence_number} marked Not Produced.`, 'success');
                                     }
                                   }}
                                 >
@@ -867,28 +878,34 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
               </div>
             )}
 
-            <footer style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-              <button
-                type="button"
-                className="secondary-button"
-                disabled={!fr.shift_id || forkliftProcessingId === fr.id}
-                onClick={async () => {
-                  if (!fr.shift_id) {
-                    addToast('Please select a shift before approving.', 'error');
-                    return;
-                  }
-                  setForkliftProcessingId(fr.id);
-                  const result = await approveForkliftRequest(fr.id);
-                  setForkliftProcessingId(null);
-                  if (result?.success) {
-                    fetchForkliftRequests();
-                  } else {
-                    addToast(result?.error || 'Approval failed', 'error');
-                  }
-                }}
-              >
-                {forkliftProcessingId === fr.id ? 'Approving...' : 'Approve'}
-              </button>
+            <footer style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '8px' }}>
+              {user?.role === 'warehouse' && String(fr.scanned_by) === String(user?.id) ? (
+                // A warehouse worker can't approve their own request — a
+                // supervisor/admin or another worker must (mirrors receipts).
+                <span className="muted small">You can't approve your own request — another approver must.</span>
+              ) : (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={!fr.shift_id || forkliftProcessingId === fr.id}
+                  onClick={async () => {
+                    if (!fr.shift_id) {
+                      addToast('Please select a shift before approving.', 'error');
+                      return;
+                    }
+                    setForkliftProcessingId(fr.id);
+                    const result = await approveForkliftRequest(fr.id);
+                    setForkliftProcessingId(null);
+                    if (result?.success) {
+                      fetchForkliftRequests();
+                    } else {
+                      addToast(result?.error || 'Approval failed', 'error');
+                    }
+                  }}
+                >
+                  {forkliftProcessingId === fr.id ? 'Approving...' : 'Approve'}
+                </button>
+              )}
             </footer>
           </article>
         );

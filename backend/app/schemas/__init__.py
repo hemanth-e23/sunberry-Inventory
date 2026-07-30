@@ -15,6 +15,13 @@ from app.schemas.product import (
     VendorBase, VendorCreate, VendorUpdate, Vendor,
     ProductBase, ProductCreate, ProductUpdate, Product, ProductListResponse,
 )
+from app.schemas.shipping import (
+    PackageSizeBase, PackageSizeCreate, PackageSizeUpdate, PackageSize,
+    ShipToLocationOut, ShipToLocationInput, CarrierOut, PalletTypeOut,
+    ScheduledOrderLine, ScheduledOrderCreate, RescheduleRequest, CheckInRequest,
+    SelectPalletRequest, AdjustPalletCasesRequest, ManualAttributionRequest, RemoveManualAttributionRequest,
+    ReconcileRequest, GenerateDocsRequest, VoidDocsRequest,
+)
 from app.schemas.receipt import (
     ReceiptAllocationBase, ReceiptAllocationCreate, ReceiptAllocation,
     ReceiptBase, ReceiptCreate, ReceiptUpdate, ReceiptAssignStorage, Receipt,
@@ -84,6 +91,11 @@ __all__ = [
     "CategoryBase", "CategoryCreate", "CategoryUpdate", "Category",
     "VendorBase", "VendorCreate", "VendorUpdate", "Vendor",
     "ProductBase", "ProductCreate", "ProductUpdate", "Product", "ProductListResponse",
+    "PackageSizeBase", "PackageSizeCreate", "PackageSizeUpdate", "PackageSize",
+    "ShipToLocationOut", "ShipToLocationInput", "CarrierOut", "PalletTypeOut",
+    "ScheduledOrderLine", "ScheduledOrderCreate", "RescheduleRequest", "CheckInRequest",
+    "SelectPalletRequest", "AdjustPalletCasesRequest", "ManualAttributionRequest", "RemoveManualAttributionRequest",
+    "ReconcileRequest", "GenerateDocsRequest", "VoidDocsRequest",
     # Receipt
     "ReceiptAllocationBase", "ReceiptAllocationCreate", "ReceiptAllocation",
     "ReceiptBase", "ReceiptCreate", "ReceiptUpdate", "Receipt",

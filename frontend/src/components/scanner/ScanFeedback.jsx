@@ -1,8 +1,8 @@
 import React, { useEffect } from 'react';
-import { CheckCircle2, XCircle } from 'lucide-react';
+import { CheckCircle2, XCircle, Info } from 'lucide-react';
 import './ScanFeedback.css';
 
-const DEFAULT_MS = { success: 900, error: 1800 };
+const DEFAULT_MS = { success: 900, error: 1800, info: 1500 };
 
 const ScanFeedback = ({ kind, message, onDismiss, duration }) => {
   const ms = duration ?? DEFAULT_MS[kind] ?? 600;
@@ -23,9 +23,9 @@ const ScanFeedback = ({ kind, message, onDismiss, duration }) => {
       aria-live="assertive"
     >
       <div className="scan-feedback-icon">
-        {kind === 'success'
-          ? <CheckCircle2 size={160} strokeWidth={2.5} />
-          : <XCircle size={160} strokeWidth={2.5} />}
+        {kind === 'success' && <CheckCircle2 size={160} strokeWidth={2.5} />}
+        {kind === 'info' && <Info size={160} strokeWidth={2.5} />}
+        {kind !== 'success' && kind !== 'info' && <XCircle size={160} strokeWidth={2.5} />}
       </div>
       {message && <div className="scan-feedback-msg">{message}</div>}
     </div>

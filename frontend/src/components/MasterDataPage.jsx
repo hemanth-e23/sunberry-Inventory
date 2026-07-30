@@ -9,6 +9,7 @@ import "./MasterDataPage.css";
 import CategoriesSection from "./masterdata/CategoriesSection";
 import CompaniesAndCategoriesSection from "./masterdata/CompaniesAndCategoriesSection";
 import VendorsSection from "./masterdata/VendorsSection";
+import PackageSizesSection from "./masterdata/PackageSizesSection";
 import LocationsSection from "./masterdata/LocationsSection";
 import FGStorageSection from "./masterdata/FGStorageSection";
 import ShiftsSection from "./masterdata/ShiftsSection";
@@ -106,6 +107,7 @@ const MasterDataPage = () => {
         <div className="data-grid">
           <CategoriesSection />
           <VendorsSection />
+          <PackageSizesSection />
         </div>
 
         <section className="panel">

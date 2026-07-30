@@ -36,7 +36,8 @@ const Modal = ({
         sm: 'modal-sm',
         md: 'modal-md',
         lg: 'modal-lg',
-        xl: 'modal-xl'
+        xl: 'modal-xl',
+        xxl: 'modal-xxl'
     };
 
     return (

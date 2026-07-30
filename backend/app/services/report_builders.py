@@ -8,6 +8,7 @@ warehouse_id, then returns a plain dict ready for the router to return as JSON.
 from typing import Optional
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -15,8 +16,51 @@ from app.models import (
     Category, Product, Vendor, User, CycleCount, Location, SubLocation, StorageRow,
     InterWarehouseTransfer, Warehouse, PalletLicence,
 )
-from app.enums import TransferStatus, AdjustmentStatus, HoldStatus, InterWarehouseStatus, ReceiptStatus
+from app.enums import (
+    TransferStatus, AdjustmentStatus, HoldStatus, InterWarehouseStatus, ReceiptStatus,
+    ShipOutLifecycle,
+)
 from app.constants import CATEGORY_FINISHED
+
+# A ship-out order counts as a COMPLETED shipment for display reports once it's
+# an approved legacy ad-hoc order OR a scheduled order whose BOL was generated
+# (locked). The scheduled flow (2026-07 cutover) never sets
+# status='approved'/approved_at, so reports keyed only on those miss every
+# scheduled shipment.
+SHIPPED_OUT_DONE_STATUSES = [
+    TransferStatus.APPROVED.value,
+    ShipOutLifecycle.DOCS_GENERATED.value,
+    ShipOutLifecycle.COMPLETE.value,
+]
+
+# Statuses where a ship-out has already REMOVED cases from stock — used to
+# reconstruct historical / original receipt quantities (which add shipped cases
+# back to the live, already-decremented receipt.quantity). Stock leaves at SCAN
+# time (scan_pick_v2 decrements receipt.quantity), so this set starts at
+# 'scanning', earlier than the "completed" set above. 'approved' covers legacy.
+SHIPPED_OUT_STOCK_REMOVED_STATUSES = [
+    TransferStatus.APPROVED.value,
+    ShipOutLifecycle.SCANNING.value,
+    ShipOutLifecycle.RECONCILED.value,
+    ShipOutLifecycle.DOCS_GENERATED.value,
+    ShipOutLifecycle.COMPLETE.value,
+]
+
+
+def _ship_ts_col():
+    """SQL expression for a ship-out's ship timestamp across both flows: legacy
+    orders stamp approved_at; scheduled orders stamp time_out / docs_generated_at
+    (never approved_at)."""
+    return func.coalesce(
+        InventoryTransfer.time_out,
+        InventoryTransfer.docs_generated_at,
+        InventoryTransfer.approved_at,
+    )
+
+
+def _ship_dt(t):
+    """Python-side ship timestamp for a loaded transfer (mirror of _ship_ts_col)."""
+    return t.time_out or t.docs_generated_at or t.approved_at
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,10 +182,10 @@ def _shipped_cases_for_receipt(
     legacy_q = db.query(InventoryTransfer).filter(
         InventoryTransfer.receipt_id == receipt_id,
         InventoryTransfer.transfer_type == "shipped-out",
-        InventoryTransfer.status == TransferStatus.APPROVED,
+        InventoryTransfer.status.in_(SHIPPED_OUT_STOCK_REMOVED_STATUSES),
     )
     if approved_after is not None:
-        legacy_q = legacy_q.filter(InventoryTransfer.approved_at > approved_after)
+        legacy_q = legacy_q.filter(_ship_ts_col() > approved_after)
     legacy_total = sum(float(t.quantity or 0) for t in legacy_q.all())
 
     line_q = (
@@ -150,11 +194,11 @@ def _shipped_cases_for_receipt(
         .filter(
             InventoryTransferLine.receipt_id == receipt_id,
             InventoryTransfer.transfer_type == "shipped-out",
-            InventoryTransfer.status == TransferStatus.APPROVED,
+            InventoryTransfer.status.in_(SHIPPED_OUT_STOCK_REMOVED_STATUSES),
         )
     )
     if approved_after is not None:
-        line_q = line_q.filter(InventoryTransfer.approved_at > approved_after)
+        line_q = line_q.filter(_ship_ts_col() > approved_after)
     line_total = sum(float(ln.cases_picked or 0) for ln, _t in line_q.all())
 
     return legacy_total + line_total
@@ -314,12 +358,13 @@ def build_activity_ledger(
     for r in range_receipts:
         product_ids.add(r.product_id)
 
-    # Transfers approved in range (covers both legacy single-receipt and multi-product)
+    # Ship-outs completed in range (covers both legacy single-receipt and
+    # multi-product; ship date spans approved_at / time_out / docs_generated_at).
     tq = db.query(InventoryTransfer).filter(
         InventoryTransfer.transfer_type == "shipped-out",
-        InventoryTransfer.status == TransferStatus.APPROVED,
-        InventoryTransfer.approved_at >= start_dt,
-        InventoryTransfer.approved_at <= end_dt,
+        InventoryTransfer.status.in_(SHIPPED_OUT_DONE_STATUSES),
+        _ship_ts_col() >= start_dt,
+        _ship_ts_col() <= end_dt,
     )
     range_transfers = tq.all()
     for t in range_transfers:
@@ -443,9 +488,17 @@ def build_shipments_report(
     order_number: Optional[str] = None,
 ) -> dict:
     order_number = (order_number or "").strip()
+    # Ship timestamp works for both flows: legacy approved orders stamp
+    # approved_at; scheduled orders stamp time_out (truck left) and/or
+    # docs_generated_at (BOL printed) but never approved_at.
+    ship_ts = func.coalesce(
+        InventoryTransfer.time_out,
+        InventoryTransfer.docs_generated_at,
+        InventoryTransfer.approved_at,
+    )
     query = db.query(InventoryTransfer).filter(
         InventoryTransfer.transfer_type == "shipped-out",
-        InventoryTransfer.status == TransferStatus.APPROVED,
+        InventoryTransfer.status.in_(SHIPPED_OUT_DONE_STATUSES),
     )
     if warehouse_id:
         query = query.filter(InventoryTransfer.warehouse_id == warehouse_id)
@@ -455,17 +508,27 @@ def build_shipments_report(
         query = query.filter(InventoryTransfer.order_number.ilike(f"%{order_number}%"))
     else:
         if start_date:
-            query = query.filter(InventoryTransfer.approved_at >= parse_dt_start(start_date))
+            query = query.filter(ship_ts >= parse_dt_start(start_date))
         if end_date:
-            query = query.filter(InventoryTransfer.approved_at <= parse_dt_end(end_date))
+            query = query.filter(ship_ts <= parse_dt_end(end_date))
 
-    transfers = query.order_by(InventoryTransfer.approved_at.desc()).all()
+    transfers = query.order_by(ship_ts.desc()).all()
 
     rows = []
     for t in transfers:
+        # Ship date + "approved by" per transfer, spanning both flows: scheduled
+        # orders have no approver (approved_by is null) — the person who generated
+        # the BOL (docs_generated_by) is the effective sign-off.
+        ship_dt = t.time_out or t.docs_generated_at or t.approved_at
+        approver = user_name(db, t.approved_by or getattr(t, "docs_generated_by", None))
         # Multi-product/multi-receipt ship-out: emit one row per line
         if t.lines:
             for ln in t.lines:
+                # Skip lines that shipped nothing: scheduled-order planning lines
+                # (receipt_id NULL) and drained drift sub-lines carry 0 picked
+                # cases and would otherwise emit empty rows on a shipments report.
+                if float(ln.cases_picked or 0) <= 0:
+                    continue
                 receipt = db.query(Receipt).filter(Receipt.id == ln.receipt_id).first()
                 if not receipt:
                     continue
@@ -476,7 +539,7 @@ def build_shipments_report(
                 rows.append({
                     "transfer_id": t.id,
                     "line_id": ln.id,
-                    "ship_date": t.approved_at,
+                    "ship_date": ship_dt,
                     "order_number": t.order_number,
                     "product_name": pname,
                     "product_code": pcode,
@@ -485,7 +548,7 @@ def build_shipments_report(
                     "cases": round(float(ln.cases_picked or 0), 2),
                     "cases_requested": round(float(ln.cases_requested or 0), 2),
                     "unit": t.unit or "cases",
-                    "approved_by": user_name(db, t.approved_by),
+                    "approved_by": approver,
                     "requested_by": user_name(db, t.requested_by),
                     "is_multi_product": True,
                 })
@@ -504,7 +567,7 @@ def build_shipments_report(
         rows.append({
             "transfer_id": t.id,
             "line_id": None,
-            "ship_date": t.approved_at,
+            "ship_date": ship_dt,
             "order_number": t.order_number,
             "product_name": pname,
             "product_code": pcode,
@@ -513,7 +576,7 @@ def build_shipments_report(
             "cases": round(float(t.quantity or 0), 2),
             "cases_requested": round(float(t.quantity or 0), 2),
             "unit": t.unit or "cases",
-            "approved_by": user_name(db, t.approved_by),
+            "approved_by": approver,
             "requested_by": user_name(db, t.requested_by),
             "is_multi_product": False,
         })
@@ -537,7 +600,7 @@ def build_shipment_detail(
     query = db.query(InventoryTransfer).filter(
         InventoryTransfer.id == transfer_id,
         InventoryTransfer.transfer_type == "shipped-out",
-        InventoryTransfer.status == TransferStatus.APPROVED,
+        InventoryTransfer.status.in_(SHIPPED_OUT_DONE_STATUSES),
     )
     if warehouse_id:
         query = query.filter(InventoryTransfer.warehouse_id == warehouse_id)
@@ -643,9 +706,11 @@ def build_shipment_detail(
         "transfer_id": transfer.id,
         "order_number": transfer.order_number,
         "created_by": user_name(db, transfer.requested_by),
-        "created_at": transfer.submitted_at,
-        "approved_by": user_name(db, transfer.approved_by),
-        "approved_at": transfer.approved_at,
+        "created_at": transfer.submitted_at or transfer.created_at,
+        # Scheduled orders have no approver — the BOL generator is the sign-off,
+        # and the ship moment is time_out / docs_generated_at, not approved_at.
+        "approved_by": user_name(db, transfer.approved_by or getattr(transfer, "docs_generated_by", None)),
+        "approved_at": transfer.approved_at or transfer.time_out or transfer.docs_generated_at,
         "unit": transfer.unit or "cases",
         "totals": {
             "cases_requested": total_requested,
@@ -698,14 +763,15 @@ def build_movement_ledger(
             "by_user": user_name(db, r.submitted_by),
         })
 
-    # Transfers
+    # Transfers — single-receipt (parent carries receipt_id): warehouse-transfer,
+    # staging, and legacy single-receipt ship-outs.
     if receipt_ids:
         tq = db.query(InventoryTransfer).filter(
             InventoryTransfer.receipt_id.in_(receipt_ids),
-            InventoryTransfer.status == TransferStatus.APPROVED,
+            InventoryTransfer.status.in_(SHIPPED_OUT_DONE_STATUSES),
         )
         for t in tq.all():
-            ts = t.approved_at or t.submitted_at
+            ts = _ship_dt(t) or t.submitted_at
             if start_dt and ts and ts < start_dt:
                 continue
             if end_dt and ts and ts > end_dt:
@@ -724,7 +790,41 @@ def build_movement_ledger(
                 "qty_out": round(float(t.quantity or 0), 2),
                 "reference": t.order_number or "",
                 "notes": t.reason or "",
-                "by_user": user_name(db, t.approved_by),
+                "by_user": user_name(db, t.approved_by or getattr(t, "docs_generated_by", None)),
+            })
+
+        # Multi-product ship-outs draw from this product's receipts via their
+        # LINES (the parent transfer's receipt_id is NULL). Without this, every
+        # scheduled / multi-product shipment is invisible in the ledger.
+        line_rows = (
+            db.query(InventoryTransferLine, InventoryTransfer)
+            .join(InventoryTransfer, InventoryTransfer.id == InventoryTransferLine.transfer_id)
+            .filter(
+                InventoryTransferLine.receipt_id.in_(receipt_ids),
+                InventoryTransfer.transfer_type == "shipped-out",
+                InventoryTransfer.receipt_id.is_(None),
+                InventoryTransfer.status.in_(SHIPPED_OUT_DONE_STATUSES),
+            )
+        )
+        for ln, t in line_rows.all():
+            if float(ln.cases_picked or 0) <= 0:
+                continue
+            ts = _ship_dt(t) or t.submitted_at
+            if start_dt and ts and ts < start_dt:
+                continue
+            if end_dt and ts and ts > end_dt:
+                continue
+            r = next((x for x in receipts if x.id == ln.receipt_id), None)
+            events.append({
+                "timestamp": ts,
+                "event_type": "Shipped Out",
+                "lot_number": r.lot_number if r else "",
+                "category": "",
+                "qty_in": 0,
+                "qty_out": round(float(ln.cases_picked or 0), 2),
+                "reference": t.order_number or "",
+                "notes": t.reason or "",
+                "by_user": user_name(db, t.approved_by or getattr(t, "docs_generated_by", None)),
             })
 
     # Adjustments
@@ -789,8 +889,8 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
 
         legacy_transfers = db.query(InventoryTransfer).filter(
             InventoryTransfer.receipt_id == r.id,
-            InventoryTransfer.status == TransferStatus.APPROVED,
-        ).order_by(InventoryTransfer.approved_at).all()
+            InventoryTransfer.status.in_(SHIPPED_OUT_DONE_STATUSES),
+        ).order_by(_ship_ts_col()).all()
 
         # Multi-product ship-outs that drew from this receipt via their lines
         line_transfer_ids = [
@@ -803,13 +903,14 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
         if line_transfer_ids:
             multi_transfers = db.query(InventoryTransfer).filter(
                 InventoryTransfer.id.in_(line_transfer_ids),
-                InventoryTransfer.status == TransferStatus.APPROVED,
+                InventoryTransfer.status.in_(SHIPPED_OUT_DONE_STATUSES),
                 InventoryTransfer.receipt_id.is_(None),  # exclude legacy already captured
-            ).order_by(InventoryTransfer.approved_at).all()
-        # Combined, sorted by approved_at
+            ).order_by(_ship_ts_col()).all()
+        # Combined, sorted by ship timestamp (approved_at for legacy, time_out /
+        # docs_generated_at for scheduled).
         transfers = sorted(
             list(legacy_transfers) + list(multi_transfers),
-            key=lambda t: t.approved_at or datetime.min,
+            key=lambda t: _ship_dt(t) or datetime.min.replace(tzinfo=timezone.utc),
         )
 
         adjustments = db.query(InventoryAdjustment).filter(
@@ -862,13 +963,13 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             timeline.append({
                 "event": t.transfer_type.replace("-", " ").title(),
                 "event_type": t.transfer_type,
-                "date": t.approved_at,
+                "date": _ship_dt(t),
                 "qty": round(line_qty, 2),
                 "notes": t.reason or None,
                 "submitted_by": user_name(db, t.requested_by),
                 "submitted_at": t.submitted_at,
-                "approved_by": user_name(db, t.approved_by),
-                "approved_at": t.approved_at,
+                "approved_by": user_name(db, t.approved_by or getattr(t, "docs_generated_by", None)),
+                "approved_at": _ship_dt(t),
                 "from_location": _loc_str(t.from_location, t.from_sub_location),
                 "from_rows": breakdown_rows(db, t.source_breakdown, r.unit or "cases"),
                 "to_location": _loc_str(t.to_location, t.to_sub_location),
@@ -1066,14 +1167,10 @@ def build_finished_goods_report(
     for r in receipts:
         pname, pcode = product_info(db, r.product_id)
         init_qty = initial_receipt_qty(r, db)
-        shipped_total = sum(
-            float(t.quantity or 0)
-            for t in db.query(InventoryTransfer).filter(
-                InventoryTransfer.receipt_id == r.id,
-                InventoryTransfer.transfer_type == "shipped-out",
-                InventoryTransfer.status == TransferStatus.APPROVED,
-            ).all()
-        )
+        # Count BOTH legacy single-receipt and multi-product / scheduled ship-out
+        # lines (the helper handles both) so cases_shipped stays consistent with
+        # cases_produced (= on_hand + shipped + adjustments + IW transfers).
+        shipped_total = _shipped_cases_for_receipt(db, r.id)
         rows.append({
             "receipt_id": r.id,
             "lot_number": r.lot_number,

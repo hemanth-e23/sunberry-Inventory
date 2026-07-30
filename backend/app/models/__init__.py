@@ -7,6 +7,12 @@ All models register themselves on the shared `Base` from database.py.
 
 # 1. No-FK base models
 from app.models.user import Warehouse, User
+
+# 1b. Shipping master data (no FK deps) — must precede product (Product FKs to
+# package_sizes) and inventory (InventoryTransfer FKs to ship_to_locations,
+# pallet_types).
+from app.models.shipping import PackageSize, PalletType, ShipToLocation, Carrier
+
 from app.models.product import CategoryGroup, Category, Vendor, Product, WarehouseCategoryAccess
 
 # 2. Location models (FK: warehouses, locations, sub_locations, storage_areas, products)

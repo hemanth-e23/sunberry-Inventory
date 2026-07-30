@@ -225,6 +225,9 @@ class ScanPickRequestV2(BaseSchema):
     """
     licence_number: str = Field(..., min_length=1, max_length=100)
     cases_to_consume: Optional[float] = Field(None, gt=0)
+    # Live-load (SPEC §5.7): re-sent as true to confirm loading a PENDING
+    # (fresh-off-the-line) pallet straight onto the truck.
+    allow_live_load: bool = False
 
 
 class ScanPickResponseV2(BaseSchema):

@@ -15,6 +15,7 @@
 
 .scan-feedback--success { background: #16a34a; }
 .scan-feedback--error   { background: #dc2626; }
+.scan-feedback--info    { background: #d97706; }
 
 .scan-feedback-icon {
   animation: scan-fb-pop 0.28s cubic-bezier(0.2, 0.7, 0.3, 1.4);
