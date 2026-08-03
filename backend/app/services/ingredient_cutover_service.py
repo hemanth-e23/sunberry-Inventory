@@ -62,6 +62,7 @@ from app.services.ingredient_intake_service import (
     _plant_timezone,
     _record_event,
     container_count_unit,
+    validate_vendor_lot,
 )
 from app.services.row_allocation import deduct_rm_rows
 from app.utils.category_rules import is_ingredient
@@ -123,7 +124,9 @@ def _sweep_intake(db: Session, receipt: Receipt, current_user) -> IngredientInta
         product_id=receipt.product_id,
         category_id=receipt.category_id,
         container_type="barrel",
-        vendor_lot=receipt.lot_number,
+        # Historical data can hold anything; a pipe would corrupt the printed
+        # payload, so refuse rather than sweep a drum we cannot label correctly.
+        vendor_lot=validate_vendor_lot(receipt.lot_number),
         # An unreadable drum label is recorded as unknown and QA-flagged, not
         # guessed at.
         lot_unknown=not bool(receipt.lot_number),
@@ -215,7 +218,9 @@ def convert_one(
     intake = _sweep_intake(db, receipt, current_user)
     lot = intake.lots[0]
     if lot_number_override:
-        lot.vendor_lot = lot_number_override
+        # A sweeper reading a legible drum label can supply a better lot than
+        # the receipt carries — but it still has to be printable.
+        lot.vendor_lot = validate_vendor_lot(lot_number_override)
         lot.lot_unknown = False
     if bbd_override:
         lot.bbd = bbd_override

@@ -310,6 +310,10 @@ async def update_lot(
         raise NotFoundError("Intake lot", lot_id)
 
     changes = payload.dict(exclude_unset=True)
+    if "vendor_lot" in changes:
+        # Same guard as creation: a pipe here shifts every field in the printed
+        # 2D payload. This path used to bypass it entirely.
+        svc.validate_vendor_lot(changes["vendor_lot"])
     old_expected = lot.expected_count or 0
     for field, value in changes.items():
         setattr(lot, field, value)

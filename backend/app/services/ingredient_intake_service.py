@@ -90,6 +90,24 @@ def _plant_timezone(db: Session, warehouse_id: Optional[str]) -> str:
     return (wh.timezone if wh and wh.timezone else "UTC")
 
 
+def validate_vendor_lot(value: Optional[str]) -> Optional[str]:
+    """Reject a vendor lot that would corrupt the printed 2D payload.
+
+    The label encodes `SB1|<serial>|<vendor_lot>|<bbd>`, so a pipe inside the lot
+    shifts every field after it and a scanner reads the wrong BBD off the drum.
+    Rejecting at entry beats escaping at print time: a sticker is applied to a
+    frozen barrel and may not be scanned for a year, by which time a bad payload
+    is unfixable without finding the physical drum.
+
+    This MUST be called from every path that writes IntakeLot.vendor_lot —
+    creation, the lot-line PATCH, and both cutover paths. It originally guarded
+    only creation, which left three ways to print a malformed label.
+    """
+    if value and "|" in value:
+        raise ValidationError("Vendor lot cannot contain the '|' character")
+    return value
+
+
 def container_count_unit(container_type: Optional[str], count: int = 2) -> str:
     """Display unit for a container count. Never "cases" (§6.3, §19.1).
 
@@ -263,11 +281,7 @@ def _build_lot(db: Session, intake: IngredientIntake, line) -> IntakeLot:
     if not product:
         raise NotFoundError("Product", line.product_id)
 
-    # The 2D label payload is pipe-delimited (SB1|serial|lot|bbd). Rejecting the
-    # delimiter at entry is simpler and safer than escaping it at print time,
-    # and a vendor lot containing '|' has never been seen in practice.
-    if line.vendor_lot and "|" in line.vendor_lot:
-        raise ValidationError("Vendor lot cannot contain the '|' character")
+    validate_vendor_lot(line.vendor_lot)
 
     return IntakeLot(
         id=_mint_id("ilot"),
