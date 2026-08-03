@@ -51,6 +51,11 @@ class StorageRow(Base):
     storage_area_id = Column(String(50), ForeignKey("storage_areas.id"), nullable=True)
     sub_location_id = Column(String(50), ForeignKey("sub_locations.id"), nullable=True)
     name = Column(String(100), nullable=False)
+    # Scannable rack label. Row `name` is NOT unique (two barns can each have an
+    # "A-12"), so ingredient scan-to-location resolves on this instead of the
+    # client-side name match the FG scanner uses. Backfilled `{LOC3}-{NAME}` by
+    # alembic u6v7w8x9y0z1; NULL only until a label is printed.
+    barcode = Column(String(40), unique=True, index=True, nullable=True)
     template = Column(String(20))
     pallet_capacity = Column(Integer, default=0)
     default_cases_per_pallet = Column(Integer, default=0)

@@ -23,6 +23,19 @@ export const CATEGORY_TYPES = {
 export const isRawMaterialType = (type) =>
   type === 'raw' || type === CATEGORY_TYPES.RAW_MATERIAL;
 
+// True for ingredients specifically (the serialized tier: barrels + bags).
+// Deliberately separate from isRawMaterialType — raw materials keep the legacy
+// receipt/allocation flow, ingredients do not.
+export const isIngredientType = (type) => type === CATEGORY_TYPES.INGREDIENT;
+
+// True for anything measured by weight rather than counted in cases: raw
+// materials AND ingredients. Use this for UI that applies to both (SID, vendor,
+// expiration, lbs display). `isRawMaterialType` alone silently EXCLUDES
+// ingredients, which is how an "isIngredient" flag ended up false for every
+// actual ingredient (approvals/ReceiptsTab.jsx).
+export const isWeighedMaterialType = (type) =>
+  isRawMaterialType(type) || isIngredientType(type);
+
 // ─── Statuses ─────────────────────────────────────────────────────────────────
 
 export const RECEIPT_STATUS = {
@@ -122,4 +135,88 @@ export const INTER_WAREHOUSE_STATUS = {
   RECEIVED: 'received',
   DISPUTED: 'disputed',
   CANCELLED: 'cancelled',
+};
+
+// ─── Ingredient serialization ─────────────────────────────────────────────────
+// Mirrors backend/app/enums.py. Keep the two in sync — these strings are
+// persisted, so a typo here is a silent filter that matches nothing.
+//
+// NOTE: CONTAINER_STATUS.IN_STOCK / SHIPPED share values with PALLET_STATUS.
+// Different domains (containers vs. pallet licences); never compare across them.
+
+export const CONTAINER_TYPE = {
+  BARREL: 'barrel',
+  BAG: 'bag',
+};
+
+export const INTAKE_STATUS = {
+  RECORDED: 'recorded',
+  SUBMITTED: 'submitted',
+  APPROVED: 'approved',
+  REJECTED: 'rejected',
+  VOIDED: 'voided',
+};
+
+export const CONTAINER_STATUS = {
+  PRINTED_UNAPPLIED: 'printed_unapplied',
+  RECEIVED: 'received',
+  IN_STOCK: 'in_stock',
+  STAGED: 'staged',
+  OPENED: 'opened',
+  EMPTY: 'empty',
+  SHIPPED: 'shipped',
+  DAMAGED: 'damaged',
+  DISPOSED: 'disposed',
+  RETURNED_TO_VENDOR: 'returned_to_vendor',
+  VOIDED: 'voided',
+  MISSING: 'missing',
+};
+
+// Statuses that count as physically present and usable.
+export const CONTAINER_AVAILABLE_STATUSES = [
+  CONTAINER_STATUS.IN_STOCK,
+  CONTAINER_STATUS.STAGED,
+  CONTAINER_STATUS.OPENED,
+];
+
+export const CONTAINER_EVENT_TYPE = {
+  PRINTED: 'printed',
+  RECEIVED: 'received',
+  APPROVED: 'approved',
+  REJECTED: 'rejected',
+  MOVED: 'moved',
+  STAGED: 'staged',
+  STAGING_RETURNED: 'staging_returned',
+  OPENED: 'opened',
+  CONSUMED: 'consumed',
+  SHIPPED: 'shipped',
+  RETURNED_TO_STOCK: 'returned_to_stock',
+  RETURNED_TO_VENDOR: 'returned_to_vendor',
+  ADJUSTED: 'adjusted',
+  SAMPLED: 'sampled',
+  DAMAGED: 'damaged',
+  DISPOSED: 'disposed',
+  RELABELED: 'relabeled',
+  HELD: 'held',
+  RELEASED: 'released',
+  REGROUPED: 'regrouped',
+  VOIDED: 'voided',
+  COUNTED: 'counted',
+};
+
+export const DISPOSAL_REASON = {
+  DAMAGED: 'damaged',
+  EXPIRED: 'expired',
+  QA_REJECT: 'qa_reject',
+  SPILL: 'spill',
+  CONTAMINATION: 'contamination',
+  OTHER: 'other',
+};
+
+// Display unit for a container count — never "cases" (SPEC §6.3 / §19.1).
+export const containerUnitLabel = (containerType, count = 2) => {
+  const plural = Number(count) === 1 ? '' : 's';
+  if (containerType === CONTAINER_TYPE.BARREL) return `barrel${plural}`;
+  if (containerType === CONTAINER_TYPE.BAG) return `bag${plural}`;
+  return `container${plural}`;
 };

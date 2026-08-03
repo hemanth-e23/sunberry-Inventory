@@ -8,6 +8,7 @@ from app.enums import TransferStatus, PalletStatus, ReceiptStatus
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED
 from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
+from app.utils import category_rules
 from app.utils.locations import warehouse_id_for_row
 
 
@@ -16,8 +17,10 @@ from app.utils.locations import warehouse_id_for_row
 # ---------------------------------------------------------------------------
 
 def _is_finished_goods(db: Session, receipt: Receipt) -> bool:
-    category = db.query(Category).filter(Category.id == receipt.category_id).first()
-    return bool(category and (category.parent_id == "group-finished" or category.type == CATEGORY_FINISHED))
+    # Delegates to the shared predicate (app/utils/category_rules.py). This was
+    # duplicated verbatim here and in inter_warehouse_transfer_service.py:17;
+    # the local name is kept so call sites are unchanged.
+    return category_rules.is_finished_goods(db, receipt)
 
 
 def _apply_pallet_licence_ship_out(db: Session, licences: list, transfer_id: str) -> None:

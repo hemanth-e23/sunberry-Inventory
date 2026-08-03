@@ -12,11 +12,14 @@ from app.models import Receipt, InterWarehouseTransfer, StorageRow, StorageArea,
 from app.enums import ReceiptStatus
 from app.constants import CATEGORY_FINISHED
 from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
+from app.utils import category_rules
 
 
 def _is_finished_goods(db: Session, receipt: Receipt) -> bool:
-    category = db.query(Category).filter(Category.id == receipt.category_id).first()
-    return bool(category and (category.parent_id == "group-finished" or category.type == CATEGORY_FINISHED))
+    # Delegates to the shared predicate (app/utils/category_rules.py). This was
+    # duplicated verbatim here and in transfer_service.py:18; the local name is
+    # kept so call sites are unchanged.
+    return category_rules.is_finished_goods(db, receipt)
 
 
 def link_source_receipt(

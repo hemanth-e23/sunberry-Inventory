@@ -54,6 +54,14 @@ const ExpiryReport = () => {
     { label: "On Hold", value: (r) => r.on_hold ? "Yes" : "No" },
   ];
 
+  // Unit for the bucket totals: only meaningful when every row in scope agrees.
+  const bucketUnit = (() => {
+    const units = new Set(
+      (expiryData?.rows || []).map((r) => r.unit).filter(Boolean),
+    );
+    return units.size === 1 ? [...units][0] : "";
+  })();
+
   return (
     <section className="reports-panel">
       <div className="reports-section report-filter-section">
@@ -82,6 +90,13 @@ const ExpiryReport = () => {
       {expiryLoading && <LoadingBox />}
       {expiryError && <ErrorBox message={expiryError} />}
 
+      {/* The bucket totals sum every row in scope, and the Category filter can
+          span categories whose rows are measured differently — raw materials and
+          ingredients in lbs, finished goods in cases. Labelling that sum "cases"
+          was wrong for any non-FG selection (an 80-barrel ingredient lot read as
+          cases). Show the unit only when the rows in scope agree on one; a mixed
+          sum gets no unit, because a mixed sum has none. Per-row units are
+          already correct in the table below. */}
       {expiryData && (
         <>
           <div className="expiry-buckets">
@@ -93,7 +108,7 @@ const ExpiryReport = () => {
                 <article key={b} className={`summary-card${urgent ? " summary-card--danger" : ""}`}>
                   <h4>{b === "expired" ? "⚠ Expired" : b}</h4>
                   <span className="summary-value">{formatNumber(info.lots)} lots</span>
-                  <span className="summary-sub">{formatNumber(info.quantity)} cases</span>
+                  <span className="summary-sub">{formatNumber(info.quantity)} {bucketUnit}</span>
                 </article>
               );
             })}

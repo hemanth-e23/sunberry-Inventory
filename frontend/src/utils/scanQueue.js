@@ -72,16 +72,24 @@ export const subscribeToScanQueue = (cb) => {
  * The caller can use idempotency_key as a stable handle to find the entry
  * later (e.g., for optimistic UI updates).
  *
+ * `endpoint` is optional and defaults to the forklift pallet-scan path, so every
+ * pre-existing caller is unchanged. Ingredient container scans pass their own
+ * path. Keeping ONE queue (one storage key, one retry policy, one drain loop) is
+ * what makes the "device dies mid-session, any device resumes" guarantee hold
+ * across both flows — a second queue would need all of that duplicated and kept
+ * in sync.
+ *
  * `idempotencyKey` is optional and reuses a key from an earlier attempt. The
  * "row is full" confirm re-sends the same scan with the driver's answer on it;
  * carrying the original key keeps that a replay rather than a second pallet if
  * the first attempt actually landed and only its response was lost.
  */
-export const enqueueScan = ({ requestId, payload, idempotencyKey }) => {
+export const enqueueScan = ({ requestId, payload, endpoint, idempotencyKey }) => {
   const item = {
     id: safeRandomId(),
     idempotency_key: idempotencyKey || safeRandomId(),
     requestId,
+    endpoint: endpoint || null,
     payload,
     addedAt: new Date().toISOString(),
     attempts: 0,
@@ -144,8 +152,10 @@ export const drainScanQueue = async ({ onItemResult } = {}) => {
       updateScan(next.id, { attempts: (next.attempts || 0) + 1 });
 
       try {
+        // Items enqueued before `endpoint` existed have it null/undefined and
+        // fall back to the forklift pallet-scan path they were queued for.
         const resp = await apiClient.post(
-          `/scanner/requests/${next.requestId}/scan`,
+          next.endpoint || `/scanner/requests/${next.requestId}/scan`,
           { ...next.payload, idempotency_key: next.idempotency_key },
         );
         sent.push({ item: next, response: resp.data });

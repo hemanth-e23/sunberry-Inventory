@@ -53,6 +53,50 @@ class AdjustmentStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class AdjustmentType(str, Enum):
+    """Every value ever written to `InventoryAdjustment.adjustment_type`.
+
+    Promoted out of a bare frozenset in adjustment_service.py (2026-08-03) because
+    the sign of a new member was previously implicit: a type that wasn't listed in
+    DEDUCTION_TYPES produced an APPROVED adjustment that looked correct in every UI
+    while leaving `receipt.quantity` untouched. Adding a member here forces the
+    author to also place it in — or deliberately out of — DEDUCTION_TYPES below.
+    """
+    REDUCE = "reduce"
+    STOCK_CORRECTION = "stock-correction"
+    DAMAGE_REDUCTION = "damage-reduction"
+    DONATION = "donation"
+    TRASH_DISPOSAL = "trash-disposal"
+    QUALITY_REJECTION = "quality-rejection"
+    USED_IN_PRODUCTION = "used-in-production"
+    # Written by staging_service.py:270 and filtered by report_builders.py:419.
+    # NOT a DEDUCTION_TYPE — it never was, and approve_adjustment has never
+    # decremented on it. Preserved as-is; changing it is a separate decision.
+    PRODUCTION_CONSUMPTION = "production-consumption"
+    FOUND = "found"
+    # Ingredient serialization cutover (SPEC §15.3). Deliberately NOT a
+    # DEDUCTION_TYPE: the conversion runs in its own transaction and does its own
+    # `receipt.quantity -= container.net_weight` decrement, then writes this
+    # adjustment already-APPROVED for KPI/report continuity only. Routing it
+    # through approve_adjustment would double-decrement.
+    SERIALIZATION_CONVERSION = "serialization-conversion"
+
+
+# Adjustment types that reduce inventory quantity when approved.
+# Derived from AdjustmentType so a new member cannot be added without a
+# deliberate sign decision. Membership is intentionally byte-identical to the
+# frozenset this replaced (adjustment_service.py, pre-2026-08-03).
+DEDUCTION_TYPES = frozenset({
+    AdjustmentType.REDUCE.value,
+    AdjustmentType.STOCK_CORRECTION.value,
+    AdjustmentType.DAMAGE_REDUCTION.value,
+    AdjustmentType.DONATION.value,
+    AdjustmentType.TRASH_DISPOSAL.value,
+    AdjustmentType.QUALITY_REJECTION.value,
+    AdjustmentType.USED_IN_PRODUCTION.value,
+})
+
+
 class HoldStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
@@ -132,3 +176,105 @@ class StagingRequestStatus(str, Enum):
     PARTIAL = "partial"
     CLOSED = "closed"
     CANCELLED = "cancelled"
+
+
+# ─── Ingredient serialization (INGREDIENT-SERIALIZATION-SPEC.md) ──────────────
+# Columns holding these are String(24), not the repo-standard String(20):
+# "returned_to_vendor" is 18 chars and String(20) leaves no headroom.
+#
+# WARNING: IN_STOCK / SHIPPED collide by *value* with PalletStatus above. They are
+# different domains (containers vs. pallet licences) and must never be compared
+# across enums — such a comparison type-checks and is silently wrong. Always
+# qualify: ContainerStatus.IN_STOCK, never a bare "in_stock" literal.
+
+class IntakeStatus(str, Enum):
+    """Lifecycle of an ingredient intake (one truck/delivery).
+
+    ONE approval gate, mirroring approve_forklift_request (scanner_service.py:1067)
+    where the session gate REPLACES the receipt gate — new intakes create no legacy
+    Receipt at all (SPEC IMPL-COMMENT 13).
+    """
+    RECORDED = "recorded"
+    SUBMITTED = "submitted"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    VOIDED = "voided"
+
+
+class ContainerStatus(str, Enum):
+    """State of one physical barrel/bag. See SPEC §7.
+
+    This column is authoritative state, NOT a cache recomputed from
+    container_events — see SPEC IMPL-COMMENT 1. The ledger is an audit trail
+    written in the same transaction, serialized by SELECT ... FOR UPDATE on the
+    container row.
+    """
+    PRINTED_UNAPPLIED = "printed_unapplied"  # serial minted, sticker not yet on a drum
+    RECEIVED = "received"                    # scanned at the dock, intake not yet approved
+    IN_STOCK = "in_stock"
+    STAGED = "staged"
+    OPENED = "opened"                        # partial; remaining_qty is live
+    EMPTY = "empty"                          # consumed; consumed_by_batch_uid recorded
+    SHIPPED = "shipped"                      # serial survives; re-receive restores it
+    DAMAGED = "damaged"
+    DISPOSED = "disposed"
+    RETURNED_TO_VENDOR = "returned_to_vendor"
+    VOIDED = "voided"                        # serial burned (I-5 reject, I-6 duplicate intake)
+    MISSING = "missing"                      # S-4: FEFO-suggested drum not physically found
+
+
+class ContainerEventType(str, Enum):
+    """Append-only ledger event types. See SPEC §6.
+
+    APPROVED/REJECTED/VOIDED/RETURNED_TO_VENDOR/COUNTED were absent from the
+    original spec list; without them the event->status mapping is not a function
+    and half the §18 edge-case catalog has nowhere to be recorded.
+    """
+    PRINTED = "printed"
+    RECEIVED = "received"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    MOVED = "moved"
+    STAGED = "staged"
+    STAGING_RETURNED = "staging_returned"
+    OPENED = "opened"
+    CONSUMED = "consumed"
+    SHIPPED = "shipped"
+    RETURNED_TO_STOCK = "returned_to_stock"
+    RETURNED_TO_VENDOR = "returned_to_vendor"
+    ADJUSTED = "adjusted"
+    SAMPLED = "sampled"
+    DAMAGED = "damaged"
+    DISPOSED = "disposed"
+    RELABELED = "relabeled"
+    HELD = "held"
+    RELEASED = "released"
+    REGROUPED = "regrouped"
+    VOIDED = "voided"
+    COUNTED = "counted"
+
+
+class ContainerType(str, Enum):
+    BARREL = "barrel"
+    BAG = "bag"
+
+
+class DisposalReason(str, Enum):
+    """Reason codes for disposal/destruction (SPEC §13).
+
+    Stored in container_events.reason_code alongside free-text `reason`, so the
+    disposal report §13 asks for is groupable. Appending a value later is safe.
+    """
+    DAMAGED = "damaged"
+    EXPIRED = "expired"
+    QA_REJECT = "qa_reject"
+    SPILL = "spill"
+    CONTAMINATION = "contamination"
+    OTHER = "other"
+
+
+class IntakeSource(str, Enum):
+    """How an intake came into being. `legacy_sweep` covers SPEC §15.4, where
+    received_date is honestly unknown rather than fabricated."""
+    TRUCK = "truck"
+    LEGACY_SWEEP = "legacy_sweep"

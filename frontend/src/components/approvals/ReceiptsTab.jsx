@@ -4,7 +4,7 @@ import { useAppData } from "../../context/AppDataContext";
 import { useToast } from "../../context/ToastContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { formatDateTime, formatTimeAgo, getDaysAgo, toDateKey, getTodayDateKey } from "../../utils/dateUtils";
-import { ROLES, CATEGORY_TYPES, RECEIPT_STATUS, isRawMaterialType } from '../../constants';
+import { ROLES, CATEGORY_TYPES, RECEIPT_STATUS, isRawMaterialType, isWeighedMaterialType } from '../../constants';
 
 const STATUS_PENDING = new Set([RECEIPT_STATUS.RECORDED, RECEIPT_STATUS.REVIEWED]);
 
@@ -298,7 +298,12 @@ const ReceiptsTab = ({
 
   const isEditable = selectedReceipt && STATUS_PENDING.has(selectedReceipt.status);
   const category = selectedReceipt ? categoryLookup[selectedReceipt.categoryId] : null;
-  const isIngredient = isRawMaterialType(category?.type);
+  // Raw materials AND ingredients: both are weighed, and both need the SID /
+  // vendor / expiration fields below. This previously called isRawMaterialType,
+  // which EXCLUDES 'ingredient' — so the flag (then named isIngredient) was false for
+  // every actual ingredient. Widened, not narrowed: raw-material behaviour is
+  // unchanged.
+  const isWeighedMaterial = isWeighedMaterialType(category?.type);
   const isPackaging = category?.type === CATEGORY_TYPES.PACKAGING;
   const isFinished = category?.type === CATEGORY_TYPES.FINISHED;
 
@@ -778,11 +783,11 @@ const ReceiptsTab = ({
                     type="date"
                     value={draft.expiration || ""}
                     onChange={(event) => handleDraftChange("expiration", event.target.value)}
-                    disabled={!isEditable || (!isIngredient && !isFinished)}
+                    disabled={!isEditable || (!isWeighedMaterial && !isFinished)}
                   />
                 </label>
 
-                {isIngredient && (
+                {isWeighedMaterial && (
                   <>
                     <label>
                       <span>SID</span>
@@ -876,7 +881,7 @@ const ReceiptsTab = ({
                   </>
                 )}
 
-                {(isIngredient || isPackaging || isFinished) && (
+                {(isWeighedMaterial || isPackaging || isFinished) && (
                   <label className="full">
                     <span>Notes</span>
                     <textarea

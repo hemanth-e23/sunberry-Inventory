@@ -3,23 +3,19 @@ from sqlalchemy.orm import Session
 
 from app.models import Receipt, InventoryAdjustment, PalletLicence
 from app.models.location import StorageRow
-from app.enums import AdjustmentStatus, ReceiptStatus, PalletStatus
+from app.enums import AdjustmentStatus, ReceiptStatus, PalletStatus, AdjustmentType
+from app.enums import DEDUCTION_TYPES  # noqa: F401  (re-exported; routers/adjustments.py:65 reads adjustment_service.DEDUCTION_TYPES)
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE
 from app.services.ship_out_service import _release_row_capacity
 from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
 from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, deduct_rm_total
 
-# Adjustment types that reduce inventory quantity
-DEDUCTION_TYPES = frozenset({
-    "reduce",
-    "stock-correction",
-    "damage-reduction",
-    "donation",
-    "trash-disposal",
-    "quality-rejection",
-    "used-in-production",
-})
+# DEDUCTION_TYPES moved to app/enums.py (2026-08-03) and is imported above.
+# It is derived from AdjustmentType there so a new adjustment type cannot be
+# added without a deliberate decision about whether it decrements the receipt —
+# previously an unlisted type silently produced an APPROVED adjustment that left
+# `receipt.quantity` untouched. Membership is unchanged.
 
 
 def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_user) -> InventoryAdjustment:

@@ -6,7 +6,7 @@ import { useAuth } from '../AuthContext';
 import apiClient from '../../api/client';
 import { CATEGORY_TYPES, RECEIPT_STATUS, TRANSFER_STATUS } from '../../constants';
 import { getTodayDateKey, toDateKey } from '../../utils/dateUtils';
-import { fallbackUnit } from '../../utils/units';
+import { resolveReceiptUnit } from '../../utils/units';
 import {
   EPSILON,
   roundTo,
@@ -24,9 +24,10 @@ const mapReceiptFromApi = (rec, products, categories = []) => ({
   productId: rec.product_id,
   categoryId: rec.category_id || null,
   quantity: Number(rec.quantity) || 0,
-  quantityUnits:
-    rec.unit || rec.quantity_units || rec.weight_unit || rec.container_unit ||
-    fallbackUnit(categories.find((c) => c.id === rec.category_id)?.type),
+  quantityUnits: resolveReceiptUnit(
+    rec,
+    categories.find((c) => c.id === rec.category_id)?.type,
+  ),
   containerCount: rec.container_count || null,
   containerUnit: rec.container_unit || null,
   weightPerContainer: rec.weight_per_container || null,
