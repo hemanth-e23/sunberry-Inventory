@@ -36,7 +36,11 @@ from app.models.inventory import (
 from app.models.scanner import ForkliftRequest, PalletLicence, TransferScanEvent
 
 # 6. Staging requests (FK: products)
-from app.models.staging import StagingRequest, StagingRequestItem
+# NOTE: StagingLineContainer FKs containers, which is defined in section 11 —
+# SQLAlchemy resolves relationship targets lazily by name, so the string
+# reference is fine, but the TABLE must exist before its FK is created. The
+# migration handles ordering; create_all sorts by dependency automatically.
+from app.models.staging import StagingRequest, StagingRequestItem, StagingLineContainer
 
 # 7. Inter-warehouse transfers (FK: warehouses, products, receipts, users)
 from app.models.warehouse_transfer import InterWarehouseTransfer
@@ -50,6 +54,12 @@ from app.models.audit import AuditLog
 # 10. Active line production (FK: production_lines, products, users)
 from app.models.active_production import ActiveLineProduction
 
+# 11. Ingredient serialization (FK: warehouses, vendors, products, categories,
+#     storage_rows, users) — must follow location (storage_rows) and product.
+from app.models.ingredient import (
+    IngredientIntake, IntakeLot, Container, ContainerEvent,
+)
+
 __all__ = [
     "Warehouse", "User",
     "CategoryGroup", "Category", "Vendor", "Product", "WarehouseCategoryAccess",
@@ -60,9 +70,10 @@ __all__ = [
     "InventoryAdjustment", "InventoryHoldAction",
     "CycleCount", "StagingItem",
     "ForkliftRequest", "PalletLicence", "TransferScanEvent",
-    "StagingRequest", "StagingRequestItem",
+    "StagingRequest", "StagingRequestItem", "StagingLineContainer",
     "InterWarehouseTransfer",
     "Notification",
     "AuditLog",
     "ActiveLineProduction",
+    "IngredientIntake", "IntakeLot", "Container", "ContainerEvent",
 ]

@@ -11,15 +11,14 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import Product, Category, Receipt, User
+from app.models import Product, Category, User
 from app.models.product import WarehouseCategoryAccess
-from app.enums import ReceiptStatus
 from app.services import staging_request_service
+from app.services.availability import on_hand_for_product
 
 import logging
 logger = logging.getLogger(__name__)
@@ -225,34 +224,15 @@ async def check_availability(
             })
             continue
 
-        # Sum on-hand quantity from approved receipts with quantity > 0,
-        # excluding QA-held material: subtract held_quantity, and skip lots
-        # flagged hold=True with no held_quantity recorded (a full-lot hold).
-        # Optionally scoped to one warehouse.
-        availability_q = (
-            db.query(
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (
-                                (Receipt.hold == True) & (func.coalesce(Receipt.held_quantity, 0) <= 0),  # noqa: E712
-                                0,
-                            ),
-                            else_=Receipt.quantity - func.coalesce(Receipt.held_quantity, 0),
-                        )
-                    ),
-                    0,
-                )
-            )
-            .filter(
-                Receipt.product_id == product.id,
-                Receipt.status == ReceiptStatus.APPROVED,
-                Receipt.quantity > 0,
-            )
-        )
-        if request.warehouse_id:
-            availability_q = availability_q.filter(Receipt.warehouse_id == request.warehouse_id)
-        on_hand = float(availability_q.scalar())
+        # DUAL-MODE on-hand: legacy approved-receipt quantity (net of QA holds)
+        # PLUS live serialized containers. This is the only availability gate
+        # production consults, so it has to survive the ingredient cutover: as
+        # drums convert from receipt quantity to Container rows the legacy side
+        # falls and the container side rises, and the total stays put. Before any
+        # container exists this returns exactly what the old inline query did —
+        # see app/services/availability.py for the behaviour-preservation notes.
+        avail = on_hand_for_product(db, product.id, request.warehouse_id)
+        on_hand = float(avail["total"])
 
         sufficient = on_hand >= item.quantity_needed
         short = max(0, item.quantity_needed - on_hand) if not sufficient else 0
@@ -265,6 +245,14 @@ async def check_availability(
             "unit": item.unit or product.quantity_uom or "",
             "sufficient": sufficient,
             "short": round(short, 2),
+            # Additive detail. Production reads on_hand/sufficient by key and
+            # ignores the rest, so these are safe to publish — and they are the
+            # only way for a caller to tell "we are short" from "it is scanned
+            # but the intake has not been approved yet".
+            "legacy_qty": round(float(avail["legacy_qty"]), 2),
+            "container_qty": round(float(avail["container_qty"]), 2),
+            "container_count": avail["container_count"],
+            "physically_present": round(float(avail["physically_present"]), 2),
         })
 
     all_sufficient = all(r["sufficient"] for r in results)

@@ -18,6 +18,7 @@ from app.database import engine, Base
 from app.routers import auth, users, products, receipts, inventory, master_data, service, scanner, pallet_licences, reports, inter_warehouse_transfers, notifications
 from app.routers import transfers, adjustments, holds, cycle_counts, staging
 from app.routers import active_production, palletizer, kpi
+from app.routers import ingredient_intakes, ingredient_containers, ingredient_staging, ingredient_cutover, ingredient_rows
 from app.utils.logging_setup import setup_logging
 
 # Configure logging — writes to stdout AND a rotating file at /app/logs/app.log
@@ -372,6 +373,11 @@ app.include_router(notifications.router, prefix="/api/notifications", tags=["Not
 app.include_router(active_production.router, prefix="/api/active-production", tags=["Active Production"])
 app.include_router(palletizer.router, prefix="/api/palletizer", tags=["Palletizer Kiosk"])
 app.include_router(kpi.router, prefix="/api/kpi", tags=["KPI"])
+app.include_router(ingredient_intakes.router, prefix="/api/ingredient-intakes", tags=["Ingredient Intakes"])
+app.include_router(ingredient_containers.router, prefix="/api/ingredient-containers", tags=["Ingredient Containers"])
+app.include_router(ingredient_staging.router, prefix="/api/ingredient-staging", tags=["Ingredient Staging"])
+app.include_router(ingredient_cutover.router, prefix="/api/ingredient-cutover", tags=["Ingredient Cutover"])
+app.include_router(ingredient_rows.router, prefix="/api/ingredient-rows", tags=["Ingredient Rows"])
 
 @app.get("/")
 async def root():

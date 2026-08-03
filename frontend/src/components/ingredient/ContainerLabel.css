@@ -1,0 +1,253 @@
+/* Ingredient container label — SPEC §5. 4" × 6" (101.6 × 152.4 mm) direct-thermal
+   stock, one per barrel/bag. Single fixed orientation: unlike the FG pallet
+   sticker there is no landscape variant — a drum label is applied to a curved
+   vertical surface (§5: "upper third of drum side, facing out").
+
+   Vertical budget on the 6in sheet, top to bottom:
+     product name  ~0.55in   ·  QR  flexes into whatever is left (~2.6in)
+     serial        ~0.55in   ·  sequence ~0.24in  ·  field grid ~1.1in
+   The QR is the only flexible element, so a two-line product name shrinks the
+   code rather than pushing the field grid off the sheet.
+*/
+
+.container-label {
+  width: 4in;
+  height: 6in;
+  padding: 0.18in 0.18in 0.16in;
+  box-sizing: border-box;
+  background: #ffffff;
+  color: #000000;
+  border: 2px solid #000000;
+  border-radius: 0;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  page-break-inside: avoid;
+  break-inside: avoid;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.container-label__rule {
+  height: 1px;
+  background: #000000;
+  width: 100%;
+  margin: 0.05in 0;
+  flex-shrink: 0;
+}
+
+/* ─── Product name ──────────────────────────────────────────────────────── */
+
+.container-label__product {
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1.1;
+  text-transform: uppercase;
+  text-align: center;
+  letter-spacing: 0.4px;
+  padding: 0 2px;
+  flex-shrink: 0;
+  /* Two lines max; a third would eat the QR. */
+  max-height: 2.3em;
+  overflow: hidden;
+}
+
+/* ─── The single scannable code ─────────────────────────────────────────── */
+
+.container-label__qr {
+  flex: 1 1 auto;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 1.4in;
+  /* White padding around the code IS the printed quiet zone — the SVG only
+     carries 2 modules of its own so the modules stay as large as possible. */
+  padding: 0.1in 0;
+}
+
+.container-label__qr-svg {
+  display: block;
+  height: 100%;
+  width: auto;
+  max-height: 2.8in;
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
+}
+
+/* Payload could not be encoded (no serial). Keep the footprint so the sheet
+   still paginates correctly and the gap is obvious to whoever picks it up. */
+.container-label__qr-fallback {
+  width: 2in;
+  height: 2in;
+  border: 2px dashed #000000;
+}
+
+/* ─── Serial + sequence ─────────────────────────────────────────────────── */
+
+.container-label__serial-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  flex-shrink: 0;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+.container-label__sequence {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+  margin-top: 0.04in;
+  flex-shrink: 0;
+}
+
+.container-label__sequence-rule {
+  flex: 1 1 auto;
+  height: 2px;
+  background: #000000;
+}
+
+.container-label__sequence-text {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* ─── Field grid: SID / VENDOR · LOT / BBD · NET / RCV ───────────────────── */
+
+.container-label__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.05in 0.14in;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.container-label__field {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.container-label__field-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  flex-shrink: 0;
+}
+
+.container-label__field-value {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.15;
+  word-break: break-word;
+  overflow: hidden;
+}
+
+/* ─── Lot-break divider sheet ───────────────────────────────────────────── */
+
+.container-label--divider {
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  gap: 0.2in;
+  border-style: dashed;
+}
+
+.container-label__divider-heading {
+  font-size: 34px;
+  font-weight: 900;
+  letter-spacing: 3px;
+}
+
+.container-label__divider-lot {
+  font-size: 44px;
+  font-weight: 900;
+  line-height: 1.1;
+  word-break: break-all;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+.container-label__divider-count {
+  font-size: 18px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* ─── Sheet (batch print) ───────────────────────────────────────────────── */
+
+.container-label-sheet {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25in;
+}
+
+/* ─── Print ─────────────────────────────────────────────────────────────── */
+
+@media print {
+  .container-label,
+  .container-label * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+    color: #000000 !important;
+  }
+
+  /* A NAMED page, not a bare `@page`. This stylesheet stays loaded for the rest
+     of the SPA session, and a bare `@page { size: 4in 6in }` would silently
+     resize every other print in the app (the FG pallet tags, ship-out docs).
+     Same idiom as PalletizerKioskPage.css:372-381. */
+  @page container-label-page {
+    size: 4in 6in;
+    margin: 0;
+  }
+
+  .container-label-sheet {
+    display: block !important;
+    gap: 0 !important;
+  }
+
+  .container-label {
+    page: container-label-page;
+    width: 4in !important;
+    height: 6in !important;
+    padding: 0.18in 0.18in 0.16in !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+    border: 2px solid #000000 !important;
+    box-shadow: none !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+    /* One label per page — the whole point of a batch stack. */
+    page-break-after: always;
+    break-after: page;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  /* No trailing blank page after the last label. */
+  .container-label:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+
+  .container-label__rule,
+  .container-label__sequence-rule {
+    background: #000000 !important;
+  }
+
+  .container-label__serial-svg text,
+  .container-label__qr-svg path {
+    fill: #000000 !important;
+  }
+
+  .container-label__qr-svg rect {
+    fill: #ffffff !important;
+  }
+}

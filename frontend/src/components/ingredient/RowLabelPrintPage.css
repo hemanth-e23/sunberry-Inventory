@@ -1,0 +1,387 @@
+/* Rack row label sheet — SPEC §8.3, audit B9.
+   Screen styles first, print rules at the bottom. */
+
+.row-label-page {
+  padding: 1.5rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.row-label-page__header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 1.25rem;
+}
+
+.row-label-page__header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.row-label-page__subtitle {
+  margin: 0.25rem 0 0;
+  color: #6b7280;
+  font-size: 0.875rem;
+}
+
+.row-label-page__actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.row-label-page__btn {
+  padding: 0.5rem 1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #111827;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.row-label-page__btn:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+
+.row-label-page__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.row-label-page__btn--primary {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+  color: #ffffff;
+}
+
+.row-label-page__btn--primary:hover:not(:disabled) {
+  background: #1e40af;
+}
+
+.row-label-page__error {
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 0.875rem;
+}
+
+.row-label-page__warning {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 0.875rem;
+}
+
+.row-label-page__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-end;
+  margin-bottom: 1rem;
+}
+
+.row-label-page__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.row-label-page__field--grow {
+  flex: 1 1 220px;
+}
+
+.row-label-page__field select,
+.row-label-page__field input {
+  padding: 0.5rem 0.65rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-weight: 400;
+  color: #111827;
+  text-transform: none;
+  letter-spacing: normal;
+  background: #ffffff;
+}
+
+.row-label-page__field-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.row-label-page__list {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: auto;
+  max-height: 420px;
+  margin-bottom: 1.5rem;
+}
+
+.row-label-page__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.row-label-page__table th,
+.row-label-page__table td {
+  padding: 0.6rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.row-label-page__table thead th {
+  position: sticky;
+  top: 0;
+  background: #f9fafb;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  z-index: 1;
+}
+
+.row-label-page__table tbody tr.is-selected {
+  background: #eff6ff;
+}
+
+.row-label-page__check-col {
+  width: 2.5rem;
+}
+
+.row-label-page__row-name {
+  font-weight: 700;
+}
+
+.row-label-page__code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  background: #f3f4f6;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.row-label-page__none {
+  color: #b45309;
+  font-style: italic;
+}
+
+.row-label-page__empty {
+  padding: 1.5rem;
+  text-align: center;
+  color: #6b7280;
+  font-size: 0.875rem;
+}
+
+.row-label-page__preview h2 {
+  font-size: 1.1rem;
+  margin: 0 0 0.75rem;
+}
+
+.row-label-page__count {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: #6b7280;
+}
+
+.row-label-page__hint {
+  margin-top: 0.75rem;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+/* ─── The label itself ───────────────────────────────────────────────────────
+   Sized in INCHES, not pixels, so the on-screen preview is a true scale model of
+   the printed sheet and nothing reflows between the two. Half-letter: two per
+   Letter portrait page. */
+
+.row-label-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: center;
+}
+
+.row-label {
+  box-sizing: border-box;
+  width: 8in;
+  height: 5in;
+  padding: 0.3in 0.35in;
+  background: #ffffff;
+  border: 3px solid #000000;
+  color: #000000;
+  display: flex;
+  flex-direction: column;
+  /* Name gets whatever the code and path do not — it is the part read from
+     furthest away. */
+  justify-content: space-between;
+  overflow: hidden;
+}
+
+.row-label__path {
+  font-size: 0.28in;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-align: center;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 2px solid #000000;
+  padding-bottom: 0.08in;
+}
+
+.row-label__name-wrap {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 0.05in 0;
+}
+
+.row-label__name-svg {
+  width: 100%;
+  height: 100%;
+  max-height: 1.9in;
+  display: block;
+}
+
+.row-label__code-block {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.04in;
+}
+
+.row-label__barcode {
+  display: block;
+  width: 100%;
+  height: 1in;
+}
+
+.row-label__code-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.2in;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
+.row-label__missing {
+  padding: 0.3in 0;
+  text-align: center;
+  font-size: 0.24in;
+  font-weight: 800;
+  border: 3px dashed #000000;
+}
+
+.row-label__footer {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.11in;
+  padding-top: 0.06in;
+  border-top: 1px solid #000000;
+}
+
+/* ─── Print ──────────────────────────────────────────────────────────────────
+   Every rule below is scoped to `body.row-label-print-mode`, a class this page
+   adds on mount and removes on unmount. The stylesheet stays loaded for the rest
+   of the SPA session, so unscoped `body *` or a bare `@page` would silently
+   break every OTHER print in the app — the FG pallet tags, the BOL, ship-out
+   docs. Same trap the named page in ContainerLabel.css:202-205 avoids. */
+
+@media print {
+  /* Blank the app chrome without needing to know its class names: hide
+     everything, then re-show the sheet and its descendants. `visibility` rather
+     than `display` so the sheet's ancestors keep their boxes and the sheet can
+     still be positioned. */
+  body.row-label-print-mode * {
+    visibility: hidden;
+  }
+
+  body.row-label-print-mode .row-label-sheet,
+  body.row-label-print-mode .row-label-sheet * {
+    visibility: visible;
+  }
+
+  body.row-label-print-mode .row-label-sheet {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    display: block;
+    gap: 0;
+  }
+
+  /* NAMED page — see the block comment above. */
+  @page row-label-page {
+    size: letter portrait;
+    margin: 0.25in;
+  }
+
+  body.row-label-print-mode .row-label {
+    page: row-label-page;
+    width: 100% !important;
+    height: 4.9in !important;
+    margin: 0 0 0.1in !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+    /* A label must never be split across two sheets. */
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  /* Two per page: break after every even label. */
+  body.row-label-print-mode .row-label:nth-child(2n) {
+    page-break-after: always;
+    break-after: page;
+  }
+
+  /* ...but never after the last one, which would eject a blank sheet. */
+  body.row-label-print-mode .row-label:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+
+  body.row-label-print-mode .row-label,
+  body.row-label-print-mode .row-label * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+    color: #000000 !important;
+  }
+
+  /* Deliberately NO fill override on the barcode. JsBarcode emits the white
+     background and the black bars as sibling <rect>s and sets each one's fill
+     inline; a blanket `rect { fill: #000 !important }` would win over those
+     inline styles and paint the background black, turning every code into a
+     solid block. The inline fills are already pure black/white. */
+
+  body.row-label-print-mode .row-label__name-svg text {
+    fill: #000000 !important;
+  }
+}

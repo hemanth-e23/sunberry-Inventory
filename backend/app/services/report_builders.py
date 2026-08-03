@@ -21,6 +21,7 @@ from app.enums import (
     ShipOutLifecycle,
 )
 from app.constants import CATEGORY_FINISHED
+from app.services.availability import container_qty_for_product
 
 # A ship-out order counts as a COMPLETED shipment for display reports once it's
 # an approved legacy ad-hoc order OR a scheduled order whose BOL was generated
@@ -438,12 +439,23 @@ def build_activity_ledger(
             if a.product_id == pid and a.adjustment_type != "production-consumption"
         )
 
-        # Current on hand
+        # Current on hand. Legacy receipt quantity PLUS live serialized
+        # containers, or an ingredient's on-hand would fall to zero in this
+        # report as the cutover sweep converts drums (audit B4).
+        #
+        # The container term deliberately comes from container_qty_for_product
+        # rather than on_hand_for_product: this sum has its own, looser legacy
+        # semantics (any status, no warehouse scope, holds ignored), and
+        # re-basing it onto the check-availability semantics would silently
+        # change every existing number in this report. include_held=True matches
+        # "holds ignored"; pending stays out because an unapproved intake is not
+        # yet on the books.
         current_receipts = db.query(Receipt).filter(
             Receipt.product_id == pid,
             Receipt.quantity > 0,
         ).all()
         current_on_hand = sum(float(r.quantity or 0) for r in current_receipts)
+        current_on_hand += container_qty_for_product(db, pid, include_held=True)
 
         lot_numbers = sorted(set(r.lot_number for r in p_receipts if r.lot_number))
 
