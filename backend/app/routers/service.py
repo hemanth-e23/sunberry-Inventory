@@ -461,3 +461,132 @@ async def close_out_staging_request(
 async def service_health():
     """Simple health-check (no auth required) so Production can verify connectivity."""
     return {"status": "ok", "service": "inventory"}
+
+
+# ---------------------------------------------------------------------------
+# Container lookup (INGREDIENT-SERIALIZATION-SPEC.md §12.2.2)
+#
+# The serial is an OPAQUE POINTER. Nothing here parses it — every attribute
+# comes from the row, which is what makes "one scan replaces two" safe: the
+# lookup yields the product, so scanning the wrong ingredient for a formula step
+# becomes impossible rather than merely discouraged.
+#
+# Production is not wired to these yet (Phase 4 deferred), but they are the
+# inventory half of that contract and are needed by the cutover tooling anyway.
+# ---------------------------------------------------------------------------
+
+@router.get("/containers/{serial}")
+async def lookup_container(
+    serial: str,
+    db: Session = Depends(get_db),
+):
+    """Everything a production scan needs to validate and record a consumption.
+
+    `blocked_reasons` is computed here rather than left to the caller so that
+    every consumer applies the SAME poka-yoke rules (§12.2.4) — a second
+    implementation on the production side would drift from this one, and the
+    failure mode is using held or expired material in food.
+    """
+    from datetime import datetime, timezone as _tz
+
+    from app.enums import ContainerStatus
+    from app.models import Container, Product
+
+    container = (
+        db.query(Container)
+        .filter(Container.serial == serial, Container.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if not container:
+        raise HTTPException(status_code=404, detail=f"Container {serial} not found")
+
+    product = db.query(Product).filter(Product.id == container.product_id).first()
+    lot = container.intake_lot
+
+    blocked = []
+    if container.is_held:
+        blocked.append("held")
+    if container.status == ContainerStatus.EMPTY.value:
+        blocked.append("empty")
+    if container.status in (
+        ContainerStatus.DISPOSED.value,
+        ContainerStatus.RETURNED_TO_VENDOR.value,
+        ContainerStatus.VOIDED.value,
+        ContainerStatus.SHIPPED.value,
+    ):
+        blocked.append(container.status)
+    if container.bbd is not None and container.bbd < datetime.now(_tz.utc):
+        blocked.append("past_bbd")
+
+    return {
+        "serial": container.serial,
+        "sequence": container.sequence,
+        "container_type": container.container_type,
+        # The mapping key: production resolves its Ingredient by this, so no
+        # separate product-barcode scan is needed.
+        "inventory_product_id": container.product_id,
+        "product_name": product.name if product else None,
+        "product_sid": getattr(product, "sid", None) if product else None,
+        "vendor_lot": container.vendor_lot,
+        "bbd": container.bbd,
+        "brix": lot.brix if lot else None,
+        "net_weight": container.net_weight,
+        "remaining_qty": container.remaining_qty,
+        "qty_unit": container.qty_unit,
+        "status": container.status,
+        "is_held": container.is_held,
+        "hold_reason": container.hold_reason,
+        "storage_row_id": container.storage_row_id,
+        "intake_id": container.intake_id,
+        "consumed_by_batch_uid": container.consumed_by_batch_uid,
+        "usable": not blocked,
+        "blocked_reasons": blocked,
+    }
+
+
+@router.get("/staging-requests/{request_id}/containers")
+async def staged_containers_for_request(
+    request_id: str,
+    db: Session = Depends(get_db),
+):
+    """Pre-fetch the staged set for one request (§12.2.6).
+
+    Production pulls this at staging time so it can validate every EXPECTED
+    container offline. The point is to degrade VERIFICATION when the network
+    drops, never RECORDING — an unexpected serial still gets recorded, flagged
+    unverified, and reconciled on reconnect.
+    """
+    from app.models import Container, StagingLineContainer, StagingRequestItem
+
+    rows = (
+        db.query(Container)
+        .join(StagingLineContainer, StagingLineContainer.container_id == Container.id)
+        .join(
+            StagingRequestItem,
+            StagingLineContainer.request_item_id == StagingRequestItem.id,
+        )
+        .filter(
+            StagingRequestItem.request_id == request_id,
+            StagingLineContainer.status == "staged",
+            Container.is_deleted == False,  # noqa: E712
+        )
+        .order_by(Container.serial)
+        .all()
+    )
+    return {
+        "request_id": request_id,
+        "containers": [
+            {
+                "serial": c.serial,
+                "inventory_product_id": c.product_id,
+                "vendor_lot": c.vendor_lot,
+                "bbd": c.bbd,
+                "remaining_qty": c.remaining_qty,
+                "qty_unit": c.qty_unit,
+                "status": c.status,
+                "is_held": c.is_held,
+            }
+            for c in rows
+        ],
+        "count": len(rows),
+    }

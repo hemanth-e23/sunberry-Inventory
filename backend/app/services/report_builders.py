@@ -5,10 +5,10 @@ Each public function accepts a db session, filter parameters, and an optional
 warehouse_id, then returns a plain dict ready for the router to return as JSON.
 """
 
-from typing import Optional
+from typing import List, Optional
 from datetime import datetime, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -883,6 +883,17 @@ def build_movement_ledger(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = None) -> dict:
+    """Recall trace for a lot: legacy receipts AND serialized containers.
+
+    This used to search `Receipt.lot_number` alone and return `{"receipts": []}`
+    on no match. Serialized ingredient lots live on `intake_lots.vendor_lot` with
+    no Receipt behind them, so QA asking "where did lot 389641 go" would get an
+    empty result that reads as CLEAN rather than as UNSUPPORTED — and a
+    half-converted lot would return only its unconverted half with nothing
+    saying the answer was partial. On a recall that is the worst possible
+    failure mode, so the response now always carries `coverage` naming exactly
+    which sources were searched and what each returned.
+    """
     query = db.query(Receipt).filter(
         Receipt.lot_number.ilike(f"%{lot_number}%")
     )
@@ -890,9 +901,8 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
         query = query.filter(Receipt.warehouse_id == warehouse_id)
     receipts = query.all()
 
-    if not receipts:
-        return {"lot_number": lot_number, "receipts": []}
-
+    # NOTE: no early return on an empty receipt set — the container side below
+    # may still have the answer.
     result = []
     for r in receipts:
         pname, pcode = product_info(db, r.product_id)
@@ -1080,7 +1090,98 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             "timeline": timeline,
         })
 
-    return {"lot_number": lot_number, "receipts": result}
+    containers = _lot_trace_containers(db, lot_number, warehouse_id)
+
+    return {
+        "lot_number": lot_number,
+        "receipts": result,
+        "containers": containers,
+        # §18.9: a report that bounds or partially answers must say so. An empty
+        # trace now means "searched both, found nothing", never "unsupported".
+        "coverage": {
+            "sources_searched": ["legacy_receipts", "serialized_containers"],
+            "legacy_receipts_found": len(result),
+            "serialized_containers_found": len(containers),
+            "partial": bool(result) and bool(containers),
+        },
+    }
+
+
+def _lot_trace_containers(
+    db: Session, lot_number: str, warehouse_id: Optional[str] = None
+) -> List[dict]:
+    """Serialized containers matching a vendor lot, with their full event trail.
+
+    Matches BOTH `Container.vendor_lot` (the denormalized copy on the hot path)
+    and `IntakeLot.vendor_lot` (the source of truth), so a lot correction that
+    has not yet fanned out to the containers cannot hide a drum from a recall.
+
+    `consumed_by_batch_uid` is the point of the whole exercise: it answers
+    "which batches did this lot go into", which was previously a spreadsheet
+    exercise.
+    """
+    from app.models import Container, ContainerEvent, IngredientIntake, IntakeLot
+
+    pattern = f"%{lot_number}%"
+    q = (
+        db.query(Container)
+        .join(IntakeLot, Container.intake_lot_id == IntakeLot.id)
+        .outerjoin(IngredientIntake, Container.intake_id == IngredientIntake.id)
+        .filter(Container.is_deleted == False)  # noqa: E712
+        .filter(
+            or_(
+                Container.vendor_lot.ilike(pattern),
+                IntakeLot.vendor_lot.ilike(pattern),
+            )
+        )
+    )
+    if warehouse_id:
+        q = q.filter(Container.warehouse_id == warehouse_id)
+
+    rows = []
+    for c in q.order_by(Container.intake_id, Container.sequence).all():
+        events = (
+            db.query(ContainerEvent)
+            .filter(ContainerEvent.container_id == c.id)
+            .order_by(ContainerEvent.seq)
+            .all()
+        )
+        rows.append({
+            "serial": c.serial,
+            "sequence": c.sequence,
+            "product_name": product_info(db, c.product_id)[0],
+            "vendor_lot": c.vendor_lot,
+            "bbd": c.bbd,
+            "status": c.status,
+            "is_held": c.is_held,
+            "net_weight": c.net_weight,
+            "remaining_qty": c.remaining_qty,
+            "qty_unit": c.qty_unit,
+            "storage_row_id": c.storage_row_id,
+            # The recall answer for a consumed drum.
+            "consumed_by_batch_uid": c.consumed_by_batch_uid,
+            "intake_number": c.intake.intake_number if c.intake else None,
+            "intake_id": c.intake_id,
+            "timeline": [
+                {
+                    "event": e.event_type,
+                    "date": e.occurred_at,
+                    "from_status": e.from_status,
+                    "to_status": e.to_status,
+                    "qty_delta": e.qty_delta,
+                    "actor": user_name(db, e.actor_id) if e.actor_id else None,
+                    "reason": e.reason,
+                    "reason_code": e.reason_code,
+                    "ref_type": e.ref_type,
+                    "ref_id": e.ref_id,
+                    # False when a production scan fell back to the printed
+                    # label because the lookup was unreachable.
+                    "verified": e.verified,
+                }
+                for e in events
+            ],
+        })
+    return rows
 
 
 # ─────────────────────────────────────────────────────────────────────────────

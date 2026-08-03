@@ -18,6 +18,7 @@ from app.constants import APPROVAL_ROLES, ROLE_FORKLIFT, ROLE_WAREHOUSE
 from app.database import get_db
 from app.exceptions import ForbiddenError
 from app.models import Container
+from app.schemas.base import BaseSchema
 from app.schemas.ingredient import (
     CacheDriftReport,
     Container as ContainerSchema,
@@ -254,6 +255,146 @@ async def missing(
     db.commit()
     db.refresh(container)
     return _serialize_container(db, container)
+
+
+# ─── bags: deferred serialization (§10) ───────────────────────────────────────
+
+class PlaceBagLotRequest(BaseSchema):
+    intake_lot_id: str
+    storage_row_id: str
+    count: Optional[int] = None
+
+
+class ActivateBagRequest(BaseSchema):
+    serial: str
+    storage_row_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+@router.post("/bags/place-lot")
+async def place_bag_lot(
+    payload: PlaceBagLotRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Record where an unserialized bag stack sits. Lot-level by design — nobody
+    scans 200 individual bags at the dock."""
+    _require_scan_role(current_user)
+    result = cs.place_bag_lot(
+        db, payload.intake_lot_id, payload.storage_row_id, current_user,
+        count=payload.count,
+    )
+    db.commit()
+    return result
+
+
+@router.post("/bags/activate")
+async def activate_bag(
+    payload: ActivateBagRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Sticker applied at staging — the bag becomes individually tracked.
+
+    Never blocked by the books saying the lot is empty: if a real bag is in the
+    worker's hand, physical reality wins and the discrepancy surfaces on the
+    reconciliation instead (§18.4 S-9).
+    """
+    _require_scan_role(current_user)
+    result = cs.activate_bag(
+        db, payload.serial, current_user,
+        storage_row_id=payload.storage_row_id,
+        idempotency_key=payload.idempotency_key,
+    )
+    db.commit()
+    result["container"] = _ser(db, result.get("container"))
+    return result
+
+
+@router.get("/bags/reconciliation")
+async def bag_reconciliation(
+    intake_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """unapplied + activated == minted, per lot line (§10.3)."""
+    return cs.bag_reconciliation(
+        db, intake_id=intake_id, warehouse_id=warehouse_filter(current_user)
+    )
+
+
+# ─── consumption (§12.2.5) ────────────────────────────────────────────────────
+
+class ConsumeRequest(BaseSchema):
+    serial: str
+    batch_uid: str
+    qty_used: Optional[float] = None
+    fully_consumed: bool = True
+    # Required when the drum was never staged for this batch — allowed, but
+    # recorded as a bypass for review rather than silently accepted.
+    bypass_reason: Optional[str] = None
+    # False when a production scan fell back to the printed label because the
+    # lookup was unreachable. We degrade verification, never recording.
+    verified: bool = True
+    idempotency_key: Optional[str] = None
+
+
+class OpenRequest(BaseSchema):
+    serial: str
+
+
+@router.post("/consume")
+async def consume(
+    payload: ConsumeRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Consume a container into a batch.
+
+    A weigh-out larger than the recorded remainder is ALLOWED — the scale is the
+    truth and a running batch is never stopped over a bookkeeping number. The
+    remainder clamps at zero and a compensating `adjusted` event carries the
+    difference, so the ledger stays reconcilable and the variance report sees it.
+    """
+    _require_scan_role(current_user)
+    result = cs.consume_container(
+        db, payload.serial, current_user,
+        batch_uid=payload.batch_uid,
+        qty_used=payload.qty_used,
+        fully_consumed=payload.fully_consumed,
+        bypass_reason=payload.bypass_reason,
+        verified=payload.verified,
+        idempotency_key=payload.idempotency_key,
+    )
+    db.commit()
+    result["container"] = _ser(db, result.get("container"))
+    return result
+
+
+@router.post("/open", response_model=ContainerSchema)
+async def open_container(
+    payload: OpenRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    _require_scan_role(current_user)
+    container = cs.open_container(db, payload.serial, current_user)
+    db.commit()
+    db.refresh(container)
+    return _serialize_container(db, container)
+
+
+@router.get("/audit/variance")
+async def variance(
+    product_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Per-container weigh-out variance — the shrink detector for expensive
+    powders, and where every clamped over-draw surfaces."""
+    return cs.variance_report(
+        db, product_id=product_id, warehouse_id=warehouse_filter(current_user)
+    )
 
 
 # ─── audits ───────────────────────────────────────────────────────────────────

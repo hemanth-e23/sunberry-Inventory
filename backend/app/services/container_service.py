@@ -39,7 +39,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.constants import APPROVAL_ROLES
-from app.enums import ContainerEventType, ContainerStatus, DisposalReason
+from app.enums import ContainerEventType, ContainerStatus, ContainerType, DisposalReason
 from app.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from app.models import Container, ContainerEvent, IngredientIntake, IntakeLot, StorageRow
 from app.services.ingredient_intake_service import (
@@ -490,6 +490,197 @@ def mark_missing(db: Session, serial: str, current_user, *, reason: str) -> Cont
     )
     db.flush()
     return locked
+
+
+# ─── bags: deferred serialization (§10) ───────────────────────────────────────
+#
+# Bags differ from barrels in WHEN the sticker goes on. All serials are printed
+# at receiving, but the stack rides on the pallet unapplied: nobody labels 200
+# citric-acid bags on a dock. The bags exist as a lot quantity in a row — today's
+# accuracy level — until a worker pulls one for staging, peels a sticker, sticks
+# it on, and scans it. That scan is the ACTIVATION, and from then on the bag is
+# individually tracked.
+#
+# The unserialized stack's location is carried on the `printed_unapplied`
+# containers themselves. That needs no extra table and no lot-level quantity
+# column to drift out of sync: the count of unapplied rows IS the lot quantity,
+# so the §10.3 invariant `unapplied + activated = received` holds by
+# construction rather than by reconciliation.
+
+
+def place_bag_lot(
+    db: Session,
+    intake_lot_id: str,
+    storage_row_id: str,
+    current_user,
+    *,
+    count: Optional[int] = None,
+) -> dict:
+    """Record where an unserialized bag stack physically sits.
+
+    Lot-level, not per-bag: this is the receiving step for bags, and its whole
+    point is that no one scans 200 individual bags at the dock.
+    """
+    row = _get_row(db, storage_row_id)
+    q = (
+        _active_containers(db, intake_lot_id=intake_lot_id)
+        .filter(Container.status == ContainerStatus.PRINTED_UNAPPLIED.value)
+        .order_by(Container.sequence)
+    )
+    pending = q.all() if count is None else q.limit(count).all()
+    if not pending:
+        raise ValidationError("No unapplied bags remain on this lot line")
+
+    for container in pending:
+        container.storage_row_id = row.id
+        # Status deliberately unchanged: the sticker is still not on the bag, so
+        # the bag is not individually identifiable yet. Only its stack's
+        # location is known.
+        _record_event(
+            db, container, ContainerEventType.MOVED.value,
+            from_status=container.status, to_status=container.status,
+            actor_id=str(current_user.id),
+            to_row_id=row.id,
+            reason="Unserialized bag stack placed",
+        )
+    db.flush()
+    return {
+        "placed": len(pending),
+        "storage_row_id": row.id,
+        "storage_row_name": row.name,
+        "count_unit": container_count_unit(pending[0].container_type, len(pending)),
+    }
+
+
+def activate_bag(
+    db: Session,
+    serial: str,
+    current_user,
+    *,
+    storage_row_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+) -> dict:
+    """Apply a sticker to a bag and bring it under individual tracking.
+
+    The conversion is atomic by construction: one row moves from
+    `printed_unapplied` to `in_stock`, so the lot quantity (count of unapplied)
+    falls by exactly one as the serialized count rises by one. There is no
+    second number to keep in step and therefore nothing to drift.
+
+    §18.4 S-9 — activation is NEVER blocked because the books say the lot is
+    empty. If more physical bags exist than the system believes, physical
+    reality wins: the activation succeeds and the discrepancy is surfaced by
+    `bag_reconciliation` instead. Blocking here would strand a worker holding a
+    real bag in front of a real batch.
+    """
+    if idempotency_key:
+        prior = (
+            db.query(ContainerEvent)
+            .filter(ContainerEvent.idempotency_key == idempotency_key)
+            .first()
+        )
+        if prior:
+            container = _active_containers(db, id=prior.container_id).first()
+            return {
+                "status": "already_activated",
+                "message": "Already recorded (idempotent replay).",
+                "container": container,
+            }
+
+    container = _get_by_serial(db, serial)
+    locked = _lock_container(db, container.id)
+    if not locked:
+        raise NotFoundError("Container", serial)
+
+    if locked.status != ContainerStatus.PRINTED_UNAPPLIED.value:
+        # Already activated — not an error worth stopping a worker over.
+        return {
+            "status": "already_activated",
+            "message": f"{serial} is already tracked ({locked.status})",
+            "container": locked,
+        }
+
+    if storage_row_id:
+        locked.storage_row_id = _get_row(db, storage_row_id).id
+
+    locked.status = ContainerStatus.IN_STOCK.value
+    locked.scanned_by = str(current_user.id)
+    locked.scanned_at = datetime.now(timezone.utc)
+
+    _record_event(
+        db, locked, ContainerEventType.RECEIVED.value,
+        from_status=ContainerStatus.PRINTED_UNAPPLIED.value,
+        to_status=ContainerStatus.IN_STOCK.value,
+        actor_id=str(current_user.id),
+        to_row_id=locked.storage_row_id,
+        qty_delta=locked.remaining_qty,
+        reason="Bag activated at staging (deferred serialization)",
+        idempotency_key=idempotency_key,
+    )
+    db.flush()
+    return {
+        "status": "ok",
+        "message": f"{serial} activated",
+        "container": locked,
+    }
+
+
+def bag_reconciliation(
+    db: Session, *, intake_id: Optional[str] = None, warehouse_id: Optional[str] = None
+) -> dict:
+    """§10.3's invariant, per lot line: unapplied + activated == minted.
+
+    Because activation moves a single row between two statuses this can only
+    fail if something outside the activation path created or deleted containers.
+    Surfacing it costs one query and it is the only place a lost or duplicated
+    sticker stack would show up.
+    """
+    q = (
+        db.query(
+            Container.intake_lot_id,
+            Container.status,
+            func.count(Container.id),
+            Container.container_type,
+        )
+        .filter(
+            Container.is_deleted == False,  # noqa: E712
+            Container.container_type == ContainerType.BAG.value,
+        )
+    )
+    if intake_id:
+        q = q.filter(Container.intake_id == intake_id)
+    if warehouse_id:
+        q = q.filter(Container.warehouse_id == warehouse_id)
+    q = q.group_by(Container.intake_lot_id, Container.status, Container.container_type)
+
+    by_lot = {}
+    for lot_id, status, n, ctype in q.all():
+        entry = by_lot.setdefault(lot_id, {"unapplied": 0, "activated": 0, "type": ctype})
+        if status == ContainerStatus.PRINTED_UNAPPLIED.value:
+            entry["unapplied"] += n
+        else:
+            entry["activated"] += n
+
+    rows = []
+    for lot_id, entry in by_lot.items():
+        lot = db.query(IntakeLot).filter(IntakeLot.id == lot_id).first()
+        minted = entry["unapplied"] + entry["activated"]
+        expected = int(lot.expected_count or 0) if lot else 0
+        rows.append({
+            "intake_lot_id": lot_id,
+            "vendor_lot": lot.vendor_lot if lot else None,
+            "unapplied": entry["unapplied"],
+            "activated": entry["activated"],
+            "minted": minted,
+            "expected_count": expected,
+            # Non-zero means the printed stack and the expected count disagree —
+            # usually a short/over receipt that was never dispositioned.
+            "variance_vs_expected": minted - expected if expected else 0,
+            "count_unit": container_count_unit(entry["type"], minted),
+        })
+
+    rows.sort(key=lambda r: abs(r["variance_vs_expected"]), reverse=True)
+    return {"rows": rows, "total": len(rows)}
 
 
 # ─── consumption (§12.2.5, §10.5, §18.5) ──────────────────────────────────────

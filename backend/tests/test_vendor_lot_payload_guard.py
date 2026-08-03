@@ -139,7 +139,7 @@ def test_clean_lot_still_converts(db_session, seed):
         expiration_date=datetime.now(timezone.utc) + timedelta(days=200),
         warehouse_id="wh-vl", vendor_id="ven-vl", status="approved",
         storage_row_id="row-vl",
-        raw_material_row_allocations=[{"id": "row-vl", "quantity": 1000, "pallets": 2}],
+        raw_material_row_allocations=[{"rowId": "row-vl", "cases": 1000, "pallets": 2}],
     )
     db_session.add(receipt)
     db_session.commit()
