@@ -95,7 +95,13 @@ const NetworkStatus = ({
                 .map((s) => (
                   <div key={s.id} className="network-status__failed">
                     <div>
-                      <code><LicenceDisplay licence={s.payload?.licence_number} /></code>
+                      <code>{s.payload?.licence_number
+                    ? <LicenceDisplay licence={s.payload.licence_number} />
+                    /* Ingredient container scans identify the drum by `serial`
+                       (ContainerScanRequest has no licence_number), so without
+                       this fallback a failed drum scan renders as a blank code
+                       and the driver cannot tell WHICH drum failed. */
+                    : (s.payload?.serial || s.requestId)}</code>
                       <small>{s.lastError}</small>
                     </div>
                     <button

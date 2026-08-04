@@ -1,0 +1,208 @@
+/* Ingredient staging on the gun (SPEC §11).
+   Sized for a glove and a forklift cab: big targets, high contrast, numbers
+   readable at arm's length. Mirrors ScannerIngredientReceiveFlow.css. */
+
+.sis-list,
+.sis-session {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem;
+}
+
+.sis-muted { color: #6b7280; }
+.sis-small { font-size: 0.85rem; }
+
+/* ─── request list ───────────────────────────────────────────────────────── */
+
+.sis-request-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 0.85rem;
+  background: #fff;
+}
+.sis-request-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.sis-request-title { font-weight: 700; font-size: 1.05rem; }
+.sis-request-uid {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+.sis-lines { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.6rem; }
+
+.sis-line-btn {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  background: #f9fafb;
+  font-size: 1rem;
+  text-align: left;
+}
+.sis-line-btn--done { opacity: 0.55; }
+.sis-line-name { font-weight: 600; }
+.sis-line-qty {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+/* ─── progress ───────────────────────────────────────────────────────────── */
+
+.sis-progress-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 0.85rem;
+  background: #fff;
+}
+.sis-progress-nums {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 1.1rem;
+}
+.sis-progress-big { font-size: 2.2rem; font-weight: 800; line-height: 1; }
+.sis-progress-sep { color: #9ca3af; }
+
+.sis-progress-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  overflow: hidden;
+  margin: 0.6rem 0 0.4rem;
+}
+.sis-progress-fill { height: 100%; background: #16a34a; transition: width 160ms ease; }
+/* Over-pull is a legitimate outcome, not a fault: amber, not red. */
+.sis-progress-fill--over { background: #f59e0b; }
+
+.sis-progress-meta {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+.sis-over { color: #92400e; font-weight: 700; }
+
+/* ─── claim ──────────────────────────────────────────────────────────────── */
+
+.sis-claim-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.sis-claim-badge {
+  background: #dcfce7;
+  color: #14532d;
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+/* ─── banners ────────────────────────────────────────────────────────────── */
+
+.sis-banner { border-radius: 10px; padding: 0.7rem 0.85rem; font-size: 0.95rem; }
+.sis-banner--error { background: #fee2e2; color: #7f1d1d; border: 1px solid #fecaca; }
+.sis-banner--warn { background: #fef3c7; color: #78350f; border: 1px solid #fde68a; }
+
+/* ─── scan input ─────────────────────────────────────────────────────────── */
+
+.sis-modes { display: flex; gap: 0.5rem; }
+.sis-mode {
+  flex: 1;
+  padding: 0.6rem;
+  border-radius: 10px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  font-weight: 600;
+}
+.sis-mode--on { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
+
+.sis-scan-form { display: flex; }
+.sis-scan-input {
+  width: 100%;
+  padding: 0.9rem;
+  font-size: 1.15rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 2px solid #1d4ed8;
+  border-radius: 10px;
+}
+
+.sis-row-context { font-size: 0.9rem; }
+.sis-row-set summary { font-size: 0.9rem; color: #1d4ed8; cursor: pointer; }
+
+/* ─── FEFO suggestions ───────────────────────────────────────────────────── */
+
+.sis-fefo, .sis-pulled {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem;
+  background: #fff;
+}
+.sis-fefo-head { font-weight: 700; margin-bottom: 0.4rem; }
+.sis-fefo-item, .sis-pulled-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+  border-top: 1px solid #f3f4f6;
+  font-size: 0.9rem;
+}
+.sis-fefo-serial, .sis-pulled-item {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.sis-fefo-meta { color: #6b7280; white-space: nowrap; }
+/* An opened drum should be finished before a sealed one is broken into. */
+.sis-open-tag {
+  background: #dbeafe;
+  color: #1e40af;
+  border-radius: 4px;
+  padding: 0 0.35rem;
+  margin-right: 0.35rem;
+  font-weight: 700;
+  font-size: 0.7rem;
+}
+
+/* ─── buttons & modal ────────────────────────────────────────────────────── */
+
+.sis-btn {
+  padding: 0.8rem 1rem;
+  border-radius: 10px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  font-size: 1rem;
+  font-weight: 600;
+}
+.sis-btn--primary { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
+.sis-btn--ghost { background: transparent; }
+.sis-btn:disabled { opacity: 0.5; }
+
+.sis-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 60;
+}
+.sis-modal-card {
+  background: #fff;
+  border-radius: 14px;
+  padding: 1.1rem;
+  width: 100%;
+  max-width: 26rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+.sis-modal-card h3 { margin: 0; font-size: 1.1rem; }
+.sis-modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }

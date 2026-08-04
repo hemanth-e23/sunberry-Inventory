@@ -1,0 +1,101 @@
+/* Ingredient staging — desk view (SPEC §11). Table-first: this screen is read
+   at a monitor to answer "who has what, and how far along", not on a gun. */
+
+.ingstg-page { padding: 1.25rem; display: flex; flex-direction: column; gap: 1rem; }
+
+.ingstg-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.ingstg-head h1 { margin: 0 0 0.2rem; font-size: 1.4rem; }
+.ingstg-sub { margin: 0; color: #6b7280; font-size: 0.9rem; max-width: 60ch; }
+.ingstg-muted { color: #6b7280; }
+.ingstg-toggle { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; color: #374151; }
+
+.ingstg-banner { border-radius: 8px; padding: 0.7rem 0.9rem; }
+.ingstg-banner--error { background: #fee2e2; color: #7f1d1d; border: 1px solid #fecaca; }
+
+.ingstg-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+.ingstg-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.85rem 1rem;
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+}
+.ingstg-title { font-weight: 700; margin-right: 0.6rem; }
+.ingstg-uid {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+.ingstg-card-meta { display: flex; gap: 0.75rem; align-items: center; font-size: 0.85rem; color: #6b7280; }
+
+.ingstg-pill {
+  border-radius: 999px;
+  padding: 0.15rem 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: capitalize;
+  background: #e5e7eb;
+  color: #374151;
+}
+.ingstg-pill--pending { background: #fef3c7; color: #78350f; }
+.ingstg-pill--in_progress { background: #dbeafe; color: #1e40af; }
+.ingstg-pill--fulfilled { background: #dcfce7; color: #14532d; }
+.ingstg-pill--cancelled { background: #fee2e2; color: #7f1d1d; }
+
+.ingstg-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.ingstg-table th {
+  text-align: left;
+  padding: 0.6rem 1rem;
+  font-weight: 600;
+  color: #6b7280;
+  font-size: 0.8rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+.ingstg-table td { padding: 0.65rem 1rem; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
+
+.ingstg-ing { font-weight: 600; }
+.ingstg-sid { font-size: 0.78rem; color: #6b7280; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ingstg-qty { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ingstg-sub-line { font-size: 0.8rem; color: #6b7280; }
+.ingstg-ok { color: #15803d; font-weight: 600; }
+/* Surplus, not fault — matches the gun's amber. */
+.ingstg-over { color: #92400e; font-weight: 700; }
+.ingstg-claim { font-weight: 600; }
+.ingstg-actions { text-align: right; white-space: nowrap; }
+
+.ingstg-btn {
+  padding: 0.35rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  font-size: 0.85rem;
+}
+.ingstg-btn:disabled { opacity: 0.5; }
+
+/* The serial list is the trace: which drums went to which batch. */
+.ingstg-serial-row td { background: #fafafa; padding-top: 0.4rem; }
+.ingstg-serial-label { font-size: 0.78rem; color: #6b7280; margin-right: 0.5rem; }
+.ingstg-serial {
+  display: inline-block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  background: #eef2ff;
+  color: #3730a3;
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+  margin: 0.1rem 0.25rem 0.1rem 0;
+}

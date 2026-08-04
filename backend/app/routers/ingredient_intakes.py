@@ -369,7 +369,12 @@ def _label_for(db: Session, c: Container, intake_total: int) -> dict:
         "product_name": c.product.name if c.product else None,
         "product_sid": getattr(c.product, "sid", None) if c.product else None,
         "vendor_name": c.intake.vendor.name if c.intake and c.intake.vendor else None,
-        "vendor_lot": c.vendor_lot, "bbd": c.bbd,
+        "vendor_lot": c.vendor_lot,
+        # Prints "LOT UNKNOWN" rather than an em-dash on a cutover drum whose
+        # original label was unreadable — that drum is QA-flagged and use-first,
+        # so the sticker has to say so (§15.4).
+        "lot_unknown": bool(lot.lot_unknown) if lot else False,
+        "bbd": c.bbd,
         "net_weight": c.net_weight,
         "weight_unit": lot.weight_unit if lot else c.qty_unit,
         "receipt_date": c.intake.receipt_date if c.intake else None,

@@ -353,6 +353,9 @@ const IntakeSessionView = ({ intakeId }) => {
   const [manualKeyboard, setManualKeyboard] = useState(false);
   const [feedback, setFeedback] = useState(null);
   const [busy, setBusy] = useState(false);
+  // True while a scan is resolving. A ref, not state: the guard must be read
+  // synchronously by the very next submit, before React re-renders.
+  const scanInFlight = useRef(false);
   const [rowFull, setRowFull] = useState(null);
   const [confirmMove, setConfirmMove] = useState(null);
   const [rowPicker, setRowPicker] = useState(false);
@@ -604,6 +607,18 @@ const IntakeSessionView = ({ intakeId }) => {
     e?.preventDefault?.();
     const raw = scanInput.trim();
     if (!raw) return;
+
+    // Re-entrancy guard. The submit button must NOT be disabled while a scan is
+    // resolving (see the JSX): a form whose default button is disabled does not
+    // submit on Enter, so a disabled button silently swallows every gun trigger
+    // that lands during the row-resolve round trip — and the characters stay in
+    // the input, so the NEXT scan decodes a concatenated string and yields the
+    // FIRST serial again. One drum recorded twice, one never recorded, no error.
+    // Enter always fires now; a genuinely overlapping scan is announced instead.
+    if (scanInFlight.current) {
+      showError('Still resolving the last scan — scan again.');
+      return;
+    }
     setScanInput('');
 
     const decoded = decodeContainerPayload(raw);
@@ -621,6 +636,7 @@ const IntakeSessionView = ({ intakeId }) => {
     // A bare token is either a row barcode or a hand-keyed serial. The server
     // decides which; there is no client-side format test, because §4.2 says no
     // code parses a serial and §8.3 says row resolution is server-side.
+    scanInFlight.current = true;
     setBusy(true);
     try {
       const { row: found, error } = await resolveRowCode(raw);
@@ -634,6 +650,7 @@ const IntakeSessionView = ({ intakeId }) => {
       }
       recordDrum(raw);
     } finally {
+      scanInFlight.current = false;
       setBusy(false);
     }
   }, [scanInput, recordDrum, resolveRowCode, adoptRow, row, online, showError]);
@@ -833,7 +850,7 @@ const IntakeSessionView = ({ intakeId }) => {
             autoFocus
             disabled={!isOpen}
           />
-          <button type="submit" className="sir-scan-btn" disabled={busy || !scanInput.trim()}>
+          <button type="submit" className="sir-scan-btn" disabled={!scanInput.trim()}>
             {busy ? '…' : <Scan size={22} />}
           </button>
         </form>
@@ -911,7 +928,7 @@ const IntakeSessionView = ({ intakeId }) => {
         <button
           type="button"
           className="sir-submit"
-          onClick={() => setSubmitForm({ reason: '' })}
+          onClick={() => { setSubmitForm({ reason: '' }); loadIntake(); }}
           disabled={!isOpen || busy}
         >
           <Send size={18} /> Review &amp; submit

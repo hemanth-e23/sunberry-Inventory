@@ -281,6 +281,7 @@ function Sidebar({ isOpen, isCollapsed, onToggleCollapse, onClose }) {
     const ingredientItems = [
       { label: 'Ingredient Intakes', icon: Boxes, to: `${prefix}/ingredient-intakes` },
       { label: 'Containers', icon: Package, to: `${prefix}/ingredient-containers` },
+      { label: 'Ingredient Staging', icon: Layers, to: `${prefix}/ingredient-staging` },
       { label: 'Row Labels', icon: Printer, to: `${prefix}/ingredient-rows/labels` },
     ];
     if (role !== 'warehouse') {

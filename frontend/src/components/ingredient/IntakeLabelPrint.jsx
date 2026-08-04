@@ -49,6 +49,7 @@ const IntakeLabelPrint = ({ sheet, onDone }) => {
   }, []);
 
   useEffect(() => {
+    if (!sheet) return undefined;
     const timer = setTimeout(() => {
       window.print();
       onDoneRef.current?.();
@@ -56,7 +57,11 @@ const IntakeLabelPrint = ({ sheet, onDone }) => {
     // Cleared on unmount — and in React StrictMode's double-invoke, which
     // would otherwise queue two prints.
     return () => clearTimeout(timer);
-  }, []);
+    // Keyed on the sheet, not []: a second reprint while this component is
+    // still mounted replaces `sheet` without remounting, and an empty dep array
+    // would leave the timer armed from the FIRST sheet — printing the old
+    // stack, or nothing at all if that timer had already fired.
+  }, [sheet]);
 
   const labels = sheet?.labels || [];
 

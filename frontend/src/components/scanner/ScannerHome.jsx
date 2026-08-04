@@ -1,6 +1,6 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Package, ArrowRightLeft, Truck, Boxes } from 'lucide-react';
+import { Package, ArrowRightLeft, Truck, Boxes, ClipboardList } from 'lucide-react';
 import './ScannerHome.css';
 
 const ScannerHome = () => {
@@ -52,6 +52,17 @@ const ScannerHome = () => {
           <div className="scanner-home-text">
             <span>Ingredient Receiving</span>
             <span className="scanner-home-desc">Scan barrels and bags off the trailer into rows</span>
+          </div>
+        </button>
+        <button
+          type="button"
+          className="scanner-home-btn staging"
+          onClick={() => navigate('/forklift/ingredient-staging')}
+        >
+          <div className="scanner-home-icon"><ClipboardList size={26} /></div>
+          <div className="scanner-home-text">
+            <span>Ingredient Staging</span>
+            <span className="scanner-home-desc">Claim a line and pull drums for a batch</span>
           </div>
         </button>
       </div>

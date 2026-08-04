@@ -193,18 +193,18 @@ const PanelShell = ({ title, description, panel, children, extraActions }) => (
 const classifyCutoverRow = (row) => {
   const legacy = Number(row.legacy_remaining || 0);
   const serialized = Number(row.serialized_remaining || 0);
-  const combined = Number(row.combined || 0);
   const converted = Number(row.converted_containers || 0);
 
   if (legacy < 0 || serialized < 0) {
     return { tone: 'drift', note: 'Negative remaining — a write path oversubtracted.' };
   }
-  if (converted > 0 && combined <= 0) {
-    return {
-      tone: 'drift',
-      note: `${fmtCount(converted)} ${row.count_unit} still exist but nothing remains on the books.`,
-    };
-  }
+  // Deliberately NOT flagged: converted > 0 with combined == 0.
+  // `converted_containers` counts every container off the sweep intake including
+  // fully-consumed ones (the backend counts all non-soft-deleted rows), while
+  // `serialized_remaining` sums only material still on hand. So a lot that was
+  // swept and then entirely used up legitimately reads "40 converted, 0
+  // combined" — the normal END STATE, not drift. Flagging it trains people to
+  // ignore this table, which is worse than not having it.
   if (converted === 0 && legacy > 0) {
     return { tone: 'watch', note: 'Sweep intake exists but nothing was converted.' };
   }

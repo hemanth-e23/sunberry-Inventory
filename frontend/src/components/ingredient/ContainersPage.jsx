@@ -380,7 +380,7 @@ const ContainersPage = () => {
 
   const renderStatusChip = (status) => (
     <span
-      className={`container-status-chip${AVAILABLE_STATUSES.has(status) ? ' is-available' : ''}`}
+      className={`containers-status-chip${AVAILABLE_STATUSES.has(status) ? ' is-available' : ''}`}
       data-status={status}
     >
       {humanize(status)}

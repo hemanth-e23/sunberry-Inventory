@@ -55,6 +55,8 @@ const ContainersPage = lazy(() => import('./components/ingredient/ContainersPage
 const CutoverSweepPage = lazy(() => import('./components/ingredient/CutoverSweepPage'));
 const IngredientAuditsPage = lazy(() => import('./components/ingredient/IngredientAuditsPage'));
 const RowLabelPrintPage = lazy(() => import('./components/ingredient/RowLabelPrintPage'));
+const IngredientStagingPage = lazy(() => import('./components/ingredient/IngredientStagingPage'));
+const ScannerIngredientStagingFlow = lazy(() => import('./components/scanner/ScannerIngredientStagingFlow'));
 
 // Context
 import { ToastProvider } from './context/ToastContext';
@@ -268,6 +270,20 @@ function AppRoutes() {
         <Route path="/forklift/ingredient-receiving/:intakeId" element={
           <ProtectedRoute requiredRole="forklift">
             <ScannerIngredientReceiveFlow />
+          </ProtectedRoute>
+        } />
+
+        {/* Ingredient staging pulls. Same list/session shape as receiving: the
+            optional :itemId selects one staging LINE, which is the unit a
+            worker claims and pulls against. */}
+        <Route path="/forklift/ingredient-staging" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerIngredientStagingFlow />
+          </ProtectedRoute>
+        } />
+        <Route path="/forklift/ingredient-staging/:itemId" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerIngredientStagingFlow />
           </ProtectedRoute>
         } />
 
@@ -649,6 +665,14 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
+        <Route path="/warehouse/ingredient-staging" element={
+          <ProtectedRoute requiredRole="warehouse">
+            <Layout>
+              {page(<IngredientStagingPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
         <Route path="/warehouse/ingredient-containers" element={
           <ProtectedRoute requiredRole="warehouse">
             <Layout>
@@ -677,6 +701,14 @@ function AppRoutes() {
           <ProtectedRoute requiredRole="supervisor">
             <Layout>
               {page(<IngredientIntakesPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/supervisor/ingredient-staging" element={
+          <ProtectedRoute requiredRole="supervisor">
+            <Layout>
+              {page(<IngredientStagingPage />)}
             </Layout>
           </ProtectedRoute>
         } />
@@ -725,6 +757,14 @@ function AppRoutes() {
           <ProtectedRoute requiredRole="admin">
             <Layout>
               {page(<IngredientIntakesPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/admin/ingredient-staging" element={
+          <ProtectedRoute requiredRole="admin">
+            <Layout>
+              {page(<IngredientStagingPage />)}
             </Layout>
           </ProtectedRoute>
         } />

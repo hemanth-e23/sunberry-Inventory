@@ -72,6 +72,8 @@ const IngredientIntakesTab = ({ userNameMap = {}, onPendingCountChange }) => {
 
   const [intakes, setIntakes] = useState([]);
   const [total, setTotal] = useState(0);
+  // Gates the badge publish below: a seeded 0 must never reach ApprovalsPage.
+  const [loadedOnce, setLoadedOnce] = useState(false);
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -93,6 +95,7 @@ const IngredientIntakesTab = ({ userNameMap = {}, onPendingCountChange }) => {
       const data = response?.data || {};
       setIntakes(Array.isArray(data.items) ? data.items : []);
       setTotal(Number(data.total) || 0);
+      setLoadedOnce(true);
       setTruncated(Boolean(data.truncated));
       setLoadError(null);
     } catch (error) {
@@ -104,7 +107,13 @@ const IngredientIntakesTab = ({ userNameMap = {}, onPendingCountChange }) => {
 
   useEffect(() => { load(); }, [load]);
 
-  useEffect(() => { onPendingCountChange?.(total); }, [total, onPendingCountChange]);
+  // Publish the badge count only once a fetch has actually succeeded. Firing on
+  // the seeded 0 would overwrite ApprovalsPage's own count with a zero before
+  // this tab has loaded — and leave it at zero forever if the fetch fails, which
+  // reads as "no ingredient intakes waiting" rather than "we could not check".
+  useEffect(() => {
+    if (loadedOnce) onPendingCountChange?.(total);
+  }, [loadedOnce, total, onPendingCountChange]);
 
   const sorted = useMemo(
     () => [...intakes].sort(

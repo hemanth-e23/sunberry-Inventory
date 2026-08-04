@@ -155,6 +155,11 @@ class ContainerLabel(BaseSchema):
     product_sid: Optional[str] = None
     vendor_name: Optional[str] = None
     vendor_lot: Optional[str] = None
+    # Drives the label's "LOT UNKNOWN" line. A cutover drum whose original label
+    # is unreadable is QA-flagged and used first (§15.4), so the sticker has to
+    # SAY so — printing an em-dash makes it indistinguishable from a lot line
+    # nobody has filled in yet.
+    lot_unknown: bool = False
     bbd: Optional[datetime] = None
     net_weight: Optional[float] = None
     weight_unit: Optional[str] = None

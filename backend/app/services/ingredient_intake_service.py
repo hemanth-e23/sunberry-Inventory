@@ -55,7 +55,11 @@ from app.models import (
     Vendor,
     Warehouse,
 )
-from app.utils.auth import require_approval_access, warehouse_filter
+from app.utils.auth import (
+    require_approval_access,
+    resolve_warehouse_for_write,
+    warehouse_filter,
+)
 from app.utils.lot_number import plant_local_date
 
 # Serials are minted per container type. The prefix is human courtesy on the
@@ -232,7 +236,13 @@ def create_intake(db: Session, data, current_user) -> IngredientIntake:
     availability sums legacy receipt weight plus live container quantity, so a
     shadow Receipt for a serialized intake would be counted twice.
     """
-    warehouse_id = data.warehouse_id or warehouse_filter(current_user)
+    # resolve_warehouse_for_write, NOT warehouse_filter: the filter returns None
+    # for a corporate user viewing "All Warehouses", which would create an intake
+    # with warehouse_id = NULL. Such an intake is then invisible everywhere —
+    # every list scopes on warehouse_id — so a whole truck's worth of scanned
+    # drums would vanish from the desk, the container list and the gun. The
+    # write helper raises a clear 400 telling the user to pick a plant first.
+    warehouse_id = data.warehouse_id or resolve_warehouse_for_write(current_user)
     plant_tz = _plant_timezone(db, warehouse_id)
 
     if data.source not in (IntakeSource.TRUCK.value, IntakeSource.LEGACY_SWEEP.value):
