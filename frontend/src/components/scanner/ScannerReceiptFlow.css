@@ -271,6 +271,48 @@
 .scanner-receipt-try-scan-btn::before { display: none; }
 .scanner-receipt-try-scan-btn:hover { background: #dcfce7; transform: none; box-shadow: none; }
 
+/* Row full by the system — a question, not a refusal. Amber, not red: the rack
+   is very often empty in reality, so this is a check, not an error. */
+.scanner-receipt-overfill {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+  padding: 0.75rem 0.85rem;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  color: #78350f;
+  font-size: 0.95rem;
+}
+
+.scanner-receipt-overfill-detail {
+  margin-top: 0.25rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: #92400e;
+}
+
+.scanner-receipt-overfill-continue {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  width: 100%;
+  margin-bottom: 0.5rem;
+  padding: 0.85rem 1rem;
+  background: #b45309;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.scanner-receipt-overfill-continue::before { display: none; }
+.scanner-receipt-overfill-continue:hover { background: #92400e; transform: none; }
+
 /* Full / Partial toggle */
 .scanner-receipt-toggle {
   display: flex;

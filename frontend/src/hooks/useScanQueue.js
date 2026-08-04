@@ -68,8 +68,8 @@ export const useScanQueue = ({ onSynced, onFailed } = {}) => {
     return () => clearInterval(t);
   }, [drain]);
 
-  const enqueue = useCallback(({ requestId, payload }) => {
-    const item = enqueueScan({ requestId, payload });
+  const enqueue = useCallback(({ requestId, payload, idempotencyKey }) => {
+    const item = enqueueScan({ requestId, payload, idempotencyKey });
     // Try immediately so the common case (online) feels synchronous.
     drain();
     return item;

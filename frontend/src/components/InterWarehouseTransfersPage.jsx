@@ -961,7 +961,10 @@ function PlaceInStorageModal({ receiptId, warehouseId, productName, quantity, un
             </div>
             <div style={{ maxHeight: 200, overflowY: 'auto' }}>
               {rows.map(row => {
-                const available = (row.pallet_capacity || 0) - (row.occupied_pallets || 0);
+                // Clamped at 0: a row can now sit over capacity (the forklift gun
+                // lets a driver load a rack the system wrongly calls full), and a
+                // negative here fed Math.min() below a negative pallet allocation.
+                const available = Math.max(0, (row.pallet_capacity || 0) - (row.occupied_pallets || 0));
                 const isSelected = rowAllocations.some(a => a.rowId === row.id);
                 const alloc = rowAllocations.find(a => a.rowId === row.id);
                 return (

@@ -467,8 +467,19 @@ def scan_pallet(
     partial_cases: Optional[int],
     current_user: User,
     idempotency_key: Optional[str] = None,
+    allow_overfill: bool = False,
 ) -> dict:
-    """Scan a pallet into an active forklift request. Handles duplicates, gaps, and capacity."""
+    """Scan a pallet into an active forklift request. Handles duplicates, gaps, and capacity.
+
+    Capacity is a soft prompt, never a block. A row the system believes is full is
+    routinely not full physically — pallets leave without being scanned out (shipped
+    or moved row to row), so the licences still point at the row. Refusing the scan
+    stopped a driver mid-load in front of racking he could see was empty. Instead the
+    first scan into a full row comes back `needs_confirm`, the gun asks once, and the
+    driver's answer arrives as `allow_overfill` on the retry. The over-fill is
+    accepted at the point of work and reconciled later, rather than stopping a
+    forklift mid-unload over a count we know drifts.
+    """
     fr = _get_forklift_request(db, request_id)
     _require_scanning(fr)
 
@@ -528,10 +539,18 @@ def scan_pallet(
 
     row = _validate_storage_row(db, storage_row_id)
 
-    # Check capacity
+    # Check capacity — ask, don't refuse. Returns 200 with nothing written: a 4xx
+    # would make the offline scan queue park the item as permanently failed
+    # (scanQueue.js) and drop the driver's optimistic row.
     available = _row_available_capacity(db, row, request_id)
-    if available < 1:
-        raise ValidationError("Row is full. Scan or select a new location.")
+    if available < 1 and not allow_overfill:
+        return {
+            "status": "needs_confirm",
+            "warning": "row_full",
+            "message": f"{row.name} is full by the system. Load into it anyway?",
+            "row_name": row.name,
+            "row_available": 0,
+        }
 
     # Handle duplicate within same request
     existing_in_this = db.query(PalletLicence).filter(

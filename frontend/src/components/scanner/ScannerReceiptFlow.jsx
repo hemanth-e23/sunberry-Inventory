@@ -36,11 +36,18 @@ const LINE_CODES = ['L1', 'L2'];
 const lineLabel = (code) => (code === 'L1' ? 'Line 1' : code === 'L2' ? 'Line 2' : code);
 
 // Per-line states:
-//   needs-row  → product known, waiting for a destination row (scan or pick)
-//   scanning   → actively taking pallets
-//   row-full   → row hit capacity, needs a new row before more pallets
-//   gap        → a sequence gap was detected, awaiting skip / mark-missing
-const isRowState = (status) => status === 'needs-row' || status === 'row-full';
+//   needs-row         → product known, waiting for a destination row (scan or pick)
+//   scanning          → actively taking pallets
+//   overfill-confirm  → row is full BY THE SYSTEM; asking the driver whether to
+//                       keep loading it anyway. Capacity is a prompt, not a block:
+//                       a row the system thinks is full is routinely empty,
+//                       because pallets leave without being scanned out. See
+//                       scanner_service.scan_pallet.
+//   gap               → a sequence gap was detected, awaiting skip / mark-missing
+//
+// overfill-confirm counts as a row state so the driver can answer the prompt by
+// simply scanning a different rack barcode instead of tapping.
+const isRowState = (status) => status === 'needs-row' || status === 'overfill-confirm';
 
 const ScannerReceiptFlow = () => {
   const navigate = useNavigate();
@@ -91,6 +98,28 @@ const ScannerReceiptFlow = () => {
       if (!code) return prev;
       const line = prev[code];
       let pallets = line.pallets;
+      // The row filled up between our cached count and this scan landing (the
+      // other line, or the other driver, got there first). Nothing was written:
+      // pull the optimistic row back out and ask. Must come before the branches
+      // below, which would read a pallet-less response as "already scanned".
+      if (resp.status === 'needs_confirm') {
+        return {
+          ...prev,
+          [code]: {
+            ...line,
+            pallets: pallets.filter((p) => p._idempotency_key !== item.idempotency_key),
+            status: 'overfill-confirm',
+            rowAvailable: 0,
+            rowScanAttempts: 0,
+            showManualRows: false,
+            pendingOverfill: {
+              payload: item.payload,
+              idempotencyKey: item.idempotency_key,
+              rowName: resp.row_name || '',
+            },
+          },
+        };
+      }
       if (resp.status === 'duplicate' || (!resp.pallet && resp.status !== 'updated')) {
         pallets = pallets.filter((p) => p._idempotency_key !== item.idempotency_key);
       } else if (resp.status === 'updated' && !resp.pallet) {
@@ -111,7 +140,9 @@ const ScannerReceiptFlow = () => {
       return { ...prev, [code]: { ...line, ...patch } };
     });
 
-    if (resp.status === 'duplicate' || (!resp.pallet && resp.status !== 'updated')) {
+    if (resp.status === 'needs_confirm') {
+      showError(resp.message || 'Row is full by the system. Load into it anyway?');
+    } else if (resp.status === 'duplicate' || (!resp.pallet && resp.status !== 'updated')) {
       showError(resp.message || 'Pallet already scanned');
     } else if (resp.status === 'updated' && !resp.pallet) {
       showSuccess(resp.message || 'Moved to new location');
@@ -190,6 +221,10 @@ const ScannerReceiptFlow = () => {
             gapMissing: [],
             rowScanAttempts: 0,
             showManualRows: false,
+            // Not carried across a resume: we can't know the driver already
+            // said yes to this rack, so the server asks again on the next scan.
+            overfillAckRowId: '',
+            pendingOverfill: null,
           };
         }
         setLines(next);
@@ -300,6 +335,8 @@ const ScannerReceiptFlow = () => {
           gapMissing: [],
           rowScanAttempts: 0,
           showManualRows: false,
+          overfillAckRowId: '',
+          pendingOverfill: null,
         },
       }));
       setActiveLine(code);
@@ -312,10 +349,26 @@ const ScannerReceiptFlow = () => {
     }
   };
 
+  const rowNameOf = (rowId) => storageRows.find((r) => r.id === rowId)?.name || 'This rack';
+
+  // Picking a row the system calls full is allowed — it just asks first, once
+  // per rack. A rack the driver already answered for stays answered.
   const selectRow = (code, rowId) => {
     const row = storageRows.find((r) => r.id === rowId);
-    updateLine(code, { selectedRowId: rowId, rowAvailable: row ? row.available : null, status: 'scanning' });
+    const available = row ? row.available : null;
+    const acked = lines[code]?.overfillAckRowId === rowId;
+    const full = available != null && available <= 0;
+    updateLine(code, {
+      selectedRowId: rowId,
+      rowAvailable: available,
+      status: full && !acked ? 'overfill-confirm' : 'scanning',
+      overfillAckRowId: acked ? rowId : '',
+      pendingOverfill: null,
+      rowScanAttempts: 0,
+      showManualRows: false,
+    });
     setError('');
+    return { full, acked, rowName: row?.name || '' };
   };
 
   const handleRowScan = (code, raw) => {
@@ -341,31 +394,27 @@ const ScannerReceiptFlow = () => {
       }
       return;
     }
-    if (match.available <= 0) {
-      updateLine(code, (prev) => ({ ...prev, rowScanAttempts: (prev.rowScanAttempts || 0) + 1 }));
-      showError(`${match.name} is full. Scan a different row.`);
-      return;
+    const { full, acked } = selectRow(code, match.id);
+    if (full && !acked) {
+      showError(`${match.name} is full by the system — load into it anyway?`);
+    } else {
+      showSuccess(`Row ${match.name}`);
     }
-    selectRow(code, match.id);
-    showSuccess(`Row ${match.name}`);
   };
 
-  const recordPallet = (code, licence) => {
+  // Enqueue + optimistic row. Shared by a fresh scan and by the replay after the
+  // driver answers the full-rack prompt (which reuses the original idempotency
+  // key, so a lost response can't become a second pallet).
+  const queuePallet = (code, licence, payload, idempotencyKey) => {
     const ls = lines[code];
-    if (!ls?.selectedRowId) return;
-    if (ls.pallets.some((p) => p.licence_number === licence)) {
-      showError('Already scanned this pallet.');
-      return;
-    }
-    const payload = {
-      licence_number: licence,
-      storage_row_id: ls.selectedRowId,
-      is_partial: ls.isPartial,
-      partial_cases: ls.isPartial && ls.partialCases ? parseInt(ls.partialCases, 10) : null,
-    };
-    const item = enqueueScan({ requestId: ls.requestId, payload });
+    if (!ls) return;
+    const item = enqueueScan({ requestId: ls.requestId, payload, idempotencyKey });
     updateLine(code, (prev) => {
       const nextAvail = prev.rowAvailable != null ? Math.max(0, prev.rowAvailable - 1) : null;
+      // Out of room by the books. If the driver has already said to keep going
+      // on this rack, don't ask again — the answer is per rack, not per pallet.
+      const askAgain = nextAvail != null && nextAvail <= 0
+        && prev.overfillAckRowId !== prev.selectedRowId;
       return {
         ...prev,
         pallets: [
@@ -384,10 +433,49 @@ const ScannerReceiptFlow = () => {
         ],
         partialCases: '',
         rowAvailable: nextAvail,
-        ...((nextAvail != null && nextAvail <= 0)
-          ? { status: 'row-full', rowScanAttempts: 0, showManualRows: false }
-          : {}),
+        ...(askAgain ? { status: 'overfill-confirm', rowScanAttempts: 0, showManualRows: false } : {}),
       };
+    });
+  };
+
+  // "Continue loading" on the full-rack prompt. Remembers the answer for this
+  // rack and replays the scan that triggered it, if the prompt came from the
+  // server (the rack filled up after our count was cached).
+  const handleOverfillContinue = (code) => {
+    const ls = lines[code];
+    if (!ls) return;
+    const pending = ls.pendingOverfill;
+    updateLine(code, {
+      overfillAckRowId: ls.selectedRowId,
+      status: 'scanning',
+      pendingOverfill: null,
+    });
+    setError('');
+    if (pending) {
+      queuePallet(
+        code,
+        pending.payload.licence_number,
+        { ...pending.payload, allow_overfill: true },
+        pending.idempotencyKey,
+      );
+    }
+    showSuccess('Loading into this rack anyway');
+  };
+
+  const recordPallet = (code, licence) => {
+    const ls = lines[code];
+    if (!ls?.selectedRowId) return;
+    if (ls.pallets.some((p) => p.licence_number === licence)) {
+      showError('Already scanned this pallet.');
+      return;
+    }
+    queuePallet(code, licence, {
+      licence_number: licence,
+      storage_row_id: ls.selectedRowId,
+      is_partial: ls.isPartial,
+      partial_cases: ls.isPartial && ls.partialCases ? parseInt(ls.partialCases, 10) : null,
+      // The driver already answered "load it anyway" for this rack.
+      allow_overfill: ls.overfillAckRowId === ls.selectedRowId,
     });
   };
 
@@ -428,7 +516,9 @@ const ScannerReceiptFlow = () => {
     }
     if (isRowState(target.status)) {
       setActiveLine(line);
-      showError(`Set a row for ${lineLabel(line)} before scanning into it.`);
+      showError(target.status === 'overfill-confirm'
+        ? `${rowNameOf(target.selectedRowId)} is full by the system — tap Continue to load it anyway, or scan a different rack.`
+        : `Set a row for ${lineLabel(line)} before scanning into it.`);
       return;
     }
     recordPallet(line, cleaned);
@@ -436,9 +526,22 @@ const ScannerReceiptFlow = () => {
   };
 
   const handleChangeRow = (code) => {
-    updateLine(code, { status: 'needs-row', rowScanAttempts: 0, showManualRows: false });
+    // Leaving the rack drops both the answer and any scan waiting on it — the
+    // driver is telling us this load is going somewhere else.
+    updateLine(code, {
+      status: 'needs-row',
+      rowScanAttempts: 0,
+      showManualRows: false,
+      overfillAckRowId: '',
+      pendingOverfill: null,
+    });
     setActiveLine(code);
     setError('');
+    // A scan that was waiting on the prompt never landed anywhere. Say so, or
+    // the driver walks away thinking that pallet was recorded.
+    if (lines[code]?.pendingOverfill) {
+      showError('That pallet was not recorded — scan it again into the new rack.');
+    }
     fetchStorageRows();
   };
 
@@ -530,7 +633,7 @@ const ScannerReceiptFlow = () => {
 
   const lineNeedsAttention = (code) => {
     const ls = lines[code];
-    return !!ls && (ls.status === 'row-full' || ls.status === 'gap');
+    return !!ls && (ls.status === 'overfill-confirm' || ls.status === 'gap');
   };
 
   const autoSubmittedBanner = autoSubmittedNotice ? (
@@ -591,14 +694,21 @@ const ScannerReceiptFlow = () => {
     );
   }
 
-  const placeholder = activeState && isRowState(activeState.status)
-    ? `Scan the ${lineLabel(activeLine)} row barcode…`
-    : 'Scan pallet licence…';
+  const placeholder = activeState && activeState.status === 'overfill-confirm'
+    ? 'Scan a different rack, or tap Continue…'
+    : activeState && isRowState(activeState.status)
+      ? `Scan the ${lineLabel(activeLine)} row barcode…`
+      : 'Scan pallet licence…';
 
   const { pending: activePending, failed: activeFailed } = activeState
     ? countsForRequest(activeState.requestId)
     : { pending: 0, failed: 0 };
-  const availableRows = storageRows.filter((r) => r.available > 0);
+  // Full racks stay pickable — the system's idea of full is often wrong, and
+  // hiding them left a driver with "no rows available" and nowhere to put a
+  // pallet. Roomy racks first, full ones marked.
+  const pickableRows = [...storageRows].sort(
+    (a, b) => (b.available > 0) - (a.available > 0),
+  );
 
   return (
     <ScannerLayout title="Receipt Scan" showBack onBack={() => navigate('/forklift')} headerExtra={netStatus}>
@@ -637,11 +747,38 @@ const ScannerReceiptFlow = () => {
               {activeState.productName} <span className="scanner-receipt-lot">· {activeState.lotNumber}</span>
             </div>
 
-            {isRowState(activeState.status) ? (
+            {activeState.status === 'overfill-confirm' ? (
               <>
-                {activeState.status === 'row-full' && (
-                  <div className="scanner-receipt-error">Row is full. Scan a new row for {lineLabel(activeLine)}.</div>
-                )}
+                <div className="scanner-receipt-overfill">
+                  <AlertTriangle size={20} color="#b45309" style={{ flexShrink: 0 }} />
+                  <div>
+                    <strong>
+                      {activeState.pendingOverfill?.rowName || rowNameOf(activeState.selectedRowId)} is
+                      full by the system.
+                    </strong>
+                    <div className="scanner-receipt-overfill-detail">
+                      It is often not full for real — pallets leave without being scanned out.
+                      Load into it anyway?
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="scanner-receipt-overfill-continue"
+                  onClick={() => handleOverfillContinue(activeLine)}
+                >
+                  <Check size={18} /> Continue loading
+                </button>
+                <button
+                  type="button"
+                  className="scanner-receipt-try-scan-btn"
+                  onClick={() => handleChangeRow(activeLine)}
+                >
+                  <Scan size={16} /> Scan a different rack
+                </button>
+              </>
+            ) : isRowState(activeState.status) ? (
+              <>
                 {!activeState.showManualRows ? (
                   <>
                     <p className="scanner-receipt-instruction">Scan the {lineLabel(activeLine)} row barcode.</p>
@@ -665,23 +802,25 @@ const ScannerReceiptFlow = () => {
                     </button>
                     {loadingRows ? (
                       <p className="scanner-receipt-loading">Loading storage rows…</p>
-                    ) : availableRows.length === 0 ? (
+                    ) : pickableRows.length === 0 ? (
                       <div className="scanner-receipt-empty">
-                        <p>No storage rows with available space.</p>
-                        <p className="scanner-receipt-empty-hint">Free up capacity or add rows in Master Data.</p>
+                        <p>No storage rows set up.</p>
+                        <p className="scanner-receipt-empty-hint">Add rows in Master Data.</p>
                       </div>
                     ) : (
                       <div className="scanner-receipt-rows">
-                        {availableRows.map((row) => (
+                        {pickableRows.map((row) => (
                           <button
                             key={row.id}
                             type="button"
                             className="scanner-receipt-row-btn"
                             onClick={() => selectRow(activeLine, row.id)}
                           >
-                            <MapPin size={20} color="#1a472a" />
+                            <MapPin size={20} color={row.available > 0 ? '#1a472a' : '#b45309'} />
                             <span>{row.name}</span>
-                            <span className="scanner-receipt-available">{row.available} free</span>
+                            <span className="scanner-receipt-available">
+                              {row.available > 0 ? `${row.available} free` : 'full'}
+                            </span>
                           </button>
                         ))}
                       </div>

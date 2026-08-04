@@ -262,8 +262,9 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     """Translate HTTPExceptions into JSON responses.
 
     400 (ValidationError) and 409 (ConflictError) carry user-correctable
-    messages like "Invalid licence number format" or "Row is full" — these are
-    safe and useful to show users in production so they can fix their input.
+    messages like "Invalid licence number format" or "Shift must be set before
+    approval" — these are safe and useful to show users in production so they
+    can fix their input.
 
     401/403/404/500 stay generic in production to avoid leaking internals.
 

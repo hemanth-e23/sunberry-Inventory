@@ -13,6 +13,9 @@ class ScanPalletRequest(BaseSchema):
     # client retries a request after a network drop, the server returns
     # the original pallet instead of creating a duplicate.
     idempotency_key: Optional[str] = Field(None, min_length=8, max_length=64)
+    # Set once the driver has answered the "row is full" prompt for this row.
+    # Capacity is a soft prompt, not a block — see scan_pallet.
+    allow_overfill: bool = False
 
 
 class MarkMissingRequest(BaseSchema):

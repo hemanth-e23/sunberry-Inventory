@@ -71,11 +71,16 @@ export const subscribeToScanQueue = (cb) => {
  * Enqueue a scan request. Returns the queue item (with idempotency_key).
  * The caller can use idempotency_key as a stable handle to find the entry
  * later (e.g., for optimistic UI updates).
+ *
+ * `idempotencyKey` is optional and reuses a key from an earlier attempt. The
+ * "row is full" confirm re-sends the same scan with the driver's answer on it;
+ * carrying the original key keeps that a replay rather than a second pallet if
+ * the first attempt actually landed and only its response was lost.
  */
-export const enqueueScan = ({ requestId, payload }) => {
+export const enqueueScan = ({ requestId, payload, idempotencyKey }) => {
   const item = {
     id: safeRandomId(),
-    idempotency_key: safeRandomId(),
+    idempotency_key: idempotencyKey || safeRandomId(),
     requestId,
     payload,
     addedAt: new Date().toISOString(),

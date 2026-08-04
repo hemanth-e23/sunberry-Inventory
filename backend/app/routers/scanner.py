@@ -118,6 +118,7 @@ async def scan_pallet(
         data.partial_cases,
         current_user,
         idempotency_key=data.idempotency_key,
+        allow_overfill=data.allow_overfill,
     )
 
 
