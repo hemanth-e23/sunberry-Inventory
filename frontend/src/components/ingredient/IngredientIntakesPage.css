@@ -1,0 +1,350 @@
+/* Ingredient intakes — desk screens (SPEC §8.1-8.2, §5).
+   Screen styles first, print rules at the very bottom.
+
+   Layout classes that already exist app-wide (`page-content`, `panel`,
+   `simple-table`, `form-actions`, `primary-button`, `badge`, `muted`) come from
+   Shared.css / index.css and are NOT redefined here — only the pieces those two
+   do not cover. Colours use the shared custom properties so this page follows
+   the app theme instead of pinning its own hex values. */
+
+/* ─── status filter chips ─────────────────────────────────────────────────── */
+
+.ing-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.ing-chip {
+  padding: 6px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.ing-chip:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary-dark);
+}
+
+.ing-chip.is-active {
+  background: var(--color-primary-soft);
+  border-color: var(--color-primary);
+  color: var(--color-primary-dark);
+}
+
+/* ─── tables ──────────────────────────────────────────────────────────────── */
+
+/* Wide tables scroll inside their own box rather than pushing the page sideways
+   — the lot-line table has ten columns and the serial picker is a modal. */
+.ing-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ing-table-wrap .simple-table {
+  min-width: 100%;
+}
+
+.ing-table-wrap tr.is-selected {
+  background: var(--color-primary-soft);
+}
+
+.ing-check-col {
+  width: 40px;
+  text-align: center;
+}
+
+.ing-link {
+  color: var(--color-primary-dark);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.ing-link:hover {
+  text-decoration: underline;
+}
+
+.ing-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ing-list__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px 4px;
+}
+
+/* ─── detail: fact grid ───────────────────────────────────────────────────── */
+
+.ing-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 14px 20px;
+  margin: 0;
+  padding: 16px;
+}
+
+.ing-facts > div {
+  min-width: 0;
+}
+
+.ing-facts__wide {
+  grid-column: 1 / -1;
+}
+
+.ing-facts dt {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin-bottom: 2px;
+}
+
+.ing-facts dd {
+  margin: 0;
+  font-size: 14px;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.ing-lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 16px 16px 8px;
+}
+
+.ing-danger {
+  border-color: var(--color-danger);
+  color: var(--color-danger-dark);
+}
+
+.ing-danger:hover:not(:disabled) {
+  background: var(--color-danger-soft);
+}
+
+/* Voided reads as "gone", not as an error — a separate tone from `badge-danger`,
+   which the rejected state already owns. */
+.ing-badge--voided {
+  background: var(--color-border);
+  color: var(--color-text-muted);
+}
+
+/* ─── forms ───────────────────────────────────────────────────────────────── */
+
+.ing-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+}
+
+/* A modal supplies its own padding. */
+.modal-body > .ing-form {
+  padding: 0;
+}
+
+.ing-form__grid,
+.ing-lotline__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px 16px;
+}
+
+.ing-form__section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 12px;
+}
+
+.ing-form__section-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.ing-lotline {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--color-canvas);
+}
+
+.ing-lotline__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.ing-lotline__index {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+}
+
+.ing-lotline__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.ing-lotline__field > span {
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.ing-lotline__field input,
+.ing-lotline__field select,
+.ing-lotline__field textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.ing-lotline__field input:focus,
+.ing-lotline__field select:focus,
+.ing-lotline__field textarea:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-soft);
+}
+
+.ing-lotline__field--wide {
+  grid-column: 1 / -1;
+}
+
+.ing-lotline__field--check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  align-self: end;
+  padding-bottom: 8px;
+}
+
+.ing-lotline__field--check input {
+  width: auto;
+}
+
+.ing-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-danger-dark);
+  cursor: pointer;
+}
+
+.ing-icon-button:hover:not(:disabled) {
+  background: var(--color-danger-soft);
+}
+
+.ing-form__error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--color-danger-soft);
+  color: var(--color-danger-dark);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ing-form__notice {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--color-info-soft);
+  color: var(--color-info-dark);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ing-form__notice--warn {
+  background: var(--color-warning-soft);
+  color: var(--color-warning-dark);
+}
+
+.ing-form__actions-note {
+  margin-right: auto;
+}
+
+@media (max-width: 640px) {
+  .ing-form__grid,
+  .ing-lotline__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ing-list__footer {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+/* ─── print ───────────────────────────────────────────────────────────────────
+   The label stack lives in a hidden root that only exists while a print job is
+   in flight (IntakeLabelPrint.jsx). Every rule below is scoped to
+   `body.ingredient-label-print-mode`, the class that component adds on mount
+   and removes on unmount.
+
+   The scoping is not cosmetic: this stylesheet stays loaded for the rest of the
+   SPA session, so an unscoped `body *` block would blank every OTHER print in
+   the app — pallet tags, the BOL, ship-out docs. Same trap the named `@page` in
+   ContainerLabel.css:202-205 avoids, and the same fix RowLabelPrintPage.css
+   uses. Page size, per-label page breaks and ink settings are ContainerLabel's
+   own job and are deliberately not repeated here. */
+
+.ing-print-root {
+  display: none;
+}
+
+@media print {
+  /* Blank the app chrome without needing to know its class names: hide
+     everything, then re-show the print root and its descendants. `visibility`
+     rather than `display` so the root's ancestors keep their boxes and it can
+     still be positioned at the top of the sheet. */
+  body.ingredient-label-print-mode * {
+    visibility: hidden;
+  }
+
+  body.ingredient-label-print-mode .ing-print-root,
+  body.ingredient-label-print-mode .ing-print-root * {
+    visibility: visible;
+  }
+
+  body.ingredient-label-print-mode .ing-print-root {
+    display: block !important;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+  }
+}

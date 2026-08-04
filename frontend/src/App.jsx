@@ -46,6 +46,16 @@ const ScannerTransferFlow = lazy(() => import('./components/scanner/ScannerTrans
 const ScannerShipOutFlow = lazy(() => import('./components/scanner/ScannerShipOutFlow'));
 const ScannerShipOutFlowV2 = lazy(() => import('./components/scanner/ScannerShipOutFlowV2'));
 
+// Ingredient container serialization (INGREDIENT-SERIALIZATION-SPEC.md).
+// Mounted under each role prefix like the rest of the app; the desk pages read
+// their own base path off the URL so links stay inside the caller's prefix.
+const ScannerIngredientReceiveFlow = lazy(() => import('./components/scanner/ScannerIngredientReceiveFlow'));
+const IngredientIntakesPage = lazy(() => import('./components/ingredient/IngredientIntakesPage'));
+const ContainersPage = lazy(() => import('./components/ingredient/ContainersPage'));
+const CutoverSweepPage = lazy(() => import('./components/ingredient/CutoverSweepPage'));
+const IngredientAuditsPage = lazy(() => import('./components/ingredient/IngredientAuditsPage'));
+const RowLabelPrintPage = lazy(() => import('./components/ingredient/RowLabelPrintPage'));
+
 // Context
 import { ToastProvider } from './context/ToastContext';
 import { ConfirmProvider } from './context/ConfirmContext';
@@ -243,6 +253,21 @@ function AppRoutes() {
         <Route path="/forklift/ship-out-v1" element={
           <ProtectedRoute requiredRole="forklift">
             <ScannerShipOutFlow />
+          </ProtectedRoute>
+        } />
+
+        {/* Ingredient receiving on the gun. One component serves both the open-intake
+            list and a scanning session; the optional :intakeId picks which.
+            Sessions are intake-scoped, not person-scoped, so any forklift user can
+            resume a part-finished truck. */}
+        <Route path="/forklift/ingredient-receiving" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerIngredientReceiveFlow />
+          </ProtectedRoute>
+        } />
+        <Route path="/forklift/ingredient-receiving/:intakeId" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerIngredientReceiveFlow />
           </ProtectedRoute>
         } />
 
@@ -601,6 +626,141 @@ function AppRoutes() {
             )
           }
         />
+
+        {/* ─── Ingredient container serialization (desk screens) ──────────────
+            Mounted per role prefix to match the rest of the app. The intake page
+            derives its own base path from the URL, so its internal links stay
+            inside whichever prefix the user entered through.
+            Cutover and audits are supervisor-and-up: the sweep permanently moves
+            quantity off a legacy receipt, and the drift audits are diagnostics. */}
+        <Route path="/warehouse/ingredient-intakes" element={
+          <ProtectedRoute requiredRole="warehouse">
+            <Layout>
+              {page(<IngredientIntakesPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/warehouse/ingredient-intakes/:intakeId" element={
+          <ProtectedRoute requiredRole="warehouse">
+            <Layout>
+              {page(<IngredientIntakesPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/warehouse/ingredient-containers" element={
+          <ProtectedRoute requiredRole="warehouse">
+            <Layout>
+              {page(<ContainersPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/warehouse/ingredient-rows/labels" element={
+          <ProtectedRoute requiredRole="warehouse">
+            <Layout>
+              {page(<RowLabelPrintPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/supervisor/ingredient-intakes" element={
+          <ProtectedRoute requiredRole="supervisor">
+            <Layout>
+              {page(<IngredientIntakesPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/supervisor/ingredient-intakes/:intakeId" element={
+          <ProtectedRoute requiredRole="supervisor">
+            <Layout>
+              {page(<IngredientIntakesPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/supervisor/ingredient-containers" element={
+          <ProtectedRoute requiredRole="supervisor">
+            <Layout>
+              {page(<ContainersPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/supervisor/ingredient-rows/labels" element={
+          <ProtectedRoute requiredRole="supervisor">
+            <Layout>
+              {page(<RowLabelPrintPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/supervisor/ingredient-cutover" element={
+          <ProtectedRoute requiredRole="supervisor">
+            <Layout>
+              {page(<CutoverSweepPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/supervisor/ingredient-audits" element={
+          <ProtectedRoute requiredRole="supervisor">
+            <Layout>
+              {page(<IngredientAuditsPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/admin/ingredient-intakes" element={
+          <ProtectedRoute requiredRole="admin">
+            <Layout>
+              {page(<IngredientIntakesPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/admin/ingredient-intakes/:intakeId" element={
+          <ProtectedRoute requiredRole="admin">
+            <Layout>
+              {page(<IngredientIntakesPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/admin/ingredient-containers" element={
+          <ProtectedRoute requiredRole="admin">
+            <Layout>
+              {page(<ContainersPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/admin/ingredient-rows/labels" element={
+          <ProtectedRoute requiredRole="admin">
+            <Layout>
+              {page(<RowLabelPrintPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/admin/ingredient-cutover" element={
+          <ProtectedRoute requiredRole="admin">
+            <Layout>
+              {page(<CutoverSweepPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
+        <Route path="/admin/ingredient-audits" element={
+          <ProtectedRoute requiredRole="admin">
+            <Layout>
+              {page(<IngredientAuditsPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
         <Route path="/unauthorized" element={<UnauthorizedPage />} />
 
         <Route

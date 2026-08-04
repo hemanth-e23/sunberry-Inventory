@@ -1,6 +1,6 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Package, ArrowRightLeft, Truck } from 'lucide-react';
+import { Package, ArrowRightLeft, Truck, Boxes } from 'lucide-react';
 import './ScannerHome.css';
 
 const ScannerHome = () => {
@@ -41,6 +41,17 @@ const ScannerHome = () => {
           <div className="scanner-home-text">
             <span>Ship-out Picking</span>
             <span className="scanner-home-desc">Pick pallets for approved shipments</span>
+          </div>
+        </button>
+        <button
+          type="button"
+          className="scanner-home-btn ingredient"
+          onClick={() => navigate('/forklift/ingredient-receiving')}
+        >
+          <div className="scanner-home-icon"><Boxes size={26} /></div>
+          <div className="scanner-home-text">
+            <span>Ingredient Receiving</span>
+            <span className="scanner-home-desc">Scan barrels and bags off the trailer into rows</span>
           </div>
         </button>
       </div>

@@ -8,7 +8,7 @@ import {
   Home, FileText, Eye, Zap, CheckCircle, ClipboardList,
   Printer, BarChart3, Package, Database, Users,
   Layers, AlertCircle, Menu, FileSpreadsheet,
-  Shield, ChevronLeft, Truck,
+  Shield, ChevronLeft, Truck, Boxes,
 } from 'lucide-react';
 import * as notificationService from '../api/notificationService';
 import apiClient from '../api/client';
@@ -272,6 +272,24 @@ function Sidebar({ isOpen, isCollapsed, onToggleCollapse, onClose }) {
         { label: 'Pallet Tags', icon: Printer, to: `${prefix}/pallet-tags` },
       ],
     });
+
+    // --- Ingredients (container serialization) ---
+    // Intakes/containers/row labels are day-to-day warehouse work. The cutover
+    // sweep and the drift audits are supervisor-and-up: the sweep permanently
+    // moves quantity off a legacy receipt, and the audits are diagnostics whose
+    // non-empty result means a write-path bug, not routine drift.
+    const ingredientItems = [
+      { label: 'Ingredient Intakes', icon: Boxes, to: `${prefix}/ingredient-intakes` },
+      { label: 'Containers', icon: Package, to: `${prefix}/ingredient-containers` },
+      { label: 'Row Labels', icon: Printer, to: `${prefix}/ingredient-rows/labels` },
+    ];
+    if (role !== 'warehouse') {
+      ingredientItems.push(
+        { label: 'Cutover Sweep', icon: ArrowRightLeft, to: `${prefix}/ingredient-cutover` },
+        { label: 'Ingredient Audits', icon: ClipboardList, to: `${prefix}/ingredient-audits` },
+      );
+    }
+    sections.push({ group: 'Ingredients', items: ingredientItems });
 
     // --- Production (feature-gated) ---
     const hasStaging = hasFeature(warehouseType, 'staging');

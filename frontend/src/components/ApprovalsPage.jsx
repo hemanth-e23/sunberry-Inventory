@@ -7,13 +7,15 @@ import { getDaysAgo, toDateKey, getTodayDateKey } from "../utils/dateUtils";
 import apiClient from "../api/client";
 import "./Shared.css";
 import "./ApprovalsPage.css";
-import { RECEIPT_STATUS, TRANSFER_STATUS, ADJUSTMENT_STATUS, HOLD_STATUS, FORKLIFT_REQUEST_STATUS } from '../constants';
+import { RECEIPT_STATUS, TRANSFER_STATUS, ADJUSTMENT_STATUS, HOLD_STATUS, FORKLIFT_REQUEST_STATUS, INTAKE_STATUS } from '../constants';
+import { listIntakes } from "../api/ingredientContainerApi";
 
 import ReceiptsTab from "./approvals/ReceiptsTab";
 import TransfersTab from "./approvals/TransfersTab";
 import HoldsTab from "./approvals/HoldsTab";
 import AdjustmentsTab from "./approvals/AdjustmentsTab";
 import ForkliftTab from "./approvals/ForkliftTab";
+import IngredientIntakesTab from "./approvals/IngredientIntakesTab";
 
 const STATUS_PENDING = new Set([RECEIPT_STATUS.RECORDED, RECEIPT_STATUS.REVIEWED]);
 
@@ -285,6 +287,20 @@ const ApprovalsPage = () => {
     [forkliftRequests],
   );
 
+  // Ingredient intakes are NOT in AppDataContext (containers behind them are
+  // high-cardinality), so the tab badge takes its own count and the tab keeps it
+  // fresh after each approve/reject.
+  const [ingredientIntakeCount, setIngredientIntakeCount] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    listIntakes({ status: INTAKE_STATUS.SUBMITTED, limit: 1 })
+      .then((response) => {
+        if (!cancelled) setIngredientIntakeCount(Number(response?.data?.total) || 0);
+      })
+      .catch(() => { /* badge stays at 0; the tab surfaces the real error */ });
+    return () => { cancelled = true; };
+  }, []);
+
   const pendingAdjustments = useMemo(
     () =>
       inventoryAdjustments
@@ -302,7 +318,7 @@ const ApprovalsPage = () => {
     const todayApproved = approvedHistory.filter(r => toDateKey(r.approvedAt) === todayKey).length;
     const urgentCount = backlogPending.filter(r => getDaysAgo(r.submittedAt || r.receiptDate) >= 7).length;
     const totalPendingReceipts = todaysPending.length + backlogPending.length;
-    const totalPendingItems = totalPendingReceipts + pendingTransfers.length + pendingHolds.length + pendingAdjustments.length + pendingForkliftRequests.length;
+    const totalPendingItems = totalPendingReceipts + pendingTransfers.length + pendingHolds.length + pendingAdjustments.length + pendingForkliftRequests.length + ingredientIntakeCount;
     return {
       totalPending: totalPendingItems,
       receiptsPending: totalPendingReceipts,
@@ -314,7 +330,7 @@ const ApprovalsPage = () => {
       urgentCount,
       todayCount: todaysPending.length,
     };
-  }, [todaysPending, backlogPending, approvedHistory, todayKey, pendingTransfers, pendingHolds, pendingAdjustments, pendingForkliftRequests]);
+  }, [todaysPending, backlogPending, approvedHistory, todayKey, pendingTransfers, pendingHolds, pendingAdjustments, pendingForkliftRequests, ingredientIntakeCount]);
 
   return (
     <div className="approvals-page">
@@ -365,6 +381,7 @@ const ApprovalsPage = () => {
             { key: 'forklift', label: 'Forklift Requests', count: summaryStats.forkliftRequestsPending },
             { key: 'holds', label: 'Holds', count: summaryStats.holdsPending },
             { key: 'adjustments', label: 'Adjustments', count: summaryStats.adjustmentsPending },
+            { key: 'ingredient-intakes', label: 'Ingredient Intakes', count: ingredientIntakeCount },
           ].map(({ key, label, count }) => (
             <button
               key={key}
@@ -466,6 +483,13 @@ const ApprovalsPage = () => {
               userNameMap={userNameMap}
             />
           </section>
+        )}
+
+        {activeTab === 'ingredient-intakes' && (
+          <IngredientIntakesTab
+            userNameMap={userNameMap}
+            onPendingCountChange={setIngredientIntakeCount}
+          />
         )}
       </div>
     </div>

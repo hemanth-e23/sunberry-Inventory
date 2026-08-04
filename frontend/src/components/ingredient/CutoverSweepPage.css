@@ -1,0 +1,416 @@
+/* CutoverSweepPage.css — SPEC §15.2 floor-sweep workstation.
+ *
+ * A desk/floor screen, not a gun screen: it borrows the inventory-tab card and
+ * table look (Shared.css / InventoryActionsPage.css, both imported globally by
+ * App.jsx) and only adds what those don't have — the numbered step rail, the
+ * scan box, the big convert button, and the conversion receipt.
+ *
+ * Sizes lean large on purpose. The sweeper is standing at a rack with gloves on
+ * and a scanner in one hand; every interactive target here is at least 44px.
+ */
+
+.cutover-sweep {
+  width: 100%;
+  min-height: 100vh;
+  background: #f5f7fb;
+  padding: 24px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.cutover-sweep__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.cutover-sweep__col {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+@media (max-width: 1024px) {
+  .cutover-sweep__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* On a narrow screen the conversion receipt is the thing the sweeper looks at
+     after every drum, so it leads rather than trails. */
+  .cutover-sweep__col--side {
+    order: -1;
+  }
+}
+
+@media (max-width: 640px) {
+  .cutover-sweep {
+    padding: 16px;
+  }
+}
+
+/* ─── Cards ────────────────────────────────────────────────────────────────── */
+
+.cutover-card {
+  background: #ffffff;
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: 12px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+/* A step that is not reachable yet is dimmed, never hidden — the sweeper can
+   see what is coming and why it is not available. Inputs inside carry their own
+   `disabled`, so this is presentation only and nothing here blocks input. */
+.cutover-card--muted {
+  opacity: 0.55;
+}
+
+.cutover-card--action {
+  gap: 14px;
+  align-items: stretch;
+}
+
+.cutover-card__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cutover-card__header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+  flex: 1;
+}
+
+.cutover-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #0f172a;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+  flex: none;
+}
+
+/* ─── Fields ───────────────────────────────────────────────────────────────── */
+
+.cutover-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.cutover-field > span {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+}
+
+.cutover-field input {
+  padding: 10px 12px;
+  font-size: 15px;
+  border: 1px solid var(--color-border-strong, #d1d5db);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f172a;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+
+.cutover-field input:focus {
+  outline: none;
+  border-color: var(--color-primary, #ff6b35);
+  box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.15);
+}
+
+.cutover-field input:disabled {
+  background: #f1f5f9;
+  cursor: not-allowed;
+}
+
+.cutover-field-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.cutover-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #334155;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.cutover-check input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--color-primary, #ff6b35);
+  cursor: pointer;
+}
+
+/* ─── Scan box ─────────────────────────────────────────────────────────────── */
+
+.cutover-scan {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.cutover-scan__input {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 14px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 2px solid var(--color-border-strong, #d1d5db);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f172a;
+  min-height: 48px;
+  box-sizing: border-box;
+}
+
+.cutover-scan__input:focus {
+  outline: none;
+  border-color: var(--color-primary, #ff6b35);
+  box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.15);
+}
+
+.cutover-scan__input:disabled {
+  background: #f1f5f9;
+  cursor: not-allowed;
+}
+
+.cutover-row-card {
+  border: 1px solid #bbf7d0;
+  background: #f0fdf4;
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.cutover-row-card__name {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #14532d;
+}
+
+/* ─── Banners ──────────────────────────────────────────────────────────────── */
+
+.cutover-banner {
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 14px;
+  border: 1px solid transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cutover-banner--ok {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #14532d;
+}
+
+.cutover-banner--warn {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #78350f;
+}
+
+.cutover-banner--danger {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+.cutover-reasons {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.cutover-reasons li {
+  margin: 2px 0;
+}
+
+/* ─── Stats ────────────────────────────────────────────────────────────────── */
+
+.cutover-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.cutover-stats div {
+  background: #f8fafc;
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.cutover-stats dt {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+}
+
+.cutover-stats dd {
+  margin: 4px 0 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+/* ─── Convert ──────────────────────────────────────────────────────────────── */
+
+.cutover-convert {
+  width: 100%;
+  min-height: 64px;
+  border: none;
+  border-radius: 12px;
+  background: var(--color-primary, #ff6b35);
+  color: #ffffff;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.cutover-convert:hover:not(:disabled) {
+  background: var(--color-primary-dark, #e8551e);
+}
+
+.cutover-convert:disabled {
+  background: #cbd5e1;
+  color: #f8fafc;
+  cursor: not-allowed;
+}
+
+/* ─── Conversion receipt ───────────────────────────────────────────────────── */
+
+.cutover-result {
+  border: 2px solid #14532d;
+  background: #f0fdf4;
+}
+
+.cutover-result__label {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #15803d;
+}
+
+.cutover-result__serial {
+  font-size: 30px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  color: #14532d;
+  word-break: break-all;
+  line-height: 1.1;
+}
+
+.cutover-result__delta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  border-top: 1px solid #bbf7d0;
+  padding-top: 8px;
+  flex-wrap: wrap;
+}
+
+.cutover-result__delta-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #15803d;
+}
+
+.cutover-result__delta-value {
+  font-size: 18px;
+  font-weight: 800;
+  color: #14532d;
+}
+
+.cutover-result__actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cutover-result__actions button {
+  flex: 1;
+  min-width: 130px;
+  min-height: 44px;
+}
+
+/* ─── Print ────────────────────────────────────────────────────────────────── */
+
+/* The sheet only exists in the DOM while a print is in flight, and it is never
+   visible on screen. `display: none` is safe here because the print rules below
+   re-show it, and layout is recalculated for the print context. */
+.cutover-print-root {
+  display: none;
+}
+
+@media print {
+  /* Scoped to a body class this page adds only for the duration of a print, for
+     the reason spelled out in RowLabelPrintPage.css:311-315 — this stylesheet
+     stays loaded for the whole SPA session, so an unscoped `body *` rule would
+     blank every OTHER print in the app (pallet tags, BOL, ship-out docs).
+     `visibility` rather than `display` so the sheet's ancestors keep their boxes. */
+  body.cutover-print-mode * {
+    visibility: hidden;
+  }
+
+  body.cutover-print-mode .cutover-print-root,
+  body.cutover-print-mode .cutover-print-root * {
+    visibility: visible;
+  }
+
+  body.cutover-print-mode .cutover-print-root {
+    display: block;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+
+  /* No @page rule here on purpose: ContainerLabel.css already owns the named
+     4in x 6in page for `.container-label`, and a second declaration would fight
+     it. */
+}
