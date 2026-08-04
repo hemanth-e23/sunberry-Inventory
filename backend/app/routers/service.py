@@ -280,6 +280,12 @@ class CreateStagingRequestIn(BaseModel):
     number_of_batches: int = 1
     production_date: Optional[date] = None  # Planned production date
     items: List[StagingRequestItemIn]
+    # Replace-only resync mode, used when a batch's recipe is overridden AFTER
+    # creation. True means: if an exact-uid PENDING request with zero pull
+    # progress exists, cancel it and create this one in its place; otherwise
+    # create NOTHING and report why. It never creates a duplicate — a blind
+    # re-send would double-stage the batch.
+    replace_existing: bool = False
 
 class FulfillItemBody(BaseModel):
     staging_item_ids: Optional[List[str]] = None  # StagingItem IDs created during staging

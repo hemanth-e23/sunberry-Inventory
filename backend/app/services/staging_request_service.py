@@ -121,7 +121,72 @@ def create_staging_request(db: Session, payload) -> dict:
     """
     Create a staging request from Production batch data.
     Non-inventory-tracked items are auto-fulfilled.
+
+    replace_existing=True is the post-creation recipe-override resync path:
+    it REPLACES an exact-uid PENDING request that nobody has pulled against,
+    or does nothing at all. It must never produce a second open request for
+    the same batch — the warehouse would stage the material twice.
     """
+    if getattr(payload, "replace_existing", False):
+        existing = (
+            db.query(StagingRequest)
+            .filter(
+                StagingRequest.production_batch_uid == payload.production_batch_uid,
+                StagingRequest.status.in_([
+                    StagingRequestStatus.PENDING,
+                    StagingRequestStatus.IN_PROGRESS,
+                ]),
+            )
+            .order_by(StagingRequest.created_at.desc())
+            .first()
+        )
+        if existing is None:
+            # No exact match — the original may be a grouped multi-batch
+            # request ("uid1, uid2"), or staging never got created. Creating a
+            # fresh single-batch request here would double-stage a grouped
+            # batch, so we decline and let production surface it for manual
+            # adjustment.
+            return {
+                "created": False,
+                "replaced": False,
+                "reason": "no_exact_match",
+                "detail": (
+                    "No open staging request found with exactly this batch uid — "
+                    "it may be part of a grouped request. Adjust staging manually."
+                ),
+            }
+
+        progress = any(
+            (item.quantity_fulfilled or 0) > 0
+            and item.status != StagingRequestStatus.FULFILLED.value
+            for item in existing.items
+        ) or any(
+            # Tracked items that are partially/fully pulled by the warehouse.
+            (item.quantity_fulfilled or 0) > 0 and item.staging_item_ids
+            for item in existing.items
+        ) or existing.status == StagingRequestStatus.IN_PROGRESS
+        if progress:
+            # Someone is already pulling against the old quantities. Replacing
+            # under them would orphan their work; surface instead.
+            return {
+                "created": False,
+                "replaced": False,
+                "reason": "in_progress",
+                "detail": (
+                    f"Staging request {existing.id} already has pull progress — "
+                    "adjust it manually in Inventory."
+                ),
+            }
+
+        replaced_request_id = existing.id
+        existing.status = StagingRequestStatus.CANCELLED
+        existing.notes = (
+            (existing.notes or "")
+            + f"\nReplaced after a recipe override on {datetime.now(timezone.utc).date().isoformat()}."
+        ).strip()
+        db.flush()
+
+    replaced_request_id = locals().get("replaced_request_id")
     request_id = f"sr-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
 
     sr = StagingRequest(
@@ -161,6 +226,9 @@ def create_staging_request(db: Session, payload) -> dict:
 
     return {
         "id": sr.id,
+        "created": True,
+        "replaced": replaced_request_id is not None,
+        "replaced_request_id": replaced_request_id,
         "production_batch_uid": sr.production_batch_uid,
         "status": sr.status,
         "items_count": len(sr.items),
