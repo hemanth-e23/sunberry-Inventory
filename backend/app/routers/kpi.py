@@ -169,3 +169,135 @@ async def get_production_today(
         "as_of": datetime.now(ZoneInfo(warehouse.timezone or "UTC")).isoformat(),
         "lines": lines_sorted,
     }
+
+
+@router.get("/production/detail")
+async def get_production_detail(
+    warehouse_id: str = Query(..., description="Warehouse to query"),
+    date: Optional[str] = Query(None, description="Production day YYYY-MM-DD (warehouse-local). Defaults to current production day."),
+    bucket_minutes: int = Query(30, description="Timeline bucket width: 15, 30, or 60 minutes."),
+    db: Session = Depends(get_db),
+):
+    """Per-PRODUCT day totals plus a time-bucketed case timeline.
+
+    `products` splits the day's output by product (and line) using the SAME
+    day-attribution rule as /production (forklift session created_at), so it
+    sums to the headline gauge number — this powers "today we're doing Guava
+    3000 · POG 4000".
+
+    `timeline` buckets pallets by their actual scanned_at into fixed windows
+    (hourly / 30-min / 15-min) for the drill-down. A pallet lands its whole
+    case count in the window it was scanned/closed in, so the series is
+    pallet-granular (chunky), not per-case smooth. Pallets with no scanned_at
+    can't be placed in time and are omitted here (still counted in `products`).
+    """
+    if bucket_minutes not in (15, 30, 60):
+        raise HTTPException(status_code=400, detail="bucket_minutes must be 15, 30, or 60")
+
+    warehouse = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
+    if not warehouse:
+        raise HTTPException(status_code=404, detail="Warehouse not found")
+
+    prod_day, win_start, win_end = _resolve_production_day(warehouse, date)
+
+    # Per-product, per-line day totals. No scanned_at filter → matches headline.
+    prod_rows = db.execute(
+        text(
+            """
+            SELECT
+                (regexp_match(pl.licence_number, '^MP\\d{3}\\d{2}L(\\d+)-'))[1] AS line_number,
+                pl.product_id                                                  AS product_id,
+                p.name                                                         AS product_name,
+                p.short_code                                                   AS short_code,
+                COALESCE(SUM(pl.cases), 0)::int                                AS cases,
+                COUNT(*) FILTER (WHERE NOT pl.is_partial)::int                 AS full_pallets,
+                COUNT(*) FILTER (WHERE pl.is_partial)::int                     AS partial_pallets
+            FROM pallet_licences pl
+            JOIN forklift_requests fr ON fr.id = pl.forklift_request_id
+            LEFT JOIN products p ON p.id = pl.product_id
+            WHERE pl.warehouse_id = :wid
+              AND pl.is_deleted = false
+              AND fr.created_at >= :win_start
+              AND fr.created_at <  :win_end
+              AND pl.licence_number ~ '^MP\\d{3}\\d{2}L\\d+-'
+            GROUP BY 1, 2, 3, 4
+            ORDER BY cases DESC
+            """
+        ),
+        {"wid": warehouse_id, "win_start": win_start, "win_end": win_end},
+    ).all()
+
+    products = [
+        {
+            "line_number": r.line_number,
+            "product_id": r.product_id,
+            "product_name": r.product_name,
+            "short_code": r.short_code,
+            "cases": r.cases,
+            "full_pallets": r.full_pallets,
+            "partial_pallets": r.partial_pallets,
+        }
+        for r in prod_rows if r.line_number
+    ]
+
+    # Time-bucketed timeline. bucket_idx = whole windows elapsed since the
+    # production-day start, measured on the pallet's actual scanned_at. Both
+    # operands are absolute instants (timestamptz), so the subtraction is TZ-safe.
+    bucket_sec = bucket_minutes * 60
+    tl_rows = db.execute(
+        text(
+            """
+            SELECT
+                FLOOR(EXTRACT(EPOCH FROM (pl.scanned_at - :win_start)) / :bsec)::int AS bucket_idx,
+                (regexp_match(pl.licence_number, '^MP\\d{3}\\d{2}L(\\d+)-'))[1]       AS line_number,
+                pl.product_id                                                        AS product_id,
+                p.name                                                               AS product_name,
+                p.short_code                                                         AS short_code,
+                COALESCE(SUM(pl.cases), 0)::int                                      AS cases,
+                COUNT(*)::int                                                        AS pallets
+            FROM pallet_licences pl
+            JOIN forklift_requests fr ON fr.id = pl.forklift_request_id
+            LEFT JOIN products p ON p.id = pl.product_id
+            WHERE pl.warehouse_id = :wid
+              AND pl.is_deleted = false
+              AND fr.created_at >= :win_start
+              AND fr.created_at <  :win_end
+              AND pl.scanned_at IS NOT NULL
+              AND pl.licence_number ~ '^MP\\d{3}\\d{2}L\\d+-'
+            GROUP BY 1, 2, 3, 4, 5
+            ORDER BY 1
+            """
+        ),
+        {"wid": warehouse_id, "win_start": win_start, "bsec": bucket_sec},
+    ).all()
+
+    n_buckets = max(1, int((win_end - win_start).total_seconds() // bucket_sec))
+    timeline = []
+    for r in tl_rows:
+        # Drop out-of-window rows (e.g. a late fix-up whose scanned_at falls
+        # outside this production day's clock).
+        if r.line_number is None or r.bucket_idx is None or r.bucket_idx < 0 or r.bucket_idx >= n_buckets:
+            continue
+        bstart = win_start + timedelta(seconds=r.bucket_idx * bucket_sec)
+        timeline.append({
+            "bucket_start": bstart.isoformat(),
+            "bucket_index": r.bucket_idx,
+            "line_number": r.line_number,
+            "product_id": r.product_id,
+            "product_name": r.product_name,
+            "short_code": r.short_code,
+            "cases": r.cases,
+            "pallets": r.pallets,
+        })
+
+    return {
+        "warehouse_id": warehouse_id,
+        "date": prod_day.isoformat(),
+        "window_start": win_start.isoformat(),
+        "window_end": win_end.isoformat(),
+        "bucket_minutes": bucket_minutes,
+        "num_buckets": n_buckets,
+        "as_of": datetime.now(ZoneInfo(warehouse.timezone or "UTC")).isoformat(),
+        "products": products,
+        "timeline": timeline,
+    }
