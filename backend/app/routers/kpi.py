@@ -248,7 +248,7 @@ async def get_production_detail(
         text(
             """
             SELECT
-                FLOOR(EXTRACT(EPOCH FROM (pl.scanned_at - :win_start)) / :bsec)::int AS bucket_idx,
+                FLOOR(EXTRACT(EPOCH FROM (pl.scanned_at - CAST(:win_start AS timestamptz))) / CAST(:bsec AS double precision))::int AS bucket_idx,
                 (regexp_match(pl.licence_number, '^MP\\d{3}\\d{2}L(\\d+)-'))[1]       AS line_number,
                 pl.product_id                                                        AS product_id,
                 p.name                                                               AS product_name,
@@ -268,7 +268,7 @@ async def get_production_detail(
             ORDER BY 1
             """
         ),
-        {"wid": warehouse_id, "win_start": win_start, "bsec": bucket_sec},
+        {"wid": warehouse_id, "win_start": win_start, "win_end": win_end, "bsec": bucket_sec},
     ).all()
 
     n_buckets = max(1, int((win_end - win_start).total_seconds() // bucket_sec))
