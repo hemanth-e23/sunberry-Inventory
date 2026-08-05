@@ -301,3 +301,87 @@ async def get_production_detail(
         "products": products,
         "timeline": timeline,
     }
+
+
+@router.get("/production/range")
+async def get_production_range(
+    warehouse_id: str = Query(..., description="Warehouse to query"),
+    start: str = Query(..., description="First production day, YYYY-MM-DD (warehouse-local, inclusive)."),
+    end: str = Query(..., description="Last production day, YYYY-MM-DD (warehouse-local, inclusive)."),
+    db: Session = Depends(get_db),
+):
+    """Per-day, per-line, per-product case counts across a date range.
+
+    Powers the KPI trend + daily-breakdown views. Each pallet is attributed to a
+    production day by shifting its forklift-session timestamp back by the
+    warehouse's day-start (05:30) and taking the local date — the same
+    05:30→05:30 window /production uses, vectorised over the range.
+    """
+    try:
+        d0 = date.fromisoformat(start)
+        d1 = date.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start/end must be YYYY-MM-DD")
+    if d1 < d0:
+        raise HTTPException(status_code=400, detail="end must be on/after start")
+    if (d1 - d0).days > 400:
+        raise HTTPException(status_code=400, detail="range too large (max 400 days)")
+
+    warehouse = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
+    if not warehouse:
+        raise HTTPException(status_code=404, detail="Warehouse not found")
+
+    tz = warehouse.timezone or "UTC"
+    start_t = warehouse.production_day_start  # datetime.time, e.g. 05:30
+    start_off = f"{start_t.hour} hours {start_t.minute} minutes"
+
+    # prod_day = local_date(created_at shifted back by the day-start offset), so a
+    # run crossing midnight and a pre-05:30 tail both file under the right day.
+    prod_day_expr = "(((fr.created_at AT TIME ZONE :tz) - CAST(:start_off AS interval))::date)"
+
+    rows = db.execute(
+        text(
+            f"""
+            SELECT
+                {prod_day_expr}                                                AS prod_day,
+                (regexp_match(pl.licence_number, '^MP\\d{{3}}\\d{{2}}L(\\d+)-'))[1] AS line_number,
+                pl.product_id                                                  AS product_id,
+                p.name                                                         AS product_name,
+                p.short_code                                                   AS short_code,
+                COALESCE(SUM(pl.cases), 0)::int                                AS cases,
+                COUNT(*)::int                                                  AS pallets
+            FROM pallet_licences pl
+            JOIN forklift_requests fr ON fr.id = pl.forklift_request_id
+            LEFT JOIN products p ON p.id = pl.product_id
+            WHERE pl.warehouse_id = :wid
+              AND pl.is_deleted = false
+              AND pl.licence_number ~ '^MP\\d{{3}}\\d{{2}}L\\d+-'
+              AND {prod_day_expr} BETWEEN :d0 AND :d1
+            GROUP BY prod_day, 2, 3, 4, 5
+            ORDER BY prod_day, line_number
+            """
+        ),
+        {"tz": tz, "start_off": start_off, "wid": warehouse_id, "d0": d0, "d1": d1},
+    ).all()
+
+    result = []
+    for r in rows:
+        if not r.line_number or r.prod_day is None:
+            continue
+        result.append({
+            "date": r.prod_day.isoformat(),
+            "line_number": r.line_number,
+            "product_id": r.product_id,
+            "product_name": r.product_name,
+            "short_code": r.short_code,
+            "cases": r.cases,
+            "pallets": r.pallets,
+        })
+
+    return {
+        "warehouse_id": warehouse_id,
+        "start": d0.isoformat(),
+        "end": d1.isoformat(),
+        "timezone": tz,
+        "rows": result,
+    }
