@@ -36,6 +36,7 @@ from app.models import (
 from app.models.inventory import ShipOutLotReservation, TransferPalletSwap
 from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
 from app.utils.locations import warehouse_id_for_row
+from app.utils.gs1 import build_bol_number
 
 
 # ---------------------------------------------------------------------------
@@ -921,8 +922,10 @@ def generate_documents(db: Session, transfer: InventoryTransfer, seal_number: Op
     if transfer.bol_number:
         bol_number = transfer.bol_number
     else:
+        # A GSIN, not a counter — see app/utils/gs1.py. nextval() is atomic, so
+        # two orders sealed at the same moment cannot draw the same serial.
         seq = db.execute(sa_text("SELECT nextval('bol_number_seq')")).scalar()
-        bol_number = f"{seq:03d}"
+        bol_number = build_bol_number(seq)
 
     snapshot = {
         "bol_number": bol_number,

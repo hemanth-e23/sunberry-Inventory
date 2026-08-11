@@ -6,6 +6,15 @@ ROLE_SUPERVISOR = "supervisor"
 ROLE_WAREHOUSE = "warehouse"
 ROLE_FORKLIFT = "forklift"
 
+# ─── Bill of Lading numbering ─────────────────────────────────────────────────
+# The BOL number is a GSIN (Global Shipment Identification Number), not a
+# counter: 17 digits = a 10-digit GS1 company prefix + a 6-digit shipment
+# serial + a mod-10 check digit. Carriers and customers read it as a real GS1
+# code, so the format is not ours to choose, and it must continue the series the
+# legacy system issued rather than restarting. See app/utils/gs1.py.
+BOL_GSIN_PREFIX = "0850039525"
+BOL_SERIAL_DIGITS = 6
+
 # Role groups
 ADMIN_ROLES = frozenset({ROLE_ADMIN, ROLE_SUPERADMIN, ROLE_CORPORATE_ADMIN})
 APPROVAL_ROLES = frozenset({ROLE_ADMIN, ROLE_SUPERADMIN, ROLE_CORPORATE_ADMIN, ROLE_SUPERVISOR})
