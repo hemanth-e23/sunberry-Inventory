@@ -1351,7 +1351,7 @@ async def create_ship_out_pick_list_v2(
         db.rollback()
         from app.exceptions import ValidationError, NotFoundError
         if isinstance(e, (ValidationError, NotFoundError)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
         raise
 
     db.commit()
@@ -1403,7 +1403,7 @@ async def create_scheduled_ship_out(
         db.rollback()
         from app.exceptions import ValidationError, NotFoundError
         if isinstance(e, (ValidationError, NotFoundError)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
         raise
 
     db.commit()
@@ -1459,7 +1459,7 @@ async def reschedule_ship_out(
     try:
         ship_out_service.reschedule_order(db, transfer, data.scheduled_date, data.appointment_time, current_user)
     except ValidationError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
     db.commit()
     db.refresh(transfer)
     return _transfer_to_response(transfer, db)
@@ -1482,7 +1482,7 @@ async def cancel_scheduled_ship_out(
     try:
         ship_out_service.cancel_scheduled_order(db, transfer, current_user)
     except ValidationError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
     db.commit()
     db.refresh(transfer)
     return _transfer_to_response(transfer, db)
@@ -1503,7 +1503,7 @@ async def restore_cancelled_ship_out(
         ship_out_service.restore_cancelled_order(db, transfer, current_user)
     except ValidationError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
     db.commit()
     db.refresh(transfer)
     return _transfer_to_response(transfer, db)
@@ -1528,7 +1528,7 @@ async def check_in_ship_out(
     try:
         ship_out_service.check_in_order(db, transfer, data, current_user)
     except ValidationError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
     db.commit()
     db.refresh(transfer)
     return _transfer_to_response(transfer, db)
@@ -1587,7 +1587,7 @@ async def select_pallet_endpoint(
         result = ship_out_service.select_pallet(db, transfer, data.licence_number, current_user)
     except ValidationError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
     db.commit()
     return result
 
@@ -1609,7 +1609,7 @@ async def adjust_pallet_cases_endpoint(
         )
     except ValidationError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
     db.commit()
     return result
 
@@ -1639,7 +1639,7 @@ async def add_manual_attribution_endpoint(
                                                 data.cases, data.reason, current_user)
     except ValidationError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
     db.commit()
     return ship_out_service.order_reconcile_summary(db, transfer)
 
@@ -1670,7 +1670,7 @@ async def reconcile_endpoint(
         ship_out_service.reconcile_order(db, transfer, data.confirm_short, data.confirm_over, current_user)
     except ValidationError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
     db.commit()
     db.refresh(transfer)
     return _transfer_to_response(transfer, db)
@@ -1691,7 +1691,7 @@ async def generate_documents_endpoint(
             db, transfer, data.seal_number, data.time_out, data.pallet_count_override, current_user)
     except ValidationError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
     db.commit()
     return snapshot
 
@@ -1711,7 +1711,7 @@ async def void_documents_endpoint(
         ship_out_service.void_documents(db, transfer, data.reason, current_user)
     except ValidationError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
     db.commit()
     db.refresh(transfer)
     return _transfer_to_response(transfer, db)
@@ -1753,7 +1753,7 @@ async def get_bol_pdf_endpoint(
     try:
         pdf = bol_pdf_service.render_bol_pdf(transfer.document_snapshot)
     except ValidationError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
 
     bol_no = transfer.bol_number or transfer_id
     return Response(
@@ -1787,7 +1787,7 @@ async def get_scanner_view(
     except Exception as e:
         from app.exceptions import ValidationError, NotFoundError
         if isinstance(e, (ValidationError, NotFoundError)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
         raise
     return view
 
@@ -1823,7 +1823,7 @@ async def scan_pick_v2_endpoint(
         db.rollback()
         from app.exceptions import ValidationError, NotFoundError
         if isinstance(e, (ValidationError, NotFoundError)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
         raise
 
     db.commit()
@@ -1862,7 +1862,7 @@ async def unscan_pick_v2_endpoint(
         db.rollback()
         from app.exceptions import ValidationError, NotFoundError
         if isinstance(e, (ValidationError, NotFoundError)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
         raise
 
     db.commit()
@@ -1891,7 +1891,7 @@ async def lots_for_line_endpoint(
     except Exception as e:
         from app.exceptions import ValidationError, NotFoundError
         if isinstance(e, (ValidationError, NotFoundError)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
         raise
 
 
@@ -1924,7 +1924,7 @@ async def retarget_lot_endpoint(
         db.rollback()
         from app.exceptions import ValidationError, NotFoundError
         if isinstance(e, (ValidationError, NotFoundError)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
         raise
 
     db.commit()
@@ -1961,7 +1961,7 @@ async def lot_escape_hatch_endpoint(
         db.rollback()
         from app.exceptions import ValidationError, NotFoundError
         if isinstance(e, (ValidationError, NotFoundError)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
         raise
 
     db.commit()

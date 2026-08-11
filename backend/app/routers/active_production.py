@@ -186,7 +186,7 @@ def set_active_production(
     try:
         lot_number = lot_for_today(plant_tz, line.name)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=e.detail)
 
     # Deactivate any existing active row for this line
     existing = (

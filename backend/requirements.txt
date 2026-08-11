@@ -1,5 +1,11 @@
 # Core framework
 fastapi==0.115.6
+# Pinned explicitly: fastapi does not pin starlette, and 0.41 added
+# HTTPException.__str__ -> "400: <detail>". Routes that did detail=str(e)
+# then shipped that prefix to the browser, breaking the frontend's
+# SHORT_CONFIRM_REQUIRED check. An unpinned transitive dep changed
+# behaviour on a container rebuild with no code change.
+starlette==0.41.3
 uvicorn[standard]==0.34.0
 
 # Database (PostgreSQL)
