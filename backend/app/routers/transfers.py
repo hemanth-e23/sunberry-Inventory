@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 from datetime import datetime, timezone, date as dt_date
@@ -1726,6 +1726,45 @@ async def get_documents_endpoint(
     if not transfer.document_snapshot:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No documents generated yet")
     return transfer.document_snapshot
+
+
+@router.get("/transfers/{transfer_id}/bol.pdf")
+async def get_bol_pdf_endpoint(
+    transfer_id: str,
+    db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
+):
+    """The printable Bill of Lading, rendered by filling Sunberry's own PDF form.
+
+    Served instead of printing the HTML view from the browser: the template's
+    geometry is fixed, so the document cannot spill onto a second page because
+    of a printer's margins, a print dialog's headers, or a long consignee
+    address. Built from the frozen document_snapshot, so a reprint reproduces
+    the shipped document exactly.
+    """
+    from app.services import bol_pdf_service
+    from app.exceptions import ValidationError
+
+    transfer = _get_shipout_or_404(db, transfer_id)
+    if not transfer.document_snapshot:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No documents generated yet — generate them before printing.",
+        )
+    try:
+        pdf = bol_pdf_service.render_bol_pdf(transfer.document_snapshot)
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    bol_no = transfer.bol_number or transfer_id
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            # inline: opens in the browser's PDF viewer (print button, exact
+            # scale) rather than downloading a file the user must find.
+            "Content-Disposition": f'inline; filename="BOL-{bol_no}.pdf"',
+        },
+    )
 
 
 @router.get("/transfers/{transfer_id}/scanner-view")

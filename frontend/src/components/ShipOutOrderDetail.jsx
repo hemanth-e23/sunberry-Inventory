@@ -508,7 +508,7 @@ const ShipOutOrderDetail = ({ orderId, onBack }) => {
         </div>
       )}
 
-      {docs && <ShipOutDocuments snapshot={docs} />}
+      {docs && <ShipOutDocuments snapshot={docs} transferId={orderId} />}
 
       {/* Pallet-select modal — lots first, then that lot's ready pallets */}
       <Modal isOpen={!!selectLine} onClose={() => setSelectLine(null)} title={`Select pallets — ${selectLine?.product_name || ''}`}>

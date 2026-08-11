@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import apiClient from '../api/client';
 import './ShipOutDocuments.css';
 
 // Renders the frozen document snapshot as a Packing Slip and a Bill of Lading,
@@ -16,8 +17,42 @@ const fmtT = (iso) => {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 };
 
-const ShipOutDocuments = ({ snapshot: s }) => {
+const ShipOutDocuments = ({ snapshot: s, transferId }) => {
   const [tab, setTab] = useState('slip');
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfError, setPdfError] = useState('');
+
+  // Open the server-rendered BOL. It is fetched through apiClient rather than
+  // linked directly because a new tab carries no Authorization header — the
+  // request would 401. Fetch with auth, then open the bytes as a blob so the
+  // browser's own PDF viewer (and its print button) handles it.
+  const openBolPdf = async () => {
+    if (!transferId) return;
+    setPdfBusy(true);
+    setPdfError('');
+    let url;
+    try {
+      const r = await apiClient.get(`/inventory/transfers/${transferId}/bol.pdf`, {
+        responseType: 'blob',
+      });
+      url = URL.createObjectURL(new Blob([r.data], { type: 'application/pdf' }));
+      const win = window.open(url, '_blank', 'noopener');
+      if (!win) setPdfError('Allow pop-ups for this site to open the BOL.');
+    } catch (err) {
+      // An error response arrives as a Blob too, so the detail has to be read out.
+      let detail = 'Could not build the BOL PDF.';
+      try {
+        const text = await err?.response?.data?.text?.();
+        if (text) detail = JSON.parse(text).detail || detail;
+      } catch { /* keep the default */ }
+      setPdfError(detail);
+    } finally {
+      setPdfBusy(false);
+      // Revoke late so the new tab has finished loading the blob.
+      if (url) setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    }
+  };
+
   if (!s) return null;
 
   const shipTo = s.ship_to || {};
@@ -33,8 +68,16 @@ const ShipOutDocuments = ({ snapshot: s }) => {
           <button className={tab === 'slip' ? 'active' : ''} onClick={() => setTab('slip')}>Packing Slip</button>
           <button className={tab === 'bol' ? 'active' : ''} onClick={() => setTab('bol')}>Bill of Lading</button>
         </div>
-        <button className="primary-button" onClick={() => window.print()}>Print</button>
+        <div className="sod-actions">
+          {transferId && (
+            <button className="primary-button" onClick={openBolPdf} disabled={pdfBusy}>
+              {pdfBusy ? 'Building…' : 'Open BOL PDF'}
+            </button>
+          )}
+          <button className="sod-print-html" onClick={() => window.print()}>Print this view</button>
+        </div>
       </div>
+      {pdfError && <p className="sod-pdf-error">{pdfError}</p>}
 
       {tab === 'slip' && (
         <div className="sod-doc" id="packing-slip">
@@ -114,7 +157,7 @@ const ShipOutDocuments = ({ snapshot: s }) => {
                 <table className="sod-kv sod-kv-right"><tbody>
                   <tr><td className="k">B of L NO</td><td><strong>{s.bol_number}</strong></td></tr>
                 </tbody></table>
-                <div className="sod-fill" style={{ minHeight: '120px', borderBottom: '1px solid #333' }}></div>
+                <div className="sod-fill" style={{ minHeight: '55px', borderBottom: '1px solid #333' }}></div>
                 <table className="sod-kv sod-kv-right"><tbody>
                   <tr><td className="k">CARRIER NAME</td><td><strong>{s.carrier || ''}</strong></td></tr>
                   <tr><td className="k">CARRIER NO</td><td>&nbsp;</td></tr>
@@ -257,11 +300,11 @@ const ShipOutDocuments = ({ snapshot: s }) => {
             <tr>
               <td className="sod-cell" style={{ width: '40%' }}>
                 <div className="sod-band">SHIPPER SIGNATURE &amp; DATE</div>
-                <div className="sod-sigbox" style={{ minHeight: '95px' }}></div>
+                <div className="sod-sigbox" style={{ minHeight: '58px' }}></div>
               </td>
               <td className="sod-cell" style={{ width: '38%' }}>
                 <div className="sod-band">CARRIER SIGNATURE &amp; PICK-UP DATE</div>
-                <div className="sod-sigbox" style={{ minHeight: '95px' }}></div>
+                <div className="sod-sigbox" style={{ minHeight: '58px' }}></div>
               </td>
               <td className="sod-cell" style={{ width: '22%' }}>
                 <div className="sod-band">TRAILER LOADED</div>
