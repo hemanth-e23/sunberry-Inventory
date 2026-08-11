@@ -28,7 +28,7 @@
 
 /* generic bordered tables */
 .sod-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
-.sod-table th, .sod-table td { border: 1px solid #333; padding: 3px 6px; text-align: left; font-size: 10.5px; }
+.sod-table th, .sod-table td { border: 1px solid #333; padding: 1px 6px; text-align: left; font-size: 10.5px; }
 .sod-table th { background: #f3f4f6; }
 
 /* BOL specifics — slate band headers like the original form */
@@ -64,10 +64,10 @@
 .sod-col-l { width: 57%; border-right: 1px solid #333; }
 .sod-col-r { width: 43%; }
 .sod-shade { background: #e9ecef; }
-.sod-sig { min-height: 46px; }
+.sod-sig { min-height: 30px; }
 
 .sod-kv { width: 100%; border-collapse: collapse; }
-.sod-kv td { padding: 3px 6px; border-bottom: 1px solid #333; font-size: 10.5px; vertical-align: middle; }
+.sod-kv td { padding: 1px 6px; border-bottom: 1px solid #333; font-size: 10.5px; vertical-align: middle; }
 .sod-kv tr:last-child td { border-bottom: none; }
 .sod-kv td.k { color: #444; font-size: 8.5px; font-weight: 700; width: 34%; text-transform: uppercase; border-right: 1px solid #333; }
 .sod-kv-right td.k { width: 40%; }
@@ -133,9 +133,56 @@
     print-color-adjust: exact !important;
   }
 
-  /* The BOL is a full-size form (readable font + tall boxes) scaled by a single
-     `zoom` to fill exactly one A4 portrait page. `zoom` (unlike transform)
-     reduces the layout box, so pagination respects it. Value tuned by rendering
-     the real component to a print PDF and checking it fills one page. */
-  .sod-bol { zoom: 0.86; }
+  /* The BOL is a fixed-height form (its tables have blank filler rows, so the
+     document is the same height for a 1-line order as a 9-line one) scaled by a
+     single `zoom` to fit one A4 portrait page. `zoom` (unlike transform) reduces
+     the layout box, so pagination respects it.
+
+     Two things set this value, and neither is taste:
+
+     1. The page box is 297mm minus whatever the PRINTER takes. "Margins:
+        Default" on a real printer is routinely 12mm+, not the 8mm this CSS
+        asks for, so the form has to survive far more margin than it requests.
+     2. Row padding was cut to 1px to match the original form, whose data rows
+        measure 3.81mm (Orders.pdf, US Letter). At the old 3px the form was 31%
+        taller than the original relative to its width, which no amount of
+        zoom-tuning could fix — that mismatch is what put the last row on
+        page 2 for years.
+
+     Measured ceilings, via ShipOutDocumentsPrint.test.jsx (renders this
+     component to a real A4 PDF and counts pages at a 24mm margin):
+
+         0.86 -> passed an 18mm check and STILL printed 2 pages in the
+                 warehouse; the print dialog reserves header/footer space on
+                 top of the paper's unprintable area, hence the 24mm bar
+         0.82 -> 1 page with normal data, 2 pages once addresses get long
+         0.79 -> 2 pages with long data
+         0.78 -> 1 page in every case, including the long-value stress case
+
+     Long text is the live risk, not line count: the tables carry fixed blank
+     rows, so a 9-line order is exactly as tall as a 1-line order. What grows
+     the form is a consignee name or address that WRAPS. Truncating those is
+     not an option on a bill of lading, so the scale carries the budget instead.
+
+     Raising this to gain font size puts the form back on the cliff. Run the
+     test before touching it. */
+  .sod-bol { zoom: 0.78; }
 }
+
+/* Document actions. "Open BOL PDF" is the primary path: the server fills
+   Sunberry's own PDF form, so the output cannot be reflowed by a printer's
+   margins the way the browser-printed HTML can. "Print this view" stays for
+   the packing slip and as a fallback. */
+.sod-actions { display: flex; gap: 0.5rem; align-items: center; }
+.sod-print-html {
+  padding: 0.5rem 0.9rem; background: #f3f4f6; color: #374151;
+  border: 1px solid #d1d5db; border-radius: 8px; font-size: 0.85rem;
+  font-weight: 600; cursor: pointer; box-shadow: none;
+}
+.sod-print-html::before { display: none; }
+.sod-print-html:hover { background: #e5e7eb; transform: none; box-shadow: none; }
+.sod-pdf-error {
+  margin: 0.5rem 0 0; padding: 0.5rem 0.75rem; background: #fee2e2;
+  color: #991b1b; border-radius: 8px; font-size: 0.85rem;
+}
+@media print { .sod-actions, .sod-pdf-error { display: none !important; } }
