@@ -21,6 +21,8 @@ def list_pallet_licences(
     product_id: Optional[str] = Query(None, description="Filter by product ID"),
     status: Optional[str] = Query(None, description="Filter by status (e.g. in_stock, shipped)"),
     is_held: Optional[bool] = Query(None, description="Filter by hold status"),
+    limit: int = Query(1000, ge=1, le=5000, description="Maximum rows to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip, for paging"),
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
@@ -46,7 +48,18 @@ def list_pallet_licences(
         query = query.filter(PalletLicence.status == status)
     if is_held is not None:
         query = query.filter(PalletLicence.is_held == is_held)
-    licences = query.order_by(PalletLicence.sequence).all()
+    # Always bounded. This endpoint previously returned every matching row with
+    # four eager joins and no ceiling, so an unfiltered call materialised the
+    # whole pallet_licences table — a cost that grew every day the warehouse
+    # operated. The default is high enough that existing callers (which filter
+    # by receipt or product) are unaffected, while making an unbounded response
+    # impossible. order_by is applied before the slice so paging is stable.
+    licences = (
+        query.order_by(PalletLicence.sequence, PalletLicence.id)
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     for pl in licences:
         area_name = pl.storage_area.name if pl.storage_area else None
         row_name = pl.storage_row.name if pl.storage_row else None

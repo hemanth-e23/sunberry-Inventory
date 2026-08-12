@@ -55,20 +55,31 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
       setTransferScanProgress({});
       return;
     }
+    // Concurrent, not sequential: this used to await one transfer at a time,
+    // so the refresh took as long as the sum of every request. Each of those
+    // calls hits /scan-progress, which is the most expensive read in the app.
+    let cancelled = false;
     const load = async () => {
-      const next = {};
-      for (const t of shipOuts) {
+      const results = await Promise.all(shipOuts.map(async (t) => {
         try {
-          const data = await fetchTransferScanProgress(t.id);
-          if (data) next[t.id] = data;
-        } catch (_) { // ignore
+          return [t.id, await fetchTransferScanProgress(t.id)];
+        } catch (_) {
+          return null;
         }
-      }
+      }));
+      if (cancelled) return;   // a superseded run must not overwrite fresher data
+      const next = {};
+      results.forEach((entry) => {
+        if (entry && entry[1]) next[entry[0]] = entry[1];
+      });
       setTransferScanProgress((prev) => ({ ...prev, ...next }));
     };
     load();
-    const interval = setInterval(load, 5000);
-    return () => clearInterval(interval);
+    // 15s rather than 5s. This is an approvals overview, not the forklift's
+    // live scanning view, so it does not need 5s freshness — and at 5s it was
+    // issuing one request per pending ship-out, three times a minute, all day.
+    const interval = setInterval(load, 15000);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [pendingTransfers, fetchTransferScanProgress]);
 
   if (pendingTransfers.length === 0) {

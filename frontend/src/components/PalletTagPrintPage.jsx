@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
@@ -61,6 +61,12 @@ const PalletTagPrintPage = () => {
   const [showPreview, setShowPreview] = useState(false);
   const [previewTags, setPreviewTags] = useState([]); // [{ kind: 'receipt'|'pallet', receipt, pallet? }]
   const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Refs, not state, on purpose: the prefetch effect below needs to test these
+  // from inside async workers that captured an older render's closure. State
+  // would be stale there — which is exactly how the request storm happened.
+  const inFlightRef = useRef(new Set());   // receipts currently being fetched
+  const attemptedRef = useRef(new Set());  // receipts already tried this mount
 
   const isFinishedGoodsReceipt = (receipt) => {
     if (!receipt) return false;
@@ -140,20 +146,45 @@ const PalletTagPrintPage = () => {
   // filtered list, fetch its pallet licences if we don't have them yet.
   // This lets the "no in-building pallets" hide filter kick in shortly
   // after the list is rendered, so empty FG receipts vanish on their own.
+  //
+  // This effect took the production API down twice (2026-08-10, 2026-08-12).
+  // It depends on `availableReceipts`, which is a useMemo over
+  // `palletsByReceipt` — the very state each fetch below writes. So every
+  // completed request produced a new array identity, re-ran this effect, and
+  // started ANOTHER pool of workers on top of the ones already running. With
+  // no cleanup nothing cancelled the old pools, and the `MAX = 4` cap applied
+  // per run rather than globally, so worker count grew without bound. The
+  // in-flight guard could not stop it either: it read `palletsByReceipt` from
+  // a stale closure and so never saw the requests already in flight. Result:
+  // ~800 requests in four minutes from a single browser tab.
+  //
+  // Three things make it safe now:
+  //   1. `inFlightRef` — a ref, so the dedupe check always sees current state
+  //      rather than the values captured when this effect ran.
+  //   2. `cancelledRef` — the cleanup stops workers from a superseded run
+  //      instead of leaving them to pile up.
+  //   3. `attemptedRef` — a receipt is tried once per mount. A failed fetch
+  //      previously cached [], which re-entered the fetch list forever.
   useEffect(() => {
     const toFetch = availableReceipts
       .filter((r) => isFinishedGoodsReceipt(r))
-      .filter((r) => !palletsByReceipt[r.id] && !loadingReceiptIds.has(r.id));
-    if (toFetch.length === 0) return;
-    // Fire requests in parallel but cap concurrency so we don't pound the
-    // API on a giant filter result.
+      .filter((r) => !palletsByReceipt[r.id]
+        && !inFlightRef.current.has(r.id)
+        && !attemptedRef.current.has(r.id));
+    if (toFetch.length === 0) return undefined;
+
+    const cancelled = { current: false };
     const MAX = 4;
     let i = 0;
     const worker = async () => {
-      while (i < toFetch.length) {
-        const idx = i++;
-        const r = toFetch[idx];
+      while (i < toFetch.length && !cancelled.current) {
+        const r = toFetch[i++];
         if (!r) return;
+        if (inFlightRef.current.has(r.id) || attemptedRef.current.has(r.id)) continue;
+        // Only the attempted marker here. inFlightRef is owned entirely by
+        // ensurePalletsLoaded — setting it here too would make that function
+        // see the receipt as already in flight and return without fetching.
+        attemptedRef.current.add(r.id);
         try {
           await ensurePalletsLoaded(r.id);
         } catch (_) {
@@ -162,6 +193,7 @@ const PalletTagPrintPage = () => {
       }
     };
     Array.from({ length: Math.min(MAX, toFetch.length) }).forEach(() => worker());
+    return () => { cancelled.current = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [availableReceipts]);
 
@@ -169,6 +201,10 @@ const PalletTagPrintPage = () => {
   // preview, or select-all). Cached afterwards.
   const ensurePalletsLoaded = async (receiptId) => {
     if (palletsByReceipt[receiptId]) return palletsByReceipt[receiptId];
+    // Mark before awaiting so concurrent callers (preview + prefetch racing on
+    // the same receipt) collapse into one request rather than duplicating it.
+    if (inFlightRef.current.has(receiptId)) return palletsByReceipt[receiptId] || [];
+    inFlightRef.current.add(receiptId);
     setLoadingReceiptIds((prev) => new Set(prev).add(receiptId));
     try {
       const list = await fetchPalletLicences({ receipt_id: receiptId });
@@ -176,6 +212,7 @@ const PalletTagPrintPage = () => {
       setPalletsByReceipt((prev) => ({ ...prev, [receiptId]: arr }));
       return arr;
     } finally {
+      inFlightRef.current.delete(receiptId);
       setLoadingReceiptIds((prev) => {
         const next = new Set(prev);
         next.delete(receiptId);

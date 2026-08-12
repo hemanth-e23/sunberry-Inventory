@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # runaway query surfaces as a real database error rather than a timeout.
     REQUEST_TIMEOUT_SECONDS: int = 45
 
+    # Log successful requests slower than this many milliseconds. Only failures
+    # were logged previously, so the slow-but-successful requests that consumed
+    # the connection pool during the August 2026 outages left no trace — the
+    # log began mid-collapse. Set to 0 to disable.
+    SLOW_REQUEST_MS: int = 2000
+
     # Worker threads FastAPI uses to run synchronous endpoints. 0 means "match
     # the connection pool", which is the sensible default: every such endpoint
     # holds one connection for its whole request, so a thread without a

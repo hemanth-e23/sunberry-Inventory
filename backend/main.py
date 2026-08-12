@@ -283,6 +283,45 @@ def _log_request_error(request: Request, status: int, *, body: bytes = b"",
             pass
 
 
+def _log_slow_request(request: Request, status: int) -> None:
+    """Log SUCCESSFUL requests that took too long.
+
+    This closes the blind spot that made both August 2026 outages so hard to
+    diagnose. Only failures were ever logged, so the requests that actually
+    consumed the connection pool left no trace at all — they succeeded, slowly,
+    for several minutes before anything started erroring. The log therefore
+    opened mid-collapse, with no record of what caused it.
+
+    A slow success is the earliest honest signal that something is degrading.
+    Unlike the error banner this includes the query string, because "which
+    pallet-licences call was slow" is unanswerable without it.
+
+    Never raises: logging must not turn a healthy response into an error.
+    """
+    try:
+        threshold_ms = settings.SLOW_REQUEST_MS
+        if threshold_ms <= 0:
+            return
+        start = getattr(request.state, "start_time", None)
+        if start is None:
+            return
+        took_ms = int((time.time() - start) * 1000)
+        if took_ms < threshold_ms:
+            return
+
+        path = request.url.path
+        if request.url.query:
+            path = f"{path}?{request.url.query}"
+        pool = pool_stats()
+        logger.warning(
+            "SLOW %s %s  user=%s status=%s took=%sms  pool=%s/%s",
+            request.method, path, _request_user_repr(request), status,
+            took_ms, pool["checked_out"], pool["capacity"],
+        )
+    except Exception:
+        pass
+
+
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Log a single banner for every FAILED request (status >= 400 or an
     unhandled exception) with the user, path, body, timing, and — for real
@@ -323,6 +362,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 body=body,
                 reason=getattr(request.state, "error_reason", None),
             )
+        else:
+            _log_slow_request(request, response.status_code)
         return response
 
 

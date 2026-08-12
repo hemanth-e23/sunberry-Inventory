@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useFoundationContext as useFoundation } from './FoundationContext';
 import { useLocationContext as useLocation } from './LocationContext';
 import { useReceipt } from './ReceiptContext';
@@ -1078,7 +1078,14 @@ export const InventoryProvider = ({ children }) => {
 
   // ─── fetchTransferScanProgress ──────────────────────────────────────────────
 
-  const fetchTransferScanProgress = async (transferId) => {
+  // useCallback with no dependencies, so this keeps ONE identity for the life
+  // of the provider. It is named in the dependency array of a polling effect in
+  // approvals/TransfersTab. As a plain function it was recreated on every
+  // render of this context — which happens on any inventory state change —
+  // and each new identity re-ran that effect, tearing down the interval and
+  // firing an immediate request per pending ship-out. On a busy scanning day
+  // that is a burst of the app's most expensive read on every state change.
+  const fetchTransferScanProgress = useCallback(async (transferId) => {
     try {
       const response = await apiClient.get(`/inventory/transfers/${transferId}/scan-progress`);
       return response.data;
@@ -1086,7 +1093,7 @@ export const InventoryProvider = ({ children }) => {
       console.error('Error fetching transfer scan progress:', error);
       return null;
     }
-  };
+  }, []);
 
   // ─── Lot-level ship-out v2 (Phase 1: warehouse worker) ─────────────────────
 

@@ -760,17 +760,35 @@ def get_transfer_scan_progress(
         .all()
     )
 
+    swaps = list(transfer.swaps or [])
+
+    # Resolve every user this response needs in ONE query.
+    #
+    # This endpoint is polled every 3-5s by three separate screens for the whole
+    # duration of a ship-out, and it previously issued a query per scan event
+    # and another per swap just to turn an id into a name. On a 200-pallet pick
+    # that was hundreds of round-trips per poll, several times a second.
+    user_ids = {e.scanned_by for e in events if e.scanned_by}
+    user_ids |= {s.swapped_by for s in swaps if s.swapped_by}
+    users_by_id = (
+        {u.id: u for u in db.query(User).filter(User.id.in_(user_ids)).all()}
+        if user_ids else {}
+    )
+
+    def _actor_name(user_id):
+        """Readable label for an actor; never the raw id, even if hard-deleted."""
+        if not user_id:
+            return None
+        u = users_by_id.get(user_id)
+        return u.name if u else "Former user"
+
     # Build scan lookup: pallet_id -> latest scan event
     scanned_pl_ids: dict = {}
     raw_exceptions: list = []
     last_scan = None
     successful_normalized: set = set()
     for e in events:
-        scanner_name = None
-        if e.scanned_by:
-            u = db.query(User).filter(User.id == e.scanned_by).first()
-            # Show a readable label for a hard-deleted user, never the raw id.
-            scanner_name = u.name if u else "Former user"
+        scanner_name = _actor_name(e.scanned_by)
         evt = {
             "licence_number": e.licence_number,
             "on_list": e.on_list,
@@ -804,20 +822,30 @@ def get_transfer_scan_progress(
             {p.id: p for p in db.query(Product).filter(Product.id.in_(product_ids)).all()}
             if product_ids else {}
         )
+        # Rows and areas batched the same way products already were, instead of
+        # two queries per pallet inside the loop below.
+        row_ids = {pl.storage_row_id for pl in licences if pl.storage_row_id}
+        rows_by_id = (
+            {r.id: r for r in db.query(StorageRow).filter(StorageRow.id.in_(row_ids)).all()}
+            if row_ids else {}
+        )
+        area_ids = {r.storage_area_id for r in rows_by_id.values() if r.storage_area_id}
+        areas_by_id = (
+            {a.id: a for a in db.query(StorageArea).filter(StorageArea.id.in_(area_ids)).all()}
+            if area_ids else {}
+        )
         for pl_id in pl_ids:
             pl = pl_map.get(pl_id)
             if not pl:
                 continue
             row_name = None
             area_name = None
-            if pl.storage_row_id:
-                row = db.query(StorageRow).filter(StorageRow.id == pl.storage_row_id).first()
-                if row:
-                    row_name = row.name
-                    if row.storage_area_id:
-                        area = db.query(StorageArea).filter(StorageArea.id == row.storage_area_id).first()
-                        if area:
-                            area_name = area.name
+            row = rows_by_id.get(pl.storage_row_id) if pl.storage_row_id else None
+            if row:
+                row_name = row.name
+                area = areas_by_id.get(row.storage_area_id) if row.storage_area_id else None
+                if area:
+                    area_name = area.name
             location_label = "Floor" if not row_name else f"{area_name}/{row_name}" if area_name else row_name
             scan_evt = scanned_pl_ids.get(pl_id)
             prod = products.get(pl.product_id) if pl.product_id else None
@@ -837,16 +865,29 @@ def get_transfer_scan_progress(
                 "product_fcc_code": prod.fcc_code if prod else None,
             })
 
-    # Swap log (for the approver and the forklift's "what happened" view)
+    # Swap log (for the approver and the forklift's "what happened" view).
+    # Swapped-out pallets are by definition no longer on the pick list, so they
+    # are usually absent from pl_map above — fetch whatever is missing in one
+    # query rather than two per swap.
+    swap_pl_ids = set()
+    for s in swaps:
+        if s.removed_pallet_id:
+            swap_pl_ids.add(s.removed_pallet_id)
+        if s.added_pallet_id:
+            swap_pl_ids.add(s.added_pallet_id)
+    swap_pl_by_id = dict(pl_map) if pl_ids else {}
+    missing_pl_ids = swap_pl_ids - set(swap_pl_by_id)
+    if missing_pl_ids:
+        swap_pl_by_id.update({
+            pl.id: pl for pl in
+            db.query(PalletLicence).filter(PalletLicence.id.in_(missing_pl_ids)).all()
+        })
+
     swaps_payload = []
-    for s in (transfer.swaps or []):
-        actor_name = None
-        if s.swapped_by:
-            u = db.query(User).filter(User.id == s.swapped_by).first()
-            # Show a readable label for a hard-deleted user, never the raw id.
-            actor_name = u.name if u else "Former user"
-        removed_pl = db.query(PalletLicence).filter(PalletLicence.id == s.removed_pallet_id).first() if s.removed_pallet_id else None
-        added_pl = db.query(PalletLicence).filter(PalletLicence.id == s.added_pallet_id).first() if s.added_pallet_id else None
+    for s in swaps:
+        actor_name = _actor_name(s.swapped_by)
+        removed_pl = swap_pl_by_id.get(s.removed_pallet_id) if s.removed_pallet_id else None
+        added_pl = swap_pl_by_id.get(s.added_pallet_id) if s.added_pallet_id else None
         swaps_payload.append({
             "id": s.id,
             "removed_pallet_id": s.removed_pallet_id,

@@ -79,13 +79,26 @@ const IngredientStagingPage = () => {
       // Fetch serialized detail for every line in view. Failures are per-line
       // and non-fatal: a legacy (non-serialized) line has no container state and
       // simply has no entry here.
+      //
+      // Concurrency is capped. This was a bare Promise.all over every line of
+      // every request, so the page opened with as many simultaneous requests as
+      // there were lines in total — dozens or hundreds at once, all holding a
+      // database connection. The server has a bounded pool, so an uncapped
+      // fan-out from one page load can starve every other user.
       const detail = {};
-      await Promise.all(
-        all.flatMap((request) => (request.items || []).map(async (item) => {
+      const items = all.flatMap((request) => request.items || []);
+      const MAX_CONCURRENT = 6;
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < items.length) {
+          const item = items[cursor++];
           try {
             detail[item.id] = await getLine(item.id);
           } catch { /* legacy or unreachable line — render the legacy numbers */ }
-        })),
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(MAX_CONCURRENT, items.length) }, worker),
       );
       setLines(detail);
     } catch (err) {
