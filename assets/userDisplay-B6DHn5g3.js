@@ -1,0 +1,1 @@
+const A="Unknown user";function o(n,r){if(!n)return A;const t=r?.[n];return t&&String(t).trim()?t:A}function L(n,r){if(!n)return"?";const t=r?.[n];return t&&String(t).trim()?String(t).charAt(0).toUpperCase():"?"}export{L as a,o as f};
