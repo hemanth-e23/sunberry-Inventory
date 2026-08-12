@@ -68,11 +68,16 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      # stdlib urllib, not curl: this image has no curl (python-slim ships
+      # none, and only gcc/postgresql-client are added). urlopen raises on a
+      # non-2xx, so a 503 from a saturated pool fails the check as intended.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      # Long enough to cover migrations on boot; autoheal must not restart the
+      # container while `alembic upgrade head` is still running.
+      start_period: 90s
     volumes:
       - ./backend:/app
     networks:

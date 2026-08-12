@@ -24,7 +24,7 @@ BOL_VARIANCE_THRESHOLD_PCT = 3.0  # Within ±3% is OK
 
 
 @router.get("/overview")
-async def get_inventory_overview(
+def get_inventory_overview(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
@@ -66,7 +66,7 @@ async def get_inventory_overview(
     }
 
 @router.get("/capacity-summary")
-async def get_capacity_summary(
+def get_capacity_summary(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):

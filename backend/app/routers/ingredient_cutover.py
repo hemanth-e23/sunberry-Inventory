@@ -54,7 +54,7 @@ class ConvertRequest(BaseSchema):
 
 
 @router.get("/eligibility/{receipt_id}")
-async def eligibility(
+def eligibility(
     receipt_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -70,7 +70,7 @@ async def eligibility(
 
 
 @router.post("/convert")
-async def convert(
+def convert(
     payload: ConvertRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -104,7 +104,7 @@ async def convert(
 
 
 @router.get("/reconciliation")
-async def reconciliation(
+def reconciliation(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):

@@ -67,7 +67,7 @@ def _hold_action_to_response(hold: InventoryHoldAction, db: Session) -> dict:
 
 
 @router.get("/hold-actions")
-async def get_hold_actions(
+def get_hold_actions(
     skip: int = 0,
     limit: int = 100,
     status: str = None,
@@ -96,7 +96,7 @@ async def get_hold_actions(
     return [_hold_action_to_response(h, db) for h in hold_actions]
 
 @router.post("/hold-actions", response_model=InventoryHoldActionSchema)
-async def create_hold_action(
+def create_hold_action(
     hold_action_data: InventoryHoldActionCreate,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -119,7 +119,7 @@ async def create_hold_action(
     return db_hold_action
 
 @router.put("/hold-actions/{hold_action_id}", response_model=InventoryHoldActionSchema)
-async def update_hold_action(
+def update_hold_action(
     hold_action_id: str,
     hold_action_update: InventoryHoldActionUpdate,
     db: Session = Depends(get_db),
@@ -156,7 +156,7 @@ async def update_hold_action(
     return hold_action
 
 @router.post("/hold-actions/{hold_action_id}/approve")
-async def approve_hold_action(
+def approve_hold_action(
     hold_action_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -181,7 +181,7 @@ async def approve_hold_action(
     return {"message": "Hold action approved successfully", "hold_action": hold_action}
 
 @router.post("/hold-actions/{hold_action_id}/reject")
-async def reject_hold_action(
+def reject_hold_action(
     hold_action_id: str,
     reason: str,
     db: Session = Depends(get_db),

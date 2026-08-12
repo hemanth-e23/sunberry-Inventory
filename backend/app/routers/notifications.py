@@ -32,7 +32,7 @@ def _user_query(db: Session, current_user):
 
 
 @router.get("/", response_model=List[NotificationOut])
-async def list_notifications(
+def list_notifications(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -46,7 +46,7 @@ async def list_notifications(
 
 
 @router.get("/unread-count")
-async def unread_count(
+def unread_count(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -55,7 +55,7 @@ async def unread_count(
 
 
 @router.put("/read-all")
-async def mark_all_read(
+def mark_all_read(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -67,7 +67,7 @@ async def mark_all_read(
 
 
 @router.put("/{notification_id}/read")
-async def mark_read(
+def mark_read(
     notification_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),

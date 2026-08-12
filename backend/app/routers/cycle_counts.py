@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 @router.post("/cycle-counts", response_model=CycleCountSchema)
-async def create_cycle_count(
+def create_cycle_count(
     cycle_count_data: CycleCountCreate,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -40,7 +40,7 @@ async def create_cycle_count(
     return db_cycle_count
 
 @router.get("/cycle-counts", response_model=List[CycleCountSchema])
-async def get_cycle_counts(
+def get_cycle_counts(
     location_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)

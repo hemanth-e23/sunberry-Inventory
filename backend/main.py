@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import uvicorn
+import anyio.to_thread
 import asyncio
 import time
 import logging
@@ -501,11 +502,38 @@ async def root():
     return response
 
 @app.on_event("startup")
-async def _start_pool_watchdog():
-    """Recover automatically from a wedged worker.
+async def _configure_runtime_limits():
+    """Size the sync-endpoint threadpool, then start the pool watchdog.
 
-    Runs per uvicorn worker. See app/utils/watchdog.py for why this exists.
+    Route handlers are declared `def`, so FastAPI runs them on anyio's
+    threadpool rather than the event loop — which is what stops a synchronous
+    SQLAlchemy call from freezing every other request in the process.
+
+    anyio defaults to 40 threads with no knowledge of how many database
+    connections exist. Since each of these endpoints holds a connection for the
+    duration of its request, threads beyond the pool size cannot do work: they
+    would sit in pool checkout and fail. Matching the two turns that failure
+    into backpressure — excess requests wait for a thread and are bounded by
+    the request deadline instead of returning 500s.
+
+    Must run inside the event loop: the limiter is a per-loop RunVar.
     """
+    configured = settings.THREADPOOL_MAX_THREADS
+    tokens = configured if configured > 0 else (
+        settings.DB_POOL_SIZE + settings.DB_MAX_OVERFLOW
+    )
+    try:
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        previous = limiter.total_tokens
+        limiter.total_tokens = tokens
+        logger.info(
+            "sync-endpoint threadpool: %s threads (was %s), pool capacity %s",
+            tokens, previous, settings.DB_POOL_SIZE + settings.DB_MAX_OVERFLOW,
+        )
+    except Exception:
+        # Never let a tuning knob stop the app from booting.
+        logger.exception("could not set threadpool size; using anyio default")
+
     start_watchdog()
 
 

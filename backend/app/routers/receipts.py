@@ -21,7 +21,7 @@ from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED, DEFAULT_CASES_PER_P
 router = APIRouter()
 
 @router.get("/", response_model=List[ReceiptSchema])
-async def get_receipts(
+def get_receipts(
     skip: int = 0,
     limit: int = 100,
     status: str = None,
@@ -48,7 +48,7 @@ async def get_receipts(
     return receipts
 
 @router.get("/pending-approvals", response_model=List[ReceiptSchema])
-async def get_pending_approvals(
+def get_pending_approvals(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
@@ -73,7 +73,7 @@ async def get_pending_approvals(
     return receipts
 
 @router.post("/", response_model=ReceiptSchema)
-async def create_receipt(
+def create_receipt(
     receipt_data: ReceiptCreate,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -313,7 +313,7 @@ async def create_receipt(
     return db_receipt
 
 @router.get("/{receipt_id}", response_model=ReceiptSchema)
-async def get_receipt(
+def get_receipt(
     receipt_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -328,7 +328,7 @@ async def get_receipt(
     return receipt
 
 @router.put("/{receipt_id}", response_model=ReceiptSchema)
-async def update_receipt(
+def update_receipt(
     receipt_id: str,
     receipt_update: ReceiptUpdate,
     db: Session = Depends(get_db),
@@ -384,7 +384,7 @@ async def update_receipt(
     return receipt
 
 @router.post("/{receipt_id}/resubmit")
-async def resubmit_receipt(
+def resubmit_receipt(
     receipt_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -428,7 +428,7 @@ async def resubmit_receipt(
     return {"message": "Receipt resubmitted successfully", "receipt": receipt}
 
 @router.post("/{receipt_id}/approve")
-async def approve_receipt(
+def approve_receipt(
     receipt_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -453,7 +453,7 @@ async def approve_receipt(
     return {"message": "Receipt approved successfully", "receipt": receipt}
 
 @router.post("/{receipt_id}/reject")
-async def reject_receipt(
+def reject_receipt(
     receipt_id: str,
     reason: str,
     db: Session = Depends(get_db),
@@ -479,7 +479,7 @@ async def reject_receipt(
     return {"message": "Receipt rejected successfully", "receipt": receipt}
 
 @router.post("/{receipt_id}/send-back")
-async def send_back_receipt(
+def send_back_receipt(
     receipt_id: str,
     reason: str,
     db: Session = Depends(get_db),
@@ -505,7 +505,7 @@ async def send_back_receipt(
     return {"message": "Receipt sent back for correction", "receipt": receipt}
 
 @router.post("/{receipt_id}/assign-storage", response_model=ReceiptSchema)
-async def assign_storage(
+def assign_storage(
     receipt_id: str,
     data: ReceiptAssignStorage,
     db: Session = Depends(get_db),
@@ -615,7 +615,7 @@ async def assign_storage(
 
 
 @router.get("/{receipt_id}/allocations", response_model=List[ReceiptAllocationSchema])
-async def get_receipt_allocations(
+def get_receipt_allocations(
     receipt_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)

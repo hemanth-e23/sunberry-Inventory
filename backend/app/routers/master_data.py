@@ -31,7 +31,7 @@ router = APIRouter()
 
 # Warehouse endpoints
 @router.get("/warehouses", response_model=List[WarehouseFull])
-async def get_warehouses(
+def get_warehouses(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -43,7 +43,7 @@ async def get_warehouses(
 
 
 @router.post("/warehouses", response_model=WarehouseFull)
-async def create_warehouse(
+def create_warehouse(
     data: WarehouseCreate,
     db: Session = Depends(get_db),
     current_user=Depends(require_superadmin),
@@ -61,7 +61,7 @@ async def create_warehouse(
 
 
 @router.put("/warehouses/{warehouse_id}", response_model=WarehouseFull)
-async def update_warehouse(
+def update_warehouse(
     warehouse_id: str,
     data: WarehouseUpdate,
     db: Session = Depends(get_db),
@@ -80,7 +80,7 @@ async def update_warehouse(
 
 # Warehouse category access endpoints (superadmin only)
 @router.get("/warehouses/{warehouse_id}/category-access", response_model=List[WarehouseCategoryAccessOut])
-async def get_warehouse_category_access(
+def get_warehouse_category_access(
     warehouse_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(require_superadmin),
@@ -95,7 +95,7 @@ async def get_warehouse_category_access(
 
 
 @router.post("/warehouses/{warehouse_id}/category-access", response_model=WarehouseCategoryAccessOut)
-async def assign_category_access(
+def assign_category_access(
     warehouse_id: str,
     data: WarehouseCategoryAccessCreate,
     db: Session = Depends(get_db),
@@ -125,7 +125,7 @@ async def assign_category_access(
 
 
 @router.delete("/warehouses/{warehouse_id}/category-access/{category_group_id}")
-async def remove_category_access(
+def remove_category_access(
     warehouse_id: str,
     category_group_id: str,
     db: Session = Depends(get_db),
@@ -144,7 +144,7 @@ async def remove_category_access(
 
 
 @router.post("/warehouses/{warehouse_id}/toggle-product-creation", response_model=WarehouseFull)
-async def toggle_product_creation(
+def toggle_product_creation(
     warehouse_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(require_superadmin),
@@ -161,7 +161,7 @@ async def toggle_product_creation(
 
 # Location endpoints
 @router.get("/locations", response_model=List[LocationSchema])
-async def get_locations(
+def get_locations(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
@@ -173,7 +173,7 @@ async def get_locations(
     return query.all()
 
 @router.post("/locations", response_model=LocationSchema)
-async def create_location(
+def create_location(
     location_data: LocationCreate,
     db: Session = Depends(get_db),
     current_user = Depends(require_role("admin"))
@@ -193,7 +193,7 @@ async def create_location(
     return db_location
 
 @router.put("/locations/{location_id}", response_model=LocationSchema)
-async def update_location(
+def update_location(
     location_id: str,
     location_update: LocationUpdate,
     db: Session = Depends(get_db),
@@ -217,7 +217,7 @@ async def update_location(
 
 # SubLocation endpoints
 @router.get("/sub-locations", response_model=List[SubLocationSchema])
-async def get_sub_locations(
+def get_sub_locations(
     location_id: str = None,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -237,7 +237,7 @@ async def get_sub_locations(
     return sub_locations
 
 @router.post("/sub-locations", response_model=SubLocationSchema)
-async def create_sub_location(
+def create_sub_location(
     sub_location_data: SubLocationCreate,
     db: Session = Depends(get_db),
     current_user = Depends(require_role("admin"))
@@ -257,7 +257,7 @@ async def create_sub_location(
     return db_sub_location
 
 @router.put("/sub-locations/{sub_location_id}", response_model=SubLocationSchema)
-async def update_sub_location(
+def update_sub_location(
     sub_location_id: str,
     sub_location_update: SubLocationUpdate,
     db: Session = Depends(get_db),
@@ -354,7 +354,7 @@ def _attach_live_row_aggregates(db: Session, storage_areas: list) -> None:
 
 
 @router.get("/storage-areas", response_model=List[StorageAreaSchema])
-async def get_storage_areas(
+def get_storage_areas(
     sub_location_id: str = None,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -374,7 +374,7 @@ async def get_storage_areas(
     return storage_areas
 
 @router.post("/storage-areas", response_model=StorageAreaSchema)
-async def create_storage_area(
+def create_storage_area(
     storage_area_data: StorageAreaCreate,
     db: Session = Depends(get_db),
     current_user = Depends(require_role("admin"))
@@ -394,7 +394,7 @@ async def create_storage_area(
     return db_storage_area
 
 @router.put("/storage-areas/{storage_area_id}", response_model=StorageAreaSchema)
-async def update_storage_area(
+def update_storage_area(
     storage_area_id: str,
     storage_area_update: StorageAreaUpdate,
     db: Session = Depends(get_db),
@@ -418,7 +418,7 @@ async def update_storage_area(
 
 # Storage Row endpoints
 @router.post("/storage-rows", response_model=StorageRowSchema)
-async def create_storage_row(
+def create_storage_row(
     row_data: StorageRowCreate,
     db: Session = Depends(get_db),
     current_user = Depends(require_role("admin"))
@@ -438,7 +438,7 @@ async def create_storage_row(
     return db_row
 
 @router.get("/storage-rows/{row_id}", response_model=StorageRowSchema)
-async def get_storage_row(
+def get_storage_row(
     row_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -453,7 +453,7 @@ async def get_storage_row(
     return row
 
 @router.put("/storage-rows/{row_id}", response_model=StorageRowSchema)
-async def update_storage_row(
+def update_storage_row(
     row_id: str,
     row_update: StorageRowUpdate,
     db: Session = Depends(get_db),
@@ -477,7 +477,7 @@ async def update_storage_row(
 
 # Production Shift endpoints
 @router.get("/production-shifts", response_model=List[ProductionShiftSchema])
-async def get_production_shifts(
+def get_production_shifts(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
@@ -486,7 +486,7 @@ async def get_production_shifts(
     return shifts
 
 @router.post("/production-shifts", response_model=ProductionShiftSchema)
-async def create_production_shift(
+def create_production_shift(
     shift_data: ProductionShiftCreate,
     db: Session = Depends(get_db),
     current_user = Depends(require_role("admin"))
@@ -506,7 +506,7 @@ async def create_production_shift(
     return db_shift
 
 @router.put("/production-shifts/{shift_id}", response_model=ProductionShiftSchema)
-async def update_production_shift(
+def update_production_shift(
     shift_id: str,
     shift_update: ProductionShiftUpdate,
     db: Session = Depends(get_db),
@@ -530,7 +530,7 @@ async def update_production_shift(
 
 # Production Line endpoints
 @router.get("/production-lines", response_model=List[ProductionLineSchema])
-async def get_production_lines(
+def get_production_lines(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
@@ -539,7 +539,7 @@ async def get_production_lines(
     return lines
 
 @router.post("/production-lines", response_model=ProductionLineSchema)
-async def create_production_line(
+def create_production_line(
     line_data: ProductionLineCreate,
     db: Session = Depends(get_db),
     current_user = Depends(require_role("admin"))
@@ -559,7 +559,7 @@ async def create_production_line(
     return db_line
 
 @router.put("/production-lines/{line_id}", response_model=ProductionLineSchema)
-async def update_production_line(
+def update_production_line(
     line_id: str,
     line_update: ProductionLineUpdate,
     db: Session = Depends(get_db),
@@ -591,7 +591,7 @@ import uuid as _uuid
 
 
 @router.get("/package-sizes", response_model=List[PackageSizeSchema])
-async def get_package_sizes(
+def get_package_sizes(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -603,7 +603,7 @@ async def get_package_sizes(
 
 
 @router.post("/package-sizes", response_model=PackageSizeSchema)
-async def create_package_size(
+def create_package_size(
     data: PackageSizeCreate,
     db: Session = Depends(get_db),
     current_user=Depends(require_role("admin")),
@@ -618,7 +618,7 @@ async def create_package_size(
 
 
 @router.put("/package-sizes/{size_id}", response_model=PackageSizeSchema)
-async def update_package_size(
+def update_package_size(
     size_id: str,
     data: PackageSizeUpdate,
     db: Session = Depends(get_db),
@@ -640,7 +640,7 @@ async def update_package_size(
 # by the order-create endpoint, so no create endpoints here.
 # ---------------------------------------------------------------------------
 @router.get("/ship-to-locations", response_model=List[ShipToLocationOut])
-async def get_ship_to_locations(
+def get_ship_to_locations(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -653,7 +653,7 @@ async def get_ship_to_locations(
 
 
 @router.get("/carriers", response_model=List[CarrierOut])
-async def get_carriers(
+def get_carriers(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -666,7 +666,7 @@ async def get_carriers(
 
 
 @router.get("/pallet-types", response_model=List[PalletTypeOut])
-async def get_pallet_types(
+def get_pallet_types(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):

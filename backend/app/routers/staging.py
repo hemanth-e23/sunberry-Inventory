@@ -21,7 +21,7 @@ router = APIRouter()
 
 
 @router.get("/staging/suggest-lots", response_model=List[StagingLotSuggestion])
-async def suggest_lots_for_staging(
+def suggest_lots_for_staging(
     product_id: str,
     quantity: float,
     db: Session = Depends(get_db),
@@ -33,7 +33,7 @@ async def suggest_lots_for_staging(
 
 
 @router.post("/staging/transfer")
-async def create_staging_transfer(
+def create_staging_transfer(
     staging_data: CreateStagingRequest,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -45,7 +45,7 @@ async def create_staging_transfer(
 
 
 @router.get("/staging/items")
-async def get_staging_items(
+def get_staging_items(
     status_filter: Optional[str] = None,
     product_id: Optional[str] = None,
     db: Session = Depends(get_db),
@@ -123,7 +123,7 @@ async def get_staging_items(
 
 
 @router.post("/staging/{staging_item_id}/mark-used")
-async def mark_staging_used(
+def mark_staging_used(
     staging_item_id: str,
     request: MarkStagingUsedRequest,
     db: Session = Depends(get_db),
@@ -141,7 +141,7 @@ async def mark_staging_used(
 
 
 @router.post("/staging/{staging_item_id}/return")
-async def return_staging_item(
+def return_staging_item(
     staging_item_id: str,
     request: ReturnStagingRequest,
     db: Session = Depends(get_db),

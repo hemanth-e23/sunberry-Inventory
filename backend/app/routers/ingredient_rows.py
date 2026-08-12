@@ -55,7 +55,7 @@ class AssignBarcodesRequest(BaseModel):
 
 
 @router.get("/")
-async def list_ingredient_rows(
+def list_ingredient_rows(
     q: Optional[str] = Query(None, description="Substring match on row name or barcode"),
     location_id: Optional[str] = None,
     warehouse_id: Optional[str] = None,
@@ -74,7 +74,7 @@ async def list_ingredient_rows(
 
 
 @router.get("/resolve")
-async def resolve_ingredient_row(
+def resolve_ingredient_row(
     code: str = Query(..., description="Scanned row barcode, or an exact row name"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
@@ -88,7 +88,7 @@ async def resolve_ingredient_row(
 
 
 @router.post("/assign-barcodes")
-async def assign_row_barcodes(
+def assign_row_barcodes(
     payload: Optional[AssignBarcodesRequest] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_row_label_manager),

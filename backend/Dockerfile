@@ -38,10 +38,17 @@ USER appuser
 EXPOSE 8000
 
 # Health check.
-# raise_for_status() matters: requests.get() does NOT raise on a 4xx/5xx, so
-# the previous version reported healthy even when /api/health returned 503.
+#
+# Uses urllib from the standard library, NOT requests and NOT curl. Neither is
+# available here: `requests` is not in requirements.txt and this image installs
+# only gcc and postgresql-client on top of python-slim, which ships no curl. The
+# previous `import requests` check could therefore never succeed — harmless
+# while nothing consumed the result, but now that an autoheal container acts on
+# health status, a check that cannot pass would restart this container forever.
+#
+# urlopen raises on a non-2xx, so a 503 from a saturated pool correctly fails.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/api/health', timeout=5).raise_for_status()" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)" || exit 1
 
 # Entrypoint runs `alembic upgrade head` before exec'ing the CMD, so a fresh
 # container always boots against a migrated schema. Stop/start is enough — no

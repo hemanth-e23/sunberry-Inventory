@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     # runaway query surfaces as a real database error rather than a timeout.
     REQUEST_TIMEOUT_SECONDS: int = 45
 
+    # Worker threads FastAPI uses to run synchronous endpoints. 0 means "match
+    # the connection pool", which is the sensible default: every such endpoint
+    # holds one connection for its whole request, so a thread without a
+    # connection to pair with has nothing useful to do — it would just block in
+    # pool checkout and time out. Matching the two makes excess load queue for
+    # a thread (bounded by REQUEST_TIMEOUT_SECONDS) instead of failing with
+    # pool-timeout 500s. anyio's own default is 40, unrelated to pool size.
+    THREADPOOL_MAX_THREADS: int = 0
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

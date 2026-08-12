@@ -83,7 +83,7 @@ def require_forklift_or_admin(current_user: User = Depends(get_current_active_us
 
 
 @router.post("/requests", response_model=ForkliftRequestSchema)
-async def create_forklift_request(
+def create_forklift_request(
     data: ForkliftRequestCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_forklift_or_admin)
@@ -93,7 +93,7 @@ async def create_forklift_request(
 
 
 @router.get("/requests/active")
-async def get_active_request(
+def get_active_request(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_forklift_or_admin),
 ):
@@ -102,7 +102,7 @@ async def get_active_request(
 
 
 @router.post("/requests/{request_id}/scan")
-async def scan_pallet(
+def scan_pallet(
     request_id: str,
     data: ScanPalletRequest,
     db: Session = Depends(get_db),
@@ -123,7 +123,7 @@ async def scan_pallet(
 
 
 @router.post("/requests/{request_id}/mark-missing")
-async def mark_missing_pallets(
+def mark_missing_pallets(
     request_id: str,
     data: MarkMissingRequest,
     db: Session = Depends(get_db),
@@ -134,7 +134,7 @@ async def mark_missing_pallets(
 
 
 @router.post("/requests/{request_id}/mark-not-produced")
-async def mark_not_produced(
+def mark_not_produced(
     request_id: str,
     data: MarkMissingRequest,  # same shape: { licence_numbers: [...] }
     db: Session = Depends(get_db),
@@ -153,7 +153,7 @@ async def mark_not_produced(
 
 
 @router.post("/requests/{request_id}/submit")
-async def submit_forklift_request(
+def submit_forklift_request(
     request_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_forklift_or_admin)
@@ -163,7 +163,7 @@ async def submit_forklift_request(
 
 
 @router.get("/requests", response_model=List[ForkliftRequestSchema])
-async def list_forklift_requests(
+def list_forklift_requests(
     status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
@@ -189,7 +189,7 @@ async def list_forklift_requests(
 
 
 @router.get("/requests/{request_id}", response_model=ForkliftRequestSchema)
-async def get_forklift_request(
+def get_forklift_request(
     request_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
@@ -208,7 +208,7 @@ async def get_forklift_request(
 
 
 @router.put("/requests/{request_id}", response_model=ForkliftRequestSchema)
-async def update_forklift_request(
+def update_forklift_request(
     request_id: str,
     data: ForkliftRequestUpdate,
     db: Session = Depends(get_db),
@@ -220,7 +220,7 @@ async def update_forklift_request(
 
 
 @router.post("/requests/{request_id}/approve")
-async def approve_forklift_request(
+def approve_forklift_request(
     request_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
@@ -230,7 +230,7 @@ async def approve_forklift_request(
 
 
 @router.post("/requests/{request_id}/reject")
-async def reject_forklift_request(
+def reject_forklift_request(
     request_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
@@ -240,7 +240,7 @@ async def reject_forklift_request(
 
 
 @router.delete("/requests/{request_id}/pallet-licences/{licence_id}")
-async def remove_pallet_licence(
+def remove_pallet_licence(
     request_id: str,
     licence_id: str,
     db: Session = Depends(get_db),
@@ -251,7 +251,7 @@ async def remove_pallet_licence(
 
 
 @router.put("/requests/{request_id}/pallet-licences/{licence_id}")
-async def update_pallet_licence(
+def update_pallet_licence(
     request_id: str,
     licence_id: str,
     data: PalletLicenceUpdate,
@@ -264,7 +264,7 @@ async def update_pallet_licence(
 
 
 @router.post("/requests/{request_id}/add-pallet")
-async def add_pallet_to_request(
+def add_pallet_to_request(
     request_id: str,
     data: ScanPalletRequest,
     db: Session = Depends(get_db),
@@ -278,7 +278,7 @@ async def add_pallet_to_request(
 
 
 @router.post("/internal-transfer")
-async def create_internal_transfer(
+def create_internal_transfer(
     data: dict,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_forklift_or_admin)
@@ -289,7 +289,7 @@ async def create_internal_transfer(
 
 
 @router.get("/storage-rows")
-async def list_storage_rows_with_capacity(
+def list_storage_rows_with_capacity(
     request_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)

@@ -12,7 +12,7 @@ import secrets
 router = APIRouter()
 
 @router.get("/directory", response_model=List[dict])
-async def get_user_directory(
+def get_user_directory(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -24,7 +24,7 @@ async def get_user_directory(
     return [{"id": u.id, "username": u.username, "name": u.name} for u in users]
 
 @router.post("/", response_model=UserSchema)
-async def create_user(
+def create_user(
     user_data: UserCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_superadmin)
@@ -90,7 +90,7 @@ async def create_user(
     return new_user
 
 @router.get("/", response_model=List[UserSchema])
-async def get_users(
+def get_users(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
@@ -104,7 +104,7 @@ async def get_users(
     return query.offset(skip).limit(limit).all()
 
 @router.get("/{user_id}", response_model=UserSchema)
-async def get_user(
+def get_user(
     user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("admin"))
@@ -119,7 +119,7 @@ async def get_user(
     return user
 
 @router.put("/{user_id}", response_model=UserSchema)
-async def update_user(
+def update_user(
     user_id: str,
     user_update: UserUpdate,
     db: Session = Depends(get_db),
@@ -178,7 +178,7 @@ async def update_user(
     return user
 
 @router.delete("/{user_id}")
-async def delete_user(
+def delete_user(
     user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_superadmin)
@@ -198,7 +198,7 @@ async def delete_user(
     return {"message": "User deactivated successfully"}
 
 @router.post("/{user_id}/toggle-status")
-async def toggle_user_status(
+def toggle_user_status(
     user_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_superadmin)

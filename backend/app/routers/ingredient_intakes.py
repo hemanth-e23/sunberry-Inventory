@@ -202,7 +202,7 @@ def _serialize_intake(db: Session, intake: IngredientIntake) -> dict:
 # ─── intakes ──────────────────────────────────────────────────────────────────
 
 @router.post("/", response_model=IngredientIntakeSchema)
-async def create_intake(
+def create_intake(
     payload: IngredientIntakeCreate,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -215,7 +215,7 @@ async def create_intake(
 
 
 @router.get("/", response_model=IngredientIntakeList)
-async def list_intakes(
+def list_intakes(
     status: Optional[str] = None,
     skip: int = 0,
     limit: int = Query(50, le=200),
@@ -243,7 +243,7 @@ async def list_intakes(
 
 
 @router.get("/{intake_id}", response_model=IngredientIntakeSchema)
-async def get_intake(
+def get_intake(
     intake_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -252,7 +252,7 @@ async def get_intake(
 
 
 @router.patch("/{intake_id}", response_model=IngredientIntakeSchema)
-async def update_intake(
+def update_intake(
     intake_id: str,
     payload: IngredientIntakeUpdate,
     db: Session = Depends(get_db),
@@ -273,7 +273,7 @@ async def update_intake(
 # ─── lot lines ────────────────────────────────────────────────────────────────
 
 @router.post("/{intake_id}/lots", response_model=IngredientIntakeSchema)
-async def add_lot(
+def add_lot(
     intake_id: str,
     payload: IntakeLotCreate,
     db: Session = Depends(get_db),
@@ -291,7 +291,7 @@ async def add_lot(
 
 
 @router.patch("/{intake_id}/lots/{lot_id}", response_model=IngredientIntakeSchema)
-async def update_lot(
+def update_lot(
     intake_id: str,
     lot_id: str,
     payload: IntakeLotUpdate,
@@ -337,7 +337,7 @@ async def update_lot(
 # ─── minting & labels ─────────────────────────────────────────────────────────
 
 @router.post("/{intake_id}/mint", response_model=LabelSheet)
-async def mint(
+def mint(
     intake_id: str,
     payload: MintSerialsRequest,
     db: Session = Depends(get_db),
@@ -383,7 +383,7 @@ def _label_for(db: Session, c: Container, intake_total: int) -> dict:
 
 
 @router.get("/{intake_id}/labels", response_model=LabelSheet)
-async def labels(
+def labels(
     intake_id: str,
     scope: str = Query("intake", pattern="^(intake|lot|selection)$"),
     lot_id: Optional[str] = None,
@@ -415,7 +415,7 @@ async def labels(
 # ─── scanning ─────────────────────────────────────────────────────────────────
 
 @router.post("/{intake_id}/scan", response_model=ContainerScanResponse)
-async def scan(
+def scan(
     intake_id: str,
     payload: ContainerScanRequest,
     db: Session = Depends(get_db),
@@ -445,7 +445,7 @@ async def scan(
 # ─── lifecycle ────────────────────────────────────────────────────────────────
 
 @router.post("/{intake_id}/close-short", response_model=IngredientIntakeSchema)
-async def close_short(
+def close_short(
     intake_id: str,
     payload: IntakeCloseShortRequest,
     db: Session = Depends(get_db),
@@ -459,7 +459,7 @@ async def close_short(
 
 
 @router.post("/{intake_id}/submit", response_model=IngredientIntakeSchema)
-async def submit(
+def submit(
     intake_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -472,7 +472,7 @@ async def submit(
 
 
 @router.post("/{intake_id}/approve", response_model=IngredientIntakeSchema)
-async def approve(
+def approve(
     intake_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -484,7 +484,7 @@ async def approve(
 
 
 @router.post("/{intake_id}/reject", response_model=IngredientIntakeSchema)
-async def reject(
+def reject(
     intake_id: str,
     payload: IntakeRejectRequest,
     db: Session = Depends(get_db),
@@ -499,7 +499,7 @@ async def reject(
 
 
 @router.post("/{intake_id}/void", response_model=IngredientIntakeSchema)
-async def void(
+def void(
     intake_id: str,
     payload: IntakeVoidRequest,
     db: Session = Depends(get_db),

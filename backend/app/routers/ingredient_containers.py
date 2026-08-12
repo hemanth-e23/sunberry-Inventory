@@ -59,7 +59,7 @@ def _ser(db: Session, container) -> Optional[dict]:
 # ─── list & lookup ────────────────────────────────────────────────────────────
 
 @router.get("/", response_model=ContainerList)
-async def list_containers(
+def list_containers(
     intake_id: Optional[str] = None,
     intake_lot_id: Optional[str] = None,
     product_id: Optional[str] = None,
@@ -102,7 +102,7 @@ async def list_containers(
 
 
 @router.get("/{serial}", response_model=ContainerSchema)
-async def get_container(
+def get_container(
     serial: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -113,7 +113,7 @@ async def get_container(
 # ─── moves ────────────────────────────────────────────────────────────────────
 
 @router.post("/move", response_model=ContainerMoveResponse)
-async def move(
+def move(
     payload: ContainerMoveRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -131,7 +131,7 @@ async def move(
 
 
 @router.post("/move-group")
-async def move_group(
+def move_group(
     payload: ContainerMoveGroupRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -151,7 +151,7 @@ async def move_group(
 # ─── holds ────────────────────────────────────────────────────────────────────
 
 @router.post("/hold", response_model=ContainerSchema)
-async def hold(
+def hold(
     payload: ContainerHoldRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -168,7 +168,7 @@ async def hold(
 
 
 @router.get("/lot/preview", response_model=LotHoldPreview)
-async def lot_preview(
+def lot_preview(
     vendor_lot: str,
     product_id: Optional[str] = None,
     vendor_id: Optional[str] = None,
@@ -192,7 +192,7 @@ async def lot_preview(
 
 
 @router.post("/bulk-hold")
-async def bulk_hold(
+def bulk_hold(
     payload: ContainerBulkHoldRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -208,7 +208,7 @@ async def bulk_hold(
 # ─── damage / disposal / missing ──────────────────────────────────────────────
 
 @router.post("/damage", response_model=ContainerSchema)
-async def damage(
+def damage(
     payload: ContainerDamageRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -226,7 +226,7 @@ async def damage(
 
 
 @router.post("/dispose", response_model=ContainerSchema)
-async def dispose(
+def dispose(
     payload: ContainerDisposeRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -243,7 +243,7 @@ async def dispose(
 
 
 @router.post("/missing", response_model=ContainerSchema)
-async def missing(
+def missing(
     payload: ContainerMissingRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -272,7 +272,7 @@ class ActivateBagRequest(BaseSchema):
 
 
 @router.post("/bags/place-lot")
-async def place_bag_lot(
+def place_bag_lot(
     payload: PlaceBagLotRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -289,7 +289,7 @@ async def place_bag_lot(
 
 
 @router.post("/bags/activate")
-async def activate_bag(
+def activate_bag(
     payload: ActivateBagRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -312,7 +312,7 @@ async def activate_bag(
 
 
 @router.get("/bags/reconciliation")
-async def bag_reconciliation(
+def bag_reconciliation(
     intake_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -344,7 +344,7 @@ class OpenRequest(BaseSchema):
 
 
 @router.post("/consume")
-async def consume(
+def consume(
     payload: ConsumeRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -372,7 +372,7 @@ async def consume(
 
 
 @router.post("/open", response_model=ContainerSchema)
-async def open_container(
+def open_container(
     payload: OpenRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -385,7 +385,7 @@ async def open_container(
 
 
 @router.get("/audit/variance")
-async def variance(
+def variance(
     product_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -400,7 +400,7 @@ async def variance(
 # ─── audits ───────────────────────────────────────────────────────────────────
 
 @router.get("/audit/cache-drift", response_model=CacheDriftReport)
-async def cache_drift(
+def cache_drift(
     limit: int = Query(500, le=2000),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -417,7 +417,7 @@ async def cache_drift(
 
 
 @router.get("/audit/row-drift", response_model=RowDriftReport)
-async def row_drift(
+def row_drift(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):

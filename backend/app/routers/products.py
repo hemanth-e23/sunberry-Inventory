@@ -21,7 +21,7 @@ router = APIRouter()
 PRODUCTS_PAGE_MAX = 500  # max items per single request
 
 @router.get("/products", response_model=ProductListResponse)
-async def get_products(
+def get_products(
     skip: int = 0,
     limit: int = 50,
     category_id: str = None,
@@ -50,7 +50,7 @@ async def get_products(
     return {"items": items, "total": total}
 
 @router.post("/products", response_model=ProductSchema)
-async def create_product(
+def create_product(
     product_data: ProductCreate,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -90,7 +90,7 @@ async def create_product(
     return db_product
 
 @router.put("/products/{product_id}", response_model=ProductSchema)
-async def update_product(
+def update_product(
     product_id: str,
     product_update: ProductUpdate,
     db: Session = Depends(get_db),
@@ -134,7 +134,7 @@ async def update_product(
     return product
 
 @router.post("/products/{product_id}/toggle-status")
-async def toggle_product_status(
+def toggle_product_status(
     product_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(require_superadmin)
@@ -155,7 +155,7 @@ async def toggle_product_status(
 
 # Category Group endpoints
 @router.get("/category-groups", response_model=List[CategoryGroupSchema])
-async def get_category_groups(
+def get_category_groups(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
@@ -169,7 +169,7 @@ async def get_category_groups(
     return query.all()
 
 @router.post("/category-groups", response_model=CategoryGroupSchema)
-async def create_category_group(
+def create_category_group(
     category_group_data: CategoryGroupCreate,
     db: Session = Depends(get_db),
     current_user = Depends(require_superadmin)
@@ -186,7 +186,7 @@ async def create_category_group(
     return db_group
 
 @router.put("/category-groups/{group_id}", response_model=CategoryGroupSchema)
-async def update_category_group(
+def update_category_group(
     group_id: str,
     group_update: CategoryGroupUpdate,
     db: Session = Depends(get_db),
@@ -207,7 +207,7 @@ async def update_category_group(
 
 # Category endpoints
 @router.get("/categories", response_model=List[CategorySchema])
-async def get_categories(
+def get_categories(
     parent_id: str = None,
     type: str = None,
     db: Session = Depends(get_db),
@@ -231,7 +231,7 @@ async def get_categories(
     return query.all()
 
 @router.post("/categories", response_model=CategorySchema)
-async def create_category(
+def create_category(
     category_data: CategoryCreate,
     db: Session = Depends(get_db),
     current_user = Depends(require_superadmin)
@@ -248,7 +248,7 @@ async def create_category(
     return db_category
 
 @router.put("/categories/{category_id}", response_model=CategorySchema)
-async def update_category(
+def update_category(
     category_id: str,
     category_update: CategoryUpdate,
     db: Session = Depends(get_db),
@@ -269,7 +269,7 @@ async def update_category(
 
 # Vendor endpoints
 @router.get("/vendors", response_model=List[VendorSchema])
-async def get_vendors(
+def get_vendors(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
@@ -278,7 +278,7 @@ async def get_vendors(
     return vendors
 
 @router.post("/vendors", response_model=VendorSchema)
-async def create_vendor(
+def create_vendor(
     vendor_data: VendorCreate,
     db: Session = Depends(get_db),
     current_user = Depends(require_role("admin"))
@@ -295,7 +295,7 @@ async def create_vendor(
     return db_vendor
 
 @router.put("/vendors/{vendor_id}", response_model=VendorSchema)
-async def update_vendor(
+def update_vendor(
     vendor_id: str,
     vendor_update: VendorUpdate,
     db: Session = Depends(get_db),

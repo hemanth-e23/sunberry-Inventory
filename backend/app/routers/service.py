@@ -74,7 +74,7 @@ class AvailabilityRequest(BaseModel):
 
 
 @router.get("/raw-materials")
-async def get_raw_materials(
+def get_raw_materials(
     warehouse_id: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
@@ -122,7 +122,7 @@ async def get_raw_materials(
 
 
 @router.get("/finished-goods")
-async def get_finished_goods(
+def get_finished_goods(
     warehouse_id: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
@@ -169,7 +169,7 @@ async def get_finished_goods(
 
 
 @router.post("/check-availability")
-async def check_availability(
+def check_availability(
     request: AvailabilityRequest,
     db: Session = Depends(get_db),
 ):
@@ -317,7 +317,7 @@ class IngredientUsedNotification(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/staging-requests")
-async def create_staging_request(
+def create_staging_request(
     payload: CreateStagingRequestIn,
     db: Session = Depends(get_db),
 ):
@@ -326,7 +326,7 @@ async def create_staging_request(
 
 
 @router.get("/staging-requests")
-async def list_staging_requests(
+def list_staging_requests(
     status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
@@ -335,7 +335,7 @@ async def list_staging_requests(
 
 
 @router.post("/staging-requests/{request_id}/fulfill-item")
-async def fulfill_staging_request_item(
+def fulfill_staging_request_item(
     request_id: str,
     item_id: str,
     quantity_fulfilled: float,
@@ -353,7 +353,7 @@ async def fulfill_staging_request_item(
 
 
 @router.get("/staging-requests/{request_id}/items/{item_id}/staging-details")
-async def get_staging_details(
+def get_staging_details(
     request_id: str,
     item_id: str,
     db: Session = Depends(get_db),
@@ -363,7 +363,7 @@ async def get_staging_details(
 
 
 @router.post("/staging-requests/{request_id}/items/{item_id}/mark-used")
-async def mark_request_item_used(
+def mark_request_item_used(
     request_id: str,
     item_id: str,
     body: MarkUsedBody,
@@ -376,7 +376,7 @@ async def mark_request_item_used(
 
 
 @router.post("/staging-requests/{request_id}/items/{item_id}/return")
-async def return_request_item(
+def return_request_item(
     request_id: str,
     item_id: str,
     body: ReturnBody,
@@ -391,7 +391,7 @@ async def return_request_item(
 
 
 @router.post("/staging-requests/{request_id}/items/{item_id}/undo")
-async def undo_staging(
+def undo_staging(
     request_id: str,
     item_id: str,
     body: UndoStageBody,
@@ -404,7 +404,7 @@ async def undo_staging(
 
 
 @router.get("/staging-requests/reconciliation")
-async def get_reconciliation_summary(
+def get_reconciliation_summary(
     db: Session = Depends(get_db),
 ):
     """Get a summary of all staging activity for end-of-day reconciliation."""
@@ -412,7 +412,7 @@ async def get_reconciliation_summary(
 
 
 @router.post("/notify-ingredient-used")
-async def notify_ingredient_used(
+def notify_ingredient_used(
     payload: IngredientUsedNotification,
     db: Session = Depends(get_db),
 ):
@@ -437,7 +437,7 @@ async def sync_production_usage(
 
 
 @router.post("/staging-requests/{request_id}/dismiss")
-async def dismiss_staging_request(
+def dismiss_staging_request(
     request_id: str,
     db: Session = Depends(get_db),
 ):
@@ -455,7 +455,7 @@ async def get_close_out_data(
 
 
 @router.post("/staging-requests/{request_id}/close-out")
-async def close_out_staging_request(
+def close_out_staging_request(
     request_id: str,
     db: Session = Depends(get_db),
 ):
@@ -464,7 +464,7 @@ async def close_out_staging_request(
 
 
 @router.get("/health")
-async def service_health():
+def service_health():
     """Simple health-check (no auth required) so Production can verify connectivity."""
     return {"status": "ok", "service": "inventory"}
 
@@ -482,7 +482,7 @@ async def service_health():
 # ---------------------------------------------------------------------------
 
 @router.get("/containers/{serial}")
-async def lookup_container(
+def lookup_container(
     serial: str,
     db: Session = Depends(get_db),
 ):
@@ -551,7 +551,7 @@ async def lookup_container(
 
 
 @router.get("/staging-requests/{request_id}/containers")
-async def staged_containers_for_request(
+def staged_containers_for_request(
     request_id: str,
     db: Session = Depends(get_db),
 ):

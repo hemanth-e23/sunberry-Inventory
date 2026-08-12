@@ -198,7 +198,7 @@ def _ship_out_only(transfer: InventoryTransfer):
 
 
 @router.get("/transfers")
-async def get_transfers(
+def get_transfers(
     skip: int = 0,
     limit: int = 1000,
     status: str = None,
@@ -240,7 +240,7 @@ async def get_transfers(
     return [_transfer_to_response(t, db) for t in transfers]
 
 @router.post("/transfers", response_model=InventoryTransferSchema)
-async def create_transfer(
+def create_transfer(
     transfer_data: InventoryTransferCreate,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -299,7 +299,7 @@ async def create_transfer(
 
 
 @router.post("/ship-out/pick-list")
-async def create_ship_out_pick_list(
+def create_ship_out_pick_list(
     data: ShipOutPickListCreate,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -480,7 +480,7 @@ async def create_ship_out_pick_list(
 
 
 @router.post("/transfers/{transfer_id}/scan-pick")
-async def scan_pick_transfer(
+def scan_pick_transfer(
     transfer_id: str,
     data: ScanPickRequest,
     db: Session = Depends(get_db),
@@ -740,7 +740,7 @@ async def scan_pick_transfer(
 
 
 @router.get("/transfers/{transfer_id}/scan-progress")
-async def get_transfer_scan_progress(
+def get_transfer_scan_progress(
     transfer_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -874,7 +874,7 @@ async def get_transfer_scan_progress(
 
 
 @router.post("/transfers/{transfer_id}/forklift-submit")
-async def forklift_submit_transfer(
+def forklift_submit_transfer(
     transfer_id: str,
     data: ForkliftSubmitRequest,
     db: Session = Depends(get_db),
@@ -920,7 +920,7 @@ def _require_warehouse_role_or_higher(current_user):
 
 
 @router.patch("/transfers/{transfer_id}/edit")
-async def edit_ship_out_transfer(
+def edit_ship_out_transfer(
     transfer_id: str,
     data: TransferEditRequest,
     db: Session = Depends(get_db),
@@ -1137,7 +1137,7 @@ async def edit_ship_out_transfer(
 
 
 @router.post("/transfers/{transfer_id}/void")
-async def void_ship_out_transfer(
+def void_ship_out_transfer(
     transfer_id: str,
     data: TransferVoidRequest,
     db: Session = Depends(get_db),
@@ -1203,7 +1203,7 @@ async def void_ship_out_transfer(
 
 
 @router.put("/transfers/{transfer_id}", response_model=InventoryTransferSchema)
-async def update_transfer(
+def update_transfer(
     transfer_id: str,
     transfer_update: InventoryTransferUpdate,
     db: Session = Depends(get_db),
@@ -1246,7 +1246,7 @@ async def update_transfer(
     return transfer
 
 @router.post("/transfers/{transfer_id}/approve")
-async def approve_transfer(
+def approve_transfer(
     transfer_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -1271,7 +1271,7 @@ async def approve_transfer(
     return {"message": "Transfer approved successfully", "transfer": transfer}
 
 @router.post("/transfers/{transfer_id}/reject")
-async def reject_transfer(
+def reject_transfer(
     transfer_id: str,
     reason: str,
     db: Session = Depends(get_db),
@@ -1306,7 +1306,7 @@ async def reject_transfer(
 # ═══════════════════════════════════════════════════════════════════════════
 
 @router.get("/ship-out/available-lots")
-async def list_available_lots(
+def list_available_lots(
     product_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user),
@@ -1321,7 +1321,7 @@ async def list_available_lots(
 
 
 @router.post("/ship-out/pick-list-v2")
-async def create_ship_out_pick_list_v2(
+def create_ship_out_pick_list_v2(
     data: ShipOutPickListCreateV2,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user),
@@ -1367,7 +1367,7 @@ async def create_ship_out_pick_list_v2(
 
 
 @router.post("/ship-out/schedule")
-async def create_scheduled_ship_out(
+def create_scheduled_ship_out(
     data: ScheduledOrderCreate,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -1418,7 +1418,7 @@ async def create_scheduled_ship_out(
 
 
 @router.get("/ship-out/scheduled")
-async def list_scheduled_ship_outs(
+def list_scheduled_ship_outs(
     date: dt_date,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -1430,7 +1430,7 @@ async def list_scheduled_ship_outs(
 
 
 @router.get("/ship-out/scheduled/overdue")
-async def list_overdue_ship_outs(
+def list_overdue_ship_outs(
     before: dt_date,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -1442,7 +1442,7 @@ async def list_overdue_ship_outs(
 
 
 @router.patch("/transfers/{transfer_id}/reschedule")
-async def reschedule_ship_out(
+def reschedule_ship_out(
     transfer_id: str,
     data: RescheduleRequest,
     db: Session = Depends(get_db),
@@ -1466,7 +1466,7 @@ async def reschedule_ship_out(
 
 
 @router.post("/transfers/{transfer_id}/cancel-scheduled")
-async def cancel_scheduled_ship_out(
+def cancel_scheduled_ship_out(
     transfer_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -1489,7 +1489,7 @@ async def cancel_scheduled_ship_out(
 
 
 @router.post("/transfers/{transfer_id}/restore-scheduled")
-async def restore_cancelled_ship_out(
+def restore_cancelled_ship_out(
     transfer_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -1510,7 +1510,7 @@ async def restore_cancelled_ship_out(
 
 
 @router.post("/transfers/{transfer_id}/check-in")
-async def check_in_ship_out(
+def check_in_ship_out(
     transfer_id: str,
     data: CheckInRequest,
     db: Session = Depends(get_db),
@@ -1535,7 +1535,7 @@ async def check_in_ship_out(
 
 
 @router.get("/ship-out/gun")
-async def list_gun_queue(
+def list_gun_queue(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
@@ -1565,7 +1565,7 @@ def _get_shipout_or_404(db, transfer_id, lock=False):
 
 # ---- Task 6: worker pallet-select ----
 @router.get("/transfers/{transfer_id}/selectable-pallets")
-async def get_selectable_pallets(
+def get_selectable_pallets(
     transfer_id: str, product_id: str, q: str = None,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1575,7 +1575,7 @@ async def get_selectable_pallets(
 
 
 @router.post("/transfers/{transfer_id}/select-pallet")
-async def select_pallet_endpoint(
+def select_pallet_endpoint(
     transfer_id: str, data: SelectPalletRequest,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1593,7 +1593,7 @@ async def select_pallet_endpoint(
 
 
 @router.post("/transfers/{transfer_id}/adjust-pallet-cases")
-async def adjust_pallet_cases_endpoint(
+def adjust_pallet_cases_endpoint(
     transfer_id: str, data: AdjustPalletCasesRequest,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1616,7 +1616,7 @@ async def adjust_pallet_cases_endpoint(
 
 # ---- Task 7: reconcile + manual attribution ----
 @router.get("/transfers/{transfer_id}/reconcile")
-async def get_reconcile(
+def get_reconcile(
     transfer_id: str,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1626,7 +1626,7 @@ async def get_reconcile(
 
 
 @router.post("/transfers/{transfer_id}/manual-attribution")
-async def add_manual_attribution_endpoint(
+def add_manual_attribution_endpoint(
     transfer_id: str, data: ManualAttributionRequest,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1645,7 +1645,7 @@ async def add_manual_attribution_endpoint(
 
 
 @router.post("/transfers/{transfer_id}/manual-attribution/remove")
-async def remove_manual_attribution_endpoint(
+def remove_manual_attribution_endpoint(
     transfer_id: str, data: RemoveManualAttributionRequest,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1658,7 +1658,7 @@ async def remove_manual_attribution_endpoint(
 
 
 @router.post("/transfers/{transfer_id}/reconcile")
-async def reconcile_endpoint(
+def reconcile_endpoint(
     transfer_id: str, data: ReconcileRequest,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1678,7 +1678,7 @@ async def reconcile_endpoint(
 
 # ---- Task 8: seal + documents ----
 @router.post("/transfers/{transfer_id}/generate-documents")
-async def generate_documents_endpoint(
+def generate_documents_endpoint(
     transfer_id: str, data: GenerateDocsRequest,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1697,7 +1697,7 @@ async def generate_documents_endpoint(
 
 
 @router.post("/transfers/{transfer_id}/void-documents")
-async def void_documents_endpoint(
+def void_documents_endpoint(
     transfer_id: str, data: VoidDocsRequest,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1718,7 +1718,7 @@ async def void_documents_endpoint(
 
 
 @router.get("/transfers/{transfer_id}/documents")
-async def get_documents_endpoint(
+def get_documents_endpoint(
     transfer_id: str,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1729,7 +1729,7 @@ async def get_documents_endpoint(
 
 
 @router.get("/transfers/{transfer_id}/bol.pdf")
-async def get_bol_pdf_endpoint(
+def get_bol_pdf_endpoint(
     transfer_id: str,
     db: Session = Depends(get_db), current_user=Depends(get_current_active_user),
 ):
@@ -1768,7 +1768,7 @@ async def get_bol_pdf_endpoint(
 
 
 @router.get("/transfers/{transfer_id}/scanner-view")
-async def get_scanner_view(
+def get_scanner_view(
     transfer_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user),
@@ -1793,7 +1793,7 @@ async def get_scanner_view(
 
 
 @router.post("/transfers/{transfer_id}/scan-pick-v2")
-async def scan_pick_v2_endpoint(
+def scan_pick_v2_endpoint(
     transfer_id: str,
     data: ScanPickRequestV2,
     db: Session = Depends(get_db),
@@ -1831,7 +1831,7 @@ async def scan_pick_v2_endpoint(
 
 
 @router.post("/transfers/{transfer_id}/unscan-pick-v2")
-async def unscan_pick_v2_endpoint(
+def unscan_pick_v2_endpoint(
     transfer_id: str,
     data: UnscanPickRequestV2,
     db: Session = Depends(get_db),
@@ -1870,7 +1870,7 @@ async def unscan_pick_v2_endpoint(
 
 
 @router.get("/transfers/{transfer_id}/lots-for-line")
-async def lots_for_line_endpoint(
+def lots_for_line_endpoint(
     transfer_id: str,
     line_id: str,
     db: Session = Depends(get_db),
@@ -1896,7 +1896,7 @@ async def lots_for_line_endpoint(
 
 
 @router.post("/transfers/{transfer_id}/retarget-lot")
-async def retarget_lot_endpoint(
+def retarget_lot_endpoint(
     transfer_id: str,
     data: RetargetLotRequest,
     db: Session = Depends(get_db),
@@ -1932,7 +1932,7 @@ async def retarget_lot_endpoint(
 
 
 @router.post("/transfers/{transfer_id}/lot-escape-hatch")
-async def lot_escape_hatch_endpoint(
+def lot_escape_hatch_endpoint(
     transfer_id: str,
     data: LotEscapeHatchRequest,
     db: Session = Depends(get_db),

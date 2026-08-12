@@ -92,7 +92,7 @@ def _check_warehouse_access(current_user, transfer: InterWarehouseTransfer, side
 # ---------------------------------------------------------------------------
 
 @router.get("/available-products")
-async def list_available_products(
+def list_available_products(
     warehouse_id: str = Query(..., description="Source warehouse ID"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -115,7 +115,7 @@ async def list_available_products(
 
 
 @router.get("/available-receipts", response_model=List[ReceiptSummary])
-async def list_available_receipts(
+def list_available_receipts(
     warehouse_id: str = Query(..., description="Source warehouse ID"),
     product_id: str = Query(..., description="Product ID"),
     lot_number: Optional[str] = Query(None, description="Filter by lot number"),
@@ -136,7 +136,7 @@ async def list_available_receipts(
 
 
 @router.get("/", response_model=List[InterWarehouseTransferOut])
-async def list_transfers(
+def list_transfers(
     status: Optional[str] = Query(None, description="Filter by status"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -160,7 +160,7 @@ async def list_transfers(
 
 
 @router.post("/", response_model=InterWarehouseTransferOut)
-async def initiate_transfer(
+def initiate_transfer(
     data: InterWarehouseTransferCreate,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -243,7 +243,7 @@ async def initiate_transfer(
 
 
 @router.get("/{transfer_id}", response_model=InterWarehouseTransferOut)
-async def get_transfer(
+def get_transfer(
     transfer_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -252,7 +252,7 @@ async def get_transfer(
 
 
 @router.post("/{transfer_id}/confirm", response_model=InterWarehouseTransferOut)
-async def confirm_transfer(
+def confirm_transfer(
     transfer_id: str,
     data: InterWarehouseTransferConfirmAction = None,
     db: Session = Depends(get_db),
@@ -324,7 +324,7 @@ async def confirm_transfer(
 
 
 @router.post("/{transfer_id}/ship", response_model=InterWarehouseTransferOut)
-async def ship_transfer(
+def ship_transfer(
     transfer_id: str,
     data: InterWarehouseTransferAction = None,
     db: Session = Depends(get_db),
@@ -356,7 +356,7 @@ async def ship_transfer(
 
 
 @router.post("/{transfer_id}/receive", response_model=InterWarehouseTransferOut)
-async def receive_transfer(
+def receive_transfer(
     transfer_id: str,
     data: InterWarehouseTransferAction = None,
     db: Session = Depends(get_db),
@@ -398,7 +398,7 @@ async def receive_transfer(
 
 
 @router.post("/{transfer_id}/complete", response_model=InterWarehouseTransferOut)
-async def complete_transfer(
+def complete_transfer(
     transfer_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -414,7 +414,7 @@ async def complete_transfer(
 
 
 @router.post("/{transfer_id}/cancel", response_model=InterWarehouseTransferOut)
-async def cancel_transfer(
+def cancel_transfer(
     transfer_id: str,
     data: InterWarehouseTransferAction = None,
     db: Session = Depends(get_db),
@@ -451,7 +451,7 @@ async def cancel_transfer(
 
 
 @router.post("/{transfer_id}/dispute", response_model=InterWarehouseTransferOut)
-async def dispute_transfer(
+def dispute_transfer(
     transfer_id: str,
     data: InterWarehouseTransferDisputeAction,
     db: Session = Depends(get_db),

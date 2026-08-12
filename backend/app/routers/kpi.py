@@ -77,7 +77,7 @@ def _resolve_production_day(
 
 
 @router.get("/production")
-async def get_production_today(
+def get_production_today(
     warehouse_id: str = Query(..., description="Warehouse to query"),
     date: Optional[str] = Query(None, description="Production day YYYY-MM-DD (warehouse-local). Defaults to current production day."),
     db: Session = Depends(get_db),
@@ -172,7 +172,7 @@ async def get_production_today(
 
 
 @router.get("/production/detail")
-async def get_production_detail(
+def get_production_detail(
     warehouse_id: str = Query(..., description="Warehouse to query"),
     date: Optional[str] = Query(None, description="Production day YYYY-MM-DD (warehouse-local). Defaults to current production day."),
     bucket_minutes: int = Query(30, description="Timeline bucket width: 15, 30, or 60 minutes."),
@@ -304,7 +304,7 @@ async def get_production_detail(
 
 
 @router.get("/production/range")
-async def get_production_range(
+def get_production_range(
     warehouse_id: str = Query(..., description="Warehouse to query"),
     start: str = Query(..., description="First production day, YYYY-MM-DD (warehouse-local, inclusive)."),
     end: str = Query(..., description="Last production day, YYYY-MM-DD (warehouse-local, inclusive)."),

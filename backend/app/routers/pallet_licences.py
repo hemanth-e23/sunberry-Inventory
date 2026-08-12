@@ -14,7 +14,7 @@ router = APIRouter()
 
 
 @router.get("/", response_model=List[PalletLicenceSchema])
-async def list_pallet_licences(
+def list_pallet_licences(
     licence_number: Optional[str] = Query(None, description="Search by exact or partial licence number"),
     receipt_id: Optional[str] = Query(None, description="Filter by receipt ID"),
     storage_row_id: Optional[str] = Query(None, description="Filter by storage row ID"),

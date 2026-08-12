@@ -52,7 +52,7 @@ class UnclaimRequest(BaseSchema):
 
 
 @router.get("/lines/{item_id}")
-async def line_detail(
+def line_detail(
     item_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -61,7 +61,7 @@ async def line_detail(
 
 
 @router.post("/lines/{item_id}/claim")
-async def claim(
+def claim(
     item_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -74,7 +74,7 @@ async def claim(
 
 
 @router.post("/lines/{item_id}/unclaim")
-async def unclaim(
+def unclaim(
     item_id: str,
     payload: UnclaimRequest,
     db: Session = Depends(get_db),
@@ -88,7 +88,7 @@ async def unclaim(
 
 
 @router.get("/lines/{item_id}/fefo", response_model=List[ContainerSchema])
-async def fefo(
+def fefo(
     item_id: str,
     limit: int = Query(50, le=200),
     db: Session = Depends(get_db),
@@ -106,7 +106,7 @@ async def fefo(
 
 
 @router.post("/lines/{item_id}/scan")
-async def scan(
+def scan(
     item_id: str,
     payload: StageScanRequest,
     db: Session = Depends(get_db),
@@ -126,7 +126,7 @@ async def scan(
 
 
 @router.post("/lines/{item_id}/return")
-async def return_container(
+def return_container(
     item_id: str,
     payload: StageReturnRequest,
     db: Session = Depends(get_db),

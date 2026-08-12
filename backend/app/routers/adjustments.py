@@ -20,7 +20,7 @@ router = APIRouter()
 
 
 @router.get("/adjustments", response_model=List[InventoryAdjustmentSchema])
-async def get_adjustments(
+def get_adjustments(
     skip: int = 0,
     limit: int = 100,
     status: str = None,
@@ -49,7 +49,7 @@ async def get_adjustments(
     return adjustments
 
 @router.post("/adjustments", response_model=InventoryAdjustmentSchema)
-async def create_adjustment(
+def create_adjustment(
     adjustment_data: InventoryAdjustmentCreate,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -115,7 +115,7 @@ async def create_adjustment(
     return db_adjustment
 
 @router.put("/adjustments/{adjustment_id}", response_model=InventoryAdjustmentSchema)
-async def update_adjustment(
+def update_adjustment(
     adjustment_id: str,
     adjustment_update: InventoryAdjustmentUpdate,
     db: Session = Depends(get_db),
@@ -153,7 +153,7 @@ async def update_adjustment(
     return adjustment
 
 @router.post("/adjustments/{adjustment_id}/approve")
-async def approve_adjustment(
+def approve_adjustment(
     adjustment_id: str,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_active_user)
@@ -178,7 +178,7 @@ async def approve_adjustment(
     return {"message": "Adjustment approved successfully", "adjustment": adjustment}
 
 @router.post("/adjustments/{adjustment_id}/reject")
-async def reject_adjustment(
+def reject_adjustment(
     adjustment_id: str,
     reason: str,
     db: Session = Depends(get_db),

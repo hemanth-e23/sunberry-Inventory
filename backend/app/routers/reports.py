@@ -27,7 +27,7 @@ router = APIRouter()
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/point-in-time")
-async def point_in_time_snapshot(
+def point_in_time_snapshot(
     as_of_date: str,
     product_id: Optional[str] = None,
     category_id: Optional[str] = None,
@@ -58,7 +58,7 @@ async def point_in_time_snapshot(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/activity-ledger")
-async def activity_ledger(
+def activity_ledger(
     start_date: str,
     end_date: str,
     product_id: Optional[str] = None,
@@ -90,7 +90,7 @@ async def activity_ledger(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/shipments")
-async def shipments_report(
+def shipments_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     product_id: Optional[str] = None,
@@ -114,7 +114,7 @@ async def shipments_report(
 
 
 @router.get("/shipments/{transfer_id}")
-async def shipment_detail(
+def shipment_detail(
     transfer_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -136,7 +136,7 @@ async def shipment_detail(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/movement-ledger")
-async def movement_ledger(
+def movement_ledger(
     product_id: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -157,7 +157,7 @@ async def movement_ledger(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/lot-trace")
-async def lot_trace(
+def lot_trace(
     lot_number: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
@@ -171,7 +171,7 @@ async def lot_trace(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/holds")
-async def holds_report(
+def holds_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     action: Optional[str] = None,
@@ -195,7 +195,7 @@ async def holds_report(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/finished-goods")
-async def finished_goods_report(
+def finished_goods_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     product_id: Optional[str] = None,
@@ -217,7 +217,7 @@ async def finished_goods_report(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/expiry-alerts")
-async def expiry_alerts(
+def expiry_alerts(
     days_ahead: Optional[int] = None,
     include_expired: bool = True,
     product_id: Optional[str] = None,
@@ -241,7 +241,7 @@ async def expiry_alerts(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/adjustments")
-async def adjustments_report(
+def adjustments_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     adjustment_type: Optional[str] = None,
@@ -265,7 +265,7 @@ async def adjustments_report(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/vendor-receipts")
-async def vendor_receipts_report(
+def vendor_receipts_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     vendor_id: Optional[str] = None,
@@ -287,7 +287,7 @@ async def vendor_receipts_report(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/cycle-counts")
-async def cycle_count_report(
+def cycle_count_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     location_id: Optional[str] = None,

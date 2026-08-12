@@ -14,7 +14,7 @@ from app.config import settings
 router = APIRouter()
 
 @router.post("/login", response_model=Token)
-async def login(
+def login(
     login_data: LoginRequest,
     db: Session = Depends(get_db)
 ):
@@ -48,7 +48,7 @@ async def login(
 
 
 @router.post("/badge-login", response_model=Token)
-async def badge_login(
+def badge_login(
     login_data: BadgeLoginRequest,
     db: Session = Depends(get_db)
 ):
@@ -85,7 +85,7 @@ async def badge_login(
 
 
 @router.post("/register", response_model=UserSchema)
-async def register(
+def register(
     user_data: UserCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
@@ -140,7 +140,7 @@ async def register(
     return db_user
 
 @router.post("/refresh", response_model=Token)
-async def refresh_token(current_user: User = Depends(get_current_active_user)):
+def refresh_token(current_user: User = Depends(get_current_active_user)):
     """Refresh the access token. Issues a new token with full expiry for the authenticated user."""
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
@@ -150,6 +150,6 @@ async def refresh_token(current_user: User = Depends(get_current_active_user)):
 
 
 @router.get("/me", response_model=UserSchema)
-async def get_current_user_info(current_user: User = Depends(get_current_active_user)):
+def get_current_user_info(current_user: User = Depends(get_current_active_user)):
     """Get current user information"""
     return current_user
