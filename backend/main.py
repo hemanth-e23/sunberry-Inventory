@@ -6,15 +6,17 @@ from fastapi.exceptions import RequestValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import uvicorn
+import asyncio
 import time
 import logging
 import uuid
 import traceback as traceback_mod
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from typing import Dict, Tuple
 
 from app.config import settings
-from app.database import engine, Base
+from app.database import engine, Base, pool_stats
+from app.utils.watchdog import start_watchdog, saturated_for_seconds
 from app.routers import auth, users, products, receipts, inventory, master_data, service, scanner, pallet_licences, reports, inter_warehouse_transfers, notifications
 from app.routers import transfers, adjustments, holds, cycle_counts, staging
 from app.routers import active_production, palletizer, kpi
@@ -39,42 +41,146 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,  # Disable in production
 )
 
-# Rate limiting storage (in-memory, use Redis for production)
-rate_limit_store: Dict[str, list] = defaultdict(list)
+# Rate limiting storage (in-memory, use Redis for production).
+# OrderedDict, not defaultdict: this is keyed by client IP and previously grew
+# without bound, retaining a list per IP ever seen for the life of the process.
+rate_limit_store: "OrderedDict[str, list]" = OrderedDict()
+
+
+def _client_ip(request: Request) -> str:
+    """Real client IP.
+
+    request.client.host is NOT usable here: this app is served through a
+    Cloudflare tunnel running as a sibling container, so every request arrives
+    from that one container's address. Keying on it would put the entire
+    company in a single rate-limit bucket — enabling the limiter without this
+    fix would throttle everyone at once.
+    """
+    cf = request.headers.get("cf-connecting-ip")
+    if cf:
+        return cf.strip()
+    # First entry in X-Forwarded-For is the originating client.
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else "unknown"
+
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Simple rate limiting middleware"""
     async def dispatch(self, request: Request, call_next):
         if not settings.RATE_LIMIT_ENABLED:
             return await call_next(request)
-        
-        # Get client IP
-        client_ip = request.client.host if request.client else "unknown"
-        
+
+        client_ip = _client_ip(request)
+
         # Check if it's a login endpoint
         is_login = request.url.path in ("/api/auth/login", "/api/auth/badge-login")
         limit = settings.RATE_LIMIT_LOGIN_PER_MINUTE if is_login else settings.RATE_LIMIT_PER_MINUTE
-        
+
         # Clean old entries (older than 1 minute)
         current_time = time.time()
-        rate_limit_store[client_ip] = [
-            timestamp for timestamp in rate_limit_store[client_ip]
+        recent = [
+            timestamp for timestamp in rate_limit_store.get(client_ip, ())
             if current_time - timestamp < 60
         ]
-        
+
         # Check rate limit
-        if len(rate_limit_store[client_ip]) >= limit:
+        if len(recent) >= limit:
+            rate_limit_store[client_ip] = recent
+            rate_limit_store.move_to_end(client_ip)
             return JSONResponse(
                 status_code=429,
                 content={
                     "detail": f"Rate limit exceeded. Maximum {limit} requests per minute."
                 }
             )
-        
-        # Add current request
-        rate_limit_store[client_ip].append(current_time)
-        
+
+        # Add current request, keeping this IP as most-recently-seen.
+        recent.append(current_time)
+        rate_limit_store[client_ip] = recent
+        rate_limit_store.move_to_end(client_ip)
+
+        # Evict least-recently-seen IPs so the store cannot grow unbounded.
+        while len(rate_limit_store) > settings.RATE_LIMIT_MAX_TRACKED_IPS:
+            rate_limit_store.popitem(last=False)
+
         return await call_next(request)
+
+
+class TimeoutMiddleware:
+    """Give every request a deadline.
+
+    Without one, a request whose work is stuck simply waits. During both
+    outages requests ran for up to 514 seconds — long after the browser had
+    given up at its own 30s timeout — so the server kept burning connections on
+    work nobody was waiting for, and the backlog outlived the burst that caused
+    it.
+
+    Written as pure ASGI rather than BaseHTTPMiddleware deliberately. Under
+    BaseHTTPMiddleware the response cannot be delivered until the downstream
+    task finishes, so a timeout there computes a 503 on schedule and then sits
+    on it until the slow work completes — the client waits exactly as long as
+    before, which defeats the point. Owning `send` here lets us answer the
+    client at the deadline.
+
+    The deadline sits above DB_STATEMENT_TIMEOUT_MS so a genuinely slow query
+    surfaces as a real database error (with a traceback) instead of being
+    masked by this timeout. Cancellation cannot interrupt a sync endpoint's
+    thread mid-query — statement_timeout on the connection is what bounds that.
+    The two are complementary: this bounds what the *client* waits, that bounds
+    what the *database* does.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        timeout = settings.REQUEST_TIMEOUT_SECONDS
+        if scope["type"] != "http" or timeout <= 0:
+            await self.app(scope, receive, send)
+            return
+
+        # Once we answer on our own, any later message from the downstream app
+        # would corrupt the connection — so drop them.
+        state = {"started": False, "we_answered": False}
+
+        async def send_wrapper(message):
+            if state["we_answered"]:
+                return
+            if message["type"] == "http.response.start":
+                state["started"] = True
+            await send(message)
+
+        task = asyncio.ensure_future(self.app(scope, receive, send_wrapper))
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
+
+        if task in done:
+            # Propagate the real result (and any exception) untouched.
+            task.result()
+            return
+
+        # Past the deadline. If the response has already begun streaming we
+        # cannot replace it; let it finish rather than emit a broken frame.
+        if not state["started"]:
+            state["we_answered"] = True
+            scope.setdefault("state", {})["error_reason"] = (
+                f"request exceeded the {timeout}s server deadline"
+            )
+            response = JSONResponse(
+                status_code=503,
+                content={"detail": "The server took too long to respond. Please retry."},
+            )
+            await response(scope, receive, send)
+
+        # Best effort: ask the stalled work to stop. A thread running a sync
+        # query will not observe this, which is precisely why statement_timeout
+        # exists. Swallow the result so it is never an "exception was never
+        # retrieved" warning.
+        task.cancel()
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
 def _request_user_repr(request: Request) -> str:
     """Short identifier for the user behind a request, for log lines.
@@ -337,6 +443,9 @@ async def general_exception_handler(request: Request, exc: Exception):
 # middleware sees the final response status (including rate-limit 429s).
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RateLimitMiddleware)
+# Inside RequestLoggingMiddleware so a timed-out request still produces an
+# error banner in the log — the timeout is exactly the event worth recording.
+app.add_middleware(TimeoutMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 
 # Configure CORS with proper origins
@@ -391,10 +500,47 @@ async def root():
         response["redoc"] = "/redoc"
     return response
 
+@app.on_event("startup")
+async def _start_pool_watchdog():
+    """Recover automatically from a wedged worker.
+
+    Runs per uvicorn worker. See app/utils/watchdog.py for why this exists.
+    """
+    start_watchdog()
+
+
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "message": "API is running"}
+    """Health check — reports real capacity, not just process liveness.
+
+    This used to return a static 'healthy' regardless of state, so during both
+    outages it kept reporting healthy while every real request failed on pool
+    checkout. It now reports pool usage, which is what actually determines
+    whether this worker can serve traffic.
+
+    Reads in-memory counters only and never checks out a connection, so it
+    stays answerable exactly when the pool is exhausted. Returns 503 only after
+    saturation is *sustained* (POOL_UNHEALTHY_AFTER_SECONDS), so a brief burst
+    does not trigger a restart.
+    """
+    stats = pool_stats()
+    saturated_for = saturated_for_seconds()
+    unhealthy_after = settings.POOL_UNHEALTHY_AFTER_SECONDS
+    degraded = unhealthy_after > 0 and saturated_for >= unhealthy_after
+
+    body = {
+        "status": "unhealthy" if degraded else "healthy",
+        "message": "API is running",
+        "pool": stats,
+        "pool_saturated_seconds": round(saturated_for, 1),
+    }
+    if degraded:
+        body["message"] = (
+            f"database connection pool saturated for {saturated_for:.0f}s "
+            f"({stats['checked_out']}/{stats['capacity']} in use)"
+        )
+        return JSONResponse(status_code=503, content=body)
+    return body
 
 if __name__ == "__main__":
     uvicorn.run(

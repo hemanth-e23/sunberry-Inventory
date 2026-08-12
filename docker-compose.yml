@@ -5,6 +5,15 @@ services:
   db:
     image: postgres:15-alpine
     container_name: sunberry-db
+    # max_connections must exceed WEB_CONCURRENCY * (DB_POOL_SIZE +
+    # DB_MAX_OVERFLOW) with headroom for the KPI puller, cron jobs, psql and
+    # pg_dump. At the defaults that is 4 * 20 = 80, so 200 leaves ample room.
+    # Each connection costs roughly 5-10MB; lower this (and the worker count)
+    # rather than over-committing a small server.
+    command: >
+      postgres
+      -c max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-sunberry_inventory}
       POSTGRES_USER: ${POSTGRES_USER:-sunberry}
@@ -37,8 +46,18 @@ services:
       PORT: 8000
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-True}
-      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-300}
       RATE_LIMIT_LOGIN_PER_MINUTE: ${RATE_LIMIT_LOGIN_PER_MINUTE:-5}
+      # Connection pool, per worker. See backend/.env.example for the reasoning.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-10}
+      DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-30000}
+      # Self-recovery thresholds.
+      POOL_UNHEALTHY_AFTER_SECONDS: ${POOL_UNHEALTHY_AFTER_SECONDS:-60}
+      POOL_EXIT_AFTER_SECONDS: ${POOL_EXIT_AFTER_SECONDS:-120}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-45}
       SERVICE_API_KEY: ${SERVICE_API_KEY:-}
       KPI_API_TOKEN: ${KPI_API_TOKEN:-}
       PRODUCTION_API_URL: ${PRODUCTION_API_URL:-}
@@ -59,6 +78,37 @@ services:
     networks:
       - sunberry-network
     restart: unless-stopped
+    labels:
+      # Opt this container in to autoheal restarts (see the autoheal service).
+      # Scoped by label rather than AUTOHEAL_CONTAINER_LABEL=all so that a
+      # transiently unhealthy database is never restarted underneath the app.
+      autoheal: "true"
+
+  # Autoheal - restarts containers that report unhealthy.
+  #
+  # `restart: unless-stopped` only reacts to a process EXITING. It does nothing
+  # for a process that is alive but wedged, which is exactly what happened on
+  # 2026-08-10 and 2026-08-12: the backend kept running with its connection
+  # pool fully checked out, failed every request, and sat there until it was
+  # restarted by hand. Compose does not act on healthcheck failures, so this
+  # container is what turns an unhealthy status into a restart.
+  #
+  # This is the second of two independent recovery paths; the first is the
+  # in-process watchdog (backend/app/utils/watchdog.py), which exits the worker
+  # on sustained pool saturation. Either alone suffices.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: sunberry-autoheal
+    restart: always
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: 15
+      AUTOHEAL_START_PERIOD: 60
+    volumes:
+      # Read/write access to the Docker socket is required to issue restarts.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - sunberry-network
 
   # Cloudflare Tunnel - exposes backend to the internet
   tunnel:

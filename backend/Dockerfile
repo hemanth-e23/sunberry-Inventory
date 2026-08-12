@@ -37,9 +37,11 @@ USER appuser
 # Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/api/health')" || exit 1
+# Health check.
+# raise_for_status() matters: requests.get() does NOT raise on a 4xx/5xx, so
+# the previous version reported healthy even when /api/health returned 503.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:8000/api/health', timeout=5).raise_for_status()" || exit 1
 
 # Entrypoint runs `alembic upgrade head` before exec'ing the CMD, so a fresh
 # container always boots against a migrated schema. Stop/start is enough — no
@@ -49,5 +51,17 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # does not need a POSIX executable bit. The compose bind-mount (./backend:/app)
 # can strip +x when the host is Windows/NTFS, which would otherwise make the
 # entrypoint unexecutable even though `chmod +x` ran in the image build.
+# Worker processes. This ran single-process until 2026-08, which meant one
+# blocked request could stall every other request in the system: the endpoints
+# are declared `async def` but execute synchronous SQLAlchemy, so a slow query
+# blocks the event loop rather than yielding it. Multiple workers contain that
+# blast radius to one process.
+#
+# uvicorn reads --workers from $WEB_CONCURRENCY, so this is overridable per
+# environment without rebuilding the image. Total PostgreSQL connections =
+# WEB_CONCURRENCY * (DB_POOL_SIZE + DB_MAX_OVERFLOW); keep that below the
+# server's max_connections.
+ENV WEB_CONCURRENCY=4
+
 ENTRYPOINT ["sh", "/app/entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
