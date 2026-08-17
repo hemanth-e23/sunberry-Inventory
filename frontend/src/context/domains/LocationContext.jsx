@@ -44,9 +44,15 @@ export const LocationProvider = ({ children }) => {
             id: sub.id,
             name: sub.name,
             active: sub.is_active !== false,
+            // What one stored unit is in this room. null = pallets, i.e. every
+            // room that exists today, which is why nothing below changes for
+            // them. Set once per room; the rows inherit it.
+            storageUnit: sub.storage_unit || null,
+            unitCapacity: sub.unit_capacity == null ? null : Number(sub.unit_capacity),
             rows: (sub.rows || []).map(row => ({
               id: row.id,
               name: row.name,
+              barcode: row.barcode || null,
               template: row.template || 'custom',
               palletCapacity: row.pallet_capacity || 0,
               defaultCasesPerPallet: row.default_cases_per_pallet || 0,
@@ -56,6 +62,26 @@ export const LocationProvider = ({ children }) => {
               hold: row.hold || false,
               notes: row.notes || '',
               active: row.is_active !== false,
+              // Live counts from lot_placements. null (not 0) outside a
+              // unit-typed room, so "no drums here" stays distinguishable from
+              // "this is a pallet room".
+              liveUnits: row.live_units == null ? null : Number(row.live_units),
+              liveOpenUnits:
+                row.live_open_units == null ? null : Number(row.live_open_units),
+              liveLots: Array.isArray(row.live_lots)
+                ? row.live_lots.map(l => ({
+                    materialLotId: l.material_lot_id,
+                    lotCode: l.lot_code,
+                    productId: l.product_id,
+                    vendorLotNumber: l.vendor_lot_number || null,
+                    units: Number(l.units || 0),
+                    openUnits: Number(l.open_units || 0),
+                    weight: Number(l.weight || 0),
+                    weightUnit: l.weight_unit || null,
+                    bbd: l.bbd || null,
+                    isHeld: Boolean(l.is_held),
+                  }))
+                : null,
             })),
           })),
       }));
@@ -415,6 +441,53 @@ export const LocationProvider = ({ children }) => {
       );
     } catch (error) {
       console.error('Error updating sub-location:', error);
+      throw error;
+    }
+  };
+
+  /**
+   * Set what one stored unit IS in this room, and how many fit in one of its
+   * rows. Pass storageUnit: '' to clear it back to pallets.
+   *
+   * This is a room-level setting on purpose: a drum barn's rows all hold drums,
+   * and asking an admin to repeat it 40 times is 40 chances to get it wrong.
+   */
+  const updateSubLocationStorage = async (parentId, subId, { storageUnit, unitCapacity }) => {
+    try {
+      const updateData = {};
+      if (storageUnit !== undefined) {
+        updateData.storage_unit = storageUnit ? String(storageUnit).trim() : null;
+      }
+      if (unitCapacity !== undefined) {
+        updateData.unit_capacity =
+          unitCapacity === '' || unitCapacity == null
+            ? null
+            : Math.max(0, Number(unitCapacity) || 0);
+      }
+      const response = await apiClient.put(`/master-data/sub-locations/${subId}`, updateData);
+
+      setLocationsState((prev) =>
+        prev.map((location) => {
+          if (location.id !== parentId) return location;
+          return {
+            ...location,
+            subLocations: location.subLocations.map((sub) =>
+              sub.id === subId
+                ? {
+                    ...sub,
+                    storageUnit: response.data.storage_unit || null,
+                    unitCapacity:
+                      response.data.unit_capacity == null
+                        ? null
+                        : Number(response.data.unit_capacity),
+                  }
+                : sub,
+            ),
+          };
+        }),
+      );
+    } catch (error) {
+      console.error('Error updating sub-location storage unit:', error);
       throw error;
     }
   };
@@ -1113,6 +1186,7 @@ export const LocationProvider = ({ children }) => {
     // Sub-location CRUD
     addSubLocation: addSubLocationNode,
     renameSubLocation: renameSubLocationNode,
+    updateSubLocationStorage,
     toggleSubLocationActive,
     removeSubLocation: removeSubLocationNode,
 

@@ -21,6 +21,13 @@ from app.models.location import (
     ProductionShift, ProductionLine,
 )
 
+# 2b. Material lots + unit-count placements (FK: products, vendors, warehouses,
+#     storage_rows, users). MUST precede receipt — Receipt.material_lot_id FKs
+#     material_lots.
+from app.models.material_lot import (
+    MaterialLot, MaterialLotBbdExtension, LotPlacement, LotPlacementEvent,
+)
+
 # 3. Receipt (FK: products, categories, vendors, locations, storage_rows, users, warehouses)
 from app.models.receipt import Receipt, ReceiptAllocation
 
@@ -65,6 +72,7 @@ __all__ = [
     "CategoryGroup", "Category", "Vendor", "Product", "WarehouseCategoryAccess",
     "Location", "SubLocation", "StorageArea", "StorageRow",
     "ProductionShift", "ProductionLine",
+    "MaterialLot", "MaterialLotBbdExtension", "LotPlacement", "LotPlacementEvent",
     "Receipt", "ReceiptAllocation",
     "InventoryTransfer", "InventoryTransferLine", "TransferPalletSwap",
     "InventoryAdjustment", "InventoryHoldAction",

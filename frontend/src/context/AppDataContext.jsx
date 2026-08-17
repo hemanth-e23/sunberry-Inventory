@@ -74,6 +74,7 @@ export const AppDataProvider = ({ children }) => {
     updateSubLocationRow: location.updateSubLocationRow,
     toggleSubLocationRowActive: location.toggleSubLocationRowActive,
     renameSubLocation: location.renameSubLocation,
+    updateSubLocationStorage: location.updateSubLocationStorage,
     toggleSubLocationActive: location.toggleSubLocationActive,
     removeSubLocation: location.removeSubLocation,
     addStorageArea: location.addStorageArea,

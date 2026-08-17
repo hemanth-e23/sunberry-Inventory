@@ -62,6 +62,26 @@ filters on ``product_id`` alone and never needs a category predicate. Every
 container query carries its own ``is_deleted == False``: nothing in
 ``app/models/ingredient.py`` inherits a soft-delete-aware base, so an omitted
 filter is a silent data leak rather than an error.
+
+LOT PLACEMENTS ARE NOW THE LIVE SOURCE (2026-08). The per-drum ``Container``
+model was replaced by lot-level identity plus a unit count per row
+(``lot_placements``). Both sources are read here, which is not a hedge:
+
+* ``Container`` rows are DORMANT — the per-drum flow never carried production
+  stock, so that term is 0 in the real database. It stays wired up only until
+  the tables are dropped, so the ~40 assertions in tests/test_availability.py
+  keep guarding the surrounding arithmetic while the model changes underneath.
+* ``LotPlacement`` is the term that will actually carry a number.
+
+THE DOUBLE-COUNT RULE, which is the one genuinely new piece of logic. A counted
+lot's receipts still carry their original ``Receipt.quantity`` — the placement
+projection rewrites the allocation JSON and the row counters, deliberately NOT
+the receipt quantity. So a receipt whose lot has placements is ALREADY
+represented, in units, by those placements, and summing both would count the
+same drums twice. ``_legacy_by_unit`` therefore excludes receipts linked to a
+lot that has any placement. On a database with no placements the NOT EXISTS is
+vacuously true for every row, so the legacy number is unchanged to the byte —
+which is the property this module was written to preserve.
 """
 
 from typing import Iterable, Optional
@@ -71,7 +91,7 @@ from sqlalchemy.orm import Session
 
 from app.enums import ContainerStatus, ReceiptStatus
 from app.exceptions import ValidationError
-from app.models import Container, Receipt
+from app.models import Container, LotPlacement, MaterialLot, Receipt
 
 # Containers that count as usable stock. `printed_unapplied` is a sticker with
 # no drum behind it; `empty`/`shipped`/`disposed`/`damaged`/`returned_to_vendor`/
@@ -125,18 +145,87 @@ def _legacy_by_unit(
     )
     gross_expr = func.coalesce(func.sum(Receipt.quantity), 0)
 
+    # A receipt whose lot is counted is represented by lot_placements instead —
+    # see THE DOUBLE-COUNT RULE in the module docstring. Correlated NOT EXISTS,
+    # so a NULL material_lot_id (every legacy receipt) never matches and the row
+    # is kept: on a placement-free database this filter changes nothing.
+    counted_lot = (
+        db.query(LotPlacement.id)
+        .filter(LotPlacement.material_lot_id == Receipt.material_lot_id)
+        .exists()
+    )
+
     q = (
         db.query(Receipt.unit, net_expr, gross_expr)
         .filter(
             Receipt.product_id == product_id,
             Receipt.status == ReceiptStatus.APPROVED,
             Receipt.quantity > 0,
+            ~counted_lot,
         )
         .group_by(Receipt.unit)
     )
     if warehouse_id:
         q = q.filter(Receipt.warehouse_id == warehouse_id)
     return [(u, float(net or 0), float(gross or 0)) for u, net, gross in q.all()]
+
+
+def _placements_by_bucket(
+    db: Session,
+    product_id: str,
+    warehouse_id: Optional[str] = None,
+) -> list:
+    """Per ``(is_held, weight_unit)`` placement sums, counts and unit counts.
+
+    Weight is DERIVED here exactly as it is everywhere else —
+    ``full_units * weight_per_unit + open_remaining_qty`` — and computed in SQL
+    so a product with a thousand placements is still one round trip. A lot with
+    no ``weight_per_unit`` yet contributes only its open remainder rather than
+    dropping out on a NULL.
+
+    There is no pending bucket, unlike containers. A placement exists because a
+    person physically scanned units into a row, so it is stock the moment it
+    exists; receiving approval checks the paperwork afterwards and was
+    explicitly agreed not to gate availability.
+
+    Returns ``[(is_held, weight_unit, qty, placement_count, unit_count), ...]``.
+    """
+    qty_expr = func.coalesce(
+        func.sum(
+            LotPlacement.full_units * func.coalesce(MaterialLot.weight_per_unit, 0.0)
+            + func.coalesce(LotPlacement.open_remaining_qty, 0.0)
+        ),
+        0.0,
+    )
+    units_expr = func.coalesce(
+        func.sum(LotPlacement.full_units + LotPlacement.open_units), 0
+    )
+
+    q = (
+        db.query(
+            MaterialLot.is_held,
+            MaterialLot.weight_unit,
+            qty_expr,
+            func.count(LotPlacement.id),
+            units_expr,
+        )
+        .join(MaterialLot, MaterialLot.id == LotPlacement.material_lot_id)
+        .filter(
+            LotPlacement.product_id == product_id,
+            MaterialLot.is_deleted == False,  # noqa: E712
+            (LotPlacement.full_units > 0) | (LotPlacement.open_units > 0),
+        )
+        .group_by(MaterialLot.is_held, MaterialLot.weight_unit)
+    )
+    if warehouse_id:
+        # Scope on the placement, not the lot: the same vendor lot legitimately
+        # sits in two plants, and only the placement knows which drums are where.
+        q = q.filter(LotPlacement.warehouse_id == warehouse_id)
+
+    return [
+        (bool(is_held), unit, float(qty or 0.0), int(count or 0), int(units or 0))
+        for is_held, unit, qty, count, units in q.all()
+    ]
 
 
 def _containers_by_bucket(
@@ -208,6 +297,13 @@ def container_qty_for_product(
     total = 0.0
     for _status, is_held, _unit, qty, _count in _containers_by_bucket(
         db, product_id, warehouse_id, statuses
+    ):
+        if is_held and not include_held:
+            continue
+        total += qty
+    # `include_pending` has no placement analogue — see _placements_by_bucket.
+    for is_held, _unit, qty, _count, _units in _placements_by_bucket(
+        db, product_id, warehouse_id
     ):
         if is_held and not include_held:
             continue
@@ -294,12 +390,13 @@ def on_hand_for_product(
 
         {
           "product_id", "warehouse_id",
-          "legacy_qty",          # app/routers/service.py:232-255, unchanged
-          "container_qty",       # unheld containers (+ pending if requested)
+          "legacy_qty",          # service.py:232-255, minus counted-lot receipts
+          "container_qty",       # unheld containers + placements (+ pending)
           "total",               # legacy_qty + container_qty
           "unit",                # agreed unit, or None when nothing declares one
-          "has_containers",      # any physical container row exists at all
-          "container_count",     # containers behind container_qty
+          "has_containers",      # any physical container/placement row exists
+          "container_count",     # containers + placements behind container_qty
+          "unit_count",          # unheld WHOLE UNITS: "31 drums", not "30.82"
           "available_to_stage",  # approved + unheld  (the availability gate)
           "physically_present",  # everything in the building, held or pending
           "financial_on_hand",   # owned and booked: held yes, pending no
@@ -350,6 +447,35 @@ def on_hand_for_product(
         display, running = counted_units.get(key, (qty_unit, 0.0))
         counted_units[key] = (display or qty_unit, running + qty)
 
+    placement_rows = _placements_by_bucket(db, product_id, warehouse_id)
+    placement_unheld = placement_held = 0.0
+    unit_count_unheld = unit_count_total = 0
+    count_placements_total = count_placements_unheld = 0
+
+    for is_held, weight_unit, qty, count, units in placement_rows:
+        count_placements_total += count
+        unit_count_total += units
+        if is_held:
+            placement_held += qty
+            continue
+        placement_unheld += qty
+        unit_count_unheld += units
+        count_placements_unheld += count
+        # Held stock is excluded from the unit assertion for the same reason a
+        # held drum is: it must not take down the gate for material it is not
+        # contributing to.
+        key = _normalize_unit(weight_unit)
+        display, running = counted_units.get(key, (weight_unit, 0.0))
+        counted_units[key] = (display or weight_unit, running + qty)
+
+    # Placements fold into the container terms rather than adding a fourth
+    # number to the return shape: to every caller they are the same fact —
+    # live stock the legacy receipt sum does not know about.
+    active_unheld += placement_unheld
+    active_held += placement_held
+    count_active_unheld += count_placements_unheld
+    count_total += count_placements_total
+
     container_qty = active_unheld + (pending_unheld if include_pending else 0.0)
     container_count = count_active_unheld + (
         count_pending_unheld if include_pending else 0
@@ -371,6 +497,10 @@ def on_hand_for_product(
         "unit": unit,
         "has_containers": count_total > 0,
         "container_count": container_count,
+        # THE number a person can act on. Weight is derived and lands on
+        # fractions nobody can count; "31 drums" is countable and "30.82 drums"
+        # is the defect this model exists to remove. 0 for legacy-only products.
+        "unit_count": unit_count_unheld,
         "available_to_stage": legacy_net + active_unheld,
         "physically_present": legacy_gross + container_active_all + container_pending_all,
         "financial_on_hand": legacy_gross + container_active_all,
@@ -398,6 +528,16 @@ def on_hand_for_product(
                         for _s, _h, display, _q, _c in container_rows
                         if display
                     }
+                ),
+            },
+            "placements": {
+                "unheld": placement_unheld,
+                "held": placement_held,
+                "unit_count_unheld": unit_count_unheld,
+                "unit_count_total": unit_count_total,
+                "placement_count": count_placements_total,
+                "units": sorted(
+                    {display for _h, display, _q, _c, _u in placement_rows if display}
                 ),
             },
             "unit_conflict": legacy_conflict,

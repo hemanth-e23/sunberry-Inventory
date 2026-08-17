@@ -9,6 +9,7 @@ from app.models import (
     Location, SubLocation, StorageArea, StorageRow,
     ProductionShift, ProductionLine, Warehouse, WarehouseCategoryAccess, CategoryGroup,
     PalletLicence, PackageSize, ShipToLocation, Carrier, PalletType,
+    LotPlacement, MaterialLot,
 )
 from app.enums import PalletStatus
 from app.schemas import (
@@ -216,6 +217,89 @@ def update_location(
     return location
 
 # SubLocation endpoints
+def _attach_live_unit_aggregates(db: Session, sub_locations: list) -> None:
+    """Populate live_units / live_open_units / live_lots on rows of UNIT-TYPED
+    rooms, by aggregating lot_placements. The drum/bag counterpart of
+    _attach_live_row_aggregates, which reads pallet_licences for finished goods.
+
+    Rooms with no `storage_unit` are skipped entirely and their rows keep
+    `live_units = None`, so a client can tell "a drum room holding zero drums"
+    apart from "a pallet room, this question does not apply".
+
+    This exists because the endpoint otherwise returns only the denormalised
+    `occupied_*` columns, which is why a drum room could say nothing better than
+    "0.00/22 pallets in use". Two grouped queries, no N+1 over rows.
+    """
+    row_ids: list[str] = []
+    for sub in sub_locations:
+        if not getattr(sub, "storage_unit", None):
+            continue
+        for row in (sub.rows or []):
+            row_ids.append(row.id)
+    if not row_ids:
+        return
+
+    placement_q = (
+        db.query(
+            LotPlacement.storage_row_id,
+            LotPlacement.material_lot_id,
+            LotPlacement.product_id,
+            LotPlacement.full_units,
+            LotPlacement.open_units,
+            LotPlacement.open_remaining_qty,
+            MaterialLot.lot_code,
+            MaterialLot.vendor_lot_number,
+            MaterialLot.weight_per_unit,
+            MaterialLot.weight_unit,
+            MaterialLot.bbd_current,
+            MaterialLot.is_held,
+        )
+        .join(MaterialLot, MaterialLot.id == LotPlacement.material_lot_id)
+        .filter(
+            LotPlacement.storage_row_id.in_(row_ids),
+            MaterialLot.is_deleted == False,  # noqa: E712
+            (LotPlacement.full_units > 0) | (LotPlacement.open_units > 0),
+        )
+        .all()
+    )
+
+    totals: dict[str, list] = defaultdict(lambda: [0, 0])
+    lots: dict[str, list[dict]] = defaultdict(list)
+    for (
+        row_id, lot_id, product_id, full_units, open_units, open_qty,
+        lot_code, vendor_lot, weight_per_unit, weight_unit, bbd, is_held,
+    ) in placement_q:
+        units = int(full_units or 0) + int(open_units or 0)
+        totals[row_id][0] += units
+        totals[row_id][1] += int(open_units or 0)
+        lots[row_id].append({
+            "material_lot_id": lot_id,
+            "lot_code": lot_code,
+            "product_id": product_id,
+            "vendor_lot_number": vendor_lot,
+            "units": units,
+            "open_units": int(open_units or 0),
+            # Derived, exactly as everywhere else.
+            "weight": round(
+                int(full_units or 0) * float(weight_per_unit or 0)
+                + float(open_qty or 0), 3,
+            ),
+            "weight_unit": weight_unit,
+            "bbd": bbd,
+            "is_held": bool(is_held),
+        })
+
+    for sub in sub_locations:
+        if not getattr(sub, "storage_unit", None):
+            continue
+        for row in (sub.rows or []):
+            units, open_units = totals.get(row.id, (0, 0))
+            # Set on the ORM instance so Pydantic (from_attributes=True) reads it
+            row.live_units = int(units)
+            row.live_open_units = int(open_units)
+            row.live_lots = lots.get(row.id, [])
+
+
 @router.get("/sub-locations", response_model=List[SubLocationSchema])
 def get_sub_locations(
     location_id: str = None,
@@ -234,6 +318,7 @@ def get_sub_locations(
         query = query.filter(SubLocation.location_id == location_id)
 
     sub_locations = query.all()
+    _attach_live_unit_aggregates(db, sub_locations)
     return sub_locations
 
 @router.post("/sub-locations", response_model=SubLocationSchema)

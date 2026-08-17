@@ -24,6 +24,26 @@ class SubLocation(Base):
     name = Column(String(100), nullable=False)
     location_id = Column(String(50), ForeignKey("locations.id"))
     is_active = Column(Boolean, default=True)
+
+    # What one stored unit IS in this room, and how many fit in one of its rows.
+    # NULL means pallets — today's behaviour, so every existing room is unchanged.
+    #
+    # These are set ONCE PER ROOM and inherited by its rows, rather than per row.
+    # A drum room reads "22 drum capacity · 15 drums in use" instead of
+    # "22 pallet capacity · 0.00/22 pallets in use · 0 cases stored".
+    #
+    # Deliberately NOT reusing `StorageRow.pallet_capacity` for this. That number
+    # is read AS PALLETS by hard gates that raise HTTP 400 (routers/receipts.py
+    # create and assign_storage), by the finished-goods allocator, and by the
+    # scanner's row picker which filters `pallet_capacity > 0`. Ingredient rows
+    # are deliberately created with pallet_capacity = 0, so giving them a real
+    # number would pull those rooms into the FG allocator's capacity maths and
+    # into the FG row picker — a regression with no upside. A drum capacity and
+    # a pallet capacity are also not the same physical fact, and one room can
+    # honestly have both.
+    storage_unit = Column(String(20), nullable=True)   # 'drum' | 'bag' | 'tote' | None
+    unit_capacity = Column(Integer, nullable=True)     # units per row in this room
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     location = relationship("Location", backref="sub_locations")

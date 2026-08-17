@@ -23,9 +23,50 @@ touched entries whose content reaches zero.
 import copy
 from sqlalchemy.orm import Session
 
+from app.exceptions import ConflictError
 from app.models import Receipt
 from app.models.location import StorageRow, StorageArea
 from app.constants import DEFAULT_CASES_PER_PALLET
+
+
+def _guard_counted_lot(db: Session, receipt: Receipt, action: str) -> None:
+    """Refuse to hand-edit the allocation JSON for a COUNTED ingredient lot.
+
+    For a counted lot (one with at least one ``lot_placement``) this JSON is a
+    PROJECTION — ``lot_placement_service`` overwrites it from the placements
+    after every mutation, in the same transaction. A caller that edits it here
+    would have its edit silently reverted by the next projection, and in the
+    window before that it would disagree with the placements. Neither failure
+    raises anything on its own; the wrong number just wins, depending on which
+    reader you ask. That is the exact class of bug the projection exists to
+    remove, so the second writer is refused rather than tolerated.
+
+    Raising rather than no-op'ing is deliberate and matches the codebase's
+    doctrine elsewhere: a silent no-op leaves the caller believing its
+    deduction landed.
+
+    Cheap by construction: for the RM and packaging lots that dominate this
+    module's traffic ``material_lot_id`` is NULL and it returns before touching
+    the database.
+    """
+    if receipt is None or getattr(receipt, "material_lot_id", None) is None:
+        return
+
+    # Imported here, not at module scope: lot_placement_service imports
+    # row_allocation's siblings, and a top-level import would close the cycle.
+    from app.models import LotPlacement
+
+    counted = (
+        db.query(LotPlacement.id)
+        .filter(LotPlacement.material_lot_id == receipt.material_lot_id)
+        .first()
+    )
+    if counted:
+        raise ConflictError(
+            f"Receipt {receipt.id} belongs to a counted lot, so its row allocations "
+            f"are derived from unit counts and cannot be changed by {action}. "
+            "Record the movement through lot_placement_service instead."
+        )
 
 
 def parse_breakdown(breakdown) -> dict:
@@ -119,6 +160,7 @@ def deduct_rm_rows(
     """
     if not deductions_by_row:
         return
+    _guard_counted_lot(db, receipt, "deduct_rm_rows")
     cpp = _cpp(receipt)
     pallets_by_row = pallets_by_row or {}
 
@@ -172,6 +214,7 @@ def add_rm_rows(
     added per row. Rows absent here fall back to ``cases / cpp`` (legacy)."""
     if not additions_by_row:
         return
+    _guard_counted_lot(db, receipt, "add_rm_rows")
     cpp = _cpp(receipt)
     pallets_by_row = pallets_by_row or {}
 
@@ -231,6 +274,7 @@ def deduct_rm_total(db: Session, receipt: Receipt, total_cases: float, *, update
     allocs = receipt.raw_material_row_allocations
     if not (allocs and isinstance(allocs, list)) or total_cases <= 0:
         return
+    _guard_counted_lot(db, receipt, "deduct_rm_total")
     cpp = _cpp(receipt)
     current_total = sum(_entry_cases(a, cpp) for a in allocs)
     if current_total <= 0:

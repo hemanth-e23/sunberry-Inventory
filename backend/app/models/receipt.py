@@ -11,6 +11,14 @@ class Receipt(Base):
     product_id = Column(String(50), ForeignKey("products.id"))
     category_id = Column(String(50), ForeignKey("categories.id"), nullable=True)
     lot_number = Column(String(100))
+    # Link to the canonical lot identity. Nullable: legacy receipts predate it,
+    # and a lot has no meaning for finished goods.
+    # `lot_number` and `expiration_date` STAY on the receipt — they are the
+    # paperwork's own record of what arrived, and are read by build_lot_trace,
+    # holds and the palletizer. MaterialLot is canonical; these are historical.
+    material_lot_id = Column(
+        String(50), ForeignKey("material_lots.id"), nullable=True, index=True
+    )
     quantity = Column(Float, nullable=False)
     unit = Column(String(20), default="cases")
     container_count = Column(Float, nullable=True)

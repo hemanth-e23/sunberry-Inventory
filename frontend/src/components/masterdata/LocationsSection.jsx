@@ -3,6 +3,21 @@ import { useAppData } from "../../context/AppDataContext";
 import { useToast } from "../../context/ToastContext";
 import "../MasterDataPage.css";
 
+// What a room can be typed as. An empty value means pallets — every room that
+// exists today — so nothing changes until an admin deliberately types one.
+const STORAGE_UNIT_OPTIONS = [
+  { value: "", label: "Pallets (default)" },
+  { value: "drum", label: "Drums" },
+  { value: "bag", label: "Bags" },
+  { value: "tote", label: "Totes" },
+  { value: "pail", label: "Pails" },
+  { value: "box", label: "Boxes" },
+];
+
+/** "drum" + 3 -> "drums". Crude on purpose: the unit words are a fixed list. */
+const pluralUnit = (unit, count) =>
+  count === 1 ? unit : `${unit}${unit.endsWith("s") ? "" : "s"}`;
+
 const LocationsSection = ({ onAssignFGArea }) => {
   const {
     locationsTree,
@@ -15,6 +30,7 @@ const LocationsSection = ({ onAssignFGArea }) => {
     updateSubLocationRow,
     toggleSubLocationRowActive,
     toggleSubLocationActive,
+    updateSubLocationStorage,
     addStorageArea,
     addStorageRow,
   } = useAppData();
@@ -28,6 +44,11 @@ const LocationsSection = ({ onAssignFGArea }) => {
   const [locationDraft, setLocationDraft] = useState("");
   const [editingSubLocation, setEditingSubLocation] = useState(null);
   const [subLocationDraft, setSubLocationDraft] = useState("");
+  const [editingSubStorage, setEditingSubStorage] = useState(null);
+  const [subStorageDraft, setSubStorageDraft] = useState({
+    storageUnit: "",
+    unitCapacity: "",
+  });
   const [expandedSubLocations, setExpandedSubLocations] = useState(new Set());
   const [editingRow, setEditingRow] = useState(null);
   const [rowDraft, setRowDraft] = useState({
@@ -96,6 +117,23 @@ const LocationsSection = ({ onAssignFGArea }) => {
     } catch (error) {
       console.error("Error renaming sub-location:", error);
       addToast("Failed to rename sub-location. Please try again.", "error");
+    }
+  };
+
+  const handleSaveSubStorage = async (locationId, subId) => {
+    try {
+      await updateSubLocationStorage(locationId, subId, {
+        storageUnit: subStorageDraft.storageUnit,
+        // Capacity only means something once a unit is chosen; clearing the
+        // unit clears the number with it rather than leaving "22 of nothing".
+        unitCapacity: subStorageDraft.storageUnit
+          ? subStorageDraft.unitCapacity
+          : "",
+      });
+      setEditingSubStorage(null);
+    } catch (error) {
+      console.error("Error updating storage unit:", error);
+      addToast("Failed to update storage unit. Please try again.", "error");
     }
   };
 
@@ -270,15 +308,28 @@ const LocationsSection = ({ onAssignFGArea }) => {
                   {location.subLocations.map((sub) => {
                     const subKey = `${location.id}-${sub.id}`;
                     const isSubExpanded = expandedSubLocations.has(subKey);
-                    const totalCapacity = (sub.rows || []).reduce(
-                      (sum, r) => sum + (r.palletCapacity || 0),
-                      0,
-                    );
-                    const totalUsed = (sub.rows || []).reduce(
-                      (sum, r) => sum + (r.occupiedPallets || 0),
-                      0,
-                    );
                     const rowCount = (sub.rows || []).length;
+                    // A unit-typed room counts whole units; an untyped room is
+                    // a pallet room and reads exactly as it always has.
+                    const unit = sub.storageUnit || null;
+                    const totalCapacity = unit
+                      ? rowCount * (sub.unitCapacity || 0)
+                      : (sub.rows || []).reduce(
+                          (sum, r) => sum + (r.palletCapacity || 0),
+                          0,
+                        );
+                    const totalUsed = unit
+                      ? (sub.rows || []).reduce(
+                          (sum, r) => sum + (r.liveUnits || 0),
+                          0,
+                        )
+                      : (sub.rows || []).reduce(
+                          (sum, r) => sum + (r.occupiedPallets || 0),
+                          0,
+                        );
+                    const subSummary = unit
+                      ? `${rowCount} rows · ${totalUsed}/${totalCapacity} ${pluralUnit(unit, totalCapacity)}`
+                      : `${rowCount} rows · ${Number(totalUsed).toFixed(2)}/${totalCapacity} pallets`;
 
                     return (
                       <div
@@ -341,8 +392,7 @@ const LocationsSection = ({ onAssignFGArea }) => {
                                 whiteSpace: "nowrap",
                               }}
                             >
-                              {rowCount} rows · {Number(totalUsed).toFixed(2)}/{totalCapacity}{" "}
-                              pallets
+                              {subSummary}
                             </span>
                             <span
                               className={`chip ${
@@ -371,6 +421,21 @@ const LocationsSection = ({ onAssignFGArea }) => {
                               className="secondary-button"
                             >
                               Rename
+                            </button>
+                            <button
+                              onClick={() => {
+                                setEditingSubStorage(sub);
+                                setSubStorageDraft({
+                                  storageUnit: sub.storageUnit || "",
+                                  unitCapacity:
+                                    sub.unitCapacity == null
+                                      ? ""
+                                      : String(sub.unitCapacity),
+                                });
+                              }}
+                              className="secondary-button"
+                            >
+                              Storage Unit
                             </button>
                             <button
                               onClick={async () => {
@@ -428,6 +493,84 @@ const LocationsSection = ({ onAssignFGArea }) => {
                             </button>
                             <button
                               onClick={() => setEditingSubLocation(null)}
+                              className="secondary-button"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Storage unit for the whole room — set once here and
+                            inherited by every row, rather than repeated 40 times */}
+                        {editingSubStorage && editingSubStorage.id === sub.id && (
+                          <div
+                            style={{
+                              padding: "8px 16px",
+                              background: "#fff",
+                              borderTop: "1px solid #e5e7eb",
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              flexWrap: "wrap",
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <label style={{ fontSize: "12px", color: "#666" }}>
+                              Stored as
+                            </label>
+                            <select
+                              value={subStorageDraft.storageUnit}
+                              onChange={(e) =>
+                                setSubStorageDraft((prev) => ({
+                                  ...prev,
+                                  storageUnit: e.target.value,
+                                }))
+                              }
+                              style={{ padding: "6px" }}
+                            >
+                              {STORAGE_UNIT_OPTIONS.map((opt) => (
+                                <option key={opt.value} value={opt.value}>
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+                            {subStorageDraft.storageUnit && (
+                              <>
+                                <label
+                                  style={{ fontSize: "12px", color: "#666" }}
+                                >
+                                  Per row
+                                </label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={subStorageDraft.unitCapacity}
+                                  onChange={(e) =>
+                                    setSubStorageDraft((prev) => ({
+                                      ...prev,
+                                      unitCapacity: e.target.value,
+                                    }))
+                                  }
+                                  style={{ padding: "6px", width: "90px" }}
+                                />
+                                <span
+                                  style={{ fontSize: "12px", color: "#666" }}
+                                >
+                                  {pluralUnit(subStorageDraft.storageUnit, 2)} per
+                                  row — a prompt, not a limit
+                                </span>
+                              </>
+                            )}
+                            <button
+                              onClick={() =>
+                                handleSaveSubStorage(location.id, sub.id)
+                              }
+                              className="primary-button"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={() => setEditingSubStorage(null)}
                               className="secondary-button"
                             >
                               Cancel
@@ -618,12 +761,34 @@ const LocationsSection = ({ onAssignFGArea }) => {
                                               className="muted"
                                               style={{ marginLeft: "8px" }}
                                             >
-                                              {row.palletCapacity} pallet
-                                              capacity ·{" "}
-                                              {Number(row.occupiedPallets || 0).toFixed(2)}/
-                                              {row.palletCapacity} pallets in
-                                              use · {row.occupiedCases || 0}{" "}
-                                              cases stored
+                                              {unit ? (
+                                                <>
+                                                  {sub.unitCapacity || 0}{" "}
+                                                  {pluralUnit(
+                                                    unit,
+                                                    sub.unitCapacity || 0,
+                                                  )}{" "}
+                                                  capacity ·{" "}
+                                                  {row.liveUnits || 0}{" "}
+                                                  {pluralUnit(
+                                                    unit,
+                                                    row.liveUnits || 0,
+                                                  )}{" "}
+                                                  in use
+                                                  {row.liveOpenUnits
+                                                    ? ` · ${row.liveOpenUnits} open`
+                                                    : ""}
+                                                </>
+                                              ) : (
+                                                <>
+                                                  {row.palletCapacity} pallet
+                                                  capacity ·{" "}
+                                                  {Number(row.occupiedPallets || 0).toFixed(2)}/
+                                                  {row.palletCapacity} pallets in
+                                                  use · {row.occupiedCases || 0}{" "}
+                                                  cases stored
+                                                </>
+                                              )}
                                             </span>
                                             {row.hold && (
                                               <span

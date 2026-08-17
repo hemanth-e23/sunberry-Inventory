@@ -30,9 +30,32 @@ class LiveRowProduct(BaseSchema):
     cases: float = 0
 
 
+class LiveRowLot(BaseSchema):
+    """One lot sitting in one row, counted in whole units.
+
+    The unit-room analogue of LiveRowProduct. `units` is the counted integer and
+    `weight` is derived from it — never the other way round, because different
+    vendors ship different weights per drum.
+    """
+    material_lot_id: str
+    lot_code: str
+    product_id: str
+    vendor_lot_number: Optional[str] = None
+    units: int = 0
+    open_units: int = 0
+    weight: float = 0
+    weight_unit: Optional[str] = None
+    bbd: Optional[datetime] = None
+    is_held: bool = False
+
+
 class StorageRowBase(BaseSchema):
     id: str
     name: str
+    # The scannable rack label. Present on the model since alembic u6v7w8x9y0z1
+    # but never exposed here, so master data could neither read nor set the field
+    # the ingredient scanner resolves rows on.
+    barcode: Optional[str] = None
     template: Optional[str] = None
     pallet_capacity: int = 0
     default_cases_per_pallet: int = 0
@@ -48,6 +71,12 @@ class StorageRowBase(BaseSchema):
     live_pallets: Optional[float] = None
     live_cases: Optional[float] = None
     live_products: Optional[List[LiveRowProduct]] = None
+    # Live aggregates computed from lot_placements. Populated for rows in a
+    # unit-typed room (sub_location.storage_unit set); None everywhere else, so a
+    # client can tell "no drums here" (0) from "this is a pallet room" (None).
+    live_units: Optional[int] = None
+    live_open_units: Optional[int] = None
+    live_lots: Optional[List[LiveRowLot]] = None
 
 class StorageRowCreate(StorageRowBase):
     storage_area_id: Optional[str] = None
@@ -55,6 +84,7 @@ class StorageRowCreate(StorageRowBase):
 
 class StorageRowUpdate(BaseSchema):
     name: Optional[str] = None
+    barcode: Optional[str] = None
     template: Optional[str] = None
     pallet_capacity: Optional[int] = None
     default_cases_per_pallet: Optional[int] = None
@@ -76,6 +106,12 @@ class SubLocationBase(BaseSchema):
     id: str
     name: str
     location_id: str
+    # What one stored unit IS in this room, and how many fit in one of its rows.
+    # NULL means pallets — today's behaviour, so every existing room is unchanged.
+    # Set once per room and inherited by its rows; see models/location.py for why
+    # this is not StorageRow.pallet_capacity.
+    storage_unit: Optional[str] = None
+    unit_capacity: Optional[int] = None
 
 class SubLocationCreate(SubLocationBase):
     pass
@@ -83,6 +119,8 @@ class SubLocationCreate(SubLocationBase):
 class SubLocationUpdate(BaseSchema):
     name: Optional[str] = None
     location_id: Optional[str] = None
+    storage_unit: Optional[str] = None
+    unit_capacity: Optional[int] = None
     is_active: Optional[bool] = None
 
 class SubLocation(SubLocationBase):
