@@ -1,9 +1,12 @@
-import React from "react";
+import React, { useState } from "react";
 import { getDashboardPath } from "../App";
 import useReceiptForm, { formatNumber } from "./receipt/useReceiptForm";
 import ReceiptFormFields from "./receipt/ReceiptFormFields";
 import FinishedGoodPlacements from "./receipt/FinishedGoodPlacements";
 import ReceiptConfirmModal from "./receipt/ReceiptConfirmModal";
+import LotLabelPrint from "./ingredient/LotLabelPrint";
+import { useToast } from "../context/ToastContext";
+import { apiErrorMessage, printSessionLabels } from "../api/lotReceivingApi";
 import "./Shared.css";
 import "./ReceiptPage.css";
 
@@ -27,6 +30,8 @@ const ReceiptPage = () => {
     setFormData,
     formRef,
     feedback,
+    justLogged,
+    setJustLogged,
     autoQuantity,
     isSubmitting,
     confirmation,
@@ -80,6 +85,28 @@ const ReceiptPage = () => {
     cancelConfirmation,
     clearForm,
   } = useReceiptForm();
+
+  const { addToast } = useToast();
+  const [sheet, setSheet] = useState(null);
+  const [printing, setPrinting] = useState(false);
+
+  /**
+   * Resolve (or mint) this receipt's lot and pull down `count` identical
+   * stickers. The server refuses to print for a lot flagged for review — an
+   * identical sticker on the wrong material cannot be found later, because every
+   * drum on the pile is wearing it.
+   */
+  const handlePrintStickers = async () => {
+    if (!justLogged) return;
+    setPrinting(true);
+    try {
+      setSheet(await printSessionLabels(justLogged.receiptId, justLogged.count));
+    } catch (error) {
+      addToast(apiErrorMessage(error, 'Could not print stickers'), 'error');
+    } finally {
+      setPrinting(false);
+    }
+  };
 
   return (
     <div className="receipt-page">
@@ -199,6 +226,39 @@ const ReceiptPage = () => {
               <div className={`alert ${feedback.type}`}>{feedback.message}</div>
             )}
 
+            {/* THE WALK-IN PATH. Material turned up with no incoming order, the
+                worker logged it off the driver's BOL, and now they print
+                stickers and scan the units in on the gun.
+
+                Printing is NOT receiving: nothing here puts a single unit in
+                stock. This is an offer, and the receipt is complete without it
+                — which is what keeps the dock from ever being blocked. */}
+            {justLogged && (
+              <div className="alert info" style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
+                <span>
+                  Print {justLogged.count} identical stickers for this lot — one
+                  for every {justLogged.unitLabel.replace(/s$/, '')}. They go on
+                  as they come off the truck, then a forklift user scans a rack
+                  and scans each one in.
+                </span>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={handlePrintStickers}
+                  disabled={printing}
+                >
+                  {printing ? 'Preparing…' : `Print ${justLogged.count} stickers`}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setJustLogged(null)}
+                >
+                  Not now
+                </button>
+              </div>
+            )}
+
             <div className="form-actions">
               <button
                 type="submit"
@@ -218,7 +278,9 @@ const ReceiptPage = () => {
           </form>
         </section>
 
-        <ReceiptConfirmModal
+        {sheet && <LotLabelPrint sheet={sheet} onDone={() => setSheet(null)} />}
+
+      <ReceiptConfirmModal
           open={confirmation.open}
           summary={confirmation.summary}
           isSubmitting={isSubmitting}

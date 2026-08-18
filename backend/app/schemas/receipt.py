@@ -99,6 +99,11 @@ class Receipt(ReceiptBase):
     id: str
     status: str
     pallets: Optional[float] = None
+    # Set once this receipt's material has a lot identity. Must be on the
+    # RESPONSE schema: the approvals card uses it to decide whether there are
+    # scanned unit counts to check against the paperwork, and a field the schema
+    # omits is silently dropped no matter what the ORM object carries.
+    material_lot_id: Optional[str] = None
     # Per-row content/pallet breakdown for RM/packaging lots — the All-Inventory
     # and lot-trace views read this to show per-row pallets. Must be on the
     # RESPONSE schema (it was previously only on the assign-storage request),

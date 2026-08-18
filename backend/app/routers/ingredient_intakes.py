@@ -64,6 +64,12 @@ def _get_intake(db: Session, intake_id: str) -> IngredientIntake:
         .filter(
             IngredientIntake.id == intake_id,
             IngredientIntake.is_deleted == False,  # noqa: E712
+            # This table is SHARED with the lot-model incoming order (2026-08).
+            # Without this filter every mutation here reaches one: void, reject
+            # and close-short all only guard on status and on whether CONTAINERS
+            # exist — and an incoming order has zero containers by construction,
+            # so a forklift user could void a truck that is halfway received.
+            IngredientIntake.is_incoming_order == False,  # noqa: E712
         )
         .first()
     )
@@ -224,7 +230,12 @@ def list_intakes(
 ):
     from sqlalchemy import func as sa_func
 
-    q = db.query(IngredientIntake).filter(IngredientIntake.is_deleted == False)  # noqa: E712
+    q = db.query(IngredientIntake).filter(
+        IngredientIntake.is_deleted == False,  # noqa: E712
+        # Incoming orders share this table but belong to Shipping > Incoming.
+        # Listing them here would offer per-drum actions against lot-model stock.
+        IngredientIntake.is_incoming_order == False,  # noqa: E712
+    )
     wh = warehouse_filter(current_user)
     if wh:
         q = q.filter(IngredientIntake.warehouse_id == wh)

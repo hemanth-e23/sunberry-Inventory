@@ -711,3 +711,25 @@
 @media print {
   .og-det-head, .og-stepper, .og-info-grid, .og-panel:not(.sod-panel), .og-toolbar { display: none !important; }
 }
+
+/* ── Incoming order lines ───────────────────────────────────────────────────
+   The inbound counterpart of the outbound `detail` list. Deliberately built on
+   the same card system: Incoming and Outgoing are one screen pointed in two
+   directions, and two visual languages would make them read as two products. */
+.og-lines { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.og-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.6fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-top: 1px solid var(--color-border);
+}
+.og-line:first-child { border-top: none; }
+.og-line-name { font-weight: 600; color: var(--color-text); }
+.og-line-count { white-space: nowrap; text-align: right; color: var(--color-text); }
+
+@media (max-width: 720px) {
+  .og-line { grid-template-columns: 1fr; gap: 2px; }
+  .og-line-count { text-align: left; }
+}

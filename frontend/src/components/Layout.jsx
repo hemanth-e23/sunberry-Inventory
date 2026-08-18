@@ -30,7 +30,9 @@ function timeAgo(dateStr) {
 
 const ADMIN_ROLES = ['admin', 'superadmin', 'corporate_admin', 'corporate_viewer'];
 
-function getRolePrefix(role) {
+/** Exported so screens can build role-relative links without re-deriving the
+ *  prefix. Every nav `to` in this file is `${prefix}/segment`. */
+export function getRolePrefix(role) {
   if (role === 'warehouse') return '/warehouse';
   if (role === 'supervisor') return '/supervisor';
   if (ADMIN_ROLES.includes(role)) return '/admin';
@@ -254,7 +256,9 @@ function Sidebar({ isOpen, isCollapsed, onToggleCollapse, onClose }) {
     opsItems.push(
       { label: 'Inventory', icon: Eye, to: `${prefix}/inventory` },
       { label: 'Inventory Actions', icon: Zap, to: `${prefix}/inventory-actions` },
-      { label: 'Outgoing', icon: Truck, to: `${prefix}/outgoing` },
+      // Renamed from 'Outgoing' when the Incoming tab landed. Still ONE entry:
+      // the ask was to adjust the screens that exist, not to grow the sidebar.
+      { label: 'Shipping', icon: Truck, to: `${prefix}/shipping` },
     );
     sections.push({ group: 'Operations', items: opsItems });
 
@@ -273,24 +277,24 @@ function Sidebar({ isOpen, isCollapsed, onToggleCollapse, onClose }) {
       ],
     });
 
-    // --- Ingredients (container serialization) ---
-    // Intakes/containers/row labels are day-to-day warehouse work. The cutover
-    // sweep and the drift audits are supervisor-and-up: the sweep permanently
-    // moves quantity off a legacy receipt, and the audits are diagnostics whose
-    // non-empty result means a write-path bug, not routine drift.
-    const ingredientItems = [
-      { label: 'Ingredient Intakes', icon: Boxes, to: `${prefix}/ingredient-intakes` },
-      { label: 'Containers', icon: Package, to: `${prefix}/ingredient-containers` },
-      { label: 'Ingredient Staging', icon: Layers, to: `${prefix}/ingredient-staging` },
-      { label: 'Row Labels', icon: Printer, to: `${prefix}/ingredient-rows/labels` },
-    ];
-    if (role !== 'warehouse') {
-      ingredientItems.push(
-        { label: 'Cutover Sweep', icon: ArrowRightLeft, to: `${prefix}/ingredient-cutover` },
-        { label: 'Ingredient Audits', icon: ClipboardList, to: `${prefix}/ingredient-audits` },
-      );
-    }
-    sections.push({ group: 'Ingredients', items: ingredientItems });
+    // --- Ingredients ---
+    // The six per-drum screens that used to live here (Ingredient Intakes,
+    // Containers, Ingredient Staging, Row Labels, Cutover Sweep, Ingredient
+    // Audits) are GONE from the sidebar. They served the retired per-drum
+    // serialization model, and adding six nav items for one material type was
+    // exactly the wrong shape — the work belongs in the screens people already
+    // use, not in a parallel set of them.
+    //
+    // Where each capability lives now:
+    //   receiving an order   -> Shipping > Incoming
+    //   logging a walk-in    -> Log Receipt (with Print stickers on it)
+    //   scanning units in    -> the gun
+    //   approving            -> Pending Approvals > Receipts
+    //   counting / cutover   -> Inventory Actions > Counts
+    //   rack barcodes        -> Master Data > Locations
+    //
+    // Their routes stay mounted so a bookmark still resolves and the dormant
+    // data stays readable until the tables are dropped.
 
     // --- Production (feature-gated) ---
     const hasStaging = hasFeature(warehouseType, 'staging');

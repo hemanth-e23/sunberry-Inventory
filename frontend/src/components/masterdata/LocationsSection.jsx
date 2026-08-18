@@ -1,6 +1,9 @@
 import React, { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAppData } from "../../context/AppDataContext";
+import { useAuth } from "../../context/AuthContext";
 import { useToast } from "../../context/ToastContext";
+import { getRolePrefix } from "../Layout";
 import "../MasterDataPage.css";
 
 // What a room can be typed as. An empty value means pallets — every room that
@@ -35,6 +38,8 @@ const LocationsSection = ({ onAssignFGArea }) => {
     addStorageRow,
   } = useAppData();
   const { addToast } = useToast();
+  const navigate = useNavigate();
+  const { user } = useAuth();
 
   const [showInactiveLocations, setShowInactiveLocations] = useState(false);
   const [newLocationName, setNewLocationName] = useState("");
@@ -144,6 +149,17 @@ const LocationsSection = ({ onAssignFGArea }) => {
           <h2>Master Locations</h2>
           <span className="muted">Define both general locations and finished good storage rows</span>
         </div>
+        {/* Rack barcodes used to sit behind their own nav item. They belong
+            here: a rack label is master data about a row, and a row is defined
+            on this screen. Scanning a rack is a prerequisite for receiving, so
+            the capability had to stay reachable when the nav item went. */}
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => navigate(`${getRolePrefix(user?.role)}/ingredient-rows/labels`)}
+        >
+          Print rack labels
+        </button>
         <label className="toggle-label" style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.875rem', cursor: 'pointer', userSelect: 'none' }}>
           <input
             type="checkbox"

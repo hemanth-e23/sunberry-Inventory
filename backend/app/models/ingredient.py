@@ -126,13 +126,47 @@ class IngredientIntake(Base):
 
     notes = Column(Text)
 
+    # ── Incoming order (2026-08, Phase 2) ────────────────────────────────────
+    # This table is REUSED as the corporate incoming order. It already had
+    # everything an order needs — a vendor, a BOL, a PO, multi-product lot lines
+    # with expected counts, a short count with a reason, and an approval trail —
+    # so rebuilding it would have produced a second table with the same columns
+    # and a second set of bugs.
+    #
+    # `warehouse_id` above IS the destination: corporate creates one order per
+    # destination site, which is how "500 drums to the Chicago 3PL, 300 to
+    # Florida, 200 to our plant" is expressed. Three orders, not one order with
+    # three destinations — because each is received, shorted and closed
+    # independently, and a shared header would couple them.
+    #
+    # `status` carries IncomingOrderStatus for these rows and IntakeStatus for
+    # rows created by the old per-drum flow. The two vocabularies do not
+    # overlap, so old rows keep reading correctly.
+    is_incoming_order = Column(
+        Boolean, nullable=False, default=False, server_default="false", index=True
+    )
+    # Where the material is coming FROM when it is not a vendor delivery — a 3PL
+    # or another plant. Free text: third parties are not in our warehouse table
+    # and inventing rows for them would be master data nobody maintains.
+    origin_name = Column(String(120), nullable=True)
+    # Set when corporate transfers stock between sites, so the source is a real
+    # warehouse we can decrement rather than a name.
+    origin_warehouse_id = Column(String(50), ForeignKey("warehouses.id"), nullable=True)
+    expected_date = Column(DateTime(timezone=True), nullable=True, index=True)
+    released_at = Column(DateTime(timezone=True), nullable=True)
+    released_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    closed_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    close_reason = Column(Text)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     is_deleted = Column(Boolean, default=False, nullable=False, server_default="false")
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     deleted_by_id = Column(String(50), ForeignKey("users.id"), nullable=True)
 
-    warehouse = relationship("Warehouse", backref="ingredient_intakes")
+    warehouse = relationship("Warehouse", foreign_keys=[warehouse_id], backref="ingredient_intakes")
+    origin_warehouse = relationship("Warehouse", foreign_keys=[origin_warehouse_id])
     vendor = relationship("Vendor", backref="ingredient_intakes")
     submitter = relationship("User", foreign_keys=[submitted_by], backref="submitted_intakes")
     approver = relationship("User", foreign_keys=[approved_by], backref="approved_intakes")
@@ -166,6 +200,19 @@ class IntakeLot(Base):
     net_weight_per_container = Column(Float, nullable=True)
     weight_unit = Column(String(20), nullable=True)
 
+    # ── Incoming order line (2026-08, Phase 2) ───────────────────────────────
+    # Resolved when the plant starts receiving this line, NOT when corporate
+    # writes the order. Corporate types a vendor lot from paperwork; the lot only
+    # becomes real identity once material is physically here, and resolving early
+    # would mint lots for trucks that never arrive.
+    material_lot_id = Column(
+        String(50), ForeignKey("material_lots.id"), nullable=True, index=True
+    )
+    # The receipt this line was received onto — the receiving session. One per
+    # line, created on "start receiving".
+    receipt_id = Column(String(50), ForeignKey("receipts.id"), nullable=True, index=True)
+    vendor_id = Column(String(50), ForeignKey("vendors.id"), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -175,6 +222,8 @@ class IntakeLot(Base):
     )
     product = relationship("Product", backref="intake_lots")
     category = relationship("Category", backref="intake_lots")
+    material_lot = relationship("MaterialLot", backref="intake_lines")
+    vendor = relationship("Vendor", backref="intake_lots")
 
 
 class Container(Base):

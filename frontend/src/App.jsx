@@ -27,7 +27,7 @@ const WarehouseDashboard = lazy(() => import('./components/WarehouseDashboard'))
 const SupervisorDashboard = lazy(() => import('./components/SupervisorDashboard'));
 const MasterDataPage = lazy(() => import('./components/MasterDataPage'));
 const InventoryActionsPage = lazy(() => import('./components/InventoryActionsPage'));
-const OutgoingDashboard = lazy(() => import('./components/OutgoingDashboard'));
+const ShippingPage = lazy(() => import('./components/ShippingPage'));
 const ReportsPage = lazy(() => import('./components/ReportsPage'));
 const ReceiptCorrectionsPage = lazy(() => import('./components/ReceiptCorrectionsPage'));
 const CycleCountingPage = lazy(() => import('./components/CycleCountingPage'));
@@ -50,6 +50,7 @@ const ScannerShipOutFlowV2 = lazy(() => import('./components/scanner/ScannerShip
 // Mounted under each role prefix like the rest of the app; the desk pages read
 // their own base path off the URL so links stay inside the caller's prefix.
 const ScannerIngredientReceiveFlow = lazy(() => import('./components/scanner/ScannerIngredientReceiveFlow'));
+const ScannerLotReceiveFlow = lazy(() => import('./components/scanner/ScannerLotReceiveFlow'));
 const IngredientIntakesPage = lazy(() => import('./components/ingredient/IngredientIntakesPage'));
 const ContainersPage = lazy(() => import('./components/ingredient/ContainersPage'));
 const CutoverSweepPage = lazy(() => import('./components/ingredient/CutoverSweepPage'));
@@ -273,6 +274,23 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
+        {/* Lot-level receiving on the gun. One component serves both the open-session
+            list and a scanning session; the optional :receiptId picks which.
+            Sessions are receipt-scoped, not person-scoped, so any forklift user can
+            resume a part-finished truck — and the same screen serves a corporate
+            incoming order and a walk-in, because a worker at the gun does not care
+            which raised it. */}
+        <Route path="/forklift/lot-receiving" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerLotReceiveFlow />
+          </ProtectedRoute>
+        } />
+        <Route path="/forklift/lot-receiving/:receiptId" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerLotReceiveFlow />
+          </ProtectedRoute>
+        } />
+
         {/* Ingredient staging pulls. Same list/session shape as receiving: the
             optional :itemId selects one staging LINE, which is the unit a
             worker claims and pulls against. */}
@@ -341,10 +359,10 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
-        <Route path="/admin/outgoing" element={
+        <Route path="/admin/shipping" element={
           <ProtectedRoute requiredRole="admin">
             <Layout>
-              {page(<OutgoingDashboard />)}
+              {page(<ShippingPage />)}
             </Layout>
           </ProtectedRoute>
         } />
@@ -451,10 +469,10 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
-        <Route path="/warehouse/outgoing" element={
+        <Route path="/warehouse/shipping" element={
           <ProtectedRoute requiredRole="warehouse">
             <Layout>
-              {page(<OutgoingDashboard />)}
+              {page(<ShippingPage />)}
             </Layout>
           </ProtectedRoute>
         } />
@@ -538,10 +556,10 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
-        <Route path="/supervisor/outgoing" element={
+        <Route path="/supervisor/shipping" element={
           <ProtectedRoute requiredRole="supervisor">
             <Layout>
-              {page(<OutgoingDashboard />)}
+              {page(<ShippingPage />)}
             </Layout>
           </ProtectedRoute>
         } />

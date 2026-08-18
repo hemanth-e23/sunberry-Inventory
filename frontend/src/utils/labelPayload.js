@@ -249,3 +249,90 @@ export const groupContainersByLot = (containers = []) => {
 /** Flat version of {@link groupContainersByLot} — the stacks, concatenated. */
 export const orderContainersForPrint = (containers = []) =>
   groupContainersByLot(containers).flatMap((group) => group.containers);
+
+// ─── SB2 — the lot-level envelope ────────────────────────────────────────────
+//
+//     SB2|<lot_code>|<vendor_lot>|<bbd YYYYMMDD>
+//
+// Positions are IDENTICAL to SB1; only the meaning of segment 2 changes, from a
+// per-drum serial to a lot code. That is not a coincidence — the SB1 header
+// above promised fields would be additive and positions 1..3 would never move,
+// and `decodeContainerPayload` already recovers segment 2 from any unknown
+// `SB<digits>` version. So a gun still running old code reads an SB2 sticker and
+// gets the lot code where it expected a serial, rather than rejecting the scan.
+// This is the migration path that was designed in; SB1 is not redefined.
+//
+// EVERY UNIT OF A LOT WEARS AN IDENTICAL STICKER. There is no per-drum identity
+// to encode, which is the whole point: a serial minted at our plant is
+// meaningless at a third-party warehouse, and a physical count that disagrees by
+// one drum has no answer to "which serial do I remove?".
+//
+// The QR carries `lot_code` and NOTHING ELSE that matters. Segments 3 and 4 are
+// human-convenience duplicates of what is printed as text; a reader must always
+// prefer the lookup. That is what keeps a printed sticker from ever going stale:
+// a BBD extension moves `bbd_current`, and the lot code still points at the
+// right lot.
+
+export const LOT_PAYLOAD_VERSION = 'SB2';
+
+/**
+ * Build the 2D payload for a lot sticker.
+ *
+ * @param {object} lot `{ lot_code, vendor_lot, bbd }` (camelCase accepted).
+ * @returns {string} `SB2|lot_code|vendor_lot|YYYYMMDD`
+ *
+ * Throws when the payload would be structurally corrupt. Does NOT throw on a
+ * missing BBD — that segment goes out empty, because one lot with an unreadable
+ * date must not abort an 80-sticker print run and the date is printed as text
+ * anyway.
+ */
+export const encodeLotPayload = (lot = {}) => {
+  const source = lot || {};
+
+  const lotCode = String(source.lot_code ?? source.lotCode ?? '').trim();
+  if (!lotCode) {
+    throw new Error('encodeLotPayload: lot_code is required');
+  }
+  if (lotCode.includes(PAYLOAD_DELIMITER)) {
+    throw new Error(`encodeLotPayload: lot code may not contain "${PAYLOAD_DELIMITER}"`);
+  }
+
+  const vendorLot = String(source.vendor_lot ?? source.vendorLot ?? '').trim();
+  if (vendorLot.includes(PAYLOAD_DELIMITER)) {
+    throw new Error(
+      `encodeLotPayload: vendor lot may not contain "${PAYLOAD_DELIMITER}" `
+      + '(reject it at entry — the payload does not escape)',
+    );
+  }
+
+  const bbd = toBbdCompact(source.bbd ?? source.best_by_date ?? source.bbdDate);
+
+  return [LOT_PAYLOAD_VERSION, lotCode, vendorLot, bbd].join(PAYLOAD_DELIMITER);
+};
+
+/**
+ * Parse a scanned lot sticker.
+ *
+ * @returns {null | { version, lotCode, vendorLot, bbd, bare, unknownVersion }}
+ *
+ * Accepts the same three shapes as {@link decodeContainerPayload}, including a
+ * bare token with no delimiter — a lot code hand-keyed off a scuffed drum, which
+ * is the only recovery available when a sticker is unreadable and there is no
+ * second copy to compare against.
+ *
+ * The server accepts either form, so the gun never has to decide: it can post
+ * the raw scan text and let one implementation unwrap it.
+ */
+export const decodeLotPayload = (raw) => {
+  const parsed = decodeContainerPayload(raw);
+  if (!parsed) return null;
+  return {
+    version: parsed.version,
+    // Segment 2 — a serial under SB1, a lot code under SB2. Same position.
+    lotCode: parsed.serial,
+    vendorLot: parsed.vendorLot,
+    bbd: parsed.bbd,
+    bare: parsed.bare,
+    unknownVersion: parsed.version !== null && parsed.version !== LOT_PAYLOAD_VERSION,
+  };
+};

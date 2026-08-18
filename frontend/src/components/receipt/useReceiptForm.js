@@ -144,6 +144,12 @@ const useReceiptForm = () => {
   const [formData, setFormData] = useState(defaultFormState);
   const [feedback, setFeedback] = useState(null);
   const [_allocationPreview, setAllocationPreview] = useState(null);
+  // The receipt that was just saved, when it is one whose units get stickered.
+  // THE WALK-IN PATH: material turns up with no incoming order, the worker logs
+  // it here off the driver's BOL, then prints stickers and scans the units in on
+  // the gun. Printing is not receiving — nothing is in stock until it is scanned
+  // into a rack — so this is an offer, never an automatic step.
+  const [justLogged, setJustLogged] = useState(null);
   const [autoQuantity, setAutoQuantity] = useState(null);
   const [manualAllocations, setManualAllocations] = useState([]);
   const [floorPallets, setFloorPallets] = useState("0");
@@ -921,6 +927,28 @@ const useReceiptForm = () => {
       setIsSubmitting(false);
       setLotNumberManuallyEdited(false);
       const licenceNote = buildLicenceNote(result.receipt, products);
+      // Offer stickers when this receipt counts UNITS — drums, bags, totes. The
+      // count comes from what the worker typed, not from the weight: weight is
+      // derived from units and never the other way round, because different
+      // vendors ship different weights per drum.
+      // camelCase — `submitReceipt` returns the receipt already mapped by
+      // ReceiptContext.mapReceipt, which has no snake_case keys at all. Reading
+      // `container_count` here yields undefined -> NaN -> 0, so the offer would
+      // never render, and since printing is the only thing that resolves the
+      // lot, the walk-in path would silently have no way to produce stickers.
+      const loggedCount = Number(
+        result.receipt?.containerCount ?? result.receipt?.container_count,
+      ) || 0;
+      setJustLogged(
+        result.receipt?.id && loggedCount > 0
+          ? {
+              receiptId: result.receipt.id,
+              count: loggedCount,
+              unitLabel: result.receipt.containerUnit
+                || result.receipt.container_unit || 'unit',
+            }
+          : null,
+      );
       setFeedback({
         type: "success",
         message: licenceNote
@@ -1020,6 +1048,8 @@ const useReceiptForm = () => {
     setFormData,
     formRef,
     feedback,
+    justLogged,
+    setJustLogged,
     autoQuantity,
     isSubmitting,
     confirmation,

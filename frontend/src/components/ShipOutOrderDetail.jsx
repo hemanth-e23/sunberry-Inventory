@@ -270,7 +270,7 @@ const ShipOutOrderDetail = ({ orderId, onBack }) => {
   };
 
   if (loading) return <div className="og-empty"><div className="big">⏳</div>Loading order…</div>;
-  if (!summary) return <div className="og-empty"><button className="og-btn og-btn-ghost" onClick={onBack}>← Back to Outgoing</button></div>;
+  if (!summary) return <div className="og-empty"><button className="og-btn og-btn-ghost" onClick={onBack}>← Back to Shipping</button></div>;
 
   const canReconcile = ['checked_in', 'scanning', 'reconciled'].includes(status);
   const canDocs = ['reconciled', 'complete'].includes(status);
@@ -291,7 +291,7 @@ const ShipOutOrderDetail = ({ orderId, onBack }) => {
   return (
     <div>
       <div className="page-header">
-        <button onClick={onBack} className="back-button">&larr; Back to Outgoing</button>
+        <button onClick={onBack} className="back-button">&larr; Back to Shipping</button>
       </div>
 
       <div className="og-det-head">

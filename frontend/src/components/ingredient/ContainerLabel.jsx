@@ -112,7 +112,14 @@ const buildQrPath = (value) => {
   }
 };
 
-const QrCode = ({ payload }) => {
+/**
+ * Exported so the lot sticker (`LotLabel.jsx`) renders the identical code
+ * rather than growing a second QR implementation. The error-correction level,
+ * the quiet zone and the vector-path rendering are all tuned for the same
+ * physical problem — a frosted drum in a freezer — and they must not drift
+ * apart between the two label designs.
+ */
+export const QrCode = ({ payload }) => {
   const qr = useMemo(() => buildQrPath(payload), [payload]);
 
   if (!qr) return <div className="container-label__qr-fallback" />;
@@ -139,7 +146,7 @@ const QrCode = ({ payload }) => {
  * readable at 6 feet (§5) whatever the serial's length. Idiom lifted from
  * `PalletStickerLayout.jsx:78-95`.
  */
-const SerialText = ({ serial }) => {
+export const BigCodeText = ({ serial }) => {
   const text = (serial || EMPTY).toUpperCase();
   return (
     <svg
@@ -164,7 +171,7 @@ const SerialText = ({ serial }) => {
   );
 };
 
-const Field = ({ label, value }) => (
+export const LabelField = ({ label, value }) => (
   <div className="container-label__field">
     <span className="container-label__field-label">{label}</span>
     <span className="container-label__field-value">{value || EMPTY}</span>
@@ -233,7 +240,7 @@ const ContainerLabel = ({ container, totalCount }) => {
       </div>
       <div className="container-label__rule" />
 
-      <SerialText serial={serial} />
+      <BigCodeText serial={serial} />
       <div className="container-label__sequence">
         <span className="container-label__sequence-rule" />
         <span className="container-label__sequence-text">{sequenceLine}</span>
@@ -242,11 +249,11 @@ const ContainerLabel = ({ container, totalCount }) => {
       <div className="container-label__rule" />
 
       <div className="container-label__grid">
-        <Field label="SID" value={sid} />
-        <Field label="Vendor" value={vendorName} />
-        <Field label="Lot" value={lotUnknown ? 'UNKNOWN' : vendorLot} />
-        <Field label="BBD" value={formatCalendarDate(bbd)} />
-        <Field label="Net" value={netLine} />
+        <LabelField label="SID" value={sid} />
+        <LabelField label="Vendor" value={vendorName} />
+        <LabelField label="Lot" value={lotUnknown ? 'UNKNOWN' : vendorLot} />
+        <LabelField label="BBD" value={formatCalendarDate(bbd)} />
+        <LabelField label="Net" value={netLine} />
         {/* RCV is a real INSTANT (when the truck landed), so the timezone math
             must go through dateUtils — `toDateKey` resolves it to the warehouse
             calendar day. Only the presentation is local: `dateUtils.formatDate`
@@ -255,7 +262,7 @@ const ContainerLabel = ({ container, totalCount }) => {
             dates in different formats on a food-safety label is a misread
             waiting to happen. BBD above is a calendar date and never goes
             through dateUtils at all — see the labelPayload.js header. */}
-        <Field label="RCV" value={formatCalendarDate(toDateKey(receiptDate))} />
+        <LabelField label="RCV" value={formatCalendarDate(toDateKey(receiptDate))} />
       </div>
     </div>
   );

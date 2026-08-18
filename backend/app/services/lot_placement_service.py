@@ -55,6 +55,13 @@ EVENT_ADJUSTED = "adjusted"
 EVENT_OPENED = "opened"
 EVENT_OPENING_BALANCE = "opening_balance"
 
+# Exact text, because find_or_create_lot clears the flag only when it is the one
+# it raised — a conflicting-weight review is somebody else's to resolve.
+_NO_WEIGHT_REASON = (
+    "No weight per unit recorded. Pounds are derived from it, so without it this "
+    "lot reads as zero stock to production. Fill it in before printing stickers."
+)
+
 
 def _mint_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
@@ -81,6 +88,8 @@ def build_lot_key(
     vendor_id: Optional[str],
     vendor_lot_number: Optional[str],
     bbd_original: Optional[datetime],
+    *,
+    lot_unknown: bool = False,
 ) -> str:
     """The natural key, as a single string.
 
@@ -94,7 +103,23 @@ def build_lot_key(
     applied to a drum in the barn would point at a lot that no longer exists.
     """
     day = bbd_original.date().isoformat() if bbd_original else ""
-    return f"{product_id}|{vendor_id or ''}|{normalize_lot_number(vendor_lot_number)}|{day}"
+    key = f"{product_id}|{vendor_id or ''}|{normalize_lot_number(vendor_lot_number)}|{day}"
+
+    if lot_unknown or not normalize_lot_number(vendor_lot_number):
+        # AN UNKNOWN LOT NEVER MATCHES ANOTHER UNKNOWN LOT.
+        #
+        # Without this, two trucks whose drum markings were unreadable both
+        # normalize their lot number to "" and produce an IDENTICAL key, so the
+        # second one silently becomes the first one's lot — and since every drum
+        # of a lot wears the same sticker, two genuinely different deliveries end
+        # up indistinguishable on the rack. That is the "one giant unknown
+        # bucket" the model explicitly forbids, and a recall could not untangle
+        # it afterwards.
+        #
+        # The suffix makes each unknown arrival its own lot. They are QA-flagged
+        # and used first; they are never merged.
+        key = f"{key}|unknown:{uuid.uuid4().hex[:12]}"
+    return key
 
 
 def find_or_create_lot(
@@ -119,11 +144,23 @@ def find_or_create_lot(
 
     A conflicting `weight_per_unit` between arrivals sets `needs_review` and does
     NOT pick a winner. A human decides, and no sticker prints until they do.
+
+    A MISSING `weight_per_unit` also sets `needs_review`, for a reason that is
+    less obvious and more dangerous. Pounds are derived as
+    `full_units * weight_per_unit`, so a NULL makes every derived pound ZERO —
+    and because a counted lot's receipt steps aside from the legacy availability
+    sum to avoid double-counting, scanning that material IN makes it vanish from
+    availability entirely. Production's scheduling gate reads that number, so
+    eighty drums in the barn would read as nothing at all. Flagging the lot stops
+    stickers printing, and since nothing can be scanned in without a sticker, the
+    number has to be filled in before any of it becomes stock.
     """
     if not product_id:
         raise ValidationError("A lot needs a product")
 
-    lot_key = build_lot_key(product_id, vendor_id, vendor_lot_number, bbd)
+    lot_key = build_lot_key(
+        product_id, vendor_id, vendor_lot_number, bbd, lot_unknown=lot_unknown
+    )
     existing = (
         db.query(MaterialLot)
         .filter(MaterialLot.lot_key == lot_key, MaterialLot.is_deleted == False)  # noqa: E712
@@ -147,6 +184,12 @@ def find_or_create_lot(
         elif existing.weight_per_unit is None and weight_per_unit is not None:
             existing.weight_per_unit = weight_per_unit
             existing.weight_unit = weight_unit
+            # The gap that flagged it is now filled, so the lot can be labelled.
+            # Only clear a review this function itself raised for that reason —
+            # a conflicting-weight flag is somebody else's to resolve.
+            if existing.needs_review and existing.review_reason == _NO_WEIGHT_REASON:
+                existing.needs_review = False
+                existing.review_reason = None
         existing.last_received_at = now
         db.flush()
         return existing
@@ -167,6 +210,10 @@ def find_or_create_lot(
         weight_unit=weight_unit,
         brix=brix,
         warehouse_id=warehouse_id,
+        # See the docstring: a lot with no weight per unit derives zero pounds,
+        # which reads as "no stock" to the production availability gate.
+        needs_review=weight_per_unit is None,
+        review_reason=_NO_WEIGHT_REASON if weight_per_unit is None else None,
         first_received_at=now,
         last_received_at=now,
     )
@@ -249,6 +296,38 @@ def is_counted_lot(db: Session, material_lot_id: Optional[str]) -> bool:
 
 # ─── the single write path ────────────────────────────────────────────────────
 
+def warehouse_for_row(db: Session, storage_row_id: str) -> Optional[str]:
+    """Which warehouse a rack physically sits in.
+
+    `StorageRow` carries no warehouse_id — warehouse lives four levels up on
+    Location — and a row hangs off EITHER a sub_location (raw material and
+    ingredients) OR a storage_area (finished goods), so both parents have to be
+    walked. This is exactly why `LotPlacement.warehouse_id` is denormalized: so
+    every scoped query afterwards is one column instead of this join.
+
+    Returns None when the chain is incomplete, which is drift rather than an
+    error — the caller falls back rather than refusing to record a scan.
+    """
+    from app.models import Location, SubLocation
+
+    row = db.query(StorageRow).filter(StorageRow.id == storage_row_id).first()
+    if not row:
+        return None
+
+    location_id = None
+    if row.sub_location_id:
+        sub = db.query(SubLocation).filter(SubLocation.id == row.sub_location_id).first()
+        location_id = sub.location_id if sub else None
+    if not location_id and row.storage_area_id:
+        area = db.query(StorageArea).filter(StorageArea.id == row.storage_area_id).first()
+        location_id = area.location_id if area else None
+    if not location_id:
+        return None
+
+    location = db.query(Location).filter(Location.id == location_id).first()
+    return location.warehouse_id if location else None
+
+
 def _lock_placement(db: Session, material_lot_id: str, storage_row_id: str) -> Optional[LotPlacement]:
     """SELECT ... FOR UPDATE. Copies routers/transfers.py:_lock_pallets_for_update."""
     return (
@@ -278,7 +357,16 @@ def _get_or_create_placement(
         material_lot_id=lot.id,
         storage_row_id=storage_row_id,
         product_id=lot.product_id,
-        warehouse_id=lot.warehouse_id,
+        # FROM THE RACK, not from the lot.
+        #
+        # A lot's key has no warehouse component — deliberately, because the same
+        # vendor lot arriving anywhere is the same material. So
+        # `MaterialLot.warehouse_id` is only ever whichever site saw it first.
+        # Copying it here would file Plant B's drums under Plant A the moment a
+        # supplier split one vendor lot between two sites: availability scopes on
+        # the PLACEMENT, so B would read zero while A's number included stock it
+        # does not physically hold.
+        warehouse_id=warehouse_for_row(db, storage_row_id) or lot.warehouse_id,
         full_units=0,
         open_units=0,
         open_remaining_qty=0,
@@ -359,8 +447,16 @@ def apply_delta(
             .first()
         )
         if prior:
-            # A replayed offline scan. Return current state without re-applying.
-            return _lock_placement(db, lot.id, prior.storage_row_id)
+            # A replayed offline scan. Return the state the ORIGINAL event
+            # produced, without re-applying it.
+            #
+            # Both the lot AND the row come from the prior event, never from the
+            # current call. The index is global rather than scoped per lot, so a
+            # client that reused a key across two different lots would otherwise
+            # get back a placement for the lot it just named at the row the OTHER
+            # scan used — a row that may hold none of it. Returning the prior
+            # event's own pair is the only answer that is true.
+            return _lock_placement(db, prior.material_lot_id, prior.storage_row_id)
 
     placement = _get_or_create_placement(db, lot, storage_row_id)
 

@@ -43,26 +43,18 @@ const ScannerHome = () => {
             <span className="scanner-home-desc">Pick pallets for approved shipments</span>
           </div>
         </button>
+        {/* Lot-level receiving. Replaces the per-drum flow, which is routed but
+            no longer reachable from here — every drum of a lot now wears an
+            identical sticker, so there is nothing per-drum left to scan. */}
         <button
           type="button"
           className="scanner-home-btn ingredient"
-          onClick={() => navigate('/forklift/ingredient-receiving')}
+          onClick={() => navigate('/forklift/lot-receiving')}
         >
           <div className="scanner-home-icon"><Boxes size={26} /></div>
           <div className="scanner-home-text">
-            <span>Ingredient Receiving</span>
-            <span className="scanner-home-desc">Scan barrels and bags off the trailer into rows</span>
-          </div>
-        </button>
-        <button
-          type="button"
-          className="scanner-home-btn staging"
-          onClick={() => navigate('/forklift/ingredient-staging')}
-        >
-          <div className="scanner-home-icon"><ClipboardList size={26} /></div>
-          <div className="scanner-home-text">
-            <span>Ingredient Staging</span>
-            <span className="scanner-home-desc">Claim a line and pull drums for a batch</span>
+            <span>Receiving</span>
+            <span className="scanner-home-desc">Scan a rack, then scan drums and bags into it</span>
           </div>
         </button>
       </div>

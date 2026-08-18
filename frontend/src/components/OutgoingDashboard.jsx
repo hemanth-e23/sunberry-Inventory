@@ -37,7 +37,16 @@ const splitTime = (appt) => {
 const ACTIVE_STATUSES = ['checked_in', 'scanning'];
 const DONE_STATUSES = ['reconciled', 'complete', 'docs_generated'];
 
-const OutgoingDashboard = () => {
+/**
+ * `embedded` — rendered as a tab inside ShippingPage rather than as its own
+ * screen. Suppresses the back button and the page title, because the shell above
+ * already renders both and a page must not have two.
+ *
+ * The detail early-return below is deliberately left INSIDE this component. The
+ * tab bar lives in the shell, one level up, so opening an order swaps only this
+ * subtree and the tabs stay put.
+ */
+const OutgoingDashboard = ({ embedded = false }) => {
   const navigate = useNavigate();
   const { user, selectedWarehouseName } = useAuth();
   const { addToast } = useToast();
@@ -245,23 +254,25 @@ const OutgoingDashboard = () => {
 
   if (detailId) {
     return (
-      <div className="inventory-actions-page">
+      <div className={embedded ? '' : 'inventory-actions-page'}>
         <ShipOutOrderDetail orderId={detailId} onBack={() => { setDetailId(null); load(); }} />
       </div>
     );
   }
 
   return (
-    <div className="inventory-actions-page">
-      <div className="page-header">
-        <button onClick={() => navigate(getDashboardPath(user?.role))} className="back-button">
-          &larr; Back to Dashboard
-        </button>
-      </div>
+    <div className={embedded ? '' : 'inventory-actions-page'}>
+      {!embedded && (
+        <div className="page-header">
+          <button onClick={() => navigate(getDashboardPath(user?.role))} className="back-button">
+            &larr; Back to Dashboard
+          </button>
+        </div>
+      )}
 
       <div className="og-header">
         <div>
-          <h2>Outgoing — Scheduled Shipments</h2>
+          {!embedded && <h2>Outgoing — Scheduled Shipments</h2>}
           <div className="og-sub">
             Trucks scheduled to ship out.{selectedWarehouseName ? ` Warehouse: ${selectedWarehouseName}.` : ''}
           </div>

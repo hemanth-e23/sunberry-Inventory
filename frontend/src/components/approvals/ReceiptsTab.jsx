@@ -5,6 +5,7 @@ import { useToast } from "../../context/ToastContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { formatDateTime, formatTimeAgo, getDaysAgo, toDateKey, getTodayDateKey } from "../../utils/dateUtils";
 import { ROLES, CATEGORY_TYPES, RECEIPT_STATUS, isRawMaterialType, isWeighedMaterialType } from '../../constants';
+import ReceivingCheck from './ReceivingCheck';
 
 const STATUS_PENDING = new Set([RECEIPT_STATUS.RECORDED, RECEIPT_STATUS.REVIEWED]);
 
@@ -396,9 +397,15 @@ const ReceiptsTab = ({
                 if (receipt.rawMaterialRowAllocations && Array.isArray(receipt.rawMaterialRowAllocations)) {
                   receipt.rawMaterialRowAllocations.forEach(alloc => {
                     const rowName = rowLookup[alloc.rowId] || alloc.rowName || alloc.rowId;
-                    const pallets = alloc.pallets || 0;
+                    // A counted lot carries a real unit count and the word for
+                    // it. Printing "40 pallets" for 40 drums is the same class of
+                    // mistake as an 80-barrel receipt rendering as 80 cases.
+                    const units = Number(alloc.units) || 0;
+                    const label = units > 0
+                      ? `${units} ${alloc.unitLabel || 'unit'}${units === 1 ? '' : 's'}`
+                      : `${alloc.pallets || 0} pallets`;
                     if (rowName) {
-                      rowInfo.push(`${rowName} (${pallets} pallets)`);
+                      rowInfo.push(`${rowName} (${label})`);
                     }
                   });
                 } else if (receipt.storageRowId || receipt.storage_row_id) {
@@ -415,6 +422,11 @@ const ReceiptsTab = ({
             </dd>
           </div>
         </dl>
+
+        {/* Paperwork vs scanned, per rack. Present only for receipts whose units
+            were actually counted in; legacy receipts render nothing. */}
+        <ReceivingCheck receipt={receipt} />
+
         <div className="requester-row">
           <span className="requester-avatar">
             {(userNameMap[receipt.submittedBy || receipt.submitted_by] || '?')[0].toUpperCase()}

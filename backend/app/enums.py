@@ -278,3 +278,37 @@ class IntakeSource(str, Enum):
     received_date is honestly unknown rather than fabricated."""
     TRUCK = "truck"
     LEGACY_SWEEP = "legacy_sweep"
+
+
+class IncomingOrderStatus(str, Enum):
+    """Lifecycle of an incoming order — corporate plans, the plant receives.
+
+    Mirrors ShipOutLifecycle deliberately: the two are the same shape pointed in
+    opposite directions, and the owner asked for them to live side by side under
+    one Shipping screen.
+
+    Stored in the EXISTING `ingredient_intakes.status` column, which is why these
+    values must not collide with IntakeStatus. They do not: that vocabulary is
+    recorded/submitted/approved/rejected/voided, and an intake created by the old
+    per-drum flow keeps reading correctly under it.
+
+    `in_transit` is the value the owner specifically asked for — corporate moving
+    material from a 3PL to a plant needs it to leave one place before it arrives
+    at the other, and "the market is short but corporate can close it with a
+    reason" is `closed_short`.
+    """
+    DRAFT = "draft"                 # corporate is still filling it in
+    IN_TRANSIT = "in_transit"       # released; on a truck somewhere
+    RECEIVING = "receiving"         # the plant has started scanning against it
+    RECEIVED = "received"           # every line accounted for
+    CLOSED_SHORT = "closed_short"   # closed with fewer units than expected, with a reason
+    CANCELLED = "cancelled"
+
+
+# Statuses a plant worker may receive against. `draft` is excluded on purpose:
+# corporate has not finished the paperwork, so the expected counts are not yet
+# something to reconcile against.
+INCOMING_RECEIVABLE_STATUSES = (
+    IncomingOrderStatus.IN_TRANSIT.value,
+    IncomingOrderStatus.RECEIVING.value,
+)

@@ -61,6 +61,9 @@ const mapReceipt = (rec, products, categories = []) => {
     storageRowId: rec.storage_row_id || null,
     pallets: rec.pallets || null,
     rawMaterialRowAllocations: rec.raw_material_row_allocations || null,
+    // Present once the material has a lot identity — the approvals card keys the
+    // paperwork-vs-scanned check on it.
+    materialLotId: rec.material_lot_id || null,
     fullPallets: rec.full_pallets || 0,
     partialCases: rec.partial_cases || 0,
     casesPerPallet: rec.cases_per_pallet || null,
