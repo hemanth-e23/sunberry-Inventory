@@ -106,3 +106,33 @@ def is_ingredient_product(db: Session, product_id: str) -> bool:
     point the serialization code paths use.
     """
     return is_ingredient_category(_category_for_product(db, product_id))
+
+
+def is_weighed_material_category(category) -> bool:
+    """True for material that is COUNTED IN UNITS AND WEIGHED — raw or ingredient.
+
+    This is the predicate the lot model actually needs, and it is deliberately
+    wider than `is_ingredient_category`.
+
+    In the spec the serialized tier was called "ingredients" and raw material was
+    to keep the legacy flow. Production data does not divide that way: there is
+    no category typed `ingredient` at all, and every puree, concentrate and acid
+    — the drums and bags this whole model exists for — is typed `raw`. The owner
+    describes the same set as "raw materials, it can be drums or bags or boxes".
+
+    Scoping the cutover to `ingredient` alone therefore matched nothing: the
+    zero-out reported zero receipts while seventeen raw receipts held stock, and
+    would have silently done nothing.
+
+    Mirrors `isWeighedMaterialType` in frontend/src/constants/index.js, which
+    already accepts both. Packaging and finished goods are excluded: packaging is
+    counted in cases and finished goods use pallet licences.
+    """
+    if category is None:
+        return False
+    return category.type in RAW_MATERIAL_TYPES or category.type == CATEGORY_INGREDIENT
+
+
+def is_weighed_material(db: Session, receipt) -> bool:
+    """Receipt-level check for raw-or-ingredient."""
+    return is_weighed_material_category(_category_for_receipt(db, receipt))

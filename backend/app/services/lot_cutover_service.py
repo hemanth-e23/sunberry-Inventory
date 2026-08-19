@@ -46,7 +46,7 @@ from app.models import (
     Vendor,
 )
 from app.services import lot_placement_service as lps
-from app.utils.category_rules import is_ingredient_category
+from app.utils.category_rules import is_weighed_material_category
 
 # Written into the ledger so a cutover entry is never mistaken for a real
 # receipt or a real count later.
@@ -60,16 +60,24 @@ def _mint_id(prefix: str) -> str:
 # ─── step 1: zero out ─────────────────────────────────────────────────────────
 
 def _ingredient_category_ids(db: Session) -> List[str]:
+    """Categories this cutover covers: raw material AND ingredients.
+
+    Deliberately wider than `is_ingredient_category`. There is no category typed
+    `ingredient` in production — every puree and concentrate is typed `raw` — so
+    scoping to `ingredient` alone matched nothing and the zero-out silently did
+    nothing. See is_weighed_material_category for the full note.
+    """
     return [
-        c.id for c in db.query(Category).all() if is_ingredient_category(c)
+        c.id for c in db.query(Category).all() if is_weighed_material_category(c)
     ]
 
 
 def _zero_out_query(db: Session, warehouse_id: Optional[str] = None):
     """Ingredient receipts still carrying stock.
 
-    Scoped to categories typed `ingredient` — raw materials and packaging are NOT
-    part of this cutover and their receipts must not be touched.
+    Scoped to weighed material — raw AND ingredient. Packaging and finished goods
+    are NOT part of this cutover and their receipts must not be touched:
+    packaging is counted in cases, finished goods use pallet licences.
     """
     cat_ids = _ingredient_category_ids(db)
     if not cat_ids:

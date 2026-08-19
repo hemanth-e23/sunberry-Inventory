@@ -149,21 +149,29 @@ class TestZeroOut:
         lcs.execute_zero_out(db_session, warehouse_id=WH, user_id="u-1")
         assert receipt.raw_material_row_allocations == []
 
-    def test_raw_material_and_packaging_are_untouched(self, db_session, cutover_seed):
-        """This cutover is ingredients only."""
+    def test_raw_material_is_INCLUDED_and_packaging_is_not(self, db_session, cutover_seed):
+        """Raw is in scope, and that is the whole point.
+
+        There is no category typed `ingredient` in production — every puree and
+        concentrate is typed `raw` — so a cutover scoped to `ingredient` alone
+        would silently do nothing. Packaging stays out: it is counted in cases,
+        not in drums.
+        """
         raw = _legacy(db_session, rid="r-raw", product=RAW_PRODUCT, category="cat-raw")
         pkg = _legacy(db_session, rid="r-pkg", product=PKG_PRODUCT, category="cat-pkg")
         ing = _legacy(db_session, rid="r-ing", product=ING_PRODUCT, category="cat-ing")
         db_session.commit()
 
-        assert lcs.preview_zero_out(db_session, WH)["receipt_count"] == 1
+        assert lcs.preview_zero_out(db_session, WH)["receipt_count"] == 2
         lcs.execute_zero_out(db_session, warehouse_id=WH, user_id="u-1")
 
-        assert raw.quantity == 20000.0
-        assert raw.status == ReceiptStatus.APPROVED
-        assert raw.raw_material_row_allocations
-        assert pkg.quantity == 20000.0
+        assert raw.quantity == 0
+        assert raw.status == ReceiptStatus.DEPLETED
         assert ing.quantity == 0
+        # Packaging is untouched, quantity and allocation JSON alike.
+        assert pkg.quantity == 20000.0
+        assert pkg.status == ReceiptStatus.APPROVED
+        assert pkg.raw_material_row_allocations
 
     def test_another_warehouse_is_untouched(self, db_session, cutover_seed):
         """One plant converts at a time."""
