@@ -139,14 +139,12 @@ const CountsTab = () => {
   };
 
   const doZeroOut = async () => {
-    const ok = await confirm({
-      title: 'Zero out ingredient receipts',
-      message: `${preview?.receipt_count || 0} receipts will drop to zero and be marked depleted. `
-        + 'The records are kept — nothing is deleted — but this cannot be undone by pressing '
-        + 'something else. Only do it once every rack has been walked and is ready to be entered.',
-      confirmText: 'Zero them out',
-      danger: true,
-    });
+    const ok = await confirm(
+      `${preview?.receipt_count || 0} receipts will drop to zero and be marked depleted. `
+      + 'The records are kept — nothing is deleted — but this cannot be undone by pressing '
+      + 'something else. Only do it once every rack has been walked and is ready to be entered.',
+      { title: 'Zero out raw material receipts', confirmLabel: 'Zero them out' },
+    );
     if (!ok) return;
     setBusy(true);
     try {

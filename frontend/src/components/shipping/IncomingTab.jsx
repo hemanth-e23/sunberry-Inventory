@@ -161,13 +161,12 @@ const IncomingTab = () => {
       addToast('Pick a warehouse in the header before creating an order.', 'error');
       return;
     }
-    const ok = await confirm({
-      title: 'Create incoming order',
-      message: `This order is for ${selectedWarehouseName || 'the selected warehouse'}. `
-        + `${lines.reduce((sum, l) => sum + Number(l.expected_count || 0), 0)} units across `
-        + `${lines.length} product line${lines.length === 1 ? '' : 's'}. Creating it puts nothing in stock.`,
-      confirmText: 'Create',
-    });
+    const ok = await confirm(
+      `This order is for ${selectedWarehouseName || 'the selected warehouse'}. `
+      + `${lines.reduce((sum, l) => sum + Number(l.expected_count || 0), 0)} units across `
+      + `${lines.length} product line${lines.length === 1 ? '' : 's'}. Creating it puts nothing in stock.`,
+      { title: 'Create incoming order', confirmLabel: 'Create' },
+    );
     if (!ok) return;
 
     setBusy(true);
@@ -217,11 +216,10 @@ const IncomingTab = () => {
       setCloseForm({ order, short, reason: '' });
       return;
     }
-    const ok = await confirm({
-      title: 'Close this order',
-      message: `${order.received_count} of ${order.expected_count} received. Close it?`,
-      confirmText: 'Close',
-    });
+    const ok = await confirm(
+      `${order.received_count} of ${order.expected_count} received. Close it?`,
+      { title: 'Close this order', confirmLabel: 'Close' },
+    );
     if (!ok) return;
     await finishClose(order, null);
   };
@@ -297,12 +295,11 @@ const IncomingTab = () => {
   };
 
   const doCancel = async (order) => {
-    const ok = await confirm({
-      title: 'Cancel this order',
-      message: `${order.order_number} will be cancelled. This is only possible while nothing has been received against it.`,
-      confirmText: 'Cancel order',
-      danger: true,
-    });
+    const ok = await confirm(
+      `${order.order_number} will be cancelled. This is only possible while nothing `
+      + 'has been received against it.',
+      { title: 'Cancel this order', confirmLabel: 'Cancel order' },
+    );
     if (!ok) return;
     setBusy(true);
     try {

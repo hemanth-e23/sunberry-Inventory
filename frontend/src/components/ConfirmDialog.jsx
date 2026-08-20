@@ -1,5 +1,27 @@
 import React from 'react';
 
+/**
+ * The contract is `confirm(message, { title, confirmLabel })` — a STRING first,
+ * options second. Not `confirm({ title, message })`.
+ *
+ * That is easy to get backwards, and the punishment was wildly out of
+ * proportion: React throws "Objects are not valid as a React child" on the raw
+ * `{message}` below, which escapes to the app-level ErrorBoundary and white-
+ * screens the whole application. A mistyped confirmation should not take the
+ * warehouse offline, so an object is now rendered as something legible and the
+ * dialog still works.
+ */
+const renderMessage = (message) => {
+  if (message === null || message === undefined) return null;
+  if (typeof message === 'string' || typeof message === 'number') return message;
+  if (React.isValidElement(message)) return message;   // JSX messages are fine
+  if (Array.isArray(message)) return message.map(renderMessage).join(' ');
+  // An options object passed where the message belongs. Show its `message` key
+  // if it has one, which is the likeliest mistake, and never crash.
+  if (typeof message === 'object') return String(message.message ?? JSON.stringify(message));
+  return String(message);
+};
+
 const ConfirmDialog = ({ message, title = 'Confirm', confirmLabel = 'Confirm', onConfirm, onCancel }) => {
   return (
     <div style={{
@@ -24,7 +46,7 @@ const ConfirmDialog = ({ message, title = 'Confirm', confirmLabel = 'Confirm', o
           {title}
         </h3>
         <p style={{ margin: '0 0 24px', fontSize: '14px', color: '#444', lineHeight: 1.5 }}>
-          {message}
+          {renderMessage(message)}
         </p>
         <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
           <button
