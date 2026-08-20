@@ -741,3 +741,49 @@ class TestRemainingGates:
             Receipt.id == summary["receipt_id"]
         ).first()
         assert receipt.category_id == "cat-ing"
+
+
+class TestWeightUnitIsAskedNotAssumed:
+    """A wrong weight unit is out by 2.2x in every pound the system derives, so
+    the receiving form asks rather than defaulting silently."""
+
+    def test_the_plant_can_correct_the_unit_against_the_bol(
+        self, client, api_seed, wh_headers, db_session
+    ):
+        from app.models import IntakeLot, MaterialLot as ML, Receipt
+
+        order = client.post("/api/lot-receiving/orders", headers=wh_headers, json={
+            "vendor_id": VENDOR,
+            "lines": [{
+                "product_id": PRODUCT, "vendor_lot": "UNIT-1", "expected_count": 10,
+                "unit_label": "drum", "weight_per_unit": 200.0, "weight_unit": "kg",
+            }],
+        }).json()
+        client.post(f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers)
+
+        # The paperwork actually said pounds.
+        summary = client.post(
+            f"/api/lot-receiving/orders/{order['id']}/start-receiving",
+            headers=wh_headers,
+            json={"line_id": order["lines"][0]["id"],
+                  "weight_per_unit": 440.0, "weight_unit": "lbs"},
+        ).json()
+
+        receipt = db_session.query(Receipt).filter(
+            Receipt.id == summary["receipt_id"]
+        ).first()
+        assert receipt.weight_unit == "lbs"
+        assert receipt.weight_per_container == 440.0
+        # Derived total follows the corrected figure, not corporate's.
+        assert receipt.quantity == 4400.0
+        assert receipt.unit == "lbs"
+
+        lot = db_session.query(ML).filter(ML.id == receipt.material_lot_id).first()
+        assert lot.weight_unit == "lbs"
+        # And the correction is written back onto the order line, so the next
+        # person to look at the order sees what actually arrived.
+        line = db_session.query(IntakeLot).filter(
+            IntakeLot.id == order["lines"][0]["id"]
+        ).first()
+        assert line.weight_unit == "lbs"
+        assert line.net_weight_per_container == 440.0

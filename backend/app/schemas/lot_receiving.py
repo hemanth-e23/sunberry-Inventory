@@ -101,6 +101,10 @@ class StartReceivingRequest(BaseSchema):
     vendor_lot: Optional[str] = Field(None, max_length=100)
     bbd: Optional[datetime] = None
     weight_per_unit: Optional[float] = Field(None, ge=0)
+    # Correctable here because a wrong unit is not a small error: 500 kg
+    # recorded as 500 lb is out by a factor of 2.2 in every pound the system
+    # derives, and this form is where somebody is holding the actual paperwork.
+    weight_unit: Optional[str] = Field(None, max_length=10)
     expected_count: Optional[int] = Field(None, ge=0)
     bol: Optional[str] = Field(None, max_length=100)
 

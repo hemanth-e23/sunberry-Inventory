@@ -708,6 +708,7 @@ def start_receiving(
     vendor_lot = overrides.get("vendor_lot", line.vendor_lot)
     bbd = overrides.get("bbd", line.bbd)
     weight_per_unit = overrides.get("weight_per_unit", line.net_weight_per_container)
+    weight_unit = overrides.get("weight_unit", line.weight_unit)
     expected = int(overrides.get("expected_count", line.expected_count) or 0)
 
     receipt = Receipt(
@@ -721,11 +722,11 @@ def start_receiving(
         # Weight, derived — matching what routers/receipts.py does on create so
         # every existing reader of Receipt.quantity keeps working.
         quantity=round(expected * float(weight_per_unit or 0), 3) if weight_per_unit else expected,
-        unit=(line.weight_unit or "lbs") if weight_per_unit else (line.container_type or "unit"),
+        unit=(weight_unit or "lbs") if weight_per_unit else (line.container_type or "unit"),
         container_count=expected,
         container_unit=line.container_type,
         weight_per_container=weight_per_unit,
-        weight_unit=line.weight_unit,
+        weight_unit=weight_unit,
         vendor_id=line.vendor_id or order.vendor_id,
         bol=overrides.get("bol", order.bol),
         purchase_order=order.purchase_order,
@@ -749,6 +750,8 @@ def start_receiving(
         line.bbd = bbd
     if weight_per_unit != line.net_weight_per_container:
         line.net_weight_per_container = weight_per_unit
+    if weight_unit != line.weight_unit:
+        line.weight_unit = weight_unit
 
     if order.status == IncomingOrderStatus.IN_TRANSIT.value:
         order.status = IncomingOrderStatus.RECEIVING.value

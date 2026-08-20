@@ -5,6 +5,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { useConfirm } from '../../context/ConfirmContext';
 import Modal from '../Modal';
+import SearchableSelect from '../SearchableSelect';
 import { formatDate } from '../../utils/dateUtils';
 import {
   apiErrorMessage, cancelIncomingOrder, closeIncomingOrder, createIncomingOrder,
@@ -250,6 +251,7 @@ const IncomingTab = () => {
     vendor_lot: line.vendor_lot || '',
     bbd: line.bbd ? String(line.bbd).slice(0, 10) : '',
     weight_per_unit: line.weight_per_unit == null ? '' : String(line.weight_per_unit),
+    weight_unit: line.weight_unit || 'lbs',
     expected_count: String(line.expected_count ?? ''),
     bol: order.bol || '',
   });
@@ -273,6 +275,7 @@ const IncomingTab = () => {
         vendor_lot: startForm.vendor_lot || null,
         bbd: startForm.bbd || null,
         weight_per_unit: Number(startForm.weight_per_unit),
+        weight_unit: startForm.weight_unit || 'lbs',
         expected_count: Number(startForm.expected_count) || null,
         bol: startForm.bol || null,
       });
@@ -519,7 +522,6 @@ const IncomingTab = () => {
               <input
                 value={startForm.vendor_lot}
                 onChange={(e) => setStartForm({ ...startForm, vendor_lot: e.target.value })}
-                autoFocus
               />
             </label>
             <label>
@@ -535,21 +537,47 @@ const IncomingTab = () => {
                 Weight per {startForm.line.unit_label || 'unit'}{' '}
                 <span className="og-prefill">every pound is derived from this</span>
               </span>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={startForm.weight_per_unit}
-                onChange={(e) => setStartForm({ ...startForm, weight_per_unit: e.target.value })}
-              />
+              {/* text + inputMode, never type="number": a number input edits itself
+                    when the wheel passes over it, so scrolling the form silently
+                    changes a figure somebody typed. */}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={startForm.weight_per_unit}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === '' || /^\d*\.?\d*$/.test(v)) {
+                      setStartForm({ ...startForm, weight_per_unit: v });
+                    }
+                  }}
+                  placeholder="500"
+                  style={{ flex: 1 }}
+                  autoFocus
+                />
+                <select
+                  value={startForm.weight_unit}
+                  onChange={(e) => setStartForm({ ...startForm, weight_unit: e.target.value })}
+                  style={{ width: 110 }}
+                  aria-label="Weight unit"
+                >
+                  <option value="lbs">lbs</option>
+                  <option value="kg">kg</option>
+                </select>
+              </div>
             </label>
             <label>
               <span>How many arrived</span>
               <input
-                type="number"
-                min="0"
+                type="text"
+                inputMode="numeric"
                 value={startForm.expected_count}
-                onChange={(e) => setStartForm({ ...startForm, expected_count: e.target.value })}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === '' || /^\d+$/.test(v)) {
+                    setStartForm({ ...startForm, expected_count: v });
+                  }
+                }}
               />
             </label>
             <label>
@@ -702,15 +730,22 @@ const IncomingTab = () => {
                 )}
                 <label>
                   <span>Product</span>
-                  <select
+                  {/* Type-to-search, not a plain select. There are already a
+                      dozen purees and concentrates with names that share long
+                      prefixes ("CONVENTIONAL MANGO PUREE (ALPHONSO)" next to
+                      "CONVENTIONAL MANGO CONCENTRATE (TOTAPURI)"), and scrolling
+                      a native dropdown to tell those apart is how the wrong one
+                      gets picked. Same control the ship-out scheduler uses. */}
+                  <SearchableSelect
+                    options={ingredientProducts.map((p) => ({
+                      value: p.id,
+                      label: p.sid ? `${p.name}  ·  ${p.sid}` : p.name,
+                    }))}
                     value={line.product_id}
-                    onChange={(e) => patchLine(index, { product_id: e.target.value })}
-                  >
-                    <option value="">—</option>
-                    {ingredientProducts.map((p) => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
+                    onChange={(v) => patchLine(index, { product_id: v })}
+                    placeholder="Search products…"
+                    emptyLabel="—"
+                  />
                 </label>
                 <label>
                   <span>Vendor lot</span>
@@ -730,11 +765,19 @@ const IncomingTab = () => {
                 </label>
                 <label>
                   <span>How many</span>
+                  {/* Whole units only, and text-not-number for the same
+                      wheel-scroll reason as the weight above. */}
                   <input
-                    type="number"
-                    min="0"
+                    type="text"
+                    inputMode="numeric"
                     value={line.expected_count}
-                    onChange={(e) => patchLine(index, { expected_count: e.target.value })}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === '' || /^\d+$/.test(v)) {
+                        patchLine(index, { expected_count: v });
+                      }
+                    }}
+                    placeholder="80"
                   />
                 </label>
                 <label>
@@ -759,13 +802,38 @@ const IncomingTab = () => {
                         received until it is filled in. */}
                     <span className="og-prefill">required — every pound comes from this</span>
                   </span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={line.weight_per_unit}
-                    onChange={(e) => patchLine(index, { weight_per_unit: e.target.value })}
-                  />
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {/* type="text" + inputMode="decimal", NOT type="number".
+                        A number input changes its value when the wheel passes
+                        over a focused field, so scrolling the form silently
+                        edits the one figure every derived pound depends on —
+                        and it shows spinner arrows nobody wants on a weight. */}
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={line.weight_per_unit}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === '' || /^\d*\.?\d*$/.test(v)) {
+                          patchLine(index, { weight_per_unit: v });
+                        }
+                      }}
+                      placeholder="500"
+                      style={{ flex: 1 }}
+                    />
+                    {/* Asked, not assumed. Vendors quote in both, and a drum
+                        recorded as 500 kg when it is 500 lb is wrong by a factor
+                        of 2.2 in every pound the system derives from it. */}
+                    <select
+                      value={line.weight_unit}
+                      onChange={(e) => patchLine(index, { weight_unit: e.target.value })}
+                      style={{ width: 110 }}
+                      aria-label="Weight unit"
+                    >
+                      <option value="lbs">lbs</option>
+                      <option value="kg">kg</option>
+                    </select>
+                  </div>
                 </label>
               </div>
             ))}

@@ -409,21 +409,31 @@ const CountsTab = () => {
           </label>
           <label>
             <span>{mode === 'set' ? 'How many are actually there' : 'How many sealed'}</span>
+            {/* text + inputMode, never type="number": a number input edits itself
+                    when the wheel passes over it, so scrolling the form silently
+                    changes a figure somebody typed. */}
             <input
-              type="number"
-              min="0"
+              type="text"
+              inputMode="numeric"
               value={entry.full_units}
-              onChange={(e) => setEntry({ ...entry, full_units: e.target.value })}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === '' || /^\d+$/.test(v)) setEntry({ ...entry, full_units: v });
+              }}
+              placeholder="31"
             />
           </label>
           <label style={mode === 'set' ? { display: 'none' } : undefined}>
             <span>Weight each <span className="muted">pounds come from this</span></span>
             <input
-              type="number"
-              min="0"
-              step="0.01"
+              type="text"
+              inputMode="decimal"
               value={entry.weight_per_unit}
-              onChange={(e) => setEntry({ ...entry, weight_per_unit: e.target.value })}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === '' || /^\d*\.?\d*$/.test(v)) setEntry({ ...entry, weight_per_unit: v });
+              }}
+              placeholder="500"
             />
           </label>
           {/* Opened units are counted separately and their remaining weight is a
@@ -432,20 +442,27 @@ const CountsTab = () => {
           <label>
             <span>Opened <span className="muted">partials, usually in a cooler</span></span>
             <input
-              type="number"
-              min="0"
+              type="text"
+              inputMode="numeric"
               value={entry.open_units}
-              onChange={(e) => setEntry({ ...entry, open_units: e.target.value })}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === '' || /^\d+$/.test(v)) setEntry({ ...entry, open_units: v });
+              }}
             />
           </label>
           <label>
             <span>Left in them <span className="muted">total across the opened ones</span></span>
             <input
-              type="number"
-              min="0"
-              step="0.01"
+              type="text"
+              inputMode="decimal"
               value={entry.open_remaining_qty}
-              onChange={(e) => setEntry({ ...entry, open_remaining_qty: e.target.value })}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === '' || /^\d*\.?\d*$/.test(v)) {
+                  setEntry({ ...entry, open_remaining_qty: v });
+                }
+              }}
               disabled={!Number(entry.open_units)}
             />
           </label>
