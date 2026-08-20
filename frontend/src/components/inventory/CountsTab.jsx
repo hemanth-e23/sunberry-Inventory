@@ -61,7 +61,7 @@ const emptyEntry = () => ({
 });
 
 const CountsTab = () => {
-  const { products, vendors, categoryLookup } = useAppData();
+  const { products, vendors, categories } = useAppData();
   const { user } = useAuth();
   const { addToast } = useToast();
   const { confirm } = useConfirm();
@@ -87,14 +87,21 @@ const CountsTab = () => {
 
   const canZeroOut = ['superadmin', 'admin', 'corporate_admin'].includes(user?.role);
 
+  // Weighed material only: raw AND ingredient. There is no category typed
+  // `ingredient` in production — every puree and concentrate is `raw` — so
+  // filtering on `ingredient` alone empties the list. Packaging and finished
+  // goods are excluded: packaging is counted in cases, FG uses pallet licences.
+  //
+  // `useAppData()` exposes `categories` as an ARRAY, not a lookup map. Reaching
+  // for a `categoryLookup` that does not exist made every type `undefined`, so
+  // the filter rejected everything and the dropdown rendered empty.
   const ingredientProducts = useMemo(() => {
-    const isIngredient = (p) => {
-      const category = categoryLookup?.[p.categoryId || p.category_id];
-      const type = category?.type;
-      return type === 'ingredient' || type === 'raw' || type === 'raw-material';
-    };
-    return (products || []).filter(isIngredient);
-  }, [products, categoryLookup]);
+    const typeById = new Map((categories || []).map((c) => [c.id, c.type]));
+    const WEIGHED = new Set(['ingredient', 'raw', 'raw-material']);
+    return (products || [])
+      .filter((p) => WEIGHED.has(typeById.get(p.categoryId || p.category_id)))
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+  }, [products, categories]);
 
   const load = useCallback(async () => {
     try {

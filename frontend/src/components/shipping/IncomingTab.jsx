@@ -67,7 +67,7 @@ const emptyLine = () => ({
 });
 
 const IncomingTab = () => {
-  const { products, vendors, categoryLookup } = useAppData();
+  const { products, vendors, categories } = useAppData();
   const { user, isCorporateUser, selectedWarehouse, selectedWarehouseName } = useAuth();
   const { addToast } = useToast();
   const { confirm } = useConfirm();
@@ -91,16 +91,34 @@ const IncomingTab = () => {
   // convention rather than a gate; incoming is gated, because a plant worker
   // raising their own inbound paperwork and then receiving against it is one
   // person checking their own work.
-  const canCreate = ['superadmin', 'corporate_admin', 'admin'].includes(user?.role);
+  // TWO DIFFERENT PERMISSIONS, deliberately not one.
+  //
+  // Raising an incoming order is corporate paperwork: they hold the PO and they
+  // decide which site a load goes to. `corporate_viewer` is inside
+  // CORPORATE_ROLES but is a viewer, so it is excluded here.
+  //
+  // STARTING to receive one is the plant's job — it is done holding the driver's
+  // BOL, at the dock. Collapsing these into one flag is what put a "New incoming
+  // order" button in front of a plant admin, and would have taken "Start
+  // receiving" away from them when that was fixed.
+  const canCreate = ['superadmin', 'corporate_admin'].includes(user?.role);
+  const canReceive = user?.role !== 'forklift';
 
+  // Weighed material only: raw AND ingredient. There is no category typed
+  // `ingredient` in production — every puree and concentrate is `raw` — so
+  // filtering on `ingredient` alone empties the list. Packaging and finished
+  // goods are excluded: packaging is counted in cases, FG uses pallet licences.
+  //
+  // `useAppData()` exposes `categories` as an ARRAY, not a lookup map. Reaching
+  // for a `categoryLookup` that does not exist made every type `undefined`, so
+  // the filter rejected everything and the dropdown rendered empty.
   const ingredientProducts = useMemo(() => {
-    const isIngredient = (p) => {
-      const category = categoryLookup?.[p.categoryId || p.category_id];
-      const type = category?.type;
-      return type === 'ingredient' || type === 'raw' || type === 'raw-material';
-    };
-    return (products || []).filter(isIngredient);
-  }, [products, categoryLookup]);
+    const typeById = new Map((categories || []).map((c) => [c.id, c.type]));
+    const WEIGHED = new Set(['ingredient', 'raw', 'raw-material']);
+    return (products || [])
+      .filter((p) => WEIGHED.has(typeById.get(p.categoryId || p.category_id)))
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+  }, [products, categories]);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -117,7 +135,6 @@ const IncomingTab = () => {
       vendor_id: '',
       bol: '',
       purchase_order: '',
-      origin_name: '',
       expected_date: '',
       notes: '',
       lines: [emptyLine()],
@@ -296,6 +313,14 @@ const IncomingTab = () => {
     }
   };
 
+  const lineTotals = useMemo(() => {
+    const rows = (form?.lines || []).filter((l) => l.product_id && Number(l.expected_count) > 0);
+    return {
+      lines: rows.length,
+      units: rows.reduce((sum, l) => sum + (Number(l.expected_count) || 0), 0),
+    };
+  }, [form]);
+
   const visible = useMemo(
     () => (showClosed ? orders : orders.filter((o) => OPEN_STATUSES.includes(o.status))),
     [orders, showClosed],
@@ -338,7 +363,7 @@ const IncomingTab = () => {
                     {line.bbd ? ` · BBD ${formatDate(line.bbd)}` : ''}
                   </span>
                   <span className="og-line-count">
-                    {isOpen && order.status !== 'draft' && !line.receipt_id && (
+                    {isOpen && canReceive && order.status !== 'draft' && !line.receipt_id && (
                       <button
                         type="button"
                         className="og-btn og-btn-primary"
@@ -433,16 +458,27 @@ const IncomingTab = () => {
           </label>
         </div>
         {canCreate && (
-          <button type="button" className="og-btn og-btn-primary" onClick={startCreate}>
-            <Plus size={15} /> New incoming order
+          // Disabled rather than open-then-refuse. An order is FOR one
+          // destination site, so on "All Warehouses" there is no answer to
+          // "where is this going" — and the server rejects it with a raw 400.
+          // Better to never open a form that cannot be submitted.
+          <button
+            type="button"
+            className="og-btn og-btn-primary"
+            onClick={startCreate}
+            disabled={needsWarehouse}
+            title={needsWarehouse ? 'Pick a plant in the header first' : undefined}
+          >
+            <Plus size={15} />
+            {needsWarehouse ? 'Pick a plant first' : 'New incoming order'}
           </button>
         )}
       </div>
 
       {needsWarehouse && canCreate && (
         <div className="og-empty">
-          <AlertTriangle size={18} /> Pick a warehouse in the header first — an
-          incoming order is for one destination site.
+          <AlertTriangle size={18} /> An incoming order is for ONE destination
+          site. Pick the plant in the header selector, then create it.
         </div>
       )}
 
@@ -606,17 +642,6 @@ const IncomingTab = () => {
                 </select>
               </label>
               <label>
-                <span>
-                  Coming from{' '}
-                  <span className="og-prefill">a 3PL or another plant — free text</span>
-                </span>
-                <input
-                  value={form.origin_name}
-                  onChange={(e) => setForm({ ...form, origin_name: e.target.value })}
-                  placeholder="Chicago 3PL"
-                />
-              </label>
-              <label>
                 <span>BOL</span>
                 <input
                   value={form.bol}
@@ -640,15 +665,41 @@ const IncomingTab = () => {
               </label>
             </div>
 
-            <h4 style={{ margin: '16px 0 6px' }}>
-              Products{' '}
+            <h4 style={{ margin: '16px 0 6px', display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+              <span>What is on the truck</span>
               <span className="og-prefill">one line per lot — a truck can carry several</span>
+              {lineTotals.units > 0 && (
+                <span className="og-count" style={{ marginLeft: 'auto' }}>
+                  <b>{lineTotals.lines}</b> line{lineTotals.lines === 1 ? '' : 's'}
+                  {' · '}<b>{lineTotals.units}</b> units
+                </span>
+              )}
             </h4>
 
             {form.lines.map((line, index) => (
               // Index as key: these rows have no identity until they are saved,
               // and reordering is not possible in this form.
-              <div className="og-modal-form" key={index} style={{ marginBottom: 12 }}>
+              <div
+                className="og-modal-form"
+                key={index}
+                style={{
+                  marginBottom: 12, paddingBottom: 12,
+                  borderBottom: index < form.lines.length - 1 ? '1px solid #e5e7eb' : 'none',
+                }}
+              >
+                {form.lines.length > 1 && (
+                  <button
+                    type="button"
+                    className="og-btn og-btn-ghost"
+                    style={{ alignSelf: 'flex-end' }}
+                    onClick={() => setForm({
+                      ...form,
+                      lines: form.lines.filter((_, i) => i !== index),
+                    })}
+                  >
+                    Remove this line
+                  </button>
+                )}
                 <label>
                   <span>Product</span>
                   <select
@@ -702,7 +753,11 @@ const IncomingTab = () => {
                 <label>
                   <span>
                     Weight each{' '}
-                    <span className="og-prefill">pounds are derived from this</span>
+                    {/* Required in practice, not just useful: pounds are derived
+                        from it, and the server flags a lot without one and
+                        refuses to print stickers for it — so nothing can be
+                        received until it is filled in. */}
+                    <span className="og-prefill">required — every pound comes from this</span>
                   </span>
                   <input
                     type="number"

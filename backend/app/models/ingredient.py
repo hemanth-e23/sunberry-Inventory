@@ -139,6 +139,32 @@ class IngredientIntake(Base):
     # three destinations — because each is received, shorted and closed
     # independently, and a shared header would couple them.
     #
+    # ── TWO KINDS OF ORDER, told apart by `origin_warehouse_id` ─────────────
+    #
+    #   NULL  -> a VENDOR ARRIVAL. Material entering the company for the first
+    #            time. The vendor IS the origin, so there is no "coming from"
+    #            and the creation form does not ask for one. This is the only
+    #            kind the UI raises today.
+    #
+    #   SET   -> a WAREHOUSE TRANSFER. Stock already on our books moving between
+    #            sites. NOT BUILT YET, and the model is shaped for it rather
+    #            than the flow being half-implemented. What it needs:
+    #              * only CLEAR stock may move — not held, not staged, on a rack
+    #              * the same order shows as Outgoing at the source and Incoming
+    #                at the destination; one object, two faces
+    #              * the source scans the drums OUT; that subtracts there and
+    #                moves the order to `in_transit`
+    #              * an OWNED destination scans them in — the SAME stickers, no
+    #                re-labelling, because lot identity is global rather than
+    #                minted per plant
+    #              * a PARTNER destination never scans (they do not use this
+    #                app), so it stays in_transit until corporate confirms the
+    #                partner received it
+    #            Note this must go through lot_placement_service, in whole units.
+    #            inter_warehouse_transfer_service moves stock by decrementing
+    #            `receipt.quantity`, which cannot touch a counted lot — it now
+    #            refuses such receipts explicitly rather than failing obscurely.
+    #
     # `status` carries IncomingOrderStatus for these rows and IntakeStatus for
     # rows created by the old per-drum flow. The two vocabularies do not
     # overlap, so old rows keep reading correctly.

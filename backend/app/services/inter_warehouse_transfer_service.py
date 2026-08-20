@@ -72,6 +72,29 @@ def link_source_receipt(
             detail="Source receipt is currently on hold. Release the hold before confirming this transfer."
         )
 
+    # Material received under the LOT MODEL cannot move through here.
+    #
+    # This service moves stock by decrementing `receipt.quantity` and editing the
+    # allocation JSON, and for a counted lot that JSON is a PROJECTION of
+    # lot_placements — `row_allocation` refuses to be a second writer of it, so
+    # the deduction below would raise a developer-facing ConflictError at a
+    # warehouse user. Refuse here instead, and say what to do about it.
+    #
+    # Removing this means re-pointing plant-to-plant transfers at
+    # `lot_placement_service` so the source is decremented in whole UNITS: an
+    # outbound scan at the sending plant, in-transit, then a receiving scan (or a
+    # corporate confirmation, for a partner site that does not use this app).
+    # Until then a lot-model transfer is blocked rather than half-done.
+    if receipt.material_lot_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This material is tracked by lot and counted in whole units, so it "
+                "cannot be moved with a quantity transfer. Plant-to-plant movement "
+                "for counted stock is not built yet — record it with corporate."
+            ),
+        )
+
     transfer.source_receipt_id = receipt.id
     return receipt
 
