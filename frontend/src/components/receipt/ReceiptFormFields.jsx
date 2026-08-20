@@ -275,14 +275,18 @@ const ReceiptFormFields = ({
                     placeholder="Weight each"
                     style={{ width: 110 }}
                   />
+                  {/* One option, so it reads as a fact rather than a choice.
+                      Pounds is the only weight unit this system stores — see
+                      weightUnitOptions in useReceiptForm.js. */}
                   <select
                     name="weightUnits"
                     value={formData.weightUnits}
                     onChange={handleChange}
                     required
                     style={{ width: 100 }}
+                    disabled={weightUnitOptions.length === 1}
                   >
-                    <option value="">Unit...</option>
+                    {weightUnitOptions.length > 1 && <option value="">Unit...</option>}
                     {weightUnitOptions.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}

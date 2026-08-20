@@ -792,3 +792,30 @@ class TestRoomUnitDisplay:
         assert response.status_code == 200
         assert response.json()["storage_unit"] == "bag"
         assert response.json()["unit_capacity"] == 70
+
+
+class TestPoundsAreTheOnlyStoredUnit:
+    """Nothing in this system converts between weight units.
+
+    Every pound is derived as `full_units * weight_per_unit`, so a drum entered
+    as 200 kg is stored as 200 and read as 200 lb — out by 2.2x in every
+    availability number production schedules against, with nothing to flag it.
+    A MIXED store is worse than either unit alone, because then every aggregate
+    has to know which row is which and one missed conversion is silent.
+    """
+
+    def test_a_lot_defaults_to_lbs(self, db_session, lot_seed):
+        lot = lps.find_or_create_lot(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR_A,
+            vendor_lot_number="NO-UNIT", bbd=BBD, unit_label="drum",
+            weight_per_unit=500.0, weight_unit=None, warehouse_id=WH,
+        )
+        assert lot.weight_unit == "lbs"
+
+    def test_an_empty_unit_still_lands_as_lbs(self, db_session, lot_seed):
+        lot = lps.find_or_create_lot(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR_A,
+            vendor_lot_number="BLANK-UNIT", bbd=BBD, unit_label="drum",
+            weight_per_unit=500.0, weight_unit="", warehouse_id=WH,
+        )
+        assert lot.weight_unit == "lbs"

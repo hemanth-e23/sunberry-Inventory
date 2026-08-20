@@ -17,7 +17,9 @@ const defaultFormState = {
   quantity: "",
   quantityUnits: "",
   weightPerUnit: "",
-  weightUnits: "",
+  // Pre-filled: pounds is the only unit this system stores. See
+  // weightUnitOptions for why there is no longer a choice.
+  weightUnits: "lbs",
   weight: "",
   brix: "",
   bol: "",
@@ -113,12 +115,25 @@ export const unitOptions = [
   { value: "units", label: "Units" },
 ];
 
+/**
+ * POUNDS, AND ONLY POUNDS.
+ *
+ * This used to offer kg, g, oz and metric tons. Nothing downstream converts:
+ * `weight_per_container` becomes `MaterialLot.weight_per_unit`, and every pound
+ * in the system is derived from it as `full_units * weight_per_unit`. So a drum
+ * entered as 200 kg was stored as 200 and read as 200 lb — out by 2.2x in every
+ * availability number production schedules against, with nothing to flag it.
+ *
+ * A mixed store is worse than either unit on its own: every aggregate has to
+ * know which row is which, and one missed conversion is silent. One canonical
+ * unit removes the question. Existing data agrees — 9 receipts in lbs, none in
+ * anything else.
+ *
+ * Kept as a list rather than deleted so the select, its `required` validation
+ * and the weight summary all keep working unchanged.
+ */
 export const weightUnitOptions = [
-  { value: "kg", label: "Kilograms" },
   { value: "lbs", label: "Pounds" },
-  { value: "g", label: "Grams" },
-  { value: "oz", label: "Ounces" },
-  { value: "mt", label: "Metric Tons" },
 ];
 
 const useReceiptForm = () => {

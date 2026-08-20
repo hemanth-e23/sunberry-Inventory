@@ -64,6 +64,7 @@ const emptyLine = () => ({
   expected_count: '',
   unit_label: 'drum',
   weight_per_unit: '',
+  // Always lbs. There is no selector — see the weight input for why.
   weight_unit: 'lbs',
 });
 
@@ -251,7 +252,6 @@ const IncomingTab = () => {
     vendor_lot: line.vendor_lot || '',
     bbd: line.bbd ? String(line.bbd).slice(0, 10) : '',
     weight_per_unit: line.weight_per_unit == null ? '' : String(line.weight_per_unit),
-    weight_unit: line.weight_unit || 'lbs',
     expected_count: String(line.expected_count ?? ''),
     bol: order.bol || '',
   });
@@ -275,7 +275,7 @@ const IncomingTab = () => {
         vendor_lot: startForm.vendor_lot || null,
         bbd: startForm.bbd || null,
         weight_per_unit: Number(startForm.weight_per_unit),
-        weight_unit: startForm.weight_unit || 'lbs',
+        weight_unit: 'lbs',
         expected_count: Number(startForm.expected_count) || null,
         bol: startForm.bol || null,
       });
@@ -535,36 +535,24 @@ const IncomingTab = () => {
             <label>
               <span>
                 Weight per {startForm.line.unit_label || 'unit'}{' '}
-                <span className="og-prefill">every pound is derived from this</span>
+                <span className="og-prefill">in LBS — every pound is derived from this</span>
               </span>
               {/* text + inputMode, never type="number": a number input edits itself
                     when the wheel passes over it, so scrolling the form silently
                     changes a figure somebody typed. */}
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={startForm.weight_per_unit}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (v === '' || /^\d*\.?\d*$/.test(v)) {
-                      setStartForm({ ...startForm, weight_per_unit: v });
-                    }
-                  }}
-                  placeholder="500"
-                  style={{ flex: 1 }}
-                  autoFocus
-                />
-                <select
-                  value={startForm.weight_unit}
-                  onChange={(e) => setStartForm({ ...startForm, weight_unit: e.target.value })}
-                  style={{ width: 110 }}
-                  aria-label="Weight unit"
-                >
-                  <option value="lbs">lbs</option>
-                  <option value="kg">kg</option>
-                </select>
-              </div>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={startForm.weight_per_unit}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === '' || /^\d*\.?\d*$/.test(v)) {
+                    setStartForm({ ...startForm, weight_per_unit: v });
+                  }
+                }}
+                placeholder="500"
+                autoFocus
+              />
             </label>
             <label>
               <span>How many arrived</span>
@@ -800,40 +788,29 @@ const IncomingTab = () => {
                         from it, and the server flags a lot without one and
                         refuses to print stickers for it — so nothing can be
                         received until it is filled in. */}
-                    <span className="og-prefill">required — every pound comes from this</span>
+                    <span className="og-prefill">in LBS — required, every pound comes from this</span>
                   </span>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    {/* type="text" + inputMode="decimal", NOT type="number".
-                        A number input changes its value when the wheel passes
-                        over a focused field, so scrolling the form silently
-                        edits the one figure every derived pound depends on —
-                        and it shows spinner arrows nobody wants on a weight. */}
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      value={line.weight_per_unit}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v === '' || /^\d*\.?\d*$/.test(v)) {
-                          patchLine(index, { weight_per_unit: v });
-                        }
-                      }}
-                      placeholder="500"
-                      style={{ flex: 1 }}
-                    />
-                    {/* Asked, not assumed. Vendors quote in both, and a drum
-                        recorded as 500 kg when it is 500 lb is wrong by a factor
-                        of 2.2 in every pound the system derives from it. */}
-                    <select
-                      value={line.weight_unit}
-                      onChange={(e) => patchLine(index, { weight_unit: e.target.value })}
-                      style={{ width: 110 }}
-                      aria-label="Weight unit"
-                    >
-                      <option value="lbs">lbs</option>
-                      <option value="kg">kg</option>
-                    </select>
-                  </div>
+                  {/* type="text" + inputMode="decimal", NOT type="number".
+                      A number input changes its value when the wheel passes over
+                      a focused field, so scrolling the form silently edits the
+                      one figure every derived pound depends on.
+
+                      POUNDS, and no unit selector. Nothing downstream converts,
+                      so a mixed store means every aggregate has to know which
+                      row is which — and one missed conversion is silent. If the
+                      vendor quotes kg, convert before typing. */}
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={line.weight_per_unit}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === '' || /^\d*\.?\d*$/.test(v)) {
+                        patchLine(index, { weight_per_unit: v });
+                      }
+                    }}
+                    placeholder="500"
+                  />
                 </label>
               </div>
             ))}

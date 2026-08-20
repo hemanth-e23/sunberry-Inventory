@@ -30,7 +30,9 @@ class IncomingOrderLineCreate(BaseSchema):
     expected_count: int = Field(0, ge=0)
     unit_label: Optional[str] = Field(None, max_length=20)
     weight_per_unit: Optional[float] = Field(None, ge=0)
-    weight_unit: Optional[str] = Field(None, max_length=10)
+    # Pounds. Accepted for completeness, but the forms do not offer a choice —
+    # see find_or_create_lot for why one canonical unit matters here.
+    weight_unit: Optional[str] = Field("lbs", max_length=10)
     brix: Optional[float] = None
 
 
@@ -101,10 +103,9 @@ class StartReceivingRequest(BaseSchema):
     vendor_lot: Optional[str] = Field(None, max_length=100)
     bbd: Optional[datetime] = None
     weight_per_unit: Optional[float] = Field(None, ge=0)
-    # Correctable here because a wrong unit is not a small error: 500 kg
-    # recorded as 500 lb is out by a factor of 2.2 in every pound the system
-    # derives, and this form is where somebody is holding the actual paperwork.
-    weight_unit: Optional[str] = Field(None, max_length=10)
+    # Pounds. No longer offered as a choice in the UI — a mixed store is worse
+    # than either unit, because nothing downstream converts.
+    weight_unit: Optional[str] = Field("lbs", max_length=10)
     expected_count: Optional[int] = Field(None, ge=0)
     bol: Optional[str] = Field(None, max_length=100)
 

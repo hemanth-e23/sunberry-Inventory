@@ -207,7 +207,13 @@ def find_or_create_lot(
         bbd_current=bbd,
         unit_label=unit_label or "unit",
         weight_per_unit=weight_per_unit,
-        weight_unit=weight_unit,
+        # POUNDS unless something explicitly says otherwise. Nothing in this
+        # system converts between weight units — every pound is derived as
+        # `full_units * weight_per_unit` — so a mixed store means every aggregate
+        # has to know which row is which, and one missed conversion is silent.
+        # One canonical unit removes the question. The entry forms no longer
+        # offer a choice; this is the backstop for anything that posts directly.
+        weight_unit=weight_unit or "lbs",
         brix=brix,
         warehouse_id=warehouse_id,
         # See the docstring: a lot with no weight per unit derives zero pounds,
