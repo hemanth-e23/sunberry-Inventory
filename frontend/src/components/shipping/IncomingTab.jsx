@@ -6,7 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import { useConfirm } from '../../context/ConfirmContext';
 import Modal from '../Modal';
 import SearchableSelect from '../SearchableSelect';
-import { formatDate } from '../../utils/dateUtils';
+import { formatCalendarDate } from '../../utils/labelPayload';
 import {
   apiErrorMessage, cancelIncomingOrder, closeIncomingOrder, createIncomingOrder,
   listIncomingOrders, printSessionLabels, releaseIncomingOrder, startReceiving,
@@ -336,8 +336,10 @@ const IncomingTab = () => {
       <div className="og-card" key={order.id}>
         <div className="og-card-time">
           <span className="og-chip og-chip-scheduled">{STATUS_LABELS[order.status] || order.status}</span>
+          {/* Also a calendar day, stored at midnight UTC — same reason as the
+              BBD below: the timezone-aware formatter would show the day before. */}
           {order.expected_date && (
-            <span className="og-date-sub">{formatDate(order.expected_date)}</span>
+            <span className="og-date-sub">{formatCalendarDate(order.expected_date)}</span>
           )}
         </div>
 
@@ -360,7 +362,7 @@ const IncomingTab = () => {
                   <span className="og-line-name">{line.product_name}</span>
                   <span className="og-sub">
                     {line.lot_unknown ? 'lot unknown' : `lot ${line.vendor_lot || '—'}`}
-                    {line.bbd ? ` · BBD ${formatDate(line.bbd)}` : ''}
+                    {line.bbd ? ` · BBD ${formatCalendarDate(line.bbd)}` : ''}
                   </span>
                   <span className="og-line-count">
                     {isOpen && canReceive && order.status !== 'draft' && !line.receipt_id && (

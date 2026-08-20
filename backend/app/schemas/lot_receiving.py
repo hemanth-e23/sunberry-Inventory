@@ -16,7 +16,7 @@ from typing import List, Optional
 
 from pydantic import Field
 
-from app.schemas.base import BaseSchema
+from app.schemas.base import BaseSchema, CalendarDateOut, CalendarDateTime
 
 
 # ─── incoming orders ──────────────────────────────────────────────────────────
@@ -26,7 +26,8 @@ class IncomingOrderLineCreate(BaseSchema):
     category_id: Optional[str] = None
     vendor_id: Optional[str] = None
     vendor_lot: Optional[str] = Field(None, max_length=100)
-    bbd: Optional[datetime] = None
+    # Accepts a bare YYYY-MM-DD from <input type="date"> — see schemas/base.py.
+    bbd: CalendarDateTime = None
     expected_count: int = Field(0, ge=0)
     unit_label: Optional[str] = Field(None, max_length=20)
     weight_per_unit: Optional[float] = Field(None, ge=0)
@@ -44,7 +45,7 @@ class IncomingOrderCreate(BaseSchema):
     # table, and creating rows for one would be master data nobody maintains.
     origin_name: Optional[str] = Field(None, max_length=120)
     origin_warehouse_id: Optional[str] = None
-    expected_date: Optional[datetime] = None
+    expected_date: CalendarDateTime = None
     notes: Optional[str] = None
     lines: List[IncomingOrderLineCreate] = []
 
@@ -57,7 +58,8 @@ class IncomingOrderLineOut(BaseSchema):
     vendor_id: Optional[str] = None
     vendor_lot: Optional[str] = None
     lot_unknown: bool = False
-    bbd: Optional[datetime] = None
+    # YYYY-MM-DD — a calendar day, not an instant. See schemas/base.py.
+    bbd: CalendarDateOut = None
     expected_count: int = 0
     received_count: int = 0
     unit_label: Optional[str] = None
@@ -80,7 +82,7 @@ class IncomingOrderOut(BaseSchema):
     origin_name: Optional[str] = None
     origin_warehouse_id: Optional[str] = None
     warehouse_id: Optional[str] = None
-    expected_date: Optional[datetime] = None
+    expected_date: CalendarDateOut = None
     expected_count: int = 0
     received_count: int = 0
     short_count: int = 0
@@ -101,7 +103,7 @@ class StartReceivingRequest(BaseSchema):
     """
     line_id: str
     vendor_lot: Optional[str] = Field(None, max_length=100)
-    bbd: Optional[datetime] = None
+    bbd: CalendarDateTime = None
     weight_per_unit: Optional[float] = Field(None, ge=0)
     # Pounds. No longer offered as a choice in the UI — a mixed store is worse
     # than either unit, because nothing downstream converts.
@@ -169,7 +171,9 @@ class LotLabel(BaseSchema):
     vendor_name: str = ""
     vendor_lot: Optional[str] = None
     lot_unknown: bool = False
-    bbd: Optional[datetime] = None
+    # The date that gets PRINTED and encoded into the QR. A day's drift here is
+    # a wrong best-by on a food-safety label.
+    bbd: CalendarDateOut = None
     net_weight: Optional[float] = None
     weight_unit: Optional[str] = None
     unit_label: Optional[str] = None
@@ -198,7 +202,7 @@ class ReceivingSummary(BaseSchema):
     receipt_id: str
     lot_code: Optional[str] = None
     vendor_lot: Optional[str] = None
-    bbd: Optional[datetime] = None
+    bbd: CalendarDateOut = None
     unit_label: Optional[str] = None
     count_unit: str = "units"
     expected_count: int = 0

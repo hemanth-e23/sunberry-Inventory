@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from pydantic import Field
 
-from app.schemas.base import BaseSchema
+from app.schemas.base import BaseSchema, CalendarDateOut, CalendarDateTime
 
 
 class ZeroOutProduct(BaseSchema):
@@ -47,7 +47,8 @@ class OpeningBalanceRequest(BaseSchema):
     full_units: int = Field(..., ge=0)
     vendor_id: Optional[str] = None
     vendor_lot: Optional[str] = Field(None, max_length=100)
-    bbd: Optional[datetime] = None
+    # Accepts a bare YYYY-MM-DD from <input type="date"> — see schemas/base.py.
+    bbd: CalendarDateTime = None
     unit_label: str = Field("drum", max_length=20)
     weight_per_unit: Optional[float] = Field(None, ge=0)
     weight_unit: Optional[str] = Field(None, max_length=10)
@@ -107,7 +108,7 @@ class UnlabelledLot(BaseSchema):
     vendor_name: str = ""
     vendor_lot: Optional[str] = None
     lot_unknown: bool = False
-    bbd: Optional[datetime] = None
+    bbd: CalendarDateOut = None
     unit_label: Optional[str] = None
     full_units: int = 0
     open_units: int = 0

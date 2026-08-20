@@ -4,7 +4,7 @@ import { useAppData } from '../../context/AppDataContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { useConfirm } from '../../context/ConfirmContext';
-import { formatDate } from '../../utils/dateUtils';
+import { formatCalendarDate } from '../../utils/labelPayload';
 import Modal from '../Modal';
 import LotLabelPrint from '../ingredient/LotLabelPrint';
 import {
@@ -523,7 +523,7 @@ const CountsTab = () => {
                   <strong>{lot.product_name}</strong>{' '}
                   <span className="muted">
                     {lot.lot_unknown ? 'lot unknown' : `lot ${lot.vendor_lot}`}
-                    {lot.bbd ? ` · BBD ${formatDate(lot.bbd)}` : ''}
+                    {lot.bbd ? ` · BBD ${formatCalendarDate(lot.bbd)}` : ''}
                     {lot.vendor_name ? ` · ${lot.vendor_name}` : ''}
                   </span>
                   {lot.needs_review && (

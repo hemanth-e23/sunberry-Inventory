@@ -787,3 +787,97 @@ class TestWeightUnitIsAskedNotAssumed:
         ).first()
         assert line.weight_unit == "lbs"
         assert line.net_weight_per_container == 440.0
+
+
+class TestCalendarDatesSurviveTheRoundTrip:
+    """A BBD is a CALENDAR DAY, not an instant, and it gets printed on a
+    food-safety label. Two separate things conspire to shift it by a day.
+
+    ON THE WAY IN: `<input type="date">` posts a bare `YYYY-MM-DD`, which
+    Pydantic 2.5 rejects for a datetime field with a 422 the person filling the
+    form cannot act on.
+
+    ON THE WAY OUT: Postgres returns a timestamptz in the SESSION timezone. This
+    database runs America/Chicago, so midnight UTC comes back as
+    `...T18:00:00-06:00` and every lexical reader — including the label encoder —
+    takes the leading ten characters and gets the PREVIOUS DAY.
+    """
+
+    def test_a_bare_date_is_accepted_and_read_back_unchanged(
+        self, client, api_seed, wh_headers
+    ):
+        response = client.post("/api/lot-receiving/orders", headers=wh_headers, json={
+            "vendor_id": VENDOR,
+            "expected_date": "2026-08-25",
+            "lines": [{
+                "product_id": PRODUCT, "vendor_lot": "CAL-1", "bbd": "2027-02-15",
+                "expected_count": 4, "unit_label": "drum", "weight_per_unit": 500.0,
+            }],
+        })
+        assert response.status_code == 200, response.text
+        order = response.json()
+        assert order["expected_date"] == "2026-08-25"
+        assert order["lines"][0]["bbd"] == "2027-02-15"
+
+        # And on a fresh read, not just the create response.
+        again = client.get(
+            f"/api/lot-receiving/orders/{order['id']}", headers=wh_headers
+        ).json()
+        assert again["lines"][0]["bbd"] == "2027-02-15"
+
+    def test_a_full_timestamp_still_works(self, client, api_seed, wh_headers):
+        """Anything posting the old way must keep working."""
+        order = client.post("/api/lot-receiving/orders", headers=wh_headers, json={
+            "vendor_id": VENDOR,
+            "lines": [{
+                "product_id": PRODUCT, "vendor_lot": "CAL-2",
+                "bbd": "2027-02-15T00:00:00Z", "expected_count": 4,
+                "unit_label": "drum", "weight_per_unit": 500.0,
+            }],
+        }).json()
+        assert order["lines"][0]["bbd"] == "2027-02-15"
+
+    def test_the_printed_label_carries_the_day_that_was_typed(
+        self, client, api_seed, wh_headers
+    ):
+        """The one that actually matters — this date goes on a drum."""
+        order = client.post("/api/lot-receiving/orders", headers=wh_headers, json={
+            "vendor_id": VENDOR,
+            "lines": [{
+                "product_id": PRODUCT, "vendor_lot": "CAL-3", "bbd": "2027-02-15",
+                "expected_count": 2, "unit_label": "drum", "weight_per_unit": 500.0,
+            }],
+        }).json()
+        client.post(f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers)
+        summary = client.post(
+            f"/api/lot-receiving/orders/{order['id']}/start-receiving",
+            headers=wh_headers, json={"line_id": order["lines"][0]["id"]},
+        ).json()
+        assert summary["bbd"] == "2027-02-15"
+
+        sheet = client.post(
+            f"/api/lot-receiving/sessions/{summary['receipt_id']}/print-labels",
+            headers=wh_headers, json={"count": 2},
+        ).json()
+        assert sheet["labels"][0]["bbd"] == "2027-02-15"
+        assert sheet["labels"][0] == sheet["labels"][1]
+
+    def test_an_opening_balance_takes_a_bare_date_too(
+        self, client, api_seed, wh_headers
+    ):
+        response = client.post("/api/lot-cutover/opening-balance", headers=wh_headers, json={
+            "product_id": PRODUCT, "storage_row_id": ROW_1, "full_units": 5,
+            "vendor_lot": "CAL-4", "bbd": "2027-06-30", "unit_label": "drum",
+            "weight_per_unit": 500.0,
+        })
+        assert response.status_code == 200, response.text
+        pending = client.get("/api/lot-cutover/unlabelled-lots", headers=wh_headers).json()
+        assert [p for p in pending if p["vendor_lot"] == "CAL-4"][0]["bbd"] == "2027-06-30"
+
+    def test_a_malformed_date_is_still_rejected(self, client, api_seed, wh_headers):
+        """The coercion must not swallow genuine nonsense."""
+        response = client.post("/api/lot-receiving/orders", headers=wh_headers, json={
+            "vendor_id": VENDOR, "expected_date": "not-a-date",
+            "lines": [{"product_id": PRODUCT, "expected_count": 1}],
+        })
+        assert response.status_code == 422
