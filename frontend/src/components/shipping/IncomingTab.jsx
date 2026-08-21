@@ -83,6 +83,7 @@ const IncomingTab = () => {
   const [closeForm, setCloseForm] = useState(null);
   const [startForm, setStartForm] = useState(null);
   const [sheet, setSheet] = useState(null);
+  const [reprint, setReprint] = useState(null);
 
   // Corporate must pick a target warehouse in the header before creating
   // anything. Without it `resolve_warehouse_for_write` raises a raw 400 —
@@ -256,10 +257,24 @@ const IncomingTab = () => {
 
   const submitStart = async () => {
     const { order, line } = startForm;
+    // All three are hard requirements at the SERVER too. Checked here so the
+    // worker is told at the form instead of at the printer, standing next to a
+    // pallet with nothing to stick on it.
+    if (!startForm.vendor_lot.trim()) {
+      addToast(
+        'The vendor lot number is needed — every drum of this lot carries the '
+        + 'same sticker, so one reading "UNKNOWN" makes them impossible to tell apart.',
+        'error',
+      );
+      return;
+    }
+    if (!startForm.bbd) {
+      addToast('The best-by date is needed — it is printed on every sticker.', 'error');
+      return;
+    }
     if (!Number(startForm.weight_per_unit)) {
-      // The server flags a weightless lot and refuses to print for it, because
-      // pounds are derived from this number and a missing one reads as zero
-      // stock to production. Saying so here saves a round trip.
+      // Pounds are derived from this number, and a missing one reads as zero
+      // stock to production.
       addToast(
         `Weight per ${line.unit_label || 'unit'} is needed — every pound is worked out from it.`,
         'error',
@@ -289,6 +304,35 @@ const IncomingTab = () => {
       await load();
     } catch (error) {
       addToast(apiErrorMessage(error, 'Could not start receiving'), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Reprint stickers for a line already being received.
+   *
+   * Available until the order is closed, because anything can happen on a dock:
+   * a sticker tears, one goes in the freezer face-down, the printer jams
+   * halfway through eighty. Under lot identity a reprint is TRIVIALLY the same
+   * sticker — there is no serial to keep in step, no sequence to resume, and no
+   * risk of minting a second identity for the same drums. That guarantee is
+   * what the per-drum design needed a locked counter to provide.
+   *
+   * It writes nothing: printing is not receiving.
+   */
+  const doReprint = async () => {
+    const count = Number(reprint?.count) || 0;
+    if (count < 1) {
+      addToast('How many stickers?', 'error');
+      return;
+    }
+    setBusy(true);
+    try {
+      setSheet(await printSessionLabels(reprint.line.receipt_id, count));
+      setReprint(null);
+    } catch (error) {
+      addToast(apiErrorMessage(error, 'Could not reprint'), 'error');
     } finally {
       setBusy(false);
     }
@@ -374,6 +418,24 @@ const IncomingTab = () => {
                         disabled={busy}
                       >
                         Start receiving
+                      </button>
+                    )}
+                    {isOpen && canReceive && line.receipt_id && (
+                      <button
+                        type="button"
+                        className="og-btn og-btn-ghost"
+                        style={{ marginRight: 8 }}
+                        onClick={() => setReprint({
+                          order,
+                          line,
+                          count: String(
+                            Math.max(0, (line.expected_count || 0) - (line.received_count || 0))
+                            || line.expected_count || 1,
+                          ),
+                        })}
+                        disabled={busy}
+                      >
+                        Reprint
                       </button>
                     )}
                     <b>{line.received_count}</b> of {line.expected_count}{' '}
@@ -503,6 +565,57 @@ const IncomingTab = () => {
       <div className="og-cards">{visible.map(renderCard)}</div>
 
       <Modal
+        isOpen={!!reprint}
+        onClose={() => setReprint(null)}
+        title="Reprint stickers"
+        size="sm"
+      >
+        {reprint && (
+          <div className="og-modal-form">
+            <p className="og-sub">
+              <strong>{reprint.line.product_name}</strong>
+              {reprint.line.lot_code ? ` · ${reprint.line.lot_code}` : ''}
+              {reprint.line.vendor_lot ? ` · lot ${reprint.line.vendor_lot}` : ''}
+              <br />
+              Every sticker for this lot is identical, so a reprint is the same
+              sticker again — nothing is duplicated and nothing goes into stock.
+              {' '}
+              {reprint.line.received_count > 0 && (
+                <>Scanned so far: <strong>{reprint.line.received_count}</strong> of{' '}
+                {reprint.line.expected_count}.</>
+              )}
+            </p>
+            <label>
+              <span>How many</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={reprint.count}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === '' || /^\d+$/.test(v)) setReprint({ ...reprint, count: v });
+                }}
+                autoFocus
+              />
+            </label>
+            <div className="og-modal-actions">
+              <button type="button" className="og-btn og-btn-ghost" onClick={() => setReprint(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="og-btn og-btn-primary"
+                onClick={doReprint}
+                disabled={busy || !Number(reprint.count)}
+              >
+                {busy ? 'Preparing…' : `Print ${reprint.count || 0}`}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
         isOpen={!!startForm}
         onClose={() => setStartForm(null)}
         title="Start receiving"
@@ -517,14 +630,20 @@ const IncomingTab = () => {
               user can scan the {startForm.line.unit_label || 'unit'}s in.
             </p>
             <label>
-              <span>Vendor lot</span>
+              <span>
+                Vendor lot{' '}
+                <span className="og-prefill">required — printed on every sticker</span>
+              </span>
               <input
                 value={startForm.vendor_lot}
                 onChange={(e) => setStartForm({ ...startForm, vendor_lot: e.target.value })}
               />
             </label>
             <label>
-              <span>BBD</span>
+              <span>
+                BBD{' '}
+                <span className="og-prefill">required — printed on every sticker</span>
+              </span>
               <input
                 type="date"
                 value={startForm.bbd}

@@ -366,14 +366,24 @@ const CountsTab = () => {
             </select>
           </label>
           <label style={mode === 'set' ? { display: 'none' } : undefined}>
-            <span>Vendor lot <span className="muted">printed on the drum</span></span>
+            {/* Not blocked here — stock that physically exists gets counted
+                either way, or the inventory is simply wrong. But without these
+                two the lot cannot be STICKERED, so it will sit on the list
+                below until somebody supplies them. */}
+            <span>
+              Vendor lot{' '}
+              <span className="muted">needed before stickers can print</span>
+            </span>
             <input
               value={entry.vendor_lot}
               onChange={(e) => setEntry({ ...entry, vendor_lot: e.target.value })}
             />
           </label>
           <label style={mode === 'set' ? { display: 'none' } : undefined}>
-            <span>BBD</span>
+            <span>
+              BBD{' '}
+              <span className="muted">needed before stickers can print</span>
+            </span>
             <input
               type="date"
               value={entry.bbd}
@@ -526,10 +536,12 @@ const CountsTab = () => {
                     {lot.bbd ? ` · BBD ${formatCalendarDate(lot.bbd)}` : ''}
                     {lot.vendor_name ? ` · ${lot.vendor_name}` : ''}
                   </span>
-                  {lot.needs_review && (
+                  {/* Say WHY. A disabled button with no reason sends somebody
+                      to ask, and the answer is always actionable: fill in the
+                      lot number, or the best-by, or resolve the review. */}
+                  {lot.blocked_reason && (
                     <div style={{ color: '#b45309', fontSize: '0.8rem' }}>
-                      <AlertTriangle size={12} /> Flagged for review — no stickers
-                      print until somebody resolves it.
+                      <AlertTriangle size={12} /> {lot.blocked_reason}
                     </div>
                   )}
                 </div>
@@ -542,7 +554,7 @@ const CountsTab = () => {
                   type="button"
                   className="secondary-button"
                   onClick={() => printFor(lot)}
-                  disabled={busy || lot.needs_review}
+                  disabled={busy || !!lot.blocked_reason}
                 >
                   Print {lot.full_units + lot.open_units}
                 </button>

@@ -501,11 +501,14 @@ class TestCutoverApi:
     ):
         client.post("/api/lot-cutover/opening-balance", headers=wh_headers, json={
             "product_id": PRODUCT, "storage_row_id": ROW_1, "full_units": 12,
-            "vendor_lot": "OLD-MG", "unit_label": "drum", "weight_per_unit": 500.0,
+            "vendor_lot": "OLD-MG", "bbd": BBD, "unit_label": "drum",
+            "weight_per_unit": 500.0,
         })
         pending = client.get("/api/lot-cutover/unlabelled-lots", headers=wh_headers).json()
         assert len(pending) == 1
         assert pending[0]["full_units"] == 12
+        # Printable: it has a lot number, a best-by and a weight.
+        assert pending[0]["blocked_reason"] is None
 
         client.post(
             f"/api/lot-receiving/lots/{pending[0]['material_lot_id']}/print-labels",
@@ -881,3 +884,70 @@ class TestCalendarDatesSurviveTheRoundTrip:
             "lines": [{"product_id": PRODUCT, "expected_count": 1}],
         })
         assert response.status_code == 422
+
+
+class TestReprintIsAlwaysAvailable:
+    """Anything can happen on a dock: a sticker tears, one lands face-down in the
+    freezer, the printer jams halfway through eighty.
+
+    Under lot identity a reprint is TRIVIALLY the same sticker — there is no
+    serial to keep in step, no sequence to resume, and no way to mint a second
+    identity for the same drums. That guarantee is what the per-drum design
+    needed a locked counter to provide.
+    """
+
+    def _session(self, client, headers):
+        order = _make_order(client, headers, count=8)
+        return _start(client, headers, order)
+
+    def test_reprinting_gives_the_identical_sticker(self, client, api_seed, wh_headers):
+        session = self._session(client, wh_headers)
+        url = f"/api/lot-receiving/sessions/{session['receipt_id']}/print-labels"
+
+        first = client.post(url, headers=wh_headers, json={"count": 8}).json()
+        second = client.post(url, headers=wh_headers, json={"count": 3}).json()
+
+        assert second["count"] == 3
+        assert second["labels"][0] == first["labels"][0]
+        assert second["lot_code"] == first["lot_code"]
+
+    def test_reprinting_creates_no_stock(self, client, api_seed, wh_headers):
+        session = self._session(client, wh_headers)
+        url = f"/api/lot-receiving/sessions/{session['receipt_id']}/print-labels"
+        for _ in range(3):
+            client.post(url, headers=wh_headers, json={"count": 8})
+
+        after = client.get(
+            f"/api/lot-receiving/sessions/{session['receipt_id']}", headers=wh_headers
+        ).json()
+        assert after["scanned_count"] == 0
+
+    def test_reprinting_works_mid_receiving(self, client, api_seed, wh_headers, fk_headers):
+        """The case that matters: half the drums are already scanned in and a
+        sticker on the pallet tears."""
+        session = self._session(client, wh_headers)
+        for i in range(4):
+            # Assert the scan LANDED. An earlier version of this test used a
+            # 6-character idempotency key, which 422s on min_length=8 — so every
+            # scan silently failed and the test still "passed" its later checks
+            # for the wrong reason. Never fire a scan without checking it.
+            scanned = client.post(
+                f"/api/lot-receiving/sessions/{session['receipt_id']}/scan",
+                headers=fk_headers,
+                json={"lot_code": session["lot_code"], "storage_row_id": ROW_1,
+                      "idempotency_key": f"rp-scan-{i:03d}", "allow_overfill": True},
+            )
+            assert scanned.status_code == 200, scanned.text
+            assert scanned.json()["status"] == "ok"
+        sheet = client.post(
+            f"/api/lot-receiving/sessions/{session['receipt_id']}/print-labels",
+            headers=wh_headers, json={"count": 1},
+        )
+        assert sheet.status_code == 200
+        assert sheet.json()["labels"][0]["lot_code"] == session["lot_code"]
+
+        # And the count is untouched by the reprint.
+        after = client.get(
+            f"/api/lot-receiving/sessions/{session['receipt_id']}", headers=wh_headers
+        ).json()
+        assert after["scanned_count"] == 4

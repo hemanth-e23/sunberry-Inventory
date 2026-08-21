@@ -838,6 +838,7 @@ def receiving_summary(db: Session, receipt: Receipt) -> dict:
         "order_number": order.intake_number if order else None,
         "order_id": order.id if order else None,
         "needs_review": bool(lot.needs_review) if lot else False,
+        "blocked_reason": lps.can_print_labels(lot)[1] if lot else None,
         "label_printed_at": lot.label_printed_at if lot else None,
     }
 

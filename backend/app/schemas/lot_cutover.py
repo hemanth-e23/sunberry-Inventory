@@ -114,6 +114,9 @@ class UnlabelledLot(BaseSchema):
     open_units: int = 0
     row_count: int = 0
     needs_review: bool = False
+    # Non-null when stickers cannot be printed for this lot yet — a missing lot
+    # number or best-by, or a flagged review.
+    blocked_reason: Optional[str] = None
 
 
 class CutoverStatus(BaseSchema):

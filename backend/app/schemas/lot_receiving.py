@@ -217,4 +217,7 @@ class ReceivingSummary(BaseSchema):
     order_number: Optional[str] = None
     order_id: Optional[str] = None
     needs_review: bool = False
+    # Non-null when stickers cannot be printed yet — a missing lot number or
+    # best-by, or a flagged review.
+    blocked_reason: Optional[str] = None
     label_printed_at: Optional[datetime] = None

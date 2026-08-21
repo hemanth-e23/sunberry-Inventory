@@ -382,6 +382,10 @@ def lots_on_hand(
             "open_units": on_hand["open_units"],
             "row_count": on_hand["row_count"],
             "needs_review": bool(lot.needs_review),
+            # Why the sticker cannot be printed yet, if it cannot. Surfaced on
+            # the list so it is answered at a desk rather than discovered at the
+            # printer with a worker standing next to a pallet.
+            "blocked_reason": lps.can_print_labels(lot)[1],
         })
     return sorted(out, key=lambda e: (e["product_name"], e["lot_code"]))
 

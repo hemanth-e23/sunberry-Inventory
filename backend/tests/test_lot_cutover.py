@@ -451,7 +451,7 @@ class TestCutoverStatus:
 
         result = lcs.create_opening_balance(
             db_session, product_id=ING_PRODUCT, storage_row_id=ROW_1, full_units=31,
-            vendor_lot="MG-1", weight_per_unit=500.0, weight_unit="lbs",
+            vendor_lot="MG-1", bbd=BBD, weight_per_unit=500.0, weight_unit="lbs",
             warehouse_id=WH, user_id="u-1",
         )
         status = lcs.cutover_status(db_session, WH)

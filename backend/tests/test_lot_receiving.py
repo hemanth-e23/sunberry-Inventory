@@ -782,3 +782,82 @@ class TestPlacementWarehouseComesFromTheRack:
         from app.services.availability import on_hand_for_product
         assert on_hand_for_product(db_session, PRODUCT, WH)["unit_count"] == 10
         assert on_hand_for_product(db_session, PRODUCT, other)["unit_count"] == 20
+
+
+class TestNoStickerWithoutIdentity:
+    """A sticker reading "LOT UNKNOWN · BBD —" goes on EVERY drum of the lot.
+
+    That is the untraceable pile this model exists to prevent — forty drums
+    wearing the same label with nothing to tell them apart, and a recall with
+    no way to untangle it.
+
+    RECORDING and PRINTING are different bars on purpose. Stock whose lot number
+    is unreadable still gets counted: it physically exists, and refusing to
+    record it just makes the inventory wrong. It simply cannot be labelled until
+    somebody supplies the detail.
+    """
+
+    def _receipt(self, db, *, lot_number, bbd):
+        receipt = _walkin_receipt(db, count=10)
+        receipt.lot_number = lot_number
+        receipt.expiration_date = bbd
+        receipt.id = f"rcpt-{lot_number or 'none'}-{'bbd' if bbd else 'nobbd'}"
+        db.flush()
+        return receipt
+
+    def test_no_lot_number_refuses(self, db_session, recv_seed):
+        receipt = self._receipt(db_session, lot_number=None, bbd=BBD)
+        lot = lrs.ensure_lot_for_receipt(db_session, receipt)
+        allowed, reason = lps.can_print_labels(lot)
+        assert allowed is False
+        assert "vendor lot number" in reason
+        with pytest.raises(ConflictError):
+            lrs.label_sheet_for_lot(db_session, lot, 10)
+
+    def test_no_bbd_refuses(self, db_session, recv_seed):
+        receipt = self._receipt(db_session, lot_number="HAS-LOT", bbd=None)
+        lot = lrs.ensure_lot_for_receipt(db_session, receipt)
+        allowed, reason = lps.can_print_labels(lot)
+        assert allowed is False
+        assert "best-by" in reason
+
+    def test_neither_says_so_once(self, db_session, recv_seed):
+        receipt = self._receipt(db_session, lot_number=None, bbd=None)
+        lot = lrs.ensure_lot_for_receipt(db_session, receipt)
+        reason = lps.can_print_labels(lot)[1]
+        assert "vendor lot number" in reason and "best-by" in reason
+
+    def test_a_blank_lot_number_counts_as_missing(self, db_session, recv_seed):
+        receipt = self._receipt(db_session, lot_number="   ", bbd=BBD)
+        lot = lrs.ensure_lot_for_receipt(db_session, receipt)
+        assert lps.can_print_labels(lot)[0] is False
+
+    def test_both_present_prints(self, db_session, recv_seed):
+        receipt = self._receipt(db_session, lot_number="GOOD-1", bbd=BBD)
+        lot = lrs.ensure_lot_for_receipt(db_session, receipt)
+        assert lps.can_print_labels(lot)[0] is True
+        assert len(lrs.label_sheet_for_lot(db_session, lot, 10)["labels"]) == 10
+
+    def test_stock_with_no_lot_is_still_COUNTED(self, db_session, recv_seed):
+        """The point of the split. Refusing to record it would make the
+        inventory wrong; refusing to sticker it keeps the drums traceable."""
+        from app.services import lot_cutover_service as lcs
+
+        result = lcs.create_opening_balance(
+            db_session, product_id=PRODUCT, storage_row_id=ROW_1, full_units=12,
+            vendor_lot=None, weight_per_unit=500.0, weight_unit="lbs",
+            warehouse_id=WH, user_id=USER,
+        )
+        assert result["full_units"] == 12          # counted
+        pending = lcs.unlabelled_lots(db_session, WH)
+        assert len(pending) == 1
+        assert pending[0]["blocked_reason"]        # and told why it cannot print
+
+    def test_supplying_the_bbd_later_unblocks_printing(self, db_session, recv_seed):
+        receipt = self._receipt(db_session, lot_number="LATE-BBD", bbd=None)
+        lot = lrs.ensure_lot_for_receipt(db_session, receipt)
+        assert lps.can_print_labels(lot)[0] is False
+
+        lot.bbd_current = BBD
+        db_session.flush()
+        assert lps.can_print_labels(lot)[0] is True

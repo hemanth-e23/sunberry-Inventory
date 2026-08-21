@@ -243,16 +243,38 @@ def _next_lot_code(db: Session) -> str:
 
 
 def can_print_labels(lot: MaterialLot) -> tuple:
-    """(allowed, reason). A lot under review must not be labelled.
+    """(allowed, reason). THE single gate on printing.
 
-    Every drum of a lot wears an identical sticker, so applying one to material
-    whose identity is in doubt is not a mistake you can find later — the sticker
-    becomes the thing everyone trusts.
+    Every drum of a lot wears an IDENTICAL sticker, so applying one to material
+    whose identity is in doubt is not a mistake anybody can find later — the
+    sticker becomes the thing everyone trusts, and there is no second copy to
+    compare it against.
+
+    RECORDING AND PRINTING ARE DIFFERENT BARS, deliberately. Stock whose lot
+    number is unreadable still gets COUNTED — it physically exists, and refusing
+    to record it would just make the inventory wrong. But it cannot be
+    STICKERED: a label reading "LOT UNKNOWN · BBD —" applied to forty drums
+    produces exactly the untraceable pile this whole model exists to prevent,
+    and a recall could not untangle it. Such a lot sits on the awaiting-stickers
+    list until somebody supplies the missing detail.
     """
-    if lot.needs_review:
-        return (False, lot.review_reason or "This lot is flagged for review.")
     if lot.is_deleted:
         return (False, "This lot has been deleted.")
+    if lot.needs_review:
+        return (False, lot.review_reason or "This lot is flagged for review.")
+
+    missing = []
+    if lot.lot_unknown or not (lot.vendor_lot_number or "").strip():
+        missing.append("a vendor lot number")
+    # bbd_CURRENT: an approved extension is the date that should be printed.
+    if not lot.bbd_current:
+        missing.append("a best-by date")
+    if missing:
+        return (False, (
+            f"This lot has no {' and no '.join(missing)}. Every drum would carry "
+            "an identical sticker saying so, and nothing could tell them apart "
+            "afterwards — fill it in from the paperwork first."
+        ))
     return (True, None)
 
 
