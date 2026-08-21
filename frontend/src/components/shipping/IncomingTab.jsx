@@ -57,6 +57,18 @@ const STATUS_LABELS = {
 
 const OPEN_STATUSES = ['draft', 'in_transit', 'receiving'];
 
+// Reuses the outbound chip palette so the two tabs read as one screen. Every
+// status got `scheduled` before, so a cancelled order wore an amber "planned"
+// chip.
+const STATUS_CHIP = {
+  draft: 'scheduled',
+  in_transit: 'scanning',
+  receiving: 'checked_in',
+  received: 'complete',
+  closed_short: 'overdue',
+  cancelled: 'cancelled',
+};
+
 const emptyLine = () => ({
   product_id: '',
   vendor_lot: '',
@@ -375,38 +387,66 @@ const IncomingTab = () => {
     const received = order.received_count || 0;
     const difference = received - expected;
     const isOpen = OPEN_STATUSES.includes(order.status);
+    const short = Math.max(0, -difference);
 
     return (
-      <div className="og-card" key={order.id}>
+      <div
+        className={`og-card og-card--incoming${order.status === 'cancelled' ? ' is-cancelled' : ''}`}
+        key={order.id}
+      >
+        {/* The 96px column is a DATE column here, not the time column it is on
+            the outbound side — an inbound order has an expected day, not a dock
+            appointment. The status chip used to live here and was clipped: a
+            word like "CLOSED SHORT" does not fit 96px, and it belongs beside the
+            order number anyway. */}
         <div className="og-card-time">
-          <span className="og-chip og-chip-scheduled">{STATUS_LABELS[order.status] || order.status}</span>
-          {/* Also a calendar day, stored at midnight UTC — same reason as the
-              BBD below: the timezone-aware formatter would show the day before. */}
-          {order.expected_date && (
-            <span className="og-date-sub">{formatCalendarDate(order.expected_date)}</span>
+          {order.expected_date ? (
+            <>
+              <span className="ampm">expected</span>
+              {/* Calendar day, stored at midnight UTC — the timezone-aware
+                  formatter would show the day before. */}
+              <span className="t">{formatCalendarDate(order.expected_date)}</span>
+            </>
+          ) : (
+            <span className="ampm">no date</span>
           )}
         </div>
 
         <div className="og-card-main">
           <div className="og-card-title">
             <strong>{order.order_number}</strong>
-            {order.origin_name && <span className="og-sub"> from {order.origin_name}</span>}
+            <span className={`og-chip og-chip-${STATUS_CHIP[order.status] || 'scheduled'}`}>
+              {STATUS_LABELS[order.status] || order.status}
+            </span>
           </div>
           <div className="og-sub">
-            {order.vendor_name || 'Vendor not recorded'}
-            {order.bol ? ` · BOL ${order.bol}` : ''}
-            {order.purchase_order ? ` · PO ${order.purchase_order}` : ''}
+            {[
+              order.vendor_name,
+              order.origin_name && `from ${order.origin_name}`,
+              order.bol && `BOL ${order.bol}`,
+              order.purchase_order && `PO ${order.purchase_order}`,
+            ].filter(Boolean).join('  ·  ') || 'No vendor recorded'}
           </div>
 
           <div className="og-lines">
             {(order.lines || []).map((line) => {
-              const lineDiff = (line.received_count || 0) - (line.expected_count || 0);
+              const lineShort = (line.expected_count || 0) - (line.received_count || 0);
               return (
                 <div className="og-line" key={line.id}>
                   <span className="og-line-name">{line.product_name}</span>
                   <span className="og-sub">
-                    {line.lot_unknown ? 'lot unknown' : `lot ${line.vendor_lot || '—'}`}
-                    {line.bbd ? ` · BBD ${formatCalendarDate(line.bbd)}` : ''}
+                    {/* A missing lot number is worth flagging, not just
+                        reporting: no sticker prints without one, so nothing can
+                        be received against this line until it is filled in. */}
+                    {line.lot_unknown || !line.vendor_lot ? (
+                      <span style={{ color: '#b45309', fontWeight: 600 }}>
+                        no lot number yet
+                      </span>
+                    ) : `lot ${line.vendor_lot}`}
+                    {line.bbd ? ` · BBD ${formatCalendarDate(line.bbd)}` : (
+                      <span style={{ color: '#b45309', fontWeight: 600 }}> · no BBD yet</span>
+                    )}
+                    {line.lot_code ? ` · ${line.lot_code}` : ''}
                   </span>
                   <span className="og-line-count">
                     {isOpen && canReceive && order.status !== 'draft' && !line.receipt_id && (
@@ -440,11 +480,16 @@ const IncomingTab = () => {
                     )}
                     <b>{line.received_count}</b> of {line.expected_count}{' '}
                     {line.unit_label || 'unit'}s
-                    {/* Amber, not red: a difference is information. Over and
-                        under are both legal and both get recorded. */}
-                    {lineDiff !== 0 && (
+                    {/* Amber, never red. Short and over are both legal and both
+                        happen; red would train people to click past it. */}
+                    {lineShort > 0 && (
                       <span style={{ color: '#b45309', fontWeight: 600 }}>
-                        {' '}({lineDiff > 0 ? '+' : ''}{lineDiff})
+                        {' '}· {lineShort} short
+                      </span>
+                    )}
+                    {lineShort < 0 && (
+                      <span style={{ color: '#b45309', fontWeight: 600 }}>
+                        {' '}· {-lineShort} over
                       </span>
                     )}
                   </span>
@@ -454,19 +499,33 @@ const IncomingTab = () => {
           </div>
 
           {order.close_reason && (
-            <div className="og-sub" style={{ marginTop: 6 }}>
-              <AlertTriangle size={13} /> {order.close_reason}
+            <div className="og-sub" style={{ marginTop: 8, color: '#b45309' }}>
+              <AlertTriangle size={13} />{' '}
+              {/* Labelled. On its own, a reason like "not shipped" reads as a
+                  status rather than somebody's explanation. */}
+              <strong>Closed short:</strong> {order.close_reason}
             </div>
           )}
         </div>
 
         <div className="og-card-side">
+          {/* The total lives HERE and nowhere else. It used to appear twice —
+              once per line and once in this column — which reads as two
+              different figures that happen to agree. */}
           <div className="og-count">
             <b>{received}</b> of {expected}
-            {difference !== 0 && (
-              <span style={{ color: '#b45309' }}> ({difference > 0 ? '+' : ''}{difference})</span>
-            )}
           </div>
+          {short > 0 && (
+            <div className="og-sub" style={{ color: '#b45309', fontWeight: 600 }}>
+              {short} short
+            </div>
+          )}
+          {difference > 0 && (
+            <div className="og-sub" style={{ color: '#b45309', fontWeight: 600 }}>
+              {difference} over
+            </div>
+          )}
+
           {isOpen && canCreate && (
             <div className="og-card-actions">
               {order.status === 'draft' && (
