@@ -200,6 +200,8 @@ class ReceivingRowCount(BaseSchema):
 
 class ReceivingSummary(BaseSchema):
     receipt_id: str
+    product_id: Optional[str] = None
+    product_name: str = ""
     lot_code: Optional[str] = None
     vendor_lot: Optional[str] = None
     bbd: CalendarDateOut = None

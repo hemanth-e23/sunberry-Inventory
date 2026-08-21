@@ -148,6 +148,17 @@ def _row_payload(row: StorageRow, container_count: int = 0) -> dict:
         "is_partial_pallet_location": bool(row.is_partial_pallet_location),
         "hold": bool(row.hold),
         "is_active": row.is_active is not False,
+        # What this ROOM stores, if it has been typed. NULL means pallets, i.e.
+        # every room that has not been set up for units.
+        #
+        # The gun's rack picker uses it to put drum and bag rooms first: without
+        # it the list is every rack in the plant in alphabetical order, so a
+        # driver receiving drums is offered finished-goods areas at the top. It
+        # SORTS rather than filters — over-filtering would hide a legitimate rack
+        # from somebody who has a real reason to use it, and row capacity is a
+        # soft hint here by policy.
+        "storage_unit": sub.storage_unit if sub is not None else None,
+        "unit_capacity": sub.unit_capacity if sub is not None else None,
     }
 
 

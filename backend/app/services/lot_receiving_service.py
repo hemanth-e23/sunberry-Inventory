@@ -819,8 +819,17 @@ def receiving_summary(db: Session, receipt: Receipt) -> dict:
         if line else None
     )
 
+    product = (
+        db.query(Product).filter(Product.id == receipt.product_id).first()
+        if receipt.product_id else None
+    )
+
     return {
         "receipt_id": receipt.id,
+        # The gun leads with this. A lot code is what the sticker says, but a
+        # driver walking to a truck is looking for mango, not L0000003.
+        "product_id": receipt.product_id,
+        "product_name": product.name if product else "",
         "lot_code": lot.lot_code if lot else None,
         "vendor_lot": lot.vendor_lot_number if lot else receipt.lot_number,
         "bbd": (lot.bbd_current if lot else receipt.expiration_date),

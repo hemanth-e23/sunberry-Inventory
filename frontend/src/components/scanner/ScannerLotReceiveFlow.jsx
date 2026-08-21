@@ -209,7 +209,11 @@ const SessionListView = () => {
               onClick={() => navigate(`/forklift/lot-receiving/${session.receipt_id}`)}
             >
               <div className="sir-card-head">
-                <span className="sir-card-number">{session.lot_code}</span>
+                {/* The PRODUCT leads. A lot code is what the sticker says, but a
+                    driver walking to a truck is looking for mango, not L0000003. */}
+                <span className="sir-card-number">
+                  {session.product_name || session.lot_code}
+                </span>
                 <span className="sir-card-status">
                   {session.source === 'incoming_order'
                     ? session.order_number
@@ -218,9 +222,12 @@ const SessionListView = () => {
               </div>
               <div className="sir-card-meta">
                 {session.vendor_lot ? `Lot ${session.vendor_lot}` : 'Lot unknown'}
-                {' · '}
-                {session.scanned_count} of {session.expected_count} {session.count_unit}
-                {remaining > 0 ? ` · ${remaining} to go` : ' · complete'}
+                {' · '}{session.lot_code}
+                <br />
+                <strong>
+                  {session.scanned_count} of {session.expected_count} {session.count_unit}
+                </strong>
+                {remaining > 0 ? ` · ${remaining} to go` : ' · all in'}
               </div>
             </button>
           );
@@ -627,13 +634,35 @@ const SessionView = ({ receiptId }) => {
     }
   }, [receiptId, pendingItems.length, showError, showInfo, showSuccess]);
 
-  const filteredRows = useMemo(() => {
+  /**
+   * Racks for the manual picker, in two groups.
+   *
+   * SORTED, never filtered. A driver receiving drums should see drum and bag
+   * rooms first — unsorted, the list is every rack in the plant alphabetically,
+   * so finished-goods areas sit at the top and the actual barn is a long thumb
+   * away. But hiding the rest would deny somebody with a real reason to use a
+   * rack we did not anticipate, and row capacity is a soft hint here by policy.
+   */
+  const rackGroups = useMemo(() => {
     const q = rowQuery.trim().toLowerCase();
-    if (!q) return rows.slice(0, 60);
-    return rows
-      .filter((r) => `${r.name} ${r.path || ''} ${r.barcode || ''}`.toLowerCase().includes(q))
-      .slice(0, 60);
+    const matches = q
+      ? rows.filter((r) => `${r.name} ${r.path || ''} ${r.barcode || ''}`.toLowerCase().includes(q))
+      : rows;
+    const byName = (a, b) => String(a.name || '').localeCompare(
+      String(b.name || ''), undefined, { numeric: true },
+    );
+    return [
+      { key: 'units', label: 'Drum and bag rooms',
+        rows: matches.filter((r) => r.storage_unit).sort(byName).slice(0, 60) },
+      { key: 'other', label: 'Everywhere else',
+        rows: matches.filter((r) => !r.storage_unit).sort(byName).slice(0, 60) },
+    ].filter((g) => g.rows.length > 0);
   }, [rows, rowQuery]);
+
+  const rackMatchCount = useMemo(
+    () => rackGroups.reduce((n, g) => n + g.rows.length, 0),
+    [rackGroups],
+  );
 
   const netStatus = (
     <NetworkStatus
@@ -670,7 +699,7 @@ const SessionView = ({ receiptId }) => {
 
   return (
     <ScannerLayout
-      title={session?.lot_code || 'Receiving'}
+      title={session?.product_name || session?.lot_code || 'Receiving'}
       showBack
       onBack={() => navigate('/forklift/lot-receiving')}
       headerExtra={netStatus}
@@ -678,6 +707,8 @@ const SessionView = ({ receiptId }) => {
       <div className="sir-session">
         <div className="sir-meta">
           <span>{session?.vendor_lot ? `Lot ${session.vendor_lot}` : 'Lot unknown'}</span>
+          <span className="sir-meta-sep">·</span>
+          <span>{session?.lot_code}</span>
           <span className="sir-meta-sep">·</span>
           <span>
             {session?.source === 'incoming_order' ? session.order_number : 'Walk-in'}
@@ -860,8 +891,12 @@ const SessionView = ({ receiptId }) => {
 
       {rowPicker && (
         <div className="sir-overlay" role="dialog" aria-modal="true">
-          <div className="sir-dialog">
+          <div className="sir-dialog sir-dialog--tall">
             <h3>Pick a rack</h3>
+            <p className="sir-dialog-hint">
+              Scanning the rack label is faster and cannot pick the wrong one.
+              This is for when the label is damaged.
+            </p>
             <input
               type="text"
               value={rowQuery}
@@ -871,18 +906,28 @@ const SessionView = ({ receiptId }) => {
               autoFocus
             />
             <div className="sir-dialog-list">
-              {filteredRows.map((r) => (
-                <button
-                  key={r.id}
-                  type="button"
-                  className="sir-dialog-row"
-                  onClick={() => adoptRow(r)}
-                >
-                  <strong>{r.name}</strong>
-                  <span>{r.path || ''}</span>
-                </button>
+              {rackGroups.map((group) => (
+                <React.Fragment key={group.key}>
+                  {rackGroups.length > 1 && (
+                    <div className="sir-dialog-group">{group.label}</div>
+                  )}
+                  {group.rows.map((r) => (
+                    <button
+                      key={r.id}
+                      type="button"
+                      className="sir-dialog-row"
+                      onClick={() => adoptRow(r)}
+                    >
+                      <strong>{r.name}</strong>
+                      <span>
+                        {r.path || ''}
+                        {r.storage_unit ? ` · ${r.unit_capacity || 0} ${r.storage_unit}s` : ''}
+                      </span>
+                    </button>
+                  ))}
+                </React.Fragment>
               ))}
-              {filteredRows.length === 0 && <p className="sir-muted">No racks match.</p>}
+              {rackMatchCount === 0 && <p className="sir-muted">No racks match.</p>}
             </div>
             <button
               type="button"
