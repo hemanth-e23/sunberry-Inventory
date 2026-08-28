@@ -209,11 +209,10 @@ def qty_on_date(receipt: Receipt, as_of_dt: datetime, db: Session) -> float:
     """Reconstruct quantity for a receipt as of a specific datetime."""
     shipped_after = _shipped_cases_for_receipt(db, receipt.id, approved_after=as_of_dt)
 
-    adj_after = db.query(InventoryAdjustment).filter(
-        InventoryAdjustment.receipt_id == receipt.id,
-        InventoryAdjustment.status == AdjustmentStatus.APPROVED,
-        InventoryAdjustment.approved_at > as_of_dt,
-    ).all()
+    # Includes Finished Goods adjustments, which carry no receipt_id — without
+    # them an as-of-date snapshot understated FG stock by everything that had
+    # been adjusted away since.
+    adj_after = approved_adjustments_for_receipt(db, receipt, approved_after=as_of_dt)
 
     return (
         float(receipt.quantity or 0)
@@ -222,13 +221,71 @@ def qty_on_date(receipt: Receipt, as_of_dt: datetime, db: Session) -> float:
     )
 
 
+def approved_adjustments_for_receipt(
+    db: Session,
+    receipt: Receipt,
+    approved_after: Optional[datetime] = None,
+) -> list:
+    """Every approved adjustment that drew this receipt down.
+
+    Lot-based (raw material / packaging) adjustments carry `receipt_id`.
+    Pallet-based (Finished Goods) ones do not: the form sends
+    `pallet_licence_ids` *instead of* a receipt (InventoryContext.jsx:664) and
+    the router never derives one, so every FG adjustment row has receipt_id
+    NULL. Approval still decrements the correct receipt — adjustment_service
+    reaches it through `pallet.receipt_id` — so on-hand was always right, but
+    the reports only ever looked at the column. A donated FG lot therefore
+    reported "Initial Qty 0" and showed no donation on its timeline, which read
+    as though the adjustment had wiped the lot out.
+
+    Reaching them through their pallets repairs lots already adjusted, with no
+    migration. Collected by id so an adjustment found down both paths is
+    counted once — that keeps this correct if `receipt_id` is later populated
+    at creation time.
+
+    `approved_after` narrows to adjustments approved after a timestamp, for
+    reconstructing what a receipt held on a past date.
+    """
+    def _restrict(q):
+        q = q.filter(InventoryAdjustment.status == AdjustmentStatus.APPROVED)
+        if approved_after is not None:
+            q = q.filter(InventoryAdjustment.approved_at > approved_after)
+        return q
+
+    found = {
+        a.id: a
+        for a in _restrict(
+            db.query(InventoryAdjustment).filter(
+                InventoryAdjustment.receipt_id == receipt.id,
+            )
+        ).all()
+    }
+
+    # pallet_licence_ids is a JSON array, so the intersection is resolved in
+    # Python. Scoped to this receipt's product to keep the candidate set small.
+    pallet_ids = {
+        row[0] for row in db.query(PalletLicence.id).filter(
+            PalletLicence.receipt_id == receipt.id
+        ).all()
+    }
+    if pallet_ids:
+        candidates = _restrict(
+            db.query(InventoryAdjustment).filter(
+                InventoryAdjustment.receipt_id.is_(None),
+                InventoryAdjustment.product_id == receipt.product_id,
+            )
+        ).all()
+        for a in candidates:
+            if any(pid in pallet_ids for pid in (a.pallet_licence_ids or [])):
+                found[a.id] = a
+
+    return list(found.values())
+
+
 def initial_receipt_qty(receipt: Receipt, db: Session) -> float:
     """Estimate the original quantity when the receipt was first created."""
     shipped = _shipped_cases_for_receipt(db, receipt.id, approved_after=None)
-    adjs = db.query(InventoryAdjustment).filter(
-        InventoryAdjustment.receipt_id == receipt.id,
-        InventoryAdjustment.status == AdjustmentStatus.APPROVED,
-    ).all()
+    adjs = approved_adjustments_for_receipt(db, receipt)
     # Inter-warehouse transfers where this receipt was the source
     iw_transfers = db.query(InterWarehouseTransfer).filter(
         InterWarehouseTransfer.source_receipt_id == receipt.id,
@@ -935,10 +992,12 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             key=lambda t: _ship_dt(t) or datetime.min.replace(tzinfo=timezone.utc),
         )
 
-        adjustments = db.query(InventoryAdjustment).filter(
-            InventoryAdjustment.receipt_id == r.id,
-            InventoryAdjustment.status == AdjustmentStatus.APPROVED,
-        ).order_by(InventoryAdjustment.approved_at).all()
+        # Includes Finished Goods adjustments, which carry no receipt_id and so
+        # never appeared on the timeline. The timeline is sorted by date below.
+        adjustments = sorted(
+            approved_adjustments_for_receipt(db, r),
+            key=lambda a: (a.approved_at is None, a.approved_at or datetime.min),
+        )
 
         holds = db.query(InventoryHoldAction).filter(
             InventoryHoldAction.receipt_id == r.id,

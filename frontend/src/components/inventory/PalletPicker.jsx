@@ -25,7 +25,10 @@ const PalletPicker = ({ pallets = [], selectedIds = [], onChange, loading = fals
       return (
         (p.licence_number || '').toLowerCase().includes(q) ||
         (p.lot_number || '').toLowerCase().includes(q) ||
-        (p.storage_row_id || '').toLowerCase().includes(q)
+        // Match what the operator can actually see and type — the rack name
+        // ("AI171"), not the internal row id. Searching the id meant the
+        // placeholder's promise of "row" search never worked.
+        (p.storage_row_name || p.storage_row_id || '').toLowerCase().includes(q)
       );
     });
   }, [pallets, selectedSet, search]);
@@ -99,7 +102,12 @@ const PalletPicker = ({ pallets = [], selectedIds = [], onChange, loading = fals
         {/* Secondary info */}
         <div style={{ fontSize: '11.5px', color: '#6b7280', marginTop: '2px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
           {p.lot_number && <span>Lot: {p.lot_number}</span>}
-          {p.storage_row_id && <span>Row: {p.storage_row_id}</span>}
+          {/* The rack name the operator reads off the barcode. `storage_row_name`
+              is resolved server-side (pallet_licences.py:67); fall back to the id
+              only if that join came back empty, rather than showing nothing. */}
+          {(p.storage_row_name || p.storage_row_id) && (
+            <span>Row: {p.storage_row_name || p.storage_row_id}</span>
+          )}
           <span style={{ fontWeight: 600, color: '#374151' }}>{(p.cases || 0).toLocaleString()} cs</span>
         </div>
       </div>
