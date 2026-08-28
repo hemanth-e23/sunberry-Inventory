@@ -52,7 +52,15 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
     <div className="card-grid">
       {pendingAdjustments.map((adjustment) => {
         const receipt = receiptLookup[adjustment.receiptId];
-        const product = productLookup[receipt?.productId];
+        // Finished Goods adjustments are pallet-based and carry no receiptId —
+        // the form sends pallet_licence_ids instead. Everything here was
+        // resolved through the receipt, so those cards rendered "Unknown
+        // Product", an em-dash lot, and no quantity panel at all: an approval
+        // screen that never said what was being approved. The adjustment itself
+        // carries the product and the cases, so read them from it directly.
+        const palletCount = adjustment.palletLicenceIds?.length || 0;
+        const isPalletBased = palletCount > 0;
+        const product = productLookup[receipt?.productId || adjustment.productId];
         const category = categoryLookup[receipt?.categoryId || adjustment.categoryId];
         const days = getDaysAgo(adjustment.submittedAt);
         const priority = getPriorityLevel(days);
@@ -78,6 +86,25 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
                 </span>
               </div>
             </header>
+
+            {/* Pallet-based adjustments have no receipt to read a before/after
+                from, so state the removal on its own rather than hiding the
+                panel and leaving the approver with no quantity at all. */}
+            {!receipt && isPalletBased && (
+              <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '12px 16px', marginBottom: '12px' }}>
+                <div style={{ fontSize: '12px', color: '#6b7280', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>Quantity Impact</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '15px' }}>
+                  <div style={{ textAlign: 'center', padding: '6px 12px', background: '#fee2e2', borderRadius: '8px' }}>
+                    <div style={{ fontSize: '11px', color: '#991b1b', marginBottom: '2px' }}>Removing</div>
+                    <div style={{ fontWeight: 700, fontSize: '18px', color: '#dc2626' }}>−{adjQty}</div>
+                    <div style={{ fontSize: '11px', color: '#991b1b' }}>cases</div>
+                  </div>
+                  <div style={{ fontSize: '13px', color: '#6b7280' }}>
+                    from {palletCount} {palletCount === 1 ? 'pallet' : 'pallets'}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Before / After quantity panel */}
             {receipt && (
@@ -108,9 +135,13 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
             )}
 
             <dl className="summary-grid">
+              {/* A pallet-based adjustment has no single lot to name — the lot
+                  lives on each pallet, which this view does not load. The
+                  pallet count is what actually identifies it, and beats the
+                  em-dash that was here. */}
               <div>
-                <dt>Lot Number</dt>
-                <dd>{receipt?.lotNo || '—'}</dd>
+                <dt>{isPalletBased ? 'Pallets' : 'Lot Number'}</dt>
+                <dd>{isPalletBased ? palletCount : (receipt?.lotNo || '—')}</dd>
               </div>
               {adjustment.recipient && (
                 <div>
@@ -139,7 +170,10 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
                 className="secondary-button"
                 disabled={actingId === adjustment.id}
                 onClick={() => {
-                  confirm(`Approve this ${getAdjustmentTypeLabel(adjustment.adjustmentType).toLowerCase()} of ${adjQty} ${receipt?.quantityUnits || 'units'}?`).then(async ok => {
+                  // 'cases' rather than 'units' as the fallback: the only time
+                  // there is no receipt is a pallet-based FG adjustment, which
+                  // is always measured in cases (adjustments.py:79).
+                  confirm(`Approve this ${getAdjustmentTypeLabel(adjustment.adjustmentType).toLowerCase()} of ${adjQty} ${receipt?.quantityUnits || 'cases'}?`).then(async ok => {
                     if (!ok) return;
                     setActingId(adjustment.id);
                     const res = await approveAdjustment(adjustment.id, user?.id || user?.username);
