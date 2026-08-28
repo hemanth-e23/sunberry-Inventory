@@ -188,6 +188,13 @@ export const InventoryProvider = ({ children }) => {
             quantity: adj.quantity,
             reason: adj.reason,
             recipient: adj.recipient,
+            // The API returns this (schemas/inventory.py:315) but the list
+            // mapping dropped it, while the create-response mapping below kept
+            // it. So a freshly submitted adjustment had its pallets and a
+            // reloaded one did not — which left the approvals card unable to
+            // tell a pallet-based Finished Goods adjustment from a lot-based
+            // one, and showing neither a lot nor a quantity.
+            palletLicenceIds: adj.pallet_licence_ids || [],
             status: adj.status,
             submittedAt: adj.submitted_at,
             submittedBy: adj.submitted_by,
