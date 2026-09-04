@@ -25,6 +25,7 @@ const ApprovalsPage = () => {
   const currentUserId = user?.id || user?.username;
   const {
     receipts,
+    refreshReceipts,
     products,
     productCategories,
     vendors,
@@ -148,6 +149,22 @@ const ApprovalsPage = () => {
     }
     return null;
   }, [rowNameCache]);
+
+  // REFETCH ON OPEN.
+  //
+  // A receipt reaches this queue and then keeps changing on the server: the gun
+  // scans units into racks, and each scan re-projects the receipt's allocations.
+  // The copy the browser is holding entered the list at `start_receiving`, when
+  // no rack was known yet — so the card's Location read "—" for a receipt that
+  // had twenty drums counted into ROW 1.
+  //
+  // The COUNTED IN panel below was right the whole time because it fetches the
+  // session live. This makes the rest of the card agree with it.
+  useEffect(() => {
+    refreshReceipts?.();
+    // Once, when the queue opens. Approving already patches its own receipt.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const missingRowIds = new Set();

@@ -338,6 +338,11 @@ class HoldItem(BaseSchema):
     receipt_id: str
     location_id: str
     quantity: float
+    # Containers to quarantine on this rack, when the caller counts in
+    # containers rather than weight. Preferred over `quantity` when present:
+    # QA counts drums, and going drums -> pounds -> back to drums is a rounding
+    # round-trip with nothing to gain.
+    units: Optional[int] = None
 
 class InventoryHoldActionBase(BaseSchema):
     receipt_id: Optional[str] = None

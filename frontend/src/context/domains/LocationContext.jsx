@@ -65,6 +65,7 @@ export const LocationProvider = ({ children }) => {
               // Live counts from lot_placements. null (not 0) outside a
               // unit-typed room, so "no drums here" stays distinguishable from
               // "this is a pallet room".
+              contentUnit: row.content_unit || null,
               liveUnits: row.live_units == null ? null : Number(row.live_units),
               liveOpenUnits:
                 row.live_open_units == null ? null : Number(row.live_open_units),

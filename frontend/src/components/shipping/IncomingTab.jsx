@@ -7,6 +7,7 @@ import { useConfirm } from '../../context/ConfirmContext';
 import Modal from '../Modal';
 import SearchableSelect from '../SearchableSelect';
 import { formatCalendarDate } from '../../utils/labelPayload';
+import { formatDateKey, getTodayDateKey } from '../../utils/dateUtils';
 import {
   apiErrorMessage, cancelIncomingOrder, closeIncomingOrder, createIncomingOrder,
   listIncomingOrders, printSessionLabels, releaseIncomingOrder, startReceiving,
@@ -57,6 +58,30 @@ const STATUS_LABELS = {
 
 const OPEN_STATUSES = ['draft', 'in_transit', 'receiving'];
 
+// Units that arrive wrapped on a pallet and cannot be stickered individually at
+// the dock — these MUST state a per-pallet count, because it drives the sticker
+// run and the gun's multiplier.
+const PALLETISED_UNITS = new Set(['bag', 'box', 'bottle', 'case', 'pail']);
+
+// Measures rather than containers, plus the pallet itself. Nothing else: DRUMS
+// RIDE PALLETS TOO, two or four to a pallet, and refusing to ask made the rack
+// count them one slot each — twenty drums reported twenty of twenty-two slots
+// on a rack holding ten pallets. Optional for those, because some genuinely are
+// one per slot; blank means exactly that.
+const NOT_A_CONTAINER = new Set(['gallon', 'liter', 'litre', 'pallet']);
+const asksPerPallet = (unit) => {
+  const u = String(unit || '').toLowerCase().replace(/s$/, '');
+  return Boolean(u) && !NOT_A_CONTAINER.has(u);
+};
+
+/** Move a YYYY-MM-DD key by N days without touching a timezone. */
+const shiftDateKey = (key, days) => {
+  const [y, m, d] = key.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d, 12));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+};
+
 // Reuses the outbound chip palette so the two tabs read as one screen. Every
 // status got `scheduled` before, so a cancelled order wore an amber "planned"
 // chip.
@@ -75,6 +100,7 @@ const emptyLine = () => ({
   bbd: '',
   expected_count: '',
   unit_label: 'drum',
+  units_per_pallet: '',
   weight_per_unit: '',
   // Always lbs. There is no selector — see the weight input for why.
   weight_unit: 'lbs',
@@ -85,6 +111,7 @@ const IncomingTab = () => {
   const { user, isCorporateUser, selectedWarehouse, selectedWarehouseName } = useAuth();
   const { addToast } = useToast();
   const { confirm } = useConfirm();
+  const today = getTodayDateKey();
 
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -96,6 +123,9 @@ const IncomingTab = () => {
   const [startForm, setStartForm] = useState(null);
   const [sheet, setSheet] = useState(null);
   const [reprint, setReprint] = useState(null);
+  const [releaseForm, setReleaseForm] = useState(null);
+  // The day the plant is looking at. Same shape as the outbound tab.
+  const [dateKey, setDateKey] = useState(() => getTodayDateKey());
 
   // Corporate must pick a target warehouse in the header before creating
   // anything. Without it `resolve_warehouse_for_write` raises a raw 400 —
@@ -137,11 +167,20 @@ const IncomingTab = () => {
 
   const load = useCallback(() => {
     setLoading(true);
-    return listIncomingOrders({ include_closed: showClosed })
+    // Drafts come back on every day — they have no slot yet, which is the whole
+    // point of a draft, so filtering them by date would hide corporate's own
+    // to-do list from them on every view.
+    return listIncomingOrders({ include_closed: showClosed, date: dateKey })
       .then((data) => setOrders(Array.isArray(data) ? data : []))
       .catch((err) => addToast(apiErrorMessage(err, 'Could not load incoming orders'), 'error'))
       .finally(() => setLoading(false));
-  }, [showClosed, addToast]);
+    // `selectedWarehouse` is not READ in here — the warehouse rides on the
+    // X-View-Warehouse header AuthContext sets, so the request is already
+    // scoped server-side. It is in the dep list because it must TRIGGER a
+    // refetch: without it, switching the header selector leaves the previous
+    // plant's rows on screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showClosed, dateKey, selectedWarehouse, addToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -150,9 +189,34 @@ const IncomingTab = () => {
       vendor_id: '',
       bol: '',
       purchase_order: '',
-      expected_date: '',
       notes: '',
       lines: [emptyLine()],
+      walkIn: false,
+    });
+    setCreating(true);
+  };
+
+  /**
+   * A truck nobody scheduled, standing at the dock.
+   *
+   * Deliberately the SAME form and the same two endpoints as a corporate order,
+   * with the release folded in and dated today. A walk-in is not a third way
+   * material enters — it is the corporate path with its first step performed by
+   * the plant instead, off the driver's BOL. Giving it its own intake would mean
+   * a second flow to keep correct, and the two would drift.
+   *
+   * The driver is waiting, so the day is not asked for: it is today by
+   * definition. Everything after this point — stickers, scanning, approval — is
+   * byte-for-byte the scheduled path.
+   */
+  const startWalkIn = () => {
+    setForm({
+      vendor_id: '',
+      bol: '',
+      purchase_order: '',
+      notes: '',
+      lines: [emptyLine()],
+      walkIn: true,
     });
     setCreating(true);
   };
@@ -174,29 +238,58 @@ const IncomingTab = () => {
       addToast('Pick a warehouse in the header before creating an order.', 'error');
       return;
     }
+    // NO vendor gate here, deliberately. Raising an order does not create a
+    // lot — the lot is minted at start-receiving — so nothing can collide yet,
+    // and corporate legitimately raises orders before every detail is known.
+    // The gate lives where the lot is actually born and where somebody is
+    // holding the BOL. See the check in `beginReceiving`.
+    const isWalkIn = Boolean(form.walkIn);
+    const totalUnits = lines.reduce((sum, l) => sum + Number(l.expected_count || 0), 0);
     const ok = await confirm(
       `This order is for ${selectedWarehouseName || 'the selected warehouse'}. `
-      + `${lines.reduce((sum, l) => sum + Number(l.expected_count || 0), 0)} units across `
-      + `${lines.length} product line${lines.length === 1 ? '' : 's'}. Creating it puts nothing in stock.`,
-      { title: 'Create incoming order', confirmLabel: 'Create' },
+      + `${totalUnits} units across ${lines.length} product line${lines.length === 1 ? '' : 's'}. `
+      + (isWalkIn
+        ? 'It goes straight onto today\'s schedule, ready to sticker and scan.'
+        : 'Creating it puts nothing in stock.'),
+      {
+        title: isWalkIn ? 'Log walk-in delivery' : 'Create incoming order',
+        confirmLabel: isWalkIn ? 'Log walk-in' : 'Create',
+      },
     );
     if (!ok) return;
 
     setBusy(true);
     try {
-      await createIncomingOrder({
+      const order = await createIncomingOrder({
         ...form,
-        expected_date: form.expected_date || null,
+        walkIn: undefined,
+        // An untouched <select> sends "", which is not an id — it reached
+        // Postgres as a foreign key to a vendor with an empty-string id and
+        // died with `Key (vendor_id)=() is not present in table "vendors"`.
+        // The server coerces this too; doing it here as well matches how the
+        // receipt form has always behaved.
+        vendor_id: form.vendor_id || null,
         lines: lines.map((line) => ({
           ...line,
           expected_count: Number(line.expected_count) || 0,
+          units_per_pallet: line.units_per_pallet === '' ? null : Number(line.units_per_pallet),
           weight_per_unit: line.weight_per_unit === '' ? null : Number(line.weight_per_unit),
           bbd: line.bbd || null,
         })),
       });
+
+      // A walk-in is already at the dock, so it is released in the same breath
+      // and dated today. If this second call fails the order still exists as a
+      // draft and the Schedule button on its card finishes the job — the truck
+      // is not blocked by a network blip.
+      if (isWalkIn && order?.id) {
+        await releaseIncomingOrder(order.id, { expected_date: today });
+        setDateKey(today);
+      }
+
       setCreating(false);
       setForm(null);
-      addToast('Incoming order created', 'success');
+      addToast(isWalkIn ? 'Walk-in logged and on today\'s schedule' : 'Incoming order created', 'success');
       await load();
     } catch (err) {
       addToast(apiErrorMessage(err, 'Could not create the order'), 'error');
@@ -205,11 +298,30 @@ const IncomingTab = () => {
     }
   };
 
-  const doRelease = async (order) => {
+  /**
+   * Schedule and release, as one step and one decision.
+   *
+   * Creating an order and committing it to a day are different moments:
+   * corporate raises it as soon as they have the PO, and agrees the slot with
+   * the carrier afterwards. So a draft carries no date, and the date is asked
+   * for here — at the point the order becomes something a plant is expected to
+   * act on.
+   */
+  const doRelease = async () => {
+    if (!releaseForm?.expected_date) {
+      addToast('Pick the day this shipment reaches the warehouse.', 'error');
+      return;
+    }
     setBusy(true);
     try {
-      await releaseIncomingOrder(order.id);
-      addToast(`${order.order_number} is in transit`, 'success');
+      await releaseIncomingOrder(releaseForm.order.id, {
+        expected_date: releaseForm.expected_date,
+        expected_time: releaseForm.expected_time,
+      });
+      addToast(`${releaseForm.order.order_number} is in transit`, 'success');
+      setReleaseForm(null);
+      // Jump to the day it is now expected, so it does not appear to vanish.
+      setDateKey(releaseForm.expected_date);
       await load();
     } catch (err) {
       addToast(apiErrorMessage(err, 'Could not release the order'), 'error');
@@ -260,9 +372,11 @@ const IncomingTab = () => {
   const openStart = (order, line) => setStartForm({
     order,
     line,
+    vendor_id: line.vendor_id || order.vendor_id || '',
     vendor_lot: line.vendor_lot || '',
     bbd: line.bbd ? String(line.bbd).slice(0, 10) : '',
     weight_per_unit: line.weight_per_unit == null ? '' : String(line.weight_per_unit),
+    units_per_pallet: line.units_per_pallet == null ? '' : String(line.units_per_pallet),
     expected_count: String(line.expected_count ?? ''),
     bol: order.bol || '',
   });
@@ -272,6 +386,14 @@ const IncomingTab = () => {
     // All three are hard requirements at the SERVER too. Checked here so the
     // worker is told at the form instead of at the printer, standing next to a
     // pallet with nothing to stick on it.
+    if (!startForm.vendor_id) {
+      addToast(
+        'Pick the vendor from the BOL — it is part of what tells this lot apart '
+        + 'from another supplier\'s lot with the same number.',
+        'error',
+      );
+      return;
+    }
     if (!startForm.vendor_lot.trim()) {
       addToast(
         'The vendor lot number is needed — every drum of this lot carries the '
@@ -297,20 +419,35 @@ const IncomingTab = () => {
     try {
       const summary = await startReceiving(order.id, {
         line_id: line.id,
+        vendor_id: startForm.vendor_id || null,
         vendor_lot: startForm.vendor_lot || null,
         bbd: startForm.bbd || null,
         weight_per_unit: Number(startForm.weight_per_unit),
         weight_unit: 'lbs',
+        units_per_pallet: Number(startForm.units_per_pallet) || null,
         expected_count: Number(startForm.expected_count) || null,
         bol: startForm.bol || null,
       });
       // Printing is NOT receiving. This hands the worker the stickers; the
       // material becomes stock when a forklift user scans it into a rack.
-      const printed = await printSessionLabels(summary.receipt_id, summary.expected_count);
+      // PALLETISED MATERIAL GETS PALLET STICKERS, one per pallet — nobody is
+      // going to destack a wrapped pallet at the dock to label every bag. The
+      // sticker is identical either way; only the middle band differs, and the
+      // gun's multiplier turns one scan into a whole pallet.
+      const per = Number(startForm.units_per_pallet) || 0;
+      const palletised = per > 1;
+      const count = palletised
+        ? Math.ceil(summary.expected_count / per)
+        : summary.expected_count;
+      const printed = await printSessionLabels(summary.receipt_id, count, {
+        scope: palletised ? 'pallet' : 'unit',
+      });
       setSheet(printed);
       setStartForm(null);
       addToast(
-        `${summary.expected_count} stickers for ${summary.lot_code} — scan them in on the gun`,
+        palletised
+          ? `${count} pallet stickers — one per pallet, then scan each in on the gun`
+          : `${count} stickers for ${summary.lot_code} — scan them in on the gun`,
         'success',
       );
       await load();
@@ -341,7 +478,9 @@ const IncomingTab = () => {
     }
     setBusy(true);
     try {
-      setSheet(await printSessionLabels(reprint.line.receipt_id, count));
+      setSheet(await printSessionLabels(reprint.line.receipt_id, count, {
+        scope: reprint.scope || 'unit',
+      }));
       setReprint(null);
     } catch (error) {
       addToast(apiErrorMessage(error, 'Could not reprint'), 'error');
@@ -382,6 +521,12 @@ const IncomingTab = () => {
     [orders, showClosed],
   );
 
+  // Two groups, because they are two different jobs. Drafts are corporate's
+  // backlog — orders raised but not yet committed to a day. Everything else is
+  // what the plant should expect on the day being viewed.
+  const drafts = useMemo(() => visible.filter((o) => o.status === 'draft'), [visible]);
+  const scheduled = useMemo(() => visible.filter((o) => o.status !== 'draft'), [visible]);
+
   const renderCard = (order) => {
     const expected = order.expected_count || 0;
     const received = order.received_count || 0;
@@ -406,6 +551,7 @@ const IncomingTab = () => {
               {/* Calendar day, stored at midnight UTC — the timezone-aware
                   formatter would show the day before. */}
               <span className="t">{formatCalendarDate(order.expected_date)}</span>
+              {order.expected_time && <span className="ampm">{order.expected_time}</span>}
             </>
           ) : (
             <span className="ampm">no date</span>
@@ -442,11 +588,21 @@ const IncomingTab = () => {
                       <span style={{ color: '#b45309', fontWeight: 600 }}>
                         no lot number yet
                       </span>
-                    ) : `lot ${line.vendor_lot}`}
+                    ) : <>lot <strong>{line.vendor_lot}</strong></>}
                     {line.bbd ? ` · BBD ${formatCalendarDate(line.bbd)}` : (
                       <span style={{ color: '#b45309', fontWeight: 600 }}> · no BBD yet</span>
                     )}
-                    {line.lot_code ? ` · ${line.lot_code}` : ''}
+                    {/* The sticker code is BUILT FROM the vendor's lot number
+                        (SID-THEIRLOT-marker), so this reads as the same number
+                        with our marker on it rather than a rival identity. */}
+                    {line.lot_code && (
+                      <>
+                        {' · sticker '}
+                        <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>
+                          {line.lot_code}
+                        </span>
+                      </>
+                    )}
                   </span>
                   <span className="og-line-count">
                     {isOpen && canReceive && order.status !== 'draft' && !line.receipt_id && (
@@ -465,14 +621,19 @@ const IncomingTab = () => {
                         type="button"
                         className="og-btn og-btn-ghost"
                         style={{ marginRight: 8 }}
-                        onClick={() => setReprint({
-                          order,
-                          line,
-                          count: String(
-                            Math.max(0, (line.expected_count || 0) - (line.received_count || 0))
-                            || line.expected_count || 1,
-                          ),
-                        })}
+                        onClick={() => {
+                          const per = Number(line.units_per_pallet) || 0;
+                          const remaining = Math.max(
+                            0, (line.expected_count || 0) - (line.received_count || 0),
+                          ) || line.expected_count || 1;
+                          setReprint({
+                            order,
+                            line,
+                            scope: per > 1 ? 'pallet' : 'unit',
+                            perPallet: per,
+                            count: String(per > 1 ? Math.ceil(remaining / per) : remaining),
+                          });
+                        }}
                         disabled={busy}
                       >
                         Reprint
@@ -532,10 +693,14 @@ const IncomingTab = () => {
                 <button
                   type="button"
                   className="og-btn og-btn-primary"
-                  onClick={() => doRelease(order)}
+                  onClick={() => setReleaseForm({
+                    order,
+                    expected_date: getTodayDateKey(),
+                    expected_time: '',
+                  })}
                   disabled={busy}
                 >
-                  Release
+                  Schedule &amp; release
                 </button>
               )}
               {order.status !== 'draft' && (
@@ -568,8 +733,50 @@ const IncomingTab = () => {
   return (
     <>
       <div className="og-toolbar">
+        {/* Same day navigator as the outbound tab — the two halves of Shipping
+            should be driven the same way. */}
+        <div className="og-datenav">
+          <button
+            className="og-navbtn"
+            onClick={() => setDateKey((k) => shiftDateKey(k, -1))}
+            title="Previous day"
+          >
+            ‹
+          </button>
+          <div className="og-date-display">
+            <span className="og-date-label">
+              {dateKey === today ? 'Today' : formatDateKey(dateKey)}
+            </span>
+            <span className="og-date-sub">
+              {dateKey === today ? formatDateKey(dateKey) : 'expected arrivals'}
+            </span>
+          </div>
+          <button
+            className="og-navbtn"
+            onClick={() => setDateKey((k) => shiftDateKey(k, 1))}
+            title="Next day"
+          >
+            ›
+          </button>
+          <input
+            type="date"
+            className="og-date-input"
+            value={dateKey}
+            onChange={(e) => setDateKey(e.target.value)}
+            title="Jump to date"
+          />
+          <button
+            className="og-todaybtn"
+            onClick={() => setDateKey(today)}
+            disabled={dateKey === today}
+          >
+            Today
+          </button>
+        </div>
         <div className="og-counts">
-          <span className="og-count"><b>{visible.length}</b> order{visible.length === 1 ? '' : 's'}</span>
+          <span className="og-count">
+            <b>{scheduled.length}</b> arriving
+          </span>
           <label className="og-count" style={{ cursor: 'pointer' }}>
             <input
               type="checkbox"
@@ -580,21 +787,42 @@ const IncomingTab = () => {
             Show closed
           </label>
         </div>
+        {/* WALK-IN IS THE PLANT'S BUTTON, not corporate's.
+            It happens at the dock, holding the driver's BOL, for a truck
+            corporate never knew about — so it is gated on `canReceive` like
+            Start receiving, not on `canCreate`. Behind the corporate flag it
+            was invisible to the plant admin who is the only person in a
+            position to press it: the same conflation this file already warns
+            about above, in reverse. */}
+        {canReceive && (
+          <button
+            type="button"
+            className="og-btn og-btn-ghost"
+            onClick={startWalkIn}
+            disabled={needsWarehouse}
+            title={needsWarehouse ? 'Pick a plant in the header first' : 'A truck nobody scheduled'}
+          >
+            <Truck size={15} />
+            Walk-in
+          </button>
+        )}
         {canCreate && (
           // Disabled rather than open-then-refuse. An order is FOR one
           // destination site, so on "All Warehouses" there is no answer to
           // "where is this going" — and the server rejects it with a raw 400.
           // Better to never open a form that cannot be submitted.
-          <button
-            type="button"
-            className="og-btn og-btn-primary"
-            onClick={startCreate}
-            disabled={needsWarehouse}
-            title={needsWarehouse ? 'Pick a plant in the header first' : undefined}
-          >
-            <Plus size={15} />
-            {needsWarehouse ? 'Pick a plant first' : 'New incoming order'}
-          </button>
+          <>
+            <button
+              type="button"
+              className="og-btn og-btn-primary"
+              onClick={startCreate}
+              disabled={needsWarehouse}
+              title={needsWarehouse ? 'Pick a plant in the header first' : undefined}
+            >
+              <Plus size={15} />
+              {needsWarehouse ? 'Pick a plant first' : 'New incoming order'}
+            </button>
+          </>
         )}
       </div>
 
@@ -607,21 +835,97 @@ const IncomingTab = () => {
 
       {loading && <div className="og-empty">Loading…</div>}
 
-      {!loading && visible.length === 0 && (
+      {/* Corporate's backlog: raised, but not yet committed to a day. Shown on
+          every day view because a draft has no day, and only to the people who
+          can act on it — the plant cannot receive against a draft. */}
+      {!loading && canCreate && drafts.length > 0 && (
+        <>
+          <h4 className="og-group-head">
+            Not scheduled yet
+            <span className="og-prefill">
+              {drafts.length} order{drafts.length === 1 ? '' : 's'} waiting for an arrival day
+            </span>
+          </h4>
+          <div className="og-cards">{drafts.map(renderCard)}</div>
+        </>
+      )}
+
+      {!loading && (
+        <h4 className="og-group-head">
+          {dateKey === today ? 'Arriving today' : `Arriving ${formatDateKey(dateKey)}`}
+        </h4>
+      )}
+
+      {!loading && scheduled.length === 0 && (
         <div className="og-empty">
           <Truck size={20} />
           <div>
-            <strong>Nothing inbound.</strong>
+            <strong>Nothing due {dateKey === today ? 'today' : 'that day'}.</strong>
             <div className="og-sub">
-              Corporate raises an order per destination. Material that turns up
-              without one is logged on the Log Receipt screen instead — the dock
-              is never blocked waiting for paperwork.
+              Corporate raises an order per destination and picks the arrival day
+              when they release it. Material that turns up without one is logged
+              on the Log Receipt screen instead — the dock is never blocked
+              waiting for paperwork.
             </div>
           </div>
         </div>
       )}
 
-      <div className="og-cards">{visible.map(renderCard)}</div>
+      <div className="og-cards">{scheduled.map(renderCard)}</div>
+
+      <Modal
+        isOpen={!!releaseForm}
+        onClose={() => setReleaseForm(null)}
+        title="Schedule & release"
+        size="sm"
+      >
+        {releaseForm && (
+          <div className="og-modal-form">
+            <p className="og-sub">
+              <strong>{releaseForm.order.order_number}</strong> —{' '}
+              {releaseForm.order.expected_count} units. Releasing it tells the
+              plant to expect it; nothing goes into stock until the drums are
+              scanned in.
+            </p>
+            <label>
+              <span>
+                Day it reaches the warehouse{' '}
+                <span className="og-prefill">required — the plant screen is by day</span>
+              </span>
+              <input
+                type="date"
+                value={releaseForm.expected_date}
+                onChange={(e) => setReleaseForm({ ...releaseForm, expected_date: e.target.value })}
+                autoFocus
+              />
+            </label>
+            <label>
+              <span>
+                Time{' '}
+                <span className="og-prefill">optional — whatever the carrier quoted</span>
+              </span>
+              <input
+                value={releaseForm.expected_time}
+                onChange={(e) => setReleaseForm({ ...releaseForm, expected_time: e.target.value })}
+                placeholder="07:00 AM"
+              />
+            </label>
+            <div className="og-modal-actions">
+              <button type="button" className="og-btn og-btn-ghost" onClick={() => setReleaseForm(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="og-btn og-btn-primary"
+                onClick={doRelease}
+                disabled={busy || !releaseForm.expected_date}
+              >
+                {busy ? 'Releasing…' : 'Release'}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       <Modal
         isOpen={!!reprint}
@@ -688,6 +992,27 @@ const IncomingTab = () => {
               Nothing goes into stock here; this prints the stickers so a forklift
               user can scan the {startForm.line.unit_label || 'unit'}s in.
             </p>
+            {/* Corporate may raise an order before knowing the supplier, and
+                the order creates no lot so nothing collides. The lot is minted
+                by THIS button, and the person pressing it is holding the BOL —
+                so the vendor is pinned down here. Unlike a missing lot number
+                or best-by, a missing vendor never announces itself: it just
+                merges two suppliers' "LOT001" into one lot. */}
+            <label>
+              <span>
+                Vendor{' '}
+                <span className="og-prefill">required — tells this lot from another supplier&apos;s</span>
+              </span>
+              <select
+                value={startForm.vendor_id}
+                onChange={(e) => setStartForm({ ...startForm, vendor_id: e.target.value })}
+              >
+                <option value="">Select vendor</option>
+                {(vendors || []).map((v) => (
+                  <option key={v.id} value={v.id}>{v.name}</option>
+                ))}
+              </select>
+            </label>
             <label>
               <span>
                 Vendor lot{' '}
@@ -731,6 +1056,36 @@ const IncomingTab = () => {
                 autoFocus
               />
             </label>
+            {/* Correctable here because vendors are not consistent: the order
+                said 50 to a pallet and the truck brought 40. This is the gun's
+                multiplier, so a wrong number books the wrong count 10 times. */}
+            {/* Shown for any container, NOT only when the order already set a
+                figure. That gate was self-defeating: corporate could not state a
+                per-pallet count for drums because the order form never asked,
+                and then this field stayed hidden because the count was empty —
+                so the number could never be entered anywhere, and every drum
+                took a whole rack slot. */}
+            {asksPerPallet(startForm.line.unit_label) && (
+              <label>
+                <span>
+                  Per pallet{' '}
+                  <span className="og-prefill">
+                    how many {startForm.line.unit_label || 'unit'}s on one pallet
+                  </span>
+                </span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={startForm.units_per_pallet}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === '' || /^\d+$/.test(v)) {
+                      setStartForm({ ...startForm, units_per_pallet: v });
+                    }
+                  }}
+                />
+              </label>
+            )}
             <label>
               <span>How many arrived</span>
               <input
@@ -762,7 +1117,13 @@ const IncomingTab = () => {
                 onClick={submitStart}
                 disabled={busy}
               >
-                {busy ? 'Working…' : `Print ${startForm.expected_count || 0} stickers`}
+                {busy ? 'Working…' : (() => {
+                  const per = Number(startForm.units_per_pallet) || 0;
+                  const n = Number(startForm.expected_count) || 0;
+                  return per > 1
+                    ? `Print ${Math.ceil(n / per)} pallet stickers`
+                    : `Print ${n} stickers`;
+                })()}
               </button>
             </div>
           </div>
@@ -816,11 +1177,18 @@ const IncomingTab = () => {
       <Modal
         isOpen={creating && !!form}
         onClose={() => { setCreating(false); setForm(null); }}
-        title="New incoming order"
+        title={form?.walkIn ? 'Walk-in delivery' : 'New incoming order'}
         size="lg"
       >
         {form && (
           <>
+            {form.walkIn && (
+              <div className="og-note" style={{ margin: '0 0 12px' }}>
+                <Truck size={14} /> Copy what is on the driver&apos;s BOL. This
+                goes onto <strong>today&apos;s</strong> schedule right away — then
+                print the stickers and scan it in, exactly like a scheduled load.
+              </div>
+            )}
             <div className="og-modal-form">
               <label>
                 <span>Vendor</span>
@@ -828,7 +1196,7 @@ const IncomingTab = () => {
                   value={form.vendor_id}
                   onChange={(e) => setForm({ ...form, vendor_id: e.target.value })}
                 >
-                  <option value="">—</option>
+                  <option value="">— not known yet</option>
                   {(vendors || []).map((v) => (
                     <option key={v.id} value={v.id}>{v.name}</option>
                   ))}
@@ -846,14 +1214,6 @@ const IncomingTab = () => {
                 <input
                   value={form.purchase_order}
                   onChange={(e) => setForm({ ...form, purchase_order: e.target.value })}
-                />
-              </label>
-              <label>
-                <span>Expected</span>
-                <input
-                  type="date"
-                  value={form.expected_date}
-                  onChange={(e) => setForm({ ...form, expected_date: e.target.value })}
                 />
               </label>
             </div>
@@ -958,6 +1318,33 @@ const IncomingTab = () => {
                     <option value="box">Boxes</option>
                   </select>
                 </label>
+                {/* Only for material that arrives palletised. Drums and totes
+                    are stickered one by one at the dock, so there is no pallet
+                    multiplier to record and asking would invite a wrong answer. */}
+                {asksPerPallet(line.unit_label) && (
+                  <label>
+                    <span>
+                      Per pallet{' '}
+                      <span className="og-prefill">
+                        {PALLETISED_UNITS.has(line.unit_label)
+                          ? `how many ${line.unit_label}s are wrapped on one pallet`
+                          : `how many ${line.unit_label}s ride one pallet — blank if one per slot`}
+                      </span>
+                    </span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={line.units_per_pallet}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === '' || /^\d+$/.test(v)) {
+                          patchLine(index, { units_per_pallet: v });
+                        }
+                      }}
+                      placeholder="50"
+                    />
+                  </label>
+                )}
                 <label>
                   <span>
                     Weight each{' '}
@@ -1014,7 +1401,9 @@ const IncomingTab = () => {
                 onClick={submitCreate}
                 disabled={busy || needsWarehouse}
               >
-                {busy ? 'Creating…' : 'Create order'}
+                {busy
+                  ? (form.walkIn ? 'Logging…' : 'Creating…')
+                  : (form.walkIn ? 'Log walk-in' : 'Create order')}
               </button>
             </div>
           </>

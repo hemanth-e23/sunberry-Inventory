@@ -550,7 +550,16 @@ const AdjustmentsTab = () => {
                               placeholder="0"
                             />
                           </label>
-                          {entry.rowId && (
+                          {/* NO pallet input for a counted lot. The footprint is DERIVED
+                              from the container count (`_pallet_footprint`), and
+                              the service ignores any figure sent here —
+                              `_move_counted_lot` and the counted adjustment path
+                              both work from units alone. An input whose value is
+                              silently discarded is worse than no input, and two
+                              boxes per rack were also what made this grid wrap
+                              mid-pair so you could not tell which pallet box
+                              belonged to which rack. */}
+                          {entry.rowId && !entry.isCounted && (
                             <label>
                               <span>
                                 ↳ Pallets emptied from this row

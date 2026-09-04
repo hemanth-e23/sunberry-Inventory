@@ -19,6 +19,7 @@ const HoldsTab = () => {
     products,
     categories,
     receipts,
+    vendors,
     userNameMap,
     inventoryHoldActions,
     submitHoldAction,
@@ -42,6 +43,10 @@ const HoldsTab = () => {
   const [rmReason, setRmReason] = useState('');
   const [rmError, setRmError] = useState('');
   const [rmSubmitting, setRmSubmitting] = useState(false);
+  // 'lot' quarantines every container wherever it sits; 'racks' quarantines a
+  // stated number on named racks. See the note by the scope picker below.
+  const [rmScope, setRmScope] = useState('lot');
+  const [rmRackUnits, setRmRackUnits] = useState({});
 
   // ─── Lookups ──────────────────────────────────────────────────────────────
   const productLookup = useMemo(() => {
@@ -84,16 +89,68 @@ const HoldsTab = () => {
     [receipts, categoryLookup]
   );
 
+  /**
+   * Is this receipt's material quarantined? Mirrors `hold_service.is_receipt_held`.
+   *
+   * `receipt.hold` alone is not the answer: a PARTIAL hold deliberately leaves
+   * it False so the un-held containers stay stageable, and the quarantine lives
+   * on the placements — surfaced here through `heldUnits` in the projected
+   * allocations. Reading only the flag is what made a partly-held lot offer
+   * Release and then be refused by the server.
+   */
+  const isReceiptHeld = (receipt) => {
+    if (!receipt) return false;
+    if (receipt.hold) return true;
+    return (receipt.rawMaterialRowAllocations || [])
+      .some((a) => Number(a?.heldUnits) > 0);
+  };
+
   const selectedRmReceipt = useMemo(
     () => rmReceipts.find(r => r.id === rmReceiptId),
     [rmReceipts, rmReceiptId]
   );
 
+  /**
+   * The racks this lot actually sits on, with how many containers are on each.
+   *
+   * Read from `rawMaterialRowAllocations`, which for a lot-tracked receipt is a
+   * projection of the placements — so the counts here are the same ones staging
+   * and the row cards read, not a separate opinion. Only racks with a container
+   * count can be partly held; a row that reports weight but no count predates
+   * the lot model, and holding "some of an unknown number" is not a fact QA can
+   * act on.
+   */
+  const rmRacks = useMemo(() => {
+    const allocs = selectedRmReceipt?.rawMaterialRowAllocations;
+    if (!Array.isArray(allocs)) return [];
+    return allocs
+      .filter(a => a?.rowId && Number(a.units) > 0)
+      .map(a => ({
+        rowId: a.rowId,
+        rowName: a.rowName || a.rowId,
+        units: Number(a.units),
+        unitLabel: a.unitLabel || 'unit',
+      }));
+  }, [selectedRmReceipt]);
+
+  const rmHeldTotal = useMemo(
+    () => rmRacks.reduce((sum, rack) => sum + (Number(rmRackUnits[rack.rowId]) || 0), 0),
+    [rmRacks, rmRackUnits]
+  );
+
   const formatReceiptLabel = (receipt) => {
     const product = productLookup[receipt.productId];
-    const category = categoryLookup[receipt.categoryId];
-    const holdLabel = receipt.hold ? ' [ON HOLD]' : '';
-    return `${String(product?.name || 'Unknown')} · Lot ${String(receipt.lotNo || '-')} · ${String(category?.name || '')}${holdLabel}`;
+    // The VENDOR, not the category. Two suppliers shipping the same lot number
+    // are two different lots that print different stickers, and the category
+    // was the same word on every row — three identical entries to choose from.
+    const vendor = vendors?.find((v) => v.id === receipt.vendorId)?.name;
+    const held = (receipt.rawMaterialRowAllocations || [])
+      .reduce((sum, a) => sum + (Number(a?.heldUnits) || 0), 0);
+    const holdLabel = receipt.hold
+      ? ' [ON HOLD]'
+      : held > 0 ? ` [${held} ON HOLD]` : '';
+    return `${String(product?.name || 'Unknown')} · Lot ${String(receipt.lotNo || '-')}`
+      + `${vendor ? ` · ${vendor}` : ''}${holdLabel}`;
   };
 
   // ─── Fetch pallets when FG product or mode changes ────────────────────────
@@ -191,13 +248,37 @@ const HoldsTab = () => {
       if (!ok) return;
     }
 
-    const action = selectedRmReceipt.hold ? 'release' : 'hold';
+    const action = isReceiptHeld(selectedRmReceipt) ? 'release' : 'hold';
+
+    // Naming racks is what makes this a partial hold; naming none holds the
+    // whole lot. The backend reads it the same way, so the two agree by
+    // construction rather than by a flag that could disagree with the items.
+    const holdingRacks = action === 'hold' && rmScope === 'racks';
+    if (holdingRacks && rmHeldTotal <= 0) {
+      setRmError('Say how many containers to hold on at least one rack.');
+      return;
+    }
+    const holdItems = holdingRacks
+      ? rmRacks
+          .filter(rack => Number(rmRackUnits[rack.rowId]) > 0)
+          .map(rack => ({
+            receiptId: rmReceiptId,
+            locationId: rack.rowId,
+            units: Number(rmRackUnits[rack.rowId]),
+            // Weight is sent alongside for the older readers of this payload;
+            // `units` is what the hold is actually applied from.
+            quantity: Number(rmRackUnits[rack.rowId])
+              * (Number(selectedRmReceipt.weightPerContainer) || 0),
+          }))
+      : undefined;
+
     setRmSubmitting(true);
     const result = await submitHoldAction({
       receiptId: rmReceiptId,
       action,
       reason: rmReason.trim(),
       submittedBy: user?.id || user?.username,
+      holdItems,
     });
     setRmSubmitting(false);
 
@@ -205,6 +286,8 @@ const HoldsTab = () => {
       setRmReceiptId('');
       setRmReason('');
       setRmError('');
+      setRmScope('lot');
+      setRmRackUnits({});
       addToast('Hold request submitted successfully.', 'success');
     } else {
       const msg = typeof result.error === 'object' ? JSON.stringify(result.error) : (result.error || 'Failed to submit.');
@@ -351,11 +434,79 @@ const HoldsTab = () => {
             {selectedRmReceipt && (
               <div style={{ background: selectedRmReceipt.hold ? '#fffbeb' : '#f0fdf4', border: `1px solid ${selectedRmReceipt.hold ? '#fde68a' : '#bbf7d0'}`, borderRadius: '8px', padding: '12px 16px', marginTop: '8px' }}>
                 <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '4px' }}>
-                  {selectedRmReceipt.hold ? '🔒 Entire lot is on hold — submit to release' : '✅ Lot is available — submit to place on hold'}
+                  {isReceiptHeld(selectedRmReceipt)
+                    ? '🔒 On hold — submit to release'
+                    : '✅ Lot is available — submit to place on hold'}
                 </div>
                 <div style={{ fontSize: '13px', color: '#6b7280' }}>
                   Lot {selectedRmReceipt.lotNo || '—'} · {(selectedRmReceipt.quantity || 0).toLocaleString()} {selectedRmReceipt.quantityUnits || 'cases'}
                 </div>
+              </div>
+            )}
+
+            {/* Scope. Only offered when placing a hold and only when we know
+                which racks the containers are on — a release always clears
+                everything, and a lot with no per-rack counts can only be held
+                whole. */}
+            {selectedRmReceipt && !isReceiptHeld(selectedRmReceipt) && rmRacks.length > 0 && (
+              <div style={{ marginTop: '12px' }}>
+                <span style={{ fontWeight: 600, fontSize: '13px' }}>What is on hold?</span>
+                <div style={{ display: 'flex', gap: '16px', margin: '8px 0' }}>
+                  <label style={{ display: 'flex', gap: '6px', alignItems: 'center', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      checked={rmScope === 'lot'}
+                      onChange={() => setRmScope('lot')}
+                    />
+                    <span>The whole lot</span>
+                  </label>
+                  <label style={{ display: 'flex', gap: '6px', alignItems: 'center', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      checked={rmScope === 'racks'}
+                      onChange={() => setRmScope('racks')}
+                    />
+                    <span>Only some, on certain racks</span>
+                  </label>
+                </div>
+                <div style={{ fontSize: '12px', color: '#6b7280' }}>
+                  {rmScope === 'lot'
+                    ? 'Every container of this lot, on every rack — including any that arrived on another truck. Use this when the lot itself is suspect.'
+                    : 'Use this when the lot is fine but some containers are not — water damage, a dropped drum. Every container wears the same sticker, so name the rack and how many, not which ones.'}
+                </div>
+
+                {rmScope === 'racks' && (
+                  <div style={{ marginTop: '10px', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '10px 12px' }}>
+                    {rmRacks.map(rack => (
+                      <div
+                        key={rack.rowId}
+                        style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '4px 0' }}
+                      >
+                        <span style={{ minWidth: '110px', fontWeight: 500 }}>{rack.rowName}</span>
+                        <span style={{ color: '#6b7280', fontSize: '13px', flex: 1 }}>
+                          {rack.units} {rack.unitLabel}{rack.units === 1 ? '' : 's'} here
+                        </span>
+                        <input
+                          type="number"
+                          min="0"
+                          max={rack.units}
+                          step="1"
+                          value={rmRackUnits[rack.rowId] ?? ''}
+                          placeholder="0"
+                          onChange={(e) => {
+                            const n = Math.max(0, Math.min(Number(e.target.value), rack.units));
+                            setRmRackUnits(prev => ({ ...prev, [rack.rowId]: n }));
+                          }}
+                          style={{ width: '80px', padding: '4px 8px' }}
+                        />
+                        <span style={{ color: '#6b7280', fontSize: '12px' }}>on hold</span>
+                      </div>
+                    ))}
+                    <div style={{ marginTop: '8px', fontSize: '13px', fontWeight: 600 }}>
+                      {rmHeldTotal} of {rmRacks.reduce((s, r) => s + r.units, 0)} quarantined
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -373,7 +524,9 @@ const HoldsTab = () => {
 
             <div className="form-actions">
               <button type="submit" className="primary-button" disabled={rmSubmitting || !rmReceiptId}>
-                {rmSubmitting ? 'Submitting…' : selectedRmReceipt?.hold ? 'Submit Release Request' : 'Submit Hold Request'}
+                {rmSubmitting
+                  ? 'Submitting…'
+                  : isReceiptHeld(selectedRmReceipt) ? 'Submit Release Request' : 'Submit Hold Request'}
               </button>
             </div>
           </form>

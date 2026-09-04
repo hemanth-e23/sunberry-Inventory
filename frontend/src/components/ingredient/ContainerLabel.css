@@ -251,3 +251,17 @@
     fill: #ffffff !important;
   }
 }
+
+/* The system's lot code — deliberately small. The big slot carries the VENDOR's
+   lot number, which is what a person on a dock recognises; this string is
+   machine-read (it is the QR payload) and is printed only so a mis-scan can be
+   diagnosed without a lookup. */
+.container-label__code {
+  margin-top: 0.06in;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 6pt;
+  line-height: 1.2;
+  color: #444;
+  text-align: center;
+  word-break: break-all;
+}

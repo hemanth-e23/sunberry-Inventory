@@ -118,7 +118,13 @@ def _make_order(client, headers, *, count=8):
 
 
 def _start(client, headers, order):
-    client.post(f"/api/lot-receiving/orders/{order['id']}/release", headers=headers)
+    # Releasing now requires an arrival day — the plant's screen is organised by
+    # day, so an order released without one would sit outside every day view.
+    released = client.post(
+        f"/api/lot-receiving/orders/{order['id']}/release",
+        headers=headers, json={"expected_date": "2026-08-25"},
+    )
+    assert released.status_code == 200, released.text
     response = client.post(
         f"/api/lot-receiving/orders/{order['id']}/start-receiving",
         headers=headers,
@@ -142,7 +148,8 @@ class TestOrderApi:
         assert order["lines"][0]["product_name"] == "Mango Puree"
 
         released = client.post(
-            f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers
+            f"/api/lot-receiving/orders/{order['id']}/release",
+            headers=wh_headers, json={"expected_date": "2026-08-25"},
         )
         assert released.status_code == 200
         assert released.json()["status"] == "in_transit"
@@ -173,7 +180,8 @@ class TestOrderApi:
         assert summary["scanned_count"] == 0
         assert summary["count_unit"] == "drums"
         assert summary["source"] == "incoming_order"
-        assert summary["lot_code"].startswith("L")
+        # Built from the vendor's lot number, with a uniqueness marker.
+        assert "MG-API" in summary["lot_code"]
 
     def test_closing_short_without_a_reason_is_rejected(self, client, api_seed, wh_headers):
         order = _make_order(client, wh_headers)
@@ -646,7 +654,10 @@ class TestRemainingGates:
         writes the weight-per-unit that every derived pound comes from —
         desk work, and the gun holds the weakest credential in the building."""
         order = _make_order(client, wh_headers)
-        client.post(f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers)
+        client.post(
+            f"/api/lot-receiving/orders/{order['id']}/release",
+            headers=wh_headers, json={"expected_date": "2026-08-25"},
+        )
         response = client.post(
             f"/api/lot-receiving/orders/{order['id']}/start-receiving",
             headers=fk_headers, json={"line_id": order["lines"][0]["id"]},
@@ -704,7 +715,10 @@ class TestRemainingGates:
             }],
         })
         order = response.json()
-        client.post(f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers)
+        client.post(
+            f"/api/lot-receiving/orders/{order['id']}/release",
+            headers=wh_headers, json={"expected_date": "2026-08-25"},
+        )
         summary = client.post(
             f"/api/lot-receiving/orders/{order['id']}/start-receiving",
             headers=wh_headers, json={"line_id": order["lines"][0]["id"]},
@@ -762,7 +776,10 @@ class TestWeightUnitIsAskedNotAssumed:
                 "unit_label": "drum", "weight_per_unit": 200.0, "weight_unit": "kg",
             }],
         }).json()
-        client.post(f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers)
+        client.post(
+            f"/api/lot-receiving/orders/{order['id']}/release",
+            headers=wh_headers, json={"expected_date": "2026-08-25"},
+        )
 
         # The paperwork actually said pounds.
         summary = client.post(
@@ -851,7 +868,10 @@ class TestCalendarDatesSurviveTheRoundTrip:
                 "expected_count": 2, "unit_label": "drum", "weight_per_unit": 500.0,
             }],
         }).json()
-        client.post(f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers)
+        client.post(
+            f"/api/lot-receiving/orders/{order['id']}/release",
+            headers=wh_headers, json={"expected_date": "2026-08-25"},
+        )
         summary = client.post(
             f"/api/lot-receiving/orders/{order['id']}/start-receiving",
             headers=wh_headers, json={"line_id": order["lines"][0]["id"]},
@@ -951,3 +971,313 @@ class TestReprintIsAlwaysAvailable:
             f"/api/lot-receiving/sessions/{session['receipt_id']}", headers=wh_headers
         ).json()
         assert after["scanned_count"] == 4
+
+
+class TestSchedulingIsASeparateStep:
+    """Creating an order and committing it to a day are different moments.
+
+    Corporate raises it as soon as they have the PO; the arrival slot is agreed
+    with the carrier afterwards. So a draft with no date is a normal state, and
+    the date is required only when the order becomes something a plant is
+    expected to act on.
+    """
+
+    def _draft(self, client, headers):
+        return client.post("/api/lot-receiving/orders", headers=headers, json={
+            "vendor_id": VENDOR,
+            "lines": [{
+                "product_id": PRODUCT, "vendor_lot": "SCH-1", "bbd": BBD,
+                "expected_count": 40, "unit_label": "drum", "weight_per_unit": 500.0,
+            }],
+        }).json()
+
+    def test_a_draft_needs_no_date(self, client, api_seed, wh_headers):
+        order = self._draft(client, wh_headers)
+        assert order["status"] == "draft"
+        assert order["expected_date"] is None
+
+    def test_releasing_without_a_date_is_refused(self, client, api_seed, wh_headers):
+        """An order released with no day would sit outside every day view and be
+        found only by somebody who thought to look for it."""
+        order = self._draft(client, wh_headers)
+        response = client.post(
+            f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers, json={},
+        )
+        assert response.status_code == 400
+        assert "day" in response.text.lower()
+        assert client.get(
+            f"/api/lot-receiving/orders/{order['id']}", headers=wh_headers
+        ).json()["status"] == "draft"
+
+    def test_releasing_records_the_slot(self, client, api_seed, wh_headers):
+        order = self._draft(client, wh_headers)
+        released = client.post(
+            f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers,
+            json={"expected_date": "2026-08-27", "expected_time": "07:00 AM"},
+        ).json()
+        assert released["status"] == "in_transit"
+        assert released["expected_date"] == "2026-08-27"
+        assert released["expected_time"] == "07:00 AM"
+
+    def test_the_time_is_optional(self, client, api_seed, wh_headers):
+        """A carrier does not always quote one, and nothing computes with it."""
+        order = self._draft(client, wh_headers)
+        released = client.post(
+            f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers,
+            json={"expected_date": "2026-08-27"},
+        ).json()
+        assert released["status"] == "in_transit"
+        assert released["expected_time"] is None
+
+    def test_the_day_filter_selects_that_day(self, client, api_seed, wh_headers):
+        order = self._draft(client, wh_headers)
+        client.post(
+            f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers,
+            json={"expected_date": "2026-08-27"},
+        )
+        on_day = client.get(
+            "/api/lot-receiving/orders?date=2026-08-27", headers=wh_headers
+        ).json()
+        assert [o["order_number"] for o in on_day] == [order["order_number"]]
+
+        off_day = client.get(
+            "/api/lot-receiving/orders?date=2026-08-28", headers=wh_headers
+        ).json()
+        assert off_day == []
+
+    def test_drafts_appear_on_every_day(self, client, api_seed, wh_headers):
+        """A draft has no arrival day — that is what makes it a draft — so
+        filtering it out of a day view would hide corporate's own backlog from
+        them on every single day."""
+        draft = self._draft(client, wh_headers)
+        for day in ("2026-08-27", "2026-09-15", "2027-01-01"):
+            listed = client.get(
+                f"/api/lot-receiving/orders?date={day}", headers=wh_headers
+            ).json()
+            assert draft["order_number"] in [o["order_number"] for o in listed]
+
+    def test_a_released_order_leaves_the_draft_group(self, client, api_seed, wh_headers):
+        draft = self._draft(client, wh_headers)
+        client.post(
+            f"/api/lot-receiving/orders/{draft['id']}/release", headers=wh_headers,
+            json={"expected_date": "2026-08-27"},
+        )
+        elsewhere = client.get(
+            "/api/lot-receiving/orders?date=2026-09-01", headers=wh_headers
+        ).json()
+        assert elsewhere == []
+
+    def test_a_malformed_day_is_rejected(self, client, api_seed, wh_headers):
+        assert client.get(
+            "/api/lot-receiving/orders?date=27-08-2026", headers=wh_headers
+        ).status_code == 400
+
+    def test_releasing_twice_is_refused(self, client, api_seed, wh_headers):
+        order = self._draft(client, wh_headers)
+        body = {"expected_date": "2026-08-27"}
+        assert client.post(
+            f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers, json=body,
+        ).status_code == 200
+        assert client.post(
+            f"/api/lot-receiving/orders/{order['id']}/release", headers=wh_headers, json=body,
+        ).status_code == 409
+
+
+class TestClosingAnOrderClearsTheGun:
+    """Closing an order does not touch its receipts, so a session filtered only
+    on receipt status stayed on the gun forever with nothing left to scan."""
+
+    def _received(self, client, headers):
+        order = _make_order(client, headers, count=8)
+        session = _start(client, headers, order)
+        return order, session
+
+    def test_a_closed_order_leaves_the_session_list(self, client, api_seed, wh_headers, fk_headers):
+        order, _session = self._received(client, wh_headers)
+        assert len(client.get("/api/lot-receiving/sessions", headers=fk_headers).json()) == 1
+
+        client.post(
+            f"/api/lot-receiving/orders/{order['id']}/close",
+            headers=wh_headers, json={"reason": "truck was short"},
+        )
+        assert client.get("/api/lot-receiving/sessions", headers=fk_headers).json() == []
+
+    def test_a_cancelled_order_leaves_too(self, client, api_seed, wh_headers, fk_headers):
+        order, _session = self._received(client, wh_headers)
+        client.post(
+            f"/api/lot-receiving/orders/{order['id']}/cancel",
+            headers=wh_headers, json={"reason": "not coming"},
+        )
+        assert client.get("/api/lot-receiving/sessions", headers=fk_headers).json() == []
+
+    def test_an_open_order_stays(self, client, api_seed, wh_headers, fk_headers):
+        self._received(client, wh_headers)
+        assert len(client.get("/api/lot-receiving/sessions", headers=fk_headers).json()) == 1
+
+    def test_a_walk_in_is_unaffected(self, client, api_seed, wh_headers, fk_headers, db_session):
+        """A walk-in has no order, so its receipt status IS its lifecycle. The
+        order filter must not touch it."""
+        from app.enums import ReceiptStatus as RS
+        from app.models import Receipt
+        from datetime import datetime, timezone as tz
+
+        receipt = Receipt(
+            id="rcpt-walkin-gun", product_id=PRODUCT, category_id="cat-ing",
+            lot_number="WI-9", expiration_date=datetime(2027, 4, 1, tzinfo=tz.utc),
+            quantity=5000.0, unit="lbs", container_count=10, container_unit="drums",
+            weight_per_container=500.0, weight_unit="lbs", warehouse_id=WH,
+            status=RS.RECORDED, receipt_date=datetime(2026, 8, 20, tzinfo=tz.utc),
+        )
+        db_session.add(receipt)
+        db_session.commit()
+        client.post(
+            f"/api/lot-receiving/sessions/{receipt.id}/print-labels",
+            headers=wh_headers, json={"count": 10},
+        )
+        sessions = client.get("/api/lot-receiving/sessions", headers=fk_headers).json()
+        assert [s["source"] for s in sessions].count("walk_in") == 1
+
+    def test_a_scan_that_arrives_after_closing_is_still_recorded(
+        self, client, api_seed, wh_headers, fk_headers
+    ):
+        """The list stops ADVERTISING a closed session; it does not refuse the
+        scan. A queued offline scan draining after the order was closed is a drum
+        that physically exists on a rack — dropping it would lose real stock."""
+        order, session = self._received(client, wh_headers)
+        client.post(
+            f"/api/lot-receiving/orders/{order['id']}/close",
+            headers=wh_headers, json={"reason": "closed early"},
+        )
+        late = client.post(
+            f"/api/lot-receiving/sessions/{session['receipt_id']}/scan",
+            headers=fk_headers,
+            json={"lot_code": session["lot_code"], "storage_row_id": ROW_1,
+                  "idempotency_key": "late-after-close-1"},
+        )
+        assert late.status_code == 200
+        assert late.json()["status"] == "ok"
+        assert late.json()["session_scanned_count"] == 1
+
+
+class TestPalletisedMaterial:
+    """Bags and boxes arrive 40-70 to a wrapped pallet.
+
+    Nobody is going to destack one at the dock to sticker every bag, so
+    receiving scans ONE sticker on the pallet and tells the gun how many are
+    under it. Without that, 500 bags means 500 trigger-pulls.
+
+    The sticker is IDENTICAL either way — same lot, same code, same QR — with
+    one word different in the middle band so a person can see whether they hold
+    a bag or a pallet of them. A bag does not become different material by
+    coming off a pallet.
+    """
+
+    def _bagged(self, client, headers, *, count=500, per_pallet=50):
+        order = client.post("/api/lot-receiving/orders", headers=headers, json={
+            "vendor_id": VENDOR,
+            "lines": [{
+                "product_id": PRODUCT, "vendor_lot": "BAG-1", "bbd": BBD,
+                "expected_count": count, "unit_label": "bag",
+                "weight_per_unit": 25.0, "units_per_pallet": per_pallet,
+            }],
+        }).json()
+        return order, _start(client, headers, order)
+
+    def test_the_pallet_size_reaches_the_gun(self, client, api_seed, wh_headers):
+        order, session = self._bagged(client, wh_headers)
+        assert order["lines"][0]["units_per_pallet"] == 50
+        assert session["units_per_pallet"] == 50
+        assert session["count_unit"] == "bags"
+
+    def test_ten_scans_book_five_hundred_bags(self, client, api_seed, wh_headers, fk_headers):
+        """The whole point. One scan per pallet, not one per bag."""
+        _order, session = self._bagged(client, wh_headers)
+        for i in range(10):
+            r = client.post(
+                f"/api/lot-receiving/sessions/{session['receipt_id']}/scan",
+                headers=fk_headers,
+                json={"lot_code": session["lot_code"], "storage_row_id": ROW_1,
+                      "units": 50, "allow_overfill": True,
+                      "idempotency_key": f"pallet-{i:03d}"},
+            )
+            assert r.status_code == 200, r.text
+        assert r.json()["session_scanned_count"] == 500
+
+    def test_a_loose_bag_still_counts_as_one(self, client, api_seed, wh_headers, fk_headers):
+        """A broken pallet's bags scan one at a time — same sticker, no multiplier."""
+        _order, session = self._bagged(client, wh_headers)
+        client.post(
+            f"/api/lot-receiving/sessions/{session['receipt_id']}/scan",
+            headers=fk_headers,
+            json={"lot_code": session["lot_code"], "storage_row_id": ROW_1,
+                  "units": 50, "allow_overfill": True, "idempotency_key": "mix-pallet"},
+        )
+        one = client.post(
+            f"/api/lot-receiving/sessions/{session['receipt_id']}/scan",
+            headers=fk_headers,
+            json={"lot_code": session["lot_code"], "storage_row_id": ROW_1,
+                  "allow_overfill": True, "idempotency_key": "mix-single"},
+        )
+        assert one.json()["session_scanned_count"] == 51
+
+    def test_a_replayed_pallet_scan_books_fifty_once(self, client, api_seed, wh_headers, fk_headers):
+        """A multiplier makes a double-count 50x worse, so the idempotency key
+        matters more here than anywhere."""
+        _order, session = self._bagged(client, wh_headers)
+        for _ in range(3):
+            r = client.post(
+                f"/api/lot-receiving/sessions/{session['receipt_id']}/scan",
+                headers=fk_headers,
+                json={"lot_code": session["lot_code"], "storage_row_id": ROW_1,
+                      "units": 50, "allow_overfill": True,
+                      "idempotency_key": "replayed-pallet-1"},
+            )
+        assert r.json()["session_scanned_count"] == 50
+
+    def test_a_pallet_sticker_is_the_same_sticker(self, client, api_seed, wh_headers):
+        """Only the band differs. Same lot, same code, same QR — so scanning
+        either resolves to the same material."""
+        _order, session = self._bagged(client, wh_headers)
+        url = f"/api/lot-receiving/sessions/{session['receipt_id']}/print-labels"
+
+        pallets = client.post(url, headers=wh_headers,
+                              json={"count": 10, "scope": "pallet"}).json()
+        bags = client.post(url, headers=wh_headers,
+                           json={"count": 2, "scope": "unit"}).json()
+
+        assert pallets["scope"] == "pallet" and bags["scope"] == "unit"
+        assert pallets["labels"][0]["pack_scope"] == "pallet"
+        assert bags["labels"][0]["pack_scope"] == "unit"
+        # The identity is identical; only the printed band is not.
+        assert pallets["labels"][0]["lot_code"] == bags["labels"][0]["lot_code"]
+        assert pallets["labels"][0]["vendor_lot"] == bags["labels"][0]["vendor_lot"]
+        assert pallets["labels"][0]["bbd"] == bags["labels"][0]["bbd"]
+
+    def test_drums_have_no_pallet_size(self, client, api_seed, wh_headers):
+        """Individually stickered, so one scan is one drum and the gun never
+        shows a multiplier."""
+        order = _make_order(client, wh_headers)
+        session = _start(client, wh_headers, order)
+        assert session["units_per_pallet"] is None
+
+    def test_the_plant_can_correct_the_pallet_size(self, client, api_seed, wh_headers):
+        """The order said 50 to a pallet; the truck brought 40. A wrong number
+        here books the wrong count on every scan."""
+        order, _ = self._bagged(client, wh_headers, per_pallet=50)
+        # A second line so there is something still unstarted to correct.
+        order2 = client.post("/api/lot-receiving/orders", headers=wh_headers, json={
+            "vendor_id": VENDOR,
+            "lines": [{
+                "product_id": PRODUCT, "vendor_lot": "BAG-2", "bbd": BBD,
+                "expected_count": 400, "unit_label": "bag",
+                "weight_per_unit": 25.0, "units_per_pallet": 50,
+            }],
+        }).json()
+        client.post(f"/api/lot-receiving/orders/{order2['id']}/release",
+                    headers=wh_headers, json={"expected_date": "2026-08-25"})
+        summary = client.post(
+            f"/api/lot-receiving/orders/{order2['id']}/start-receiving",
+            headers=wh_headers,
+            json={"line_id": order2["lines"][0]["id"], "units_per_pallet": 40},
+        ).json()
+        assert summary["units_per_pallet"] == 40

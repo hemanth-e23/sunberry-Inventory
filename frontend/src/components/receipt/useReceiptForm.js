@@ -17,6 +17,16 @@ const defaultFormState = {
   quantity: "",
   quantityUnits: "",
   weightPerUnit: "",
+  // Blank for barrels; 50 for bags that arrive wrapped fifty to a pallet.
+  // Decides whether stickers print per pallet or per container.
+  unitsPerPallet: "",
+  // Palletised material is entered as FULL PALLETS + whatever is loose on top,
+  // because that is what a person sees on a truck. Two full pallets and a
+  // partial with thirty bags on it is 130 bags — neither 100 nor 150 — so a
+  // pallet count alone cannot express a real delivery. `quantity` is derived
+  // from these two and stays the container count underneath.
+  palletCount: "",
+  looseCount: "",
   // Pre-filled: pounds is the only unit this system stores. See
   // weightUnitOptions for why there is no longer a choice.
   weightUnits: "lbs",
@@ -114,6 +124,44 @@ export const unitOptions = [
   { value: "unit", label: "Unit" },
   { value: "units", label: "Units" },
 ];
+
+/**
+ * "How many ride one pallet" is a CONTAINER question, not a bags question.
+ *
+ * This was originally restricted to bags and boxes, on the reasoning that a
+ * drum IS the thing carried. That was wrong, and the warehouse's own data said
+ * so: four drums logged as sitting on two pallets. Drums ride pallets too, just
+ * two or four to a pallet instead of fifty.
+ *
+ * The cost of getting it wrong was silent. `_pallet_footprint` falls back to
+ * the unit count when this is unset, so a rack holding two pallets of drums
+ * reported four slots — double — and there was no way to correct it, because
+ * the footprint is derived and the figure it derives from was never collected.
+ *
+ * So it is asked for EVERY container now. The difference is only whether it
+ * must be answered:
+ *
+ *   REQUIRED for bags, bottles, cases, pails — always many to a pallet, and a
+ *   blank here misprints five hundred stickers instead of ten.
+ *
+ *   OPTIONAL for drums, barrels, totes — often genuinely one per slot, which is
+ *   what blank means. Gallons and litres are measures rather than containers,
+ *   and `pallets` is already the pallet, so those are skipped entirely.
+ */
+export const PALLETISED_UNITS = new Set(["bags", "bottles", "cases", "pails"]);
+
+// Containers where a pallet count is meaningless: measures, and the pallet itself.
+const NOT_A_CONTAINER = new Set(["gallons", "liters", "pallets"]);
+
+/** Must this be answered? Bags and boxes always ride pallets. */
+export const isPalletisedUnit = (unit) =>
+  PALLETISED_UNITS.has(String(unit || "").toLowerCase());
+
+/** Should we ask at all? Everything that is a physical container. */
+export const asksPerPallet = (unit) => {
+  const u = String(unit || "").toLowerCase();
+  return Boolean(u) && !NOT_A_CONTAINER.has(u);
+};
 
 /**
  * POUNDS, AND ONLY POUNDS.
@@ -320,18 +368,20 @@ const useReceiptForm = () => {
         const occupied = row.occupiedPallets || 0;
         const available = capacity > 0 ? Math.max(0, capacity - occupied) : null;
 
-        let canFit = true;
+        // Capacity is a planning hint, never a gate. Every branch below leaves
+        // the row selectable — a full or over-full row still gets picked, it
+        // just says so. Hiding it was worse than useless: the counter only ever
+        // increments, so a drifted row (ROW 1 sat at 501 against a capacity of
+        // 22) disappeared from the form permanently, and the entry that would
+        // have corrected it was the very thing being refused.
         let fitStatus = '';
         if (totalPalletsNeeded > 0 && available !== null) {
           if (available >= totalPalletsNeeded) {
             fitStatus = 'Can fit all';
-            canFit = true;
           } else if (available > 0) {
-            fitStatus = `Can fit ${available} of ${totalPalletsNeeded}`;
-            canFit = true;
+            fitStatus = `${available} of ${totalPalletsNeeded} within capacity`;
           } else {
-            fitStatus = 'No capacity';
-            canFit = false;
+            fitStatus = `Already at ${occupied} of ${capacity} — over capacity`;
           }
         }
 
@@ -343,15 +393,9 @@ const useReceiptForm = () => {
             : row.name,
           available: available,
           capacity: capacity,
-          canFit: canFit,
+          canFit: true,
           fitStatus: fitStatus,
         };
-      })
-      .filter(row => {
-        if (totalPalletsNeeded > 0 && row.available !== null && row.available === 0) {
-          return false;
-        }
-        return true;
       });
   }, [formData.location, formData.subLocation, formData.pallets, locations, subLocationMap]);
 
@@ -412,6 +456,25 @@ const useReceiptForm = () => {
 
       if (name === "quantity") {
         next.quantityTouched = true;
+      }
+
+      // Containers = full pallets x per-pallet + loose. Recomputed on every
+      // keystroke in any of the three, so `quantity` — the number every
+      // downstream reader uses — is never stale.
+      if (["palletCount", "looseCount", "unitsPerPallet", "quantityUnits"].includes(name)) {
+        const per = Number(next.unitsPerPallet) || 0;
+        if (isPalletisedUnit(next.quantityUnits) && per > 1) {
+          const full = Number(next.palletCount) || 0;
+          const loose = Number(next.looseCount) || 0;
+          next.quantity = String(full * per + loose);
+          next.quantityTouched = true;
+        } else if (name === "quantityUnits") {
+          // Switched to a container that is not palletised — the pallet inputs
+          // no longer mean anything, and leaving them would silently keep
+          // driving `quantity` from numbers nobody can see.
+          next.palletCount = "";
+          next.looseCount = "";
+        }
       }
 
       const quantityDriverFields = [
@@ -712,6 +775,68 @@ const useReceiptForm = () => {
         setFeedback({ type: "error", message: "Weight unit is required for raw material receipts." });
         return;
       }
+
+      // THE LOT KEY IS `SID.VENDOR.THEIRLOT.BBD`, and two of its four segments
+      // were optional here. Both failures are silent and both are expensive.
+      //
+      // No vendor: `build_lot_key` falls back to an empty segment, so two
+      // DIFFERENT suppliers each calling a lot "001" of the same product with
+      // the same best-by collapse into ONE lot — and every container of both
+      // wears the same sticker. A recall would then trace to the wrong vendor.
+      if (!formData.vendorId) {
+        setFeedback({
+          type: "error",
+          message: "Vendor is required — it is part of what makes this lot "
+            + "different from another supplier's lot with the same number.",
+        });
+        return;
+      }
+      // No best-by: `can_print_labels` refuses outright, so the receipt saves
+      // and the stickers cannot be printed. Better to be stopped here, at a
+      // keyboard, than at the printer with a pallet waiting.
+      if (!formData.expiration) {
+        setFeedback({
+          type: "error",
+          message: "Best-by date is required — stickers cannot be printed "
+            + "for a lot without one.",
+        });
+        return;
+      }
+      // The BOL is how a delivery is found again in the paperwork when
+      // somebody queries it months later.
+      if (!(formData.bol && formData.bol.trim())) {
+        setFeedback({
+          type: "error",
+          message: "BOL number is required.",
+        });
+        return;
+      }
+      // Only asked for containers that actually ride a pallet — see
+      // PALLETISED_UNITS. Required there rather than optional, because a blank
+      // silently prints one sticker per bag and reports the rack fifty times
+      // over. Loose bags are entered as 1.
+      if (isPalletisedUnit(formData.quantityUnits)) {
+        const per = Number(formData.unitsPerPallet);
+        if (!per || per < 1 || !Number.isInteger(per)) {
+          setFeedback({
+            type: "error",
+            message: `How many ${formData.quantityUnits} come on one pallet? `
+              + "Enter 1 if they arrive loose rather than wrapped.",
+          });
+          return;
+        }
+        // `quantity` is DERIVED here from full pallets plus loose, so neither
+        // input carries the browser's `required` — an empty entry would sail
+        // past it as a silent zero-container receipt.
+        if (!(Number(formData.quantity) > 0)) {
+          setFeedback({
+            type: "error",
+            message: `How many arrived? Enter the full pallets, the loose `
+              + `${formData.quantityUnits}, or both.`,
+          });
+          return;
+        }
+      }
     }
 
     if (formData.expiration) {
@@ -780,13 +905,22 @@ const useReceiptForm = () => {
           return;
         }
 
-        for (const alloc of rawMaterialRowAllocations) {
-          const palletsToAdd = Number(alloc.pallets);
-          const originalAvailable = alloc.available;
-          if (originalAvailable !== null && palletsToAdd > originalAvailable) {
+        // Capacity is deliberately NOT checked here. It is a planning hint, the
+        // warehouse decides what fits, and refusing an over-capacity row made a
+        // drifted counter permanent by blocking the correction.
+
+        // Containers per row, on the other hand, must add up — a placement
+        // counts units, and a wrong split puts real drums on the wrong rack.
+        // Only asked when several rows share the load; one row holds everything.
+        if (rawMaterialRowAllocations.length > 1 && Number(formData.quantity) > 0) {
+          const totalUnits = rawMaterialRowAllocations.reduce(
+            (sum, alloc) => sum + (Number(alloc.units) || 0), 0
+          );
+          if (totalUnits !== Number(formData.quantity)) {
+            const word = formData.quantityUnits || "units";
             setFeedback({
               type: "error",
-              message: `Row ${alloc.rowName} cannot accommodate ${palletsToAdd} pallets. Available: ${originalAvailable} pallets.`,
+              message: `The ${word} placed across the rows (${totalUnits}) must equal the total received (${formData.quantity}).`,
             });
             return;
           }
@@ -843,6 +977,12 @@ const useReceiptForm = () => {
       containerUnit: formData.quantityUnits || null,
       weightPerContainer: formData.weightPerUnit ? parseFloat(formData.weightPerUnit) : null,
       weightUnit: formData.weightUnits || null,
+      // Only sent when it means something. A 1 would claim "one bag per pallet",
+      // which is what a barrel already is, and would switch on pallet stickers
+      // for material that does not come on pallets.
+      unitsPerPallet: Number(formData.unitsPerPallet) > 1
+        ? parseInt(formData.unitsPerPallet, 10)
+        : null,
       weight: formData.weight,
       weightUnits: formData.weightUnits,
       brix: formData.brix,
@@ -858,6 +998,12 @@ const useReceiptForm = () => {
         ? rawMaterialRowAllocations.map(alloc => ({
             rowId: alloc.rowId,
             pallets: Number(alloc.pallets) || 0,
+            // How many containers sit on THIS row — what a placement counts.
+            // Pallets describe the footprint and cannot stand in for it: a row
+            // holding 4 pallets of drums says nothing about whether that is 40
+            // drums or 70. Left at 0 when a single row holds everything, where
+            // the backend takes the whole container count and is exact.
+            units: Number(alloc.units) || 0,
           }))
         : null,
       autoAssignSubLocation: isPackaging,
@@ -961,6 +1107,11 @@ const useReceiptForm = () => {
               count: loggedCount,
               unitLabel: result.receipt.containerUnit
                 || result.receipt.container_unit || 'unit',
+              // Carried so the print dialog can offer pallet stickers straight
+              // away for bags, rather than only ever the per-container run.
+              unitsPerPallet: result.receipt.unitsPerPallet
+                || result.receipt.units_per_pallet || null,
+              productName: result.receipt.productName || '',
             }
           : null,
       );

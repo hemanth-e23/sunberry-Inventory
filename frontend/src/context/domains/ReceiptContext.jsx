@@ -32,6 +32,7 @@ const mapReceipt = (rec, products, categories = []) => {
     containerCount: rec.container_count || null,
     containerUnit: rec.container_unit || null,
     weightPerContainer: rec.weight_per_container || null,
+    unitsPerPallet: rec.units_per_pallet || null,
     weightUnit: rec.weight_unit || null,
     lotNo: rec.lot_number || '',
     receiptDate: rec.receipt_date
@@ -295,6 +296,7 @@ export const ReceiptProvider = ({ children }) => {
       container_count: receipt.containerCount || null,
       container_unit: receipt.containerUnit || null,
       weight_per_container: receipt.weightPerContainer || null,
+      units_per_pallet: receipt.unitsPerPallet || null,
       weight_unit: receipt.weightUnit || null,
       lot_number: receipt.lotNo || null,
       receipt_date: receipt.receiptDate ? new Date(receipt.receiptDate).toISOString() : null,
@@ -374,6 +376,7 @@ export const ReceiptProvider = ({ children }) => {
         containerCount: response.data.container_count || null,
         containerUnit: response.data.container_unit || null,
         weightPerContainer: response.data.weight_per_container || null,
+        unitsPerPallet: response.data.units_per_pallet || null,
         weightUnit: response.data.weight_unit || null,
         lotNo: response.data.lot_number || '',
         receiptDate: response.data.receipt_date
@@ -530,6 +533,12 @@ export const ReceiptProvider = ({ children }) => {
       if (updates.weightPerContainer !== undefined)
         updateData.weight_per_container = updates.weightPerContainer ? Number(updates.weightPerContainer) : null;
       if (updates.weightUnit !== undefined) updateData.weight_unit = updates.weightUnit || null;
+      // Repairable too: somebody may only learn the pallet count later.
+      // A 1 is sent as null — one bag per pallet is what a barrel already is.
+      if (updates.unitsPerPallet !== undefined)
+        updateData.units_per_pallet = Number(updates.unitsPerPallet) > 1
+          ? parseInt(updates.unitsPerPallet, 10)
+          : null;
       // `status` is intentionally not sent here — the backend ignores it and
       // status changes go through dedicated endpoints (resubmitReceipt etc.).
 
@@ -540,7 +549,7 @@ export const ReceiptProvider = ({ children }) => {
             'casesPerPallet', 'fullPallets', 'partialCases', 'shift', 'lineNumber',
             'bol', 'purchaseOrder', 'vendorId', 'note', 'status',
             'quantityUnits', 'containerCount', 'containerUnit',
-            'weightPerContainer', 'weightUnit',
+            'weightPerContainer', 'weightUnit', 'unitsPerPallet',
           ].includes(key)
         ) {
           if (key === 'sid' || key === 'fccCode') return;
@@ -617,6 +626,21 @@ export const ReceiptProvider = ({ children }) => {
             approvedAt: response.data.receipt?.approved_at
               ? response.data.receipt.approved_at
               : null,
+            // APPROVAL IS WHEN THE LOT IS MINTED — `place_logged_receipt` runs
+            // here, resolves the lot and writes the placements. Patching only
+            // the status left the client believing the receipt still had no
+            // lot, so every screen that branches on it kept showing the
+            // pre-lot version: Pallet Tags rendered the legacy SID+lot barcode
+            // tag instead of the real sticker, and a hard refresh "fixed" it.
+            materialLotId:
+              response.data.receipt?.material_lot_id ?? r.materialLotId ?? null,
+            // Rewritten from the placements by `project_lot` in the same
+            // transaction, so the copy held here is stale the moment approval
+            // returns.
+            rawMaterialRowAllocations:
+              response.data.receipt?.raw_material_row_allocations
+              ?? r.rawMaterialRowAllocations
+              ?? null,
           };
         }),
       );

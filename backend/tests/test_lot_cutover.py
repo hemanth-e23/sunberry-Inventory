@@ -219,7 +219,10 @@ class TestOpeningBalance:
         assert result["derived_weight"] == 15500.0
         assert result["unit_label"] == "drum"
         assert result["needs_labels"] is True
-        assert result["lot_code"].startswith("L")
+        # The code is built FROM the vendor's lot number — one number on the
+        # drum, not two — with a marker on the end so two of a vendor's lots
+        # cannot be mistaken for each other.
+        assert "MG-2024-A" in result["lot_code"]
 
         lot = db_session.query(MaterialLot).filter(
             MaterialLot.id == result["material_lot_id"]

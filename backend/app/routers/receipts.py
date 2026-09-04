@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime
 import json
+import logging
 
 import uuid
 from app.database import get_db
@@ -18,7 +19,29 @@ from app.enums import ReceiptStatus, PalletStatus
 from app.services import receipt_service
 from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED, DEFAULT_CASES_PER_PALLET
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+def _warn_over_capacity(storage_row, current_occupied: float, pallets_to_add: float) -> None:
+    """Note an over-full row. Does NOT refuse it.
+
+    `pallet_capacity` is a planning hint, not a physical limit — rows routinely
+    take more than their nominal figure and the warehouse is the authority on
+    what fits. This used to raise HTTP 400, which turned the hint into a gate and
+    made the counter's own drift self-sealing: nothing ever decremented
+    `occupied_pallets`, so rows climbed past capacity (ROW 1 reached 501 against
+    a capacity of 22) and then refused every further receipt, including the
+    corrective ones. A row that has drifted must stay usable, because entering
+    what is really on it is the only way to fix the number.
+    """
+    capacity = storage_row.pallet_capacity or 0
+    if capacity > 0 and (current_occupied + pallets_to_add) > capacity:
+        logger.warning(
+            "Row %s over nominal capacity: %s occupied + %s incoming > %s",
+            storage_row.name, current_occupied, pallets_to_add, capacity,
+        )
 
 @router.get("/", response_model=List[ReceiptSchema])
 def get_receipts(
@@ -184,15 +207,8 @@ def create_receipt(
             if row_id and pallets_to_add > 0:
                 storage_row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
                 if storage_row:
-                    # Check capacity
                     current_occupied = storage_row.occupied_pallets or 0
-                    capacity = storage_row.pallet_capacity or 0
-                    if capacity > 0 and (current_occupied + pallets_to_add) > capacity:
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Adding {pallets_to_add} pallets to row {storage_row.name} would exceed capacity ({capacity}). Currently occupied: {current_occupied}"
-                        )
-                    
+                    _warn_over_capacity(storage_row, current_occupied, pallets_to_add)
                     # Add to existing occupancy (reserve capacity)
                     storage_row.occupied_pallets = current_occupied + pallets_to_add
                     # Set product_id if not already set
@@ -206,15 +222,8 @@ def create_receipt(
             if pallets_to_add > 0:
                 storage_row = db.query(StorageRow).filter(StorageRow.id == db_receipt.storage_row_id).first()
                 if storage_row:
-                    # Check capacity
                     current_occupied = storage_row.occupied_pallets or 0
-                    capacity = storage_row.pallet_capacity or 0
-                    if capacity > 0 and (current_occupied + pallets_to_add) > capacity:
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Adding {pallets_to_add} pallets would exceed row capacity ({capacity}). Currently occupied: {current_occupied}"
-                        )
-                    
+                    _warn_over_capacity(storage_row, current_occupied, pallets_to_add)
                     # Add to existing occupancy (reserve capacity)
                     storage_row.occupied_pallets = current_occupied + pallets_to_add
                     # Set product_id if not already set

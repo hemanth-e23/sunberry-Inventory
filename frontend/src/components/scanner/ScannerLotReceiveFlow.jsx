@@ -222,7 +222,9 @@ const SessionListView = () => {
               </div>
               <div className="sir-card-meta">
                 {session.vendor_lot ? `Lot ${session.vendor_lot}` : 'Lot unknown'}
-                {' · '}{session.lot_code}
+                {/* Vendor's number, then ours. Labelled, because unlabelled and
+                    adjacent the second one reads as a correction of the first. */}
+                {' · sticker '}{session.lot_code}
                 <br />
                 <strong>
                   {session.scanned_count} of {session.expected_count} {session.count_unit}
@@ -273,6 +275,15 @@ const SessionView = ({ receiptId }) => {
   const scanInFlight = useRef(false);
   const [rowFull, setRowFull] = useState(null);
   const [rowPicker, setRowPicker] = useState(false);
+  // HOW MANY UNITS ONE SCAN MEANS. 1 for drums and totes, which are stickered
+  // individually. For bags and boxes it defaults to what a pallet holds, so
+  // scanning the sticker on a wrapped pallet books all of them at once —
+  // otherwise receiving 500 bags means 500 trigger-pulls at the dock.
+  //
+  // A visible control rather than a prompt on every scan: a modal per scan
+  // would be unusable at gun speed, and it would steal focus from the input.
+  // The multiplier stays on screen so it can never be silently wrong.
+  const [perScan, setPerScan] = useState(1);
   const [rowQuery, setRowQuery] = useState('');
 
   const inputRef = useRef(null);
@@ -401,10 +412,18 @@ const SessionView = ({ receiptId }) => {
     () => myItems.filter((it) => it.state === 'failed').length,
     [myItems],
   );
-  const pendingNew = pendingItems.length;
+  // Counts UNITS, not queue items. One queued scan of a pallet sticker is 50
+  // bags, so counting items would show "2 of 500" after two pallets.
+  const unitsOf = (it) => Number(it.payload?.units) || 1;
+  const pendingNew = useMemo(
+    () => pendingItems.reduce((n, it) => n + unitsOf(it), 0),
+    [pendingItems],
+  );
   const pendingForRow = useMemo(() => {
     if (!row) return 0;
-    return pendingItems.filter((it) => it.payload?.storage_row_id === row.id).length;
+    return pendingItems
+      .filter((it) => it.payload?.storage_row_id === row.id)
+      .reduce((n, it) => n + unitsOf(it), 0);
   }, [pendingItems, row]);
 
   const expected = session?.expected_count || 0;
@@ -420,6 +439,10 @@ const SessionView = ({ receiptId }) => {
     return getReceivingSession(receiptId)
       .then((data) => {
         setSession(data);
+        // Palletised material starts on the pallet multiplier; individually
+        // stickered material stays at 1 and never shows the control.
+        setPerScan(data.units_per_pallet && data.units_per_pallet > 1
+          ? data.units_per_pallet : 1);
         setServerScanned(data.scanned_count || 0);
         const counts = {};
         (data.rows || []).forEach((b) => { counts[b.storage_row_id] = b.count; });
@@ -511,6 +534,7 @@ const SessionView = ({ receiptId }) => {
       return;
     }
     const payload = { lot_code: lotCode, storage_row_id: target.id };
+    if (perScan > 1) payload.units = perScan;
     if (allowOverfill) payload.allow_overfill = true;
     const item = send(receiptId, endpoint, payload, reuseKey);
     const entry = {
@@ -518,6 +542,7 @@ const SessionView = ({ receiptId }) => {
       lotCode,
       rowId: target.id,
       rowName: target.name,
+      units: perScan,
       state: 'pending',
       message: 'Queued',
     };
@@ -530,7 +555,7 @@ const SessionView = ({ receiptId }) => {
       // reconciled to rather than the live one.
       ...prev.filter((h) => h.key !== entry.key),
     ].slice(0, HISTORY_LIMIT));
-  }, [row, online, send, receiptId, endpoint, showError]);
+  }, [row, online, send, receiptId, endpoint, perScan, showError]);
 
   const handleScanSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
@@ -708,7 +733,7 @@ const SessionView = ({ receiptId }) => {
         <div className="sir-meta">
           <span>{session?.vendor_lot ? `Lot ${session.vendor_lot}` : 'Lot unknown'}</span>
           <span className="sir-meta-sep">·</span>
-          <span>{session?.lot_code}</span>
+          <span>sticker {session?.lot_code}</span>
           <span className="sir-meta-sep">·</span>
           <span>
             {session?.source === 'incoming_order' ? session.order_number : 'Walk-in'}
@@ -782,6 +807,33 @@ const SessionView = ({ receiptId }) => {
           </div>
         )}
 
+        {/* Shown ONLY for palletised material. Drums and totes are stickered
+            individually, so one scan is one drum and a multiplier would be a
+            way to get it wrong for no benefit. */}
+        {session?.units_per_pallet > 1 && (
+          <div className="sir-perscan">
+            <span className="sir-perscan-label">Each scan is</span>
+            <div className="sir-perscan-opts">
+              <button
+                type="button"
+                className={`sir-perscan-btn${perScan === session.units_per_pallet ? ' is-on' : ''}`}
+                onClick={() => setPerScan(session.units_per_pallet)}
+              >
+                <strong>{session.units_per_pallet}</strong>
+                <span>a pallet</span>
+              </button>
+              <button
+                type="button"
+                className={`sir-perscan-btn${perScan === 1 ? ' is-on' : ''}`}
+                onClick={() => setPerScan(1)}
+              >
+                <strong>1</strong>
+                <span>single {unit.replace(/s$/, '')}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         <form onSubmit={handleScanSubmit} className="sir-form">
           <input
             ref={inputRef}
@@ -848,7 +900,8 @@ const SessionView = ({ receiptId }) => {
                 {/* No serial to show — every sticker is identical. What a worker
                     can actually check against the pile is the running count. */}
                 <span className="sir-history-serial">
-                  +1{entry.count != null ? ` · ${entry.count} in rack` : ''}
+                  +{entry.units || 1}
+                  {entry.count != null ? ` · ${entry.count} in rack` : ''}
                 </span>
                 {entry.state !== 'ok' && entry.message && (
                   <span className="sir-history-msg">{entry.message}</span>

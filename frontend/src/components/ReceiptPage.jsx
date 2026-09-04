@@ -5,6 +5,7 @@ import ReceiptFormFields from "./receipt/ReceiptFormFields";
 import FinishedGoodPlacements from "./receipt/FinishedGoodPlacements";
 import ReceiptConfirmModal from "./receipt/ReceiptConfirmModal";
 import LotLabelPrint from "./ingredient/LotLabelPrint";
+import PrintStickersDialog from "./ingredient/PrintStickersDialog";
 import { useToast } from "../context/ToastContext";
 import { apiErrorMessage, printSessionLabels } from "../api/lotReceivingApi";
 import "./Shared.css";
@@ -89,6 +90,8 @@ const ReceiptPage = () => {
   const { addToast } = useToast();
   const [sheet, setSheet] = useState(null);
   const [printing, setPrinting] = useState(false);
+  // Open while the pallet-vs-container choice is being made.
+  const [asking, setAsking] = useState(false);
 
   /**
    * Resolve (or mint) this receipt's lot and pull down `count` identical
@@ -96,11 +99,12 @@ const ReceiptPage = () => {
    * identical sticker on the wrong material cannot be found later, because every
    * drum on the pile is wearing it.
    */
-  const handlePrintStickers = async () => {
+  const handlePrintStickers = async ({ count, scope }) => {
     if (!justLogged) return;
     setPrinting(true);
     try {
-      setSheet(await printSessionLabels(justLogged.receiptId, justLogged.count));
+      setSheet(await printSessionLabels(justLogged.receiptId, count, { scope }));
+      setAsking(false);
     } catch (error) {
       addToast(apiErrorMessage(error, 'Could not print stickers'), 'error');
     } finally {
@@ -236,18 +240,19 @@ const ReceiptPage = () => {
             {justLogged && (
               <div className="alert info" style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
                 <span>
-                  Print {justLogged.count} identical stickers for this lot — one
-                  for every {justLogged.unitLabel.replace(/s$/, '')}. They go on
-                  as they come off the truck, then a forklift user scans a rack
-                  and scans each one in.
+                  Stickers for this lot — one per wrapped pallet if it came
+                  palletised, otherwise one for every{' '}
+                  {justLogged.unitLabel.replace(/s$/, '')}. They go on as it comes
+                  off the truck, then a forklift user scans a rack and scans each
+                  one in.
                 </span>
                 <button
                   type="button"
                   className="primary-button"
-                  onClick={handlePrintStickers}
+                  onClick={() => setAsking(true)}
                   disabled={printing}
                 >
-                  {printing ? 'Preparing…' : `Print ${justLogged.count} stickers`}
+                  {printing ? 'Preparing…' : 'Print stickers'}
                 </button>
                 <button
                   type="button"
@@ -277,6 +282,19 @@ const ReceiptPage = () => {
             </div>
           </form>
         </section>
+
+        <PrintStickersDialog
+          open={asking && !!justLogged}
+          busy={printing}
+          lot={justLogged && {
+            productName: justLogged.productName,
+            unitLabel: (justLogged.unitLabel || 'unit').replace(/s$/, ''),
+            unitsPerPallet: justLogged.unitsPerPallet,
+            totalUnits: justLogged.count,
+          }}
+          onCancel={() => setAsking(false)}
+          onConfirm={handlePrintStickers}
+        />
 
         {sheet && <LotLabelPrint sheet={sheet} onDone={() => setSheet(null)} />}
 

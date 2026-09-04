@@ -108,6 +108,10 @@ export const buildEntriesForProduct = ({
         entries.push(makeEntry({
           key: `${receipt.id}::row-${a.rowId}`,
           receiptId: receipt.id,
+          // Counted lots move as WHOLE CONTAINERS off named racks, and their
+          // footprint is derived from the count — so the screens must not ask
+          // for a pallet figure the services then ignore.
+          isCounted: Boolean(receipt.materialLotId),
           rowId: a.rowId,
           sourceId: `row-${a.rowId}`,
           lotNumber: lot,
@@ -124,6 +128,22 @@ export const buildEntriesForProduct = ({
       continue;
     }
 
+    // A LOT-TRACKED receipt with no allocations was EMPTIED ON PURPOSE.
+    //
+    // `project_lot` writes the whole lot's picture onto the newest receipt and
+    // blanks the older ones, precisely so the same drums are not counted once
+    // per receipt. `storageRowId` still points at the row that receipt
+    // originally named, so falling through to the single-row branch below
+    // resurrects it as a phantom — the adjustment screen listed ROW 11 twice,
+    // once real (4 drums) and once stale (the old receipt's 2 pallets), and
+    // offered both for deduction against a rack holding four.
+    //
+    // No lot means legacy data, where `storageRowId` is still the only record
+    // of where it went, so that path stays.
+    if (receipt.materialLotId) {
+      continue;
+    }
+
     // 2) Single-row receipt
     if (receipt.storageRowId) {
       const info = findRowInfo(receipt.storageRowId, storageAreas, subLocationMap, locations);
@@ -133,6 +153,7 @@ export const buildEntriesForProduct = ({
       entries.push(makeEntry({
         key: `${receipt.id}::row-${receipt.storageRowId}`,
         receiptId: receipt.id,
+        isCounted: false,
         rowId: receipt.storageRowId,
         sourceId: `row-${receipt.storageRowId}`,
         lotNumber: lot,

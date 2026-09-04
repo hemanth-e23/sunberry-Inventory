@@ -7,6 +7,7 @@ import { useConfirm } from '../../context/ConfirmContext';
 import { formatCalendarDate } from '../../utils/labelPayload';
 import Modal from '../Modal';
 import LotLabelPrint from '../ingredient/LotLabelPrint';
+import PrintStickersDialog from '../ingredient/PrintStickersDialog';
 import {
   apiErrorMessage, countRow, createOpeningBalance, getCutoverStatus,
   listLotsOnHand, listUnlabelledLots, previewZeroOut, printLotLabels, runZeroOut,
@@ -75,6 +76,8 @@ const CountsTab = () => {
   const [busy, setBusy] = useState(false);
   const [showZeroOut, setShowZeroOut] = useState(false);
   const [sheet, setSheet] = useState(null);
+  // The lot whose print options are being chosen. Null when the dialog is shut.
+  const [asking, setAsking] = useState(null);
   const [lastEntry, setLastEntry] = useState(null);
   // 'add' -> opening balance (ADDITIVE). 'set' -> physical count (ABSOLUTE).
   //
@@ -232,10 +235,13 @@ const CountsTab = () => {
     }
   };
 
-  const printFor = async (lot) => {
+  const printFor = async ({ count, scope }) => {
+    const lot = asking;
+    if (!lot) return;
     setBusy(true);
     try {
-      setSheet(await printLotLabels(lot.material_lot_id, lot.full_units + lot.open_units));
+      setSheet(await printLotLabels(lot.material_lot_id, count, { scope }));
+      setAsking(null);
       await load();
     } catch (error) {
       addToast(apiErrorMessage(error, 'Could not print stickers'), 'error');
@@ -553,10 +559,10 @@ const CountsTab = () => {
                 <button
                   type="button"
                   className="secondary-button"
-                  onClick={() => printFor(lot)}
+                  onClick={() => setAsking(lot)}
                   disabled={busy || !!lot.blocked_reason}
                 >
-                  Print {lot.full_units + lot.open_units}
+                  Print
                 </button>
               </div>
             ))}
@@ -622,6 +628,20 @@ const CountsTab = () => {
           </div>
         )}
       </Modal>
+
+      <PrintStickersDialog
+        open={!!asking}
+        busy={busy}
+        lot={asking && {
+          lotCode: asking.lot_code,
+          productName: asking.product_name,
+          unitLabel: asking.unit_label,
+          unitsPerPallet: asking.units_per_pallet,
+          totalUnits: (asking.full_units || 0) + (asking.open_units || 0),
+        }}
+        onCancel={() => setAsking(null)}
+        onConfirm={printFor}
+      />
 
       {sheet && <LotLabelPrint sheet={sheet} onDone={() => setSheet(null)} />}
     </div>

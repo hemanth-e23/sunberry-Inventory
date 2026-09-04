@@ -848,3 +848,55 @@
   color: #9ca3af;
   line-height: 1.4;
 }
+
+/* ── The per-scan multiplier ────────────────────────────────────────────────
+   Bags and boxes arrive 40-70 to a wrapped pallet and nobody destacks one at
+   the dock, so scanning the pallet's sticker books all of them at once. The
+   multiplier is a permanent on-screen control rather than a prompt per scan:
+   a modal at gun speed is unusable and would steal focus from the input, and a
+   silent multiplier is a way to book 500 bags by accident. Sized for gloves. */
+.sir-perscan {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.55rem 0;
+  padding: 0.5rem 0.7rem;
+  background: #fffbeb;
+  border: 2px solid #fde68a;
+  border-radius: 12px;
+}
+
+.sir-perscan-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #92400e;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.sir-perscan-opts { display: flex; gap: 0.4rem; flex: 1; }
+
+.sir-perscan-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  flex: 1;
+  padding: 0.45rem 0.5rem;
+  background: white;
+  border: 2px solid #e5e7eb;
+  border-radius: 10px;
+  cursor: pointer;
+  box-shadow: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.sir-perscan-btn::before { display: none; }
+.sir-perscan-btn:hover { transform: none; box-shadow: none; }
+
+.sir-perscan-btn strong { font-size: 1.35rem; font-weight: 800; color: #111; line-height: 1.1; }
+.sir-perscan-btn span { font-size: 0.72rem; color: #6b7280; }
+
+.sir-perscan-btn.is-on { border-color: #b45309; background: #fffbeb; }
+.sir-perscan-btn.is-on strong { color: #b45309; }

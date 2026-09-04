@@ -378,9 +378,19 @@ def lots_on_hand(
             "lot_unknown": bool(lot.lot_unknown),
             "bbd": lot.bbd_current,
             "unit_label": lot.unit_label,
+            # Lets the print dialog offer pallet stickers. NULL for barrels,
+            # where the container is the thing handled and there is only one
+            # sensible answer.
+            "units_per_pallet": lot.units_per_pallet,
             "full_units": on_hand["full_units"],
             "open_units": on_hand["open_units"],
             "row_count": on_hand["row_count"],
+            # Quarantine, at both granularities. Without these a partial hold is
+            # invisible on every screen that lists lots, and "40 drums" reads as
+            # forty available when eight of them are under a QA hold.
+            "held_units": on_hand["held_units"],
+            "is_held": bool(lot.is_held),
+            "hold_reason": lot.hold_reason,
             "needs_review": bool(lot.needs_review),
             # Why the sticker cannot be printed yet, if it cannot. Surfaced on
             # the list so it is answered at a desk rather than discovered at the

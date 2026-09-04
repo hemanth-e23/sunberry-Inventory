@@ -17,6 +17,7 @@ was demonstrably wrong before:
    derived, so a second writer editing it is refused rather than silently
    reverted by the next projection.
 """
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -37,6 +38,7 @@ from app.models import (
     Warehouse,
 )
 from app.services import lot_placement_service as lps
+from app.utils.calendar_dates import calendar_day
 from app.services import row_allocation
 
 WH = "wh-lot-1"
@@ -193,15 +195,59 @@ class TestLotIdentity:
         assert again.weight_per_unit == 500.0
         assert again.needs_review is False
 
-    def test_lot_codes_are_unique_and_carry_nothing(self, db_session, lot_seed):
-        """The QR payload is an opaque pointer, so nothing printed can go stale."""
-        codes = {
-            _lot(db_session, lot_number=f"LOT-{i}").lot_code for i in range(5)
-        }
-        assert len(codes) == 5
-        for code in codes:
-            assert code.startswith("L")
-            assert PRODUCT not in code and VENDOR_A not in code
+    def test_the_code_is_the_whole_natural_key(self, db_session, lot_seed):
+        """NO MARKER, NO COUNTER, NOTHING INVENTED.
+
+        Every segment is a fact about the material, and the four together are
+        unique by construction — which is why a marker was never necessary.
+        """
+        lot = _lot(db_session, lot_number="LOT001234")
+        assert "LOT001234" in lot.lot_code          # theirs
+        assert VENDOR_A.upper() in lot.lot_code     # whose
+        assert "20270115" in lot.lot_code           # best-by
+        # No invented segment on the end.
+        assert not re.search(r"-\d{2}$", lot.lot_code)
+
+    def test_two_vendors_sharing_a_lot_number_differ_by_vendor(self, db_session, lot_seed):
+        a = _lot(db_session, vendor=VENDOR_A, lot_number="001")
+        b = _lot(db_session, vendor=VENDOR_B, lot_number="001")
+        assert a.lot_code != b.lot_code
+        assert a.id != b.id
+
+    def test_one_vendor_reusing_a_number_differs_by_bbd(self, db_session, lot_seed):
+        """Vendors restart sequences. Different best-by, different material."""
+        a = _lot(db_session, lot_number="001", bbd=BBD)
+        b = _lot(db_session, lot_number="001", bbd=LATER_BBD)
+        assert a.lot_code != b.lot_code
+
+    def test_the_same_four_facts_are_the_SAME_lot(self, db_session, lot_seed):
+        """Not a collision — the match is the point. A second truck of the same
+        vendor lot shares the sticker, the BBD and the recall trace."""
+        assert _lot(db_session).lot_code == _lot(db_session).lot_code
+
+    def test_nothing_is_truncated(self, db_session, lot_seed):
+        """Length stopped mattering: nothing reads the code, and a scanner does
+        not care. Truncation was the last thing that could make two lots look
+        alike."""
+        long_lot = "VERYLONGVENDORLOTNUMBER123456789"
+        a = _lot(db_session, lot_number=long_lot + "A")
+        b = _lot(db_session, lot_number=long_lot + "B")
+        assert long_lot + "A" in a.lot_code
+        assert long_lot + "B" in b.lot_code
+        assert a.lot_code != b.lot_code
+
+    def test_the_code_never_contains_the_qr_delimiter(self, db_session, lot_seed):
+        """The payload is `SB2|code|lot|bbd` and does not escape, so a pipe in
+        the code would produce a label nothing can parse."""
+        lot = _lot(db_session, lot_number="lot|001234/A")
+        assert "|" in "SB2|x"  # sanity: the delimiter is what we think it is
+        assert "|" not in lot.lot_code
+
+    def test_a_product_with_no_sid_falls_back_to_its_id(self, db_session, lot_seed):
+        """29 of 113 products have no SID. The product segment is never empty."""
+        lot = _lot(db_session, lot_number="NOSID-1")
+        assert "NOSID-1" in lot.lot_code
+        assert lot.lot_code.split(".")[0]
 
 
 # ---------------------------------------------------------------------------
@@ -819,3 +865,95 @@ class TestPoundsAreTheOnlyStoredUnit:
             weight_per_unit=500.0, weight_unit="", warehouse_id=WH,
         )
         assert lot.weight_unit == "lbs"
+
+
+class TestTheBbdInTheKeyIsACalendarDay:
+    """The same material must produce the SAME key however it reaches us.
+
+    A BBD is stored as midnight UTC, but Postgres returns a timestamptz in the
+    SESSION timezone — America/Chicago here — so a best-by of 2027-06-01 comes
+    back as `2027-05-31 19:00:00-05`. Taking `.date()` on that gives MAY 31.
+
+    The two entry paths sourced it differently:
+        walk-in / incoming order -> loaded from the DB   -> 2027-05-31
+        opening balance          -> parsed from the form -> 2027-06-01
+
+    Two keys for one lot, so a second delivery would not match the first: two
+    lots, two sticker designs, split stock, and nothing afterwards to show the
+    pile on the rack had ever been one thing. It is the worst place in this
+    system for a silent day's drift, because the day IS part of the identity.
+    """
+
+    def test_the_same_instant_gives_the_same_day(self, db_session, lot_seed):
+        from datetime import timedelta
+
+        from_form = datetime(2027, 6, 1, tzinfo=timezone.utc)
+        from_db = datetime(2027, 5, 31, 19, tzinfo=timezone(timedelta(hours=-5)))
+        assert from_form == from_db                        # the same moment
+        assert calendar_day(from_form) == "2027-06-01"
+        assert calendar_day(from_db) == "2027-06-01"
+
+    def test_a_naive_datetime_is_read_as_utc(self, db_session, lot_seed):
+        """Everything that reaches here writes midnight UTC, so that is what a
+        missing tzinfo means."""
+        assert calendar_day(datetime(2027, 6, 1)) == "2027-06-01"
+
+    def test_the_two_entry_paths_resolve_to_ONE_lot(self, db_session, lot_seed):
+        """The bug in its real shape: one delivery entered through both paths
+        must not become two lots."""
+        from datetime import timedelta
+
+        as_form = lps.find_or_create_lot(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR_A,
+            vendor_lot_number="TZ-1", bbd=datetime(2027, 6, 1, tzinfo=timezone.utc),
+            unit_label="drum", weight_per_unit=500.0, weight_unit="lbs", warehouse_id=WH,
+        )
+        as_db = lps.find_or_create_lot(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR_A,
+            vendor_lot_number="TZ-1",
+            bbd=datetime(2027, 5, 31, 19, tzinfo=timezone(timedelta(hours=-5))),
+            unit_label="drum", weight_per_unit=500.0, weight_unit="lbs", warehouse_id=WH,
+        )
+        assert as_form.id == as_db.id
+        assert as_form.lot_code == as_db.lot_code
+
+    def test_the_printed_code_carries_the_day_that_was_typed(self, db_session, lot_seed):
+        from datetime import timedelta
+
+        lot = lps.find_or_create_lot(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR_A,
+            vendor_lot_number="TZ-2",
+            bbd=datetime(2027, 5, 31, 19, tzinfo=timezone(timedelta(hours=-5))),
+            unit_label="drum", weight_per_unit=500.0, weight_unit="lbs", warehouse_id=WH,
+        )
+        assert lot.lot_code.endswith("20270601")
+        assert "20270531" not in lot.lot_code
+
+    def test_a_genuinely_different_bbd_still_separates(self, db_session, lot_seed):
+        """The fix must not collapse two real dates into one."""
+        a = _lot(db_session, lot_number="TZ-3", bbd=datetime(2027, 6, 1, tzinfo=timezone.utc))
+        b = _lot(db_session, lot_number="TZ-3", bbd=datetime(2027, 6, 2, tzinfo=timezone.utc))
+        assert a.id != b.id
+
+    def test_a_bbd_that_survives_a_database_round_trip_still_matches(
+        self, db_session, lot_seed
+    ):
+        """The end-to-end version: create a lot, let Postgres hand the date back
+        in the session timezone, and resolve the same material again."""
+        first = lps.find_or_create_lot(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR_A,
+            vendor_lot_number="TZ-4", bbd=datetime(2027, 6, 1, tzinfo=timezone.utc),
+            unit_label="drum", weight_per_unit=500.0, weight_unit="lbs", warehouse_id=WH,
+        )
+        db_session.commit()
+        db_session.expire_all()
+
+        reloaded = db_session.query(MaterialLot).filter(
+            MaterialLot.id == first.id
+        ).first()
+        again = lps.find_or_create_lot(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR_A,
+            vendor_lot_number="TZ-4", bbd=reloaded.bbd_original,   # straight from the DB
+            unit_label="drum", weight_per_unit=500.0, weight_unit="lbs", warehouse_id=WH,
+        )
+        assert again.id == first.id

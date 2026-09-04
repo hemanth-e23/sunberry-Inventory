@@ -50,7 +50,9 @@ from app.enums import (
     ReceiptStatus,
 )
 from app.exceptions import ConflictError, NotFoundError, ValidationError
+from app.constants import CATEGORY_FINISHED
 from app.models import (
+    Category,
     IngredientIntake,
     IntakeLot,
     LotPlacement,
@@ -88,7 +90,9 @@ def unit_word(lot: Optional[MaterialLot], count: int = 2) -> str:
 
 # ─── lot resolution ───────────────────────────────────────────────────────────
 
-def ensure_lot_for_receipt(db: Session, receipt: Receipt, *, user_id=None) -> MaterialLot:
+def ensure_lot_for_receipt(
+    db: Session, receipt: Receipt, *, user_id=None, units_per_pallet=None
+) -> MaterialLot:
     """Resolve (or mint) the material lot this receipt's paperwork describes.
 
     Called by the print-stickers button on BOTH paths. Idempotent: a receipt
@@ -104,6 +108,15 @@ def ensure_lot_for_receipt(db: Session, receipt: Receipt, *, user_id=None) -> Ma
     if receipt.material_lot_id:
         lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
         if lot:
+            # A packing fact the lot may not have had when it was minted — the
+            # receipt can be approved (which mints the lot) before anybody fills
+            # in how many bags ride a pallet. Filled when missing, NEVER
+            # overwritten: pallets already received were counted under the old
+            # figure, and restating it would restate their footprint too. Same
+            # rule `find_or_create_lot` applies on the second-truck path.
+            if lot.units_per_pallet is None and units_per_pallet:
+                lot.units_per_pallet = int(units_per_pallet)
+                db.flush()
             return lot
 
     if not receipt.product_id:
@@ -120,9 +133,102 @@ def ensure_lot_for_receipt(db: Session, receipt: Receipt, *, user_id=None) -> Ma
         weight_unit=receipt.weight_unit,
         warehouse_id=receipt.warehouse_id,
         lot_unknown=not bool(receipt.lot_number),
+        units_per_pallet=units_per_pallet,
     )
     receipt.material_lot_id = lot.id
     db.flush()
+    return lot
+
+
+def logged_rows(receipt: Receipt) -> list:
+    """`(row_id, units)` for what the Log Receipt form typed. Units, not pallets.
+
+    The form has always sent PALLETS per row; units per row is new, and older
+    receipts do not carry it. Three cases, in order:
+
+      * any row states units -> use the stated ones, ignore rows stating none
+      * exactly one row and no units -> every container is on that row, so
+        `container_count` is exact rather than a guess
+      * several rows and none state units -> place NOTHING
+
+    That last case looks unhelpful and is the honest answer. Splitting 40 drums
+    across three rows by their pallet share invents a per-rack number nobody
+    counted, and it would be indistinguishable afterwards from one somebody did.
+    Leaving the material unplaced is visible and fixable; a fabricated placement
+    is neither.
+    """
+    total = int(float(receipt.container_count or 0))
+    allocs = receipt.raw_material_row_allocations
+
+    if isinstance(allocs, list) and allocs:
+        typed = [
+            (a.get("rowId"), int(float(a.get("units") or 0)))
+            for a in allocs
+            if isinstance(a, dict) and a.get("rowId")
+        ]
+        stated = [(rid, units) for rid, units in typed if units > 0]
+        if stated:
+            return stated
+        if len(typed) == 1 and total > 0:
+            return [(typed[0][0], total)]
+        return []
+
+    if receipt.storage_row_id and total > 0:
+        return [(receipt.storage_row_id, total)]
+    return []
+
+
+def place_logged_receipt(db: Session, receipt: Receipt, *, actor_id=None):
+    """Record WHERE a logged receipt's material physically sits.
+
+    Route 1 of the three ways material enters. Somebody with a clipboard types
+    what is ALREADY on the racks — product, vendor lot, BBD, how many drums, and
+    which rows — and this turns the rows they typed into placements. Without it
+    the system knows the lot exists and prints correct stickers for it, but
+    picking, staging and the row cards cannot see where the drums are.
+
+    Runs at APPROVAL rather than at save: entering a receipt is a claim, and
+    approving it is the confirmation that the claim is true.
+
+    ADDITIVE, never absolute. `set_count` is the wrong primitive here despite the
+    form stating a total, because the total is this DELIVERY's and not the
+    RACK's: a second truck of the same vendor lot onto the same row has to make
+    it 80 drums, not overwrite 40 with 40. A per-(receipt, row) idempotency key
+    is what makes a replay safe instead.
+    """
+    if receipt is None or not receipt.product_id:
+        return None
+
+    # Finished goods locate themselves through pallet licences and their own
+    # allocation plan. They have no lot and must not be given one here.
+    category = (
+        db.query(Category).filter(Category.id == receipt.category_id).first()
+        if receipt.category_id
+        else None
+    )
+    if category and category.type == CATEGORY_FINISHED:
+        return None
+
+    rows = logged_rows(receipt)
+    if not rows:
+        return None
+
+    lot = ensure_lot_for_receipt(
+        db, receipt, user_id=actor_id, units_per_pallet=receipt.units_per_pallet
+    )
+    for row_id, units in rows:
+        lps.apply_delta(
+            db,
+            lot,
+            row_id,
+            event_type=lps.EVENT_RECEIVED,
+            full_units_delta=units,
+            actor_id=actor_id,
+            ref_type="receipt",
+            ref_id=receipt.id,
+            reason="Logged receipt",
+            idempotency_key=f"logged:{receipt.id}:{row_id}",
+        )
     return lot
 
 
@@ -477,7 +583,9 @@ def _scan_payload(
 
 # ─── labels ───────────────────────────────────────────────────────────────────
 
-def label_sheet_for_lot(db: Session, lot: MaterialLot, count: int, *, receipt=None) -> dict:
+def label_sheet_for_lot(
+    db: Session, lot: MaterialLot, count: int, *, receipt=None, scope: str = "unit"
+) -> dict:
     """`count` IDENTICAL stickers for one lot.
 
     There is no per-sticker identity, so there is no serial, no "17 of 80", and
@@ -516,6 +624,18 @@ def label_sheet_for_lot(db: Session, lot: MaterialLot, count: int, *, receipt=No
         "net_weight": lot.weight_per_unit,
         "weight_unit": lot.weight_unit,
         "unit_label": lot.unit_label,
+        # 'unit' or 'pallet'. THE SAME STICKER either way — same lot, same code,
+        # same QR — with one word different in the middle band, so a person can
+        # see at a glance whether they are holding a bag or a wrapped pallet of
+        # them. Scanning either resolves to the same lot, because a bag does not
+        # become different material by coming off a pallet.
+        #
+        # The pallet sticker deliberately prints NO COUNT. If it said "50 BAGS"
+        # it would start lying the moment somebody took one, and nobody
+        # re-labels a pallet per bag. The count lives in lot_placements, where
+        # it can change.
+        "pack_scope": scope,
+        "units_per_pallet": lot.units_per_pallet,
         "receipt_date": receipt.receipt_date if receipt else None,
     }
 
@@ -524,6 +644,7 @@ def label_sheet_for_lot(db: Session, lot: MaterialLot, count: int, *, receipt=No
     return {
         "lot_code": lot.lot_code,
         "count": int(count),
+        "scope": scope,
         "labels": [dict(label) for _ in range(int(count))],
     }
 
@@ -601,16 +722,49 @@ def create_incoming_order(db: Session, payload: dict, *, user_id: str, warehouse
             brix=line.get("brix"),
             net_weight_per_container=line.get("weight_per_unit"),
             weight_unit=line.get("weight_unit"),
+            units_per_pallet=(
+                int(line["units_per_pallet"]) if line.get("units_per_pallet") else None
+            ),
         ))
     order.expected_count = total
     db.flush()
     return order
 
 
-def release_order(db: Session, order: IngredientIntake, *, user_id: str):
-    """Draft -> in transit. Corporate says it has left."""
+def release_order(
+    db: Session,
+    order: IngredientIntake,
+    *,
+    user_id: str,
+    expected_date=None,
+    expected_time: str = None,
+):
+    """Draft -> in transit, WITH an arrival slot.
+
+    Releasing is a separate step from creating on purpose. Corporate raises the
+    order as soon as they have the PO, but the arrival slot is agreed with the
+    carrier afterwards — so a draft with no date is a normal state, and the date
+    is required only at the moment the order becomes something a plant is
+    expected to act on.
+
+    The date is REQUIRED here because the plant's screen is organised by day. An
+    order released without one would sit outside every day view and be found only
+    by someone who thought to look for it.
+    """
     if order.status != IncomingOrderStatus.DRAFT.value:
         raise ConflictError(f"This order is {order.status}, so it cannot be released again")
+
+    if expected_date is not None:
+        order.expected_date = expected_date
+    if expected_time is not None:
+        order.expected_time = (expected_time or "").strip() or None
+
+    if not order.expected_date:
+        raise ValidationError(
+            "Pick the day this shipment reaches the warehouse before releasing it — "
+            "the plant's incoming screen is organised by day."
+        )
+
     order.status = IncomingOrderStatus.IN_TRANSIT.value
     order.released_at = datetime.now(timezone.utc)
     order.released_by = user_id
@@ -705,11 +859,32 @@ def start_receiving(
             return existing   # resuming, not restarting
 
     overrides = overrides or {}
+    vendor_id = overrides.get("vendor_id") or line.vendor_id or order.vendor_id
     vendor_lot = overrides.get("vendor_lot", line.vendor_lot)
     bbd = overrides.get("bbd", line.bbd)
     weight_per_unit = overrides.get("weight_per_unit", line.net_weight_per_container)
     weight_unit = overrides.get("weight_unit", line.weight_unit)
+    units_per_pallet = overrides.get("units_per_pallet", line.units_per_pallet)
     expected = int(overrides.get("expected_count", line.expected_count) or 0)
+
+    # THE VENDOR GATE, here rather than at order creation.
+    #
+    # Corporate raises orders before every detail is known and that is fine —
+    # an order creates no lot, so nothing can collide. This line is where the
+    # lot is minted, and the person running it is holding the driver's BOL.
+    #
+    # Enforced in the SERVICE rather than only in the form because this failure
+    # is silent: `can_print_labels` refuses a lot with no vendor lot number or
+    # no best-by, so those two announce themselves at the printer. A missing
+    # vendor announces nothing — `build_lot_key` just writes an empty segment,
+    # and two suppliers' "LOT001" of the same product with the same best-by
+    # quietly become one lot wearing one sticker.
+    if not vendor_id:
+        raise ValidationError(
+            "This delivery has no vendor. It is part of what tells this lot "
+            "apart from another supplier's lot with the same number, so it has "
+            "to be set before anything can be received against it."
+        )
 
     receipt = Receipt(
         id=_mint_id("rcpt"),
@@ -727,7 +902,7 @@ def start_receiving(
         container_unit=line.container_type,
         weight_per_container=weight_per_unit,
         weight_unit=weight_unit,
-        vendor_id=line.vendor_id or order.vendor_id,
+        vendor_id=vendor_id,
         bol=overrides.get("bol", order.bol),
         purchase_order=order.purchase_order,
         warehouse_id=order.warehouse_id,
@@ -739,7 +914,9 @@ def start_receiving(
     db.add(receipt)
     db.flush()
 
-    lot = ensure_lot_for_receipt(db, receipt, user_id=user_id)
+    lot = ensure_lot_for_receipt(
+        db, receipt, user_id=user_id, units_per_pallet=units_per_pallet
+    )
 
     line.receipt_id = receipt.id
     line.material_lot_id = lot.id
@@ -752,6 +929,8 @@ def start_receiving(
         line.net_weight_per_container = weight_per_unit
     if weight_unit != line.weight_unit:
         line.weight_unit = weight_unit
+    if units_per_pallet != line.units_per_pallet:
+        line.units_per_pallet = units_per_pallet
 
     if order.status == IncomingOrderStatus.IN_TRANSIT.value:
         order.status = IncomingOrderStatus.RECEIVING.value
@@ -769,17 +948,41 @@ def open_sessions(db: Session, *, warehouse_id: Optional[str] = None, limit: int
     is material to scan in. Splitting this into two screens would make them
     choose the right one before they can do the job.
 
-    A session is open while its receipt is still `recorded` or `reviewed` and its
-    lot is resolved. Deliberately NOT filtered on "scanned < expected": over-
-    receiving is legal, and hiding a session the moment it hits the paperwork
-    count would strand the 81st drum of an expected 80.
+    A session is open while its receipt is still `recorded` or `reviewed`, its lot
+    is resolved, AND — if it came from an incoming order — that order is still
+    open. Closing an order does not touch its receipts, so without the second
+    half a closed truck stayed on the gun forever with nothing left to scan.
+
+    Deliberately NOT filtered on "scanned < expected": over-receiving is legal,
+    and hiding a session the moment it hits the paperwork count would strand the
+    81st drum of an expected 80.
+
+    A walk-in has no order, so its receipt status IS its lifecycle — the NOT
+    EXISTS below leaves it alone.
     """
+    # Receipts belonging to an order that is finished. A closed or cancelled
+    # order has nothing left to receive against it.
+    closed_order = (
+        db.query(IntakeLot.id)
+        .join(IngredientIntake, IngredientIntake.id == IntakeLot.intake_id)
+        .filter(
+            IntakeLot.receipt_id == Receipt.id,
+            IngredientIntake.status.in_((
+                IncomingOrderStatus.RECEIVED.value,
+                IncomingOrderStatus.CLOSED_SHORT.value,
+                IncomingOrderStatus.CANCELLED.value,
+            )),
+        )
+        .exists()
+    )
+
     query = (
         db.query(Receipt)
         .filter(
             Receipt.material_lot_id.isnot(None),
             Receipt.is_deleted == False,  # noqa: E712
             Receipt.status.in_((ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED)),
+            ~closed_order,
         )
     )
     if warehouse_id:
@@ -839,6 +1042,10 @@ def receiving_summary(db: Session, receipt: Receipt) -> dict:
         "scanned_count": counts["total"],
         "difference": counts["total"] - expected,
         "weight_per_unit": lot.weight_per_unit if lot else receipt.weight_per_container,
+        # NULL for drums and totes, so the gun stays one-scan-one-unit for them.
+        # Set for bags and boxes, and it is the prefill for "how many are under
+        # this pallet sticker?".
+        "units_per_pallet": lot.units_per_pallet if lot else None,
         "derived_weight": round(
             counts["total"] * float(lot.weight_per_unit or 0), 3
         ) if lot else None,

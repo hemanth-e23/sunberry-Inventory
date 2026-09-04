@@ -33,6 +33,14 @@ class StagingItem(StagingItemBase):
     returned_at: Optional[datetime] = None
 
 
+class StagingRack(BaseSchema):
+    """One rack holding some of a lot, and how much of it can be pulled."""
+    storage_row_id: str
+    storage_row_name: str = ""
+    available_units: int = 0
+    held_units: int = 0
+
+
 class StagingLotSuggestion(BaseSchema):
     receipt_id: str
     lot_number: str
@@ -48,6 +56,20 @@ class StagingLotSuggestion(BaseSchema):
     container_unit: Optional[str] = None
     weight_per_container: Optional[float] = None
     weight_unit: Optional[str] = None
+
+    # ── counted lots ────────────────────────────────────────────────────────
+    # Set when this lot's location is tracked as placements. `is_counted` is
+    # what the screen switches on: a counted lot is pulled as whole containers
+    # off named racks, so asking for a weight and a pallet count describes
+    # something nobody does. Absent on legacy receipts, where the old weight
+    # entry is still the only thing that can be answered.
+    is_counted: bool = False
+    unit_label: Optional[str] = None
+    # Containers free to pull — quarantined ones are excluded, so this is what
+    # can actually be taken rather than what is standing there.
+    available_units: int = 0
+    held_units: int = 0
+    racks: List[StagingRack] = []
 
 
 class StagingLotRequest(BaseSchema):

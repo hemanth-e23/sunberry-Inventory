@@ -528,6 +528,10 @@ export const InventoryProvider = ({ children }) => {
           receipt_id: item.receiptId,
           location_id: item.locationId,
           quantity: item.quantity,
+          // Containers, when the caller counted containers. The hold is applied
+          // from this in preference to the weight — QA counts drums, and
+          // drums -> pounds -> drums is a rounding trip with nothing to gain.
+          ...(item.units != null ? { units: item.units } : {}),
         }));
         payload.total_quantity = action.totalQuantity;
       }

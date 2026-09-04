@@ -60,7 +60,11 @@ class MaterialLot(Base):
     # once, never reused. Human-readable product / vendor / lot / BBD are printed
     # as text on the sticker; the machine-readable half stays an immutable
     # pointer, so nothing on a printed label can ever go stale.
-    lot_code = Column(String(30), unique=True, index=True, nullable=False)
+    # THE WHOLE NATURAL KEY, human-unreadable and deliberately so — see
+    # lot_placement_service.build_lot_code. Wide because nothing reads it: a
+    # scanner does not care about length, and the label's big text carries the
+    # vendor's own lot number instead.
+    lot_code = Column(String(160), unique=True, index=True, nullable=False)
 
     # Normalized natural key: {product_id}|{vendor_id}|{NORM(vendor_lot)}|{bbd_original date}.
     # A UNIQUE index on the four columns would NOT work — vendor_id and bbd are
@@ -97,6 +101,24 @@ class MaterialLot(Base):
     weight_per_unit = Column(Float, nullable=True)
     weight_unit = Column(String(10), nullable=True)
     brix = Column(Float, nullable=True)
+
+    # HOW MANY UNITS COME ON ONE PALLET, for material that arrives palletised.
+    #
+    # NULL for anything stickered individually — drums and totes are big enough
+    # to label as they come off the truck, so one scan is one unit and there is
+    # no multiplier to apply.
+    #
+    # Set for bags and boxes, which arrive 40-70 to a wrapped pallet. Nobody is
+    # going to destack a pallet at the dock to sticker every bag, so receiving
+    # scans ONE sticker on the pallet and tells the gun how many are under it.
+    # This is the prefill for that question — the worker can always correct it,
+    # because vendors are not consistent about it.
+    #
+    # It is a PACKING fact, not a stock figure: the count of what is actually on
+    # hand lives in lot_placements, in bags. A half-broken pallet does not make
+    # this wrong, which is exactly why the pallet's own sticker never prints a
+    # number.
+    units_per_pallet = Column(Integer, nullable=True)
 
     warehouse_id = Column(String(50), ForeignKey("warehouses.id"), nullable=True, index=True)
     status = Column(String(20), nullable=False, default="active", server_default="active")
@@ -213,6 +235,27 @@ class LotPlacement(Base):
     # per-item identity this model exists to avoid.
     open_remaining_qty = Column(Float, nullable=False, default=0, server_default="0")
 
+    # QUARANTINE, at rack granularity.
+    #
+    # `MaterialLot.is_held` holds a whole lot — the right answer when a vendor
+    # certificate is bad, because every drum of it is suspect wherever it sits.
+    # This is the other real case: eight of the forty on one rack got wet. The
+    # lot is fine; those eight are not.
+    #
+    # A COUNT rather than a boolean, because every drum on the pile wears an
+    # identical sticker and there is no way to say WHICH eight — nor any need
+    # to. "Eight of the forty here are quarantined" is the whole fact, and it is
+    # checkable: somebody can walk to the rack and count.
+    #
+    # Held units are frozen in place. `take_units` will not pull them and
+    # `move_units` will not carry them, so a quarantine cannot be walked out of
+    # the warehouse by a staging pull. Moving them means releasing first, which
+    # is a decision with a name on it.
+    held_units = Column(Integer, nullable=False, default=0, server_default="0")
+    hold_reason = Column(Text, nullable=True)
+    held_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    held_at = Column(DateTime(timezone=True), nullable=True)
+
     last_counted_at = Column(DateTime(timezone=True), nullable=True)
     last_counted_by = Column(String(50), ForeignKey("users.id"), nullable=True)
     last_movement_at = Column(DateTime(timezone=True), nullable=True)
@@ -227,6 +270,11 @@ class LotPlacement(Base):
         UniqueConstraint("material_lot_id", "storage_row_id", name="uq_lot_placement_lot_row"),
         CheckConstraint("full_units >= 0", name="ck_lot_placement_full_units_nonneg"),
         CheckConstraint("open_units >= 0", name="ck_lot_placement_open_units_nonneg"),
+        # You cannot quarantine more drums than are on the rack.
+        CheckConstraint("held_units >= 0", name="ck_lot_placement_held_units_nonneg"),
+        CheckConstraint(
+            "held_units <= full_units", name="ck_lot_placement_held_within_full"
+        ),
         CheckConstraint("open_remaining_qty >= 0", name="ck_lot_placement_open_qty_nonneg"),
         # No open units means no remaining quantity hiding in them.
         CheckConstraint(

@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { receivedInto } from "../../api/lotReceivingApi";
 import { formatDateTime as formatDate } from "../../utils/dateUtils";
 
 const ProductDetailModal = ({
@@ -6,6 +7,7 @@ const ProductDetailModal = ({
   productsById,
   categoriesById,
   receipts,
+  vendorNameById,
   rowLookup,
   rowNameCache,
   getReceiptLocations,
@@ -15,6 +17,18 @@ const ProductDetailModal = ({
   const [modalExpiryEndDate, setModalExpiryEndDate] = useState("");
   const [modalExpiryFilter, setModalExpiryFilter] = useState("all");
   const [expirySortDirection, setExpirySortDirection] = useState("desc");
+  // receiptId -> the racks THAT delivery was put away on, replayed from the
+  // event ledger. One request for the product, not one per row.
+  const [receivedRows, setReceivedRows] = useState({});
+
+  useEffect(() => {
+    if (!productId) return undefined;
+    let cancelled = false;
+    receivedInto(productId)
+      .then((data) => { if (!cancelled) setReceivedRows(data || {}); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [productId]);
 
   const product = productsById[productId];
 
@@ -186,6 +200,12 @@ const ProductDetailModal = ({
               <thead>
                 <tr>
                   <th className="hide-mobile">Lot</th>
+                  {/* Beside the lot, not on the product row outside. The
+                      vendor is part of the lot key, so every lot has exactly
+                      ONE — which makes it a fact with a quantity attached
+                      here, where "Davaraj, ITC, +2" on the product row was
+                      just a list you could not do anything with. */}
+                  <th className="hide-mobile">Vendor</th>
                   <th className="hide-tablet">Location</th>
                   <th className="hide-tablet">Row</th>
                   <th>Quantity</th>
@@ -212,8 +232,30 @@ const ProductDetailModal = ({
                   const rowDetail = locations[0]?.detail || '';
 
                   let rowDisplay = '—';
-                  if (rowDetail) {
+                  // WHERE THIS DELIVERY WENT, from the ledger.
+                  //
+                  // Not from the allocation JSON: that is a projection of the
+                  // LOT, so `project_lot` puts the whole picture on the newest
+                  // receipt and blanks the older ones. Reading it here showed
+                  // ROW 11 twice — once live, once frozen at the pallet count
+                  // its receipt was created with.
+                  //
+                  // The ledger stamps every put-away with the receipt that
+                  // caused it, so eight drums of one lot arriving on two days
+                  // can still be told apart: "ROW 10, that Tuesday".
+                  //
+                  // It is where it WENT, not where it is — a later rack-to-rack
+                  // move writes its own events and leaves these alone. Beside a
+                  // receipt date, that is the honest reading.
+                  const putAway = receivedRows[r.id];
+                  if (putAway?.length) {
+                    rowDisplay = putAway
+                      .map((x) => `${x.storage_row_name} (${x.units})`)
+                      .join(', ');
+                  } else if (rowDetail) {
                     rowDisplay = rowDetail.replace('Rows: ', '').replace('Row: ', '');
+                  } else if (r.materialLotId) {
+                    rowDisplay = '—';
                   } else if (r.storageRowId || r.storage_row_id) {
                     const rowId = r.storageRowId || r.storage_row_id;
                     const rowName = rowLookup[rowId] || rowNameCache[rowId];
@@ -229,6 +271,9 @@ const ProductDetailModal = ({
                   return (
                     <tr key={r.id}>
                       <td className="hide-mobile">{r.lotNo || '—'}</td>
+                      <td className="hide-mobile">
+                        {vendorNameById?.[r.vendorId] || <span className="muted">—</span>}
+                      </td>
                       <td className="hide-tablet">{locationLabel}</td>
                       <td className="hide-tablet">{rowDisplay}</td>
                       <td>

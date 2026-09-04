@@ -3,6 +3,8 @@ from typing import Annotated, Optional
 
 from pydantic import BaseModel, BeforeValidator, PlainSerializer
 
+from app.utils.calendar_dates import calendar_day
+
 
 class BaseSchema(BaseModel):
     class Config:
@@ -45,27 +47,9 @@ def _coerce_calendar_date(value):
 CalendarDateTime = Annotated[Optional[datetime], BeforeValidator(_coerce_calendar_date)]
 
 
-def _serialize_calendar_date(value):
-    """Emit a calendar field as `YYYY-MM-DD`, normalized to UTC first.
-
-    Storing midnight UTC is only half the job. Postgres returns a timestamptz in
-    the SESSION timezone, and this database runs America/Chicago — so a BBD
-    stored as `2027-02-15 00:00:00+00` comes back as `2027-02-14T18:00:00-06:00`
-    and serializes to JSON that way. Every lexical reader then takes the leading
-    ten characters and gets FEBRUARY 14: a best-by one day early, printed on the
-    sticker and encoded into its QR.
-
-    Converting to UTC before taking `.date()` recovers the day that was typed,
-    whatever timezone the connection happens to be in.
-    """
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        aware = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return aware.astimezone(timezone.utc).date().isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return str(value)
+# THE canonical rule lives in app/utils/calendar_dates — see that module for why
+# this keeps going wrong and what it costs when it does.
+_serialize_calendar_date = calendar_day
 
 
 # A calendar field on a RESPONSE: always `YYYY-MM-DD`, never an offset instant.

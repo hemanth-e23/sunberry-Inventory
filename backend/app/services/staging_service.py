@@ -4,10 +4,12 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Receipt, StagingItem, Product, Location, SubLocation, StorageRow, InventoryTransfer, InventoryAdjustment
+    MaterialLot, Receipt, StagingItem, Product, Location, SubLocation, StorageRow,
+    InventoryTransfer, InventoryAdjustment
 )
 from app.enums import ReceiptStatus, AdjustmentStatus
 from app.exceptions import ValidationError, NotFoundError
+from app.services import lot_placement_service as lps
 from app.services.row_allocation import deduct_rm_total, deduct_rm_rows, add_rm_rows
 
 
@@ -34,11 +36,19 @@ def _lot_row_footprint(receipt: Receipt) -> dict:
 
 
 def _stage_free_rack(db: Session, receipt: Receipt, staged_qty: float, staged_pallets: float) -> float:
-    """Free a lot's rack footprint when material is pulled for staging: remove
-    ``staged_qty`` content and ``staged_pallets`` pallets, distributed across the
-    lot's current rows by their real content / pallet share (never cases/cpp).
-    Returns the pallet count actually freed (the explicit number, or a
-    proportional estimate when none was supplied)."""
+    """Free a lot's rack footprint when material is pulled for staging.
+
+    Two languages, one meaning. A COUNTED lot — one with placements — comes off
+    the rack as whole containers off named racks, because that is what a person
+    physically carries and what they can be told to go and fetch. Everything else
+    keeps the original behaviour: remove ``staged_qty`` content and
+    ``staged_pallets`` pallets spread across the lot's rows by their share.
+
+    Returns the pallet count actually freed.
+    """
+    if lps.is_counted_lot(db, receipt.material_lot_id):
+        return _stage_free_counted(db, receipt, staged_qty)
+
     footprint = _lot_row_footprint(receipt)
     total_cases = sum(r["cases"] for r in footprint.values())
     total_pallets = sum(r["pallets"] for r in footprint.values())
@@ -63,8 +73,49 @@ def _stage_free_rack(db: Session, receipt: Receipt, staged_qty: float, staged_pa
     return float(staged_pallets or 0)
 
 
+def _stage_free_counted(db: Session, receipt: Receipt, staged_qty: float) -> float:
+    """Pull whole containers off named racks for a counted lot.
+
+    The pallet argument is deliberately ignored here. For a counted lot the
+    footprint is DERIVED from the unit count (`_project_rows` recomputes
+    `occupied_pallets` from placements), so accepting a separate pallet figure
+    would let two numbers disagree about the same shelf — the exact drift the
+    lot model exists to remove. The count is the input; the footprint follows.
+    """
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    if not lot:
+        return 0.0
+
+    units = lps.units_for_quantity(lot, staged_qty)
+    taken = lps.take_units(
+        db, lot,
+        units=units,
+        event_type=lps.EVENT_STAGED,
+        ref_type="staging",
+        ref_id=receipt.id,
+        reason="Pulled for production staging",
+    )
+    # The footprint freed IS the container count — see `_project_rows`.
+    return float(sum(t["units"] for t in taken))
+
+
 def _compute_available_quantity(db: Session, receipt: Receipt) -> float:
-    """Calculate how much of receipt.quantity is free to stage (not currently in active staging)."""
+    """How much of this receipt is free to stage.
+
+    For a COUNTED lot this is derived from the containers actually pickable —
+    what is on the racks, minus anything quarantined. `receipt.quantity` cannot
+    answer it: it is a running weight that knows nothing about holds, so a lot
+    with five drums under a QA hold would report every pound as available and
+    then be refused by `take_units` at the moment of pulling. Offering material
+    that cannot be pulled is how a picker ends up standing at a rack arguing
+    with the system.
+
+    Legacy receipts keep the old arithmetic — no placements, so no better source.
+
+    Both paths still subtract what is currently out in staging, because those
+    containers have physically left the rack but the receipt has not been
+    decremented yet.
+    """
     staged_items = db.query(StagingItem).filter(
         StagingItem.receipt_id == receipt.id,
         StagingItem.status.in_(["staged", "partially_used", "partially_returned"]),
@@ -73,6 +124,23 @@ def _compute_available_quantity(db: Session, receipt: Receipt) -> float:
         item.quantity_staged - item.quantity_used - item.quantity_returned
         for item in staged_items
     )
+
+    if lps.is_counted_lot(db, receipt.material_lot_id):
+        lot = db.query(MaterialLot).filter(
+            MaterialLot.id == receipt.material_lot_id
+        ).first()
+        if lot:
+            if lot.is_held:
+                return 0.0
+            free_units = sum(
+                lps._free_units(p) for p in lps.placements_for_lot(db, lot.id)
+            )
+            pickable = free_units * float(lot.weight_per_unit or 0)
+            # The staging subtraction is already reflected in the placements —
+            # staging takes the units off the rack — so it must not be applied
+            # twice here.
+            return max(0.0, pickable)
+
     return receipt.quantity - quantity_still_in_staging
 
 
@@ -131,9 +199,70 @@ def suggest_lots_for_staging(
             "container_unit": receipt.container_unit,
             "weight_per_container": receipt.weight_per_container,
             "weight_unit": receipt.weight_unit,
+            **_counted_lot_detail(db, receipt),
         })
 
     return suggestions
+
+
+def _counted_lot_detail(db: Session, receipt: Receipt) -> dict:
+    """Containers and racks, for a lot whose location is tracked as placements.
+
+    What the staging screen needs to stop speaking in pounds. A worker does not
+    remove 62% of a pound from a rack — they carry two drums off ROW 3 — so the
+    screen has to be able to say how many containers there are and which racks
+    they are on.
+
+    Quarantined containers are reported but EXCLUDED from `available_units`.
+    They are physically on the rack, so hiding them entirely would contradict
+    what somebody sees standing there; they cannot be pulled, so counting them
+    as available would offer material `take_units` will refuse.
+    """
+    empty = {"is_counted": False, "unit_label": None, "available_units": 0,
+             "held_units": 0, "racks": []}
+    if not lps.is_counted_lot(db, receipt.material_lot_id):
+        return empty
+
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    if not lot:
+        return empty
+    # A wholly-held lot offers nothing, but still says so rather than vanishing:
+    # the row is filtered out upstream by `Receipt.hold`, and if it ever reaches
+    # here the honest answer is zero available with the hold visible.
+    placements = lps.placements_for_lot(db, lot.id)
+    rows = _rows_by_id(db, [p.storage_row_id for p in placements])
+
+    racks = []
+    for placement in placements:
+        held = int(placement.held_units or 0)
+        free = 0 if lot.is_held else max(0, int(placement.full_units or 0) - held)
+        if free <= 0 and held <= 0:
+            continue
+        row = rows.get(placement.storage_row_id)
+        racks.append({
+            "storage_row_id": placement.storage_row_id,
+            "storage_row_name": row.name if row else placement.storage_row_id,
+            "available_units": free,
+            "held_units": int(placement.full_units or 0) if lot.is_held else held,
+        })
+    # Fullest first — the same order `take_units` drains them in, so the screen
+    # shows the racks in the order a picker will actually walk them.
+    racks.sort(key=lambda r: r["available_units"], reverse=True)
+
+    return {
+        "is_counted": True,
+        "unit_label": lot.unit_label,
+        "available_units": sum(r["available_units"] for r in racks),
+        "held_units": sum(r["held_units"] for r in racks),
+        "racks": racks,
+    }
+
+
+def _rows_by_id(db: Session, row_ids) -> dict:
+    ids = [r for r in set(row_ids) if r]
+    if not ids:
+        return {}
+    return {r.id: r for r in db.query(StorageRow).filter(StorageRow.id.in_(ids)).all()}
 
 
 def create_staging_transfer(db: Session, staging_data, current_user) -> dict:
@@ -334,15 +463,37 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
     )
     db.add(return_transfer)
 
-    # Add the returned content + explicit pallets to the chosen return row (rows
-    # + allocation JSON), tracked independently — no cases/cases_per_pallet.
+    # Put it back where the worker says they put it.
     if request.to_storage_row_id:
-        add_rm_rows(
-            db, receipt,
-            {request.to_storage_row_id: float(request.quantity)},
-            pallets_by_row={request.to_storage_row_id: returned_pallets},
-            update_rows=True,
-        )
+        if lps.is_counted_lot(db, receipt.material_lot_id):
+            # Whole containers, on the named rack. Rounding DOWN here, the
+            # opposite of the pull: 600 lbs returned against 500 lb drums is one
+            # full drum back on the shelf plus a partial still in production, and
+            # counting the partial as a whole drum would invent stock that is not
+            # on the rack to be found.
+            lot = db.query(MaterialLot).filter(
+                MaterialLot.id == receipt.material_lot_id
+            ).first()
+            per_unit = float(lot.weight_per_unit or 0) if lot else 0
+            whole = int(float(request.quantity) / per_unit) if per_unit > 0 else 0
+            lps.put_units(
+                db, lot,
+                units=whole,
+                to_row_id=request.to_storage_row_id,
+                event_type=lps.EVENT_RETURNED,
+                ref_type="staging",
+                ref_id=staging_item.id,
+                reason="Returned from staging",
+            )
+        else:
+            # Content + explicit pallets onto the chosen row, tracked
+            # independently — no cases/cases_per_pallet.
+            add_rm_rows(
+                db, receipt,
+                {request.to_storage_row_id: float(request.quantity)},
+                pallets_by_row={request.to_storage_row_id: returned_pallets},
+                update_rows=True,
+            )
 
     # Only re-home the receipt's primary location when this return completes the
     # staged item — a partial return must not claim the whole lot moved.

@@ -1,7 +1,13 @@
 import React, { useState, useMemo } from "react";
+import { Printer } from "lucide-react";
 import { formatDateTime as formatDate } from "../../utils/dateUtils";
 import { formatUserName } from "../../utils/userDisplay";
 import { CATEGORY_TYPES } from '../../constants';
+import { apiErrorMessage, printSessionLabels } from "../../api/lotReceivingApi";
+import { useToast } from "../../context/ToastContext";
+import { useAppData } from "../../context/AppDataContext";
+import LotLabelPrint from "../ingredient/LotLabelPrint";
+import PrintStickersDialog from "../ingredient/PrintStickersDialog";
 
 const parseDate = (value) => {
   if (!value) return null;
@@ -19,6 +25,41 @@ const RecentEntriesTab = ({
   const [recentSearch, setRecentSearch] = useState("");
   const [recentStatusFilter, setRecentStatusFilter] = useState("all");
   const [recentTypeFilter, setRecentTypeFilter] = useState("all");
+  const { addToast } = useToast();
+  const { refreshReceipts } = useAppData();
+  const [sheet, setSheet] = useState(null);
+  const [printingId, setPrintingId] = useState(null);
+  // The entry whose print options are being chosen. Null when the dialog is shut.
+  const [asking, setAsking] = useState(null);
+
+  /**
+   * Reprint a receipt's stickers, any time after it was logged.
+   *
+   * The offer used to live only in the moment after saving and vanished on
+   * navigation, which does not fit how the stickering actually happens: barrels
+   * already on the racks get entered now and stickered days later, as each is
+   * pulled for staging. The endpoint never had a state gate — this is only
+   * putting the button somewhere it survives.
+   */
+  const handlePrint = async ({ count, scope }) => {
+    const entry = asking;
+    if (!entry) return;
+    setPrintingId(entry.id);
+    try {
+      setSheet(await printSessionLabels(entry.id, count, { scope }));
+      setAsking(null);
+      // Printing RESOLVES the lot when the receipt has none yet — that is what
+      // makes the walk-in path work: log off the BOL, print, scan. So the
+      // receipt held here is stale the moment this returns, and every screen
+      // branching on `materialLotId` would keep showing the pre-lot version
+      // until a hard refresh.
+      refreshReceipts?.();
+    } catch (error) {
+      addToast(apiErrorMessage(error, "Could not print stickers"), "error");
+    } finally {
+      setPrintingId(null);
+    }
+  };
 
   const recentEntries = useMemo(() => {
     const sorted = [...receipts].sort((a, b) => {
@@ -94,6 +135,18 @@ const RecentEntriesTab = ({
             parseDate(receipt.receiptDate) || 0,
           locations: getReceiptLocations(receipt),
           note: receipt.note || "",
+          // How many identical stickers this receipt is worth — one per
+          // container. Finished goods are excluded: their pallets carry unique
+          // licences, not one repeated lot sticker.
+          stickerCount: Math.max(0, Math.round(Number(receipt.containerCount) || 0)),
+          // What one container IS, and how many ride a pallet. Together these
+          // decide whether the print dialog can offer pallet stickers at all —
+          // blank for barrels, 50 for bags.
+          unitLabel: (receipt.containerUnit || 'unit').replace(/s$/, ''),
+          unitsPerPallet: receipt.unitsPerPallet || null,
+          canPrint:
+            category?.type !== CATEGORY_TYPES.FINISHED &&
+            Number(receipt.containerCount) > 0,
         };
       });
   }, [receipts, productsById, categoriesById, userLookup, recentSearch, recentStatusFilter, recentTypeFilter, getReceiptLocations]);
@@ -210,6 +263,19 @@ const RecentEntriesTab = ({
                     </ul>
                   )}
                   {entry.note && <p className="note">{entry.note}</p>}
+                  {entry.canPrint && (
+                    <div className="recent-card-actions">
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => setAsking(entry)}
+                        disabled={printingId === entry.id}
+                      >
+                        <Printer size={14} />
+                        {printingId === entry.id ? "Preparing…" : "Print stickers"}
+                      </button>
+                    </div>
+                  )}
                 </article>
               ))}
             </div>
@@ -219,6 +285,21 @@ const RecentEntriesTab = ({
           <div className="empty-state">No receipts recorded yet.</div>
         )}
       </div>
+      <PrintStickersDialog
+        open={!!asking}
+        busy={!!printingId}
+        lot={asking && {
+          productName: asking.productName,
+          lotCode: asking.lot,
+          unitLabel: asking.unitLabel,
+          unitsPerPallet: asking.unitsPerPallet,
+          totalUnits: asking.stickerCount,
+        }}
+        onCancel={() => setAsking(null)}
+        onConfirm={handlePrint}
+      />
+
+      {sheet && <LotLabelPrint sheet={sheet} onDone={() => setSheet(null)} />}
     </section>
   );
 };

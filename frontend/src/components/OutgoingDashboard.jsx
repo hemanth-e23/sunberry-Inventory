@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { getDashboardPath } from '../App';
-import { getTodayDateKey, formatDate } from '../utils/dateUtils';
+import { getTodayDateKey, formatDate, formatDateKey } from '../utils/dateUtils';
 import Modal from './Modal';
 import ShipOutOrderDetail from './ShipOutOrderDetail';
 import { StatusChip, MiniPipeline } from './ShipOutPipeline';
@@ -48,7 +48,7 @@ const DONE_STATUSES = ['reconciled', 'complete', 'docs_generated'];
  */
 const OutgoingDashboard = ({ embedded = false }) => {
   const navigate = useNavigate();
-  const { user, selectedWarehouseName } = useAuth();
+  const { user, selectedWarehouse, selectedWarehouseName } = useAuth();
   const { addToast } = useToast();
   const { confirm } = useConfirm();
 
@@ -95,7 +95,13 @@ const OutgoingDashboard = ({ embedded = false }) => {
     } finally {
       setLoading(false);
     }
-  }, [dateKey, today, addToast]);
+      // `selectedWarehouse` is not READ in here — the warehouse rides on the
+    // X-View-Warehouse header AuthContext sets, so the request is already
+    // scoped server-side. It is in the dep list because it must TRIGGER a
+    // refetch: without it, switching the header selector leaves the previous
+    // plant's rows on screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateKey, today, selectedWarehouse, addToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -283,8 +289,8 @@ const OutgoingDashboard = ({ embedded = false }) => {
         <div className="og-datenav">
           <button className="og-navbtn" onClick={() => setDateKey(k => shiftDateKey(k, -1))} title="Previous day">‹</button>
           <div className="og-date-display">
-            <span className="og-date-label">{dateKey === today ? 'Today' : formatDate(dateKey)}</span>
-            <span className="og-date-sub">{dateKey === today ? formatDate(dateKey) : 'scheduled shipments'}</span>
+            <span className="og-date-label">{dateKey === today ? 'Today' : formatDateKey(dateKey)}</span>
+            <span className="og-date-sub">{dateKey === today ? formatDateKey(dateKey) : 'scheduled shipments'}</span>
           </div>
           <button className="og-navbtn" onClick={() => setDateKey(k => shiftDateKey(k, 1))} title="Next day">›</button>
           <input type="date" className="og-date-input" value={dateKey} onChange={(e) => setDateKey(e.target.value)} title="Jump to date" />

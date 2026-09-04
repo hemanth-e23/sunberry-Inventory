@@ -74,6 +74,10 @@ class StorageRowBase(BaseSchema):
     # Live aggregates computed from lot_placements. Populated for rows in a
     # unit-typed room (sub_location.storage_unit set); None everywhere else, so a
     # client can tell "no drums here" (0) from "this is a pallet room" (None).
+    # What `occupied_cases` is measured in for this row — 'lbs' when it holds
+    # lot-tracked material (the column stores derived weight there), None when
+    # it keeps its legacy case meaning. Must be on the RESPONSE schema.
+    content_unit: Optional[str] = None
     live_units: Optional[int] = None
     live_open_units: Optional[int] = None
     live_lots: Optional[List[LiveRowLot]] = None

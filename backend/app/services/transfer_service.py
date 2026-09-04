@@ -3,10 +3,13 @@ import json
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
-from app.models import Receipt, InventoryTransfer, StorageRow, StorageArea, PalletLicence, Category
+from app.models import (
+    Receipt, InventoryTransfer, MaterialLot, StorageRow, StorageArea, PalletLicence, Category
+)
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED
+from app.services import lot_placement_service as lps
 from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
 from app.utils import category_rules
 from app.utils.locations import warehouse_id_for_row
@@ -192,15 +195,58 @@ def _apply_raw_material_internal_transfer(
     dest_cases = parse_breakdown(transfer.destination_breakdown)
     dest_pallets = parse_pallet_breakdown(transfer.destination_breakdown)
 
-    # Free source rows (content + explicit pallets) and sync the allocation JSON.
-    deduct_rm_rows(db, receipt, source_cases, pallets_by_row=source_pallets, update_rows=True)
-    # Reserve destination rows (content + explicit pallets) and sync the JSON.
-    add_rm_rows(db, receipt, dest_cases, pallets_by_row=dest_pallets, update_rows=True)
+    if lps.is_counted_lot(db, receipt.material_lot_id):
+        _move_counted_lot(db, receipt, source_cases, dest_cases, transfer.id)
+    else:
+        # Free source rows (content + explicit pallets) and sync the allocation JSON.
+        deduct_rm_rows(db, receipt, source_cases, pallets_by_row=source_pallets, update_rows=True)
+        # Reserve destination rows (content + explicit pallets) and sync the JSON.
+        add_rm_rows(db, receipt, dest_cases, pallets_by_row=dest_pallets, update_rows=True)
 
     # Update receipt.storage_row_id when there's a single destination row.
     dest_row_ids = list(dest_cases.keys())
     if len(dest_row_ids) == 1:
         receipt.storage_row_id = dest_row_ids[0]
+
+
+def _move_counted_lot(
+    db: Session, receipt: Receipt, source_cases: dict, dest_cases: dict, ref_id: str
+) -> None:
+    """Rack-to-rack for a counted lot: whole containers, source rack to dest rack.
+
+    Uses `move_units`, which writes the two halves of the move under one shared
+    ref. That matters more here than anywhere else: a move is the one operation
+    where a half-applied change leaves containers existing in neither place or
+    both, and a shared ref is what lets `reconcile_lot` see the pair.
+
+    Source and destination are zipped in order. A transfer that names three
+    source racks and one destination consolidates onto the one; the reverse
+    spreads out. Anything left over after the destinations are exhausted goes to
+    the last named destination rather than being dropped.
+    """
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    if not lot or not source_cases or not dest_cases:
+        return
+
+    dest_rows = [rid for rid in dest_cases if rid]
+    if not dest_rows:
+        return
+
+    for index, (src_row, qty) in enumerate(source_cases.items()):
+        units = lps.units_for_quantity(lot, float(qty or 0))
+        if units <= 0 or not src_row:
+            continue
+        dest_row = dest_rows[index] if index < len(dest_rows) else dest_rows[-1]
+        if dest_row == src_row:
+            continue
+        lps.move_units(
+            db, lot,
+            from_row_id=src_row,
+            to_row_id=dest_row,
+            full_units=units,
+            reason="Warehouse transfer",
+            ref_id=f"{ref_id}:{index}",
+        )
 
 
 def _apply_raw_material_ship_out(
@@ -214,6 +260,30 @@ def _apply_raw_material_ship_out(
     breakdown): prorate content across the lot's allocations, with pallets
     scaled to each row's real footprint."""
     source_cases = parse_breakdown(transfer.source_breakdown)
+
+    if lps.is_counted_lot(db, receipt.material_lot_id):
+        lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+        if not lot:
+            return
+        if source_cases:
+            # The worker named the racks they pulled from. Honour exactly that.
+            for row_id, qty in source_cases.items():
+                units = lps.units_for_quantity(lot, float(qty or 0))
+                if units > 0 and row_id:
+                    lps.take_units(
+                        db, lot, units=units, event_type=lps.EVENT_MOVED,
+                        from_row_id=row_id, ref_type="transfer", ref_id=transfer.id,
+                        reason="Shipped out",
+                    )
+        else:
+            lps.take_units(
+                db, lot,
+                units=lps.units_for_quantity(lot, float(transfer.quantity)),
+                event_type=lps.EVENT_MOVED,
+                ref_type="transfer", ref_id=transfer.id, reason="Shipped out",
+            )
+        return
+
     if source_cases:
         source_pallets = parse_pallet_breakdown(transfer.source_breakdown)
         deduct_rm_rows(db, receipt, source_cases, pallets_by_row=source_pallets, update_rows=True)

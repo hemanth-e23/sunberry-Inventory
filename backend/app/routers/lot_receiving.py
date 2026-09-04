@@ -28,6 +28,7 @@ Auth shape, and why it differs per endpoint:
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.constants import ROLE_FORKLIFT
@@ -45,6 +46,7 @@ from app.models import (
 )
 from app.schemas.lot_receiving import (
     CloseOrderRequest,
+    ReleaseOrderRequest,
     IncomingOrderCreate,
     IncomingOrderOut,
     LotLabelSheet,
@@ -54,6 +56,7 @@ from app.schemas.lot_receiving import (
     ReceivingSummary,
     StartReceivingRequest,
 )
+from app.services import lot_placement_service as lps
 from app.services import lot_receiving_service as lrs
 from app.utils.auth import (
     get_current_active_user,
@@ -105,6 +108,7 @@ def _serialize_order(db: Session, order: IngredientIntake) -> dict:
             "unit_label": line.container_type,
             "weight_per_unit": line.net_weight_per_container,
             "weight_unit": line.weight_unit,
+            "units_per_pallet": line.units_per_pallet,
             "brix": line.brix,
             "material_lot_id": line.material_lot_id,
             "lot_code": lot.lot_code if lot else None,
@@ -123,6 +127,7 @@ def _serialize_order(db: Session, order: IngredientIntake) -> dict:
         "origin_warehouse_id": order.origin_warehouse_id,
         "warehouse_id": order.warehouse_id,
         "expected_date": order.expected_date,
+        "expected_time": order.expected_time,
         "expected_count": int(order.expected_count or 0),
         "received_count": lrs.order_received_count(db, order),
         "short_count": int(order.short_count or 0),
@@ -174,6 +179,9 @@ def _get_order(db: Session, order_id: str, current_user: User = None) -> Ingredi
 def list_orders(
     status: Optional[str] = Query(None),
     include_closed: bool = Query(False),
+    date: Optional[str] = Query(
+        None, description="YYYY-MM-DD. Orders expected that day, plus every draft."
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -182,6 +190,11 @@ def list_orders(
     Scoped through `warehouse_filter`, which returns None for a corporate user on
     "All Warehouses" — that is deliberate, it is how corporate sees every site's
     inbound at once.
+
+    `date` organises the plant's screen by day, the same way the outbound tab
+    works. DRAFTS ARE ALWAYS INCLUDED regardless of the day: a draft has no
+    arrival slot yet — that is the whole point of it being a draft — so filtering
+    it by date would hide corporate's own to-do list from them on every day view.
     """
     query = db.query(IngredientIntake).filter(
         IngredientIntake.is_incoming_order == True,  # noqa: E712
@@ -199,6 +212,27 @@ def list_orders(
                 IncomingOrderStatus.IN_TRANSIT.value,
                 IncomingOrderStatus.RECEIVING.value,
             ))
+        )
+
+    if date:
+        from datetime import datetime as _dt, timedelta, timezone as _tz
+
+        try:
+            day = _dt.strptime(date, "%Y-%m-%d").replace(tzinfo=_tz.utc)
+        except ValueError:
+            raise ValidationError("date must be YYYY-MM-DD")
+        # Half-open range on the stored instant. expected_date is written as
+        # midnight UTC (see schemas/base.py), so comparing against a UTC window
+        # is exact — a `func.date()` cast would be evaluated in the SESSION
+        # timezone and would silently pick up the neighbouring day.
+        query = query.filter(
+            or_(
+                and_(
+                    IngredientIntake.expected_date >= day,
+                    IngredientIntake.expected_date < day + timedelta(days=1),
+                ),
+                IngredientIntake.status == IncomingOrderStatus.DRAFT.value,
+            )
         )
 
     orders = query.order_by(IngredientIntake.created_at.desc()).limit(500).all()
@@ -238,10 +272,21 @@ def create_order(
 @router.post("/orders/{order_id}/release", response_model=IncomingOrderOut)
 def release(
     order_id: str,
+    payload: ReleaseOrderRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_receiver),
 ):
-    order = lrs.release_order(db, _get_order(db, order_id, current_user), user_id=str(current_user.id))
+    """Draft -> in transit, with the arrival slot.
+
+    A separate step from creating: corporate raises the order when they have the
+    PO, and agrees the slot with the carrier afterwards.
+    """
+    order = lrs.release_order(
+        db, _get_order(db, order_id, current_user),
+        user_id=str(current_user.id),
+        expected_date=payload.expected_date,
+        expected_time=payload.expected_time,
+    )
     db.commit()
     db.refresh(order)
     return _serialize_order(db, order)
@@ -416,8 +461,18 @@ def print_labels(
     work: log the receipt off the BOL, press Print, scan.
     """
     receipt = _get_receipt(db, receipt_id, current_user)
-    lot = lrs.ensure_lot_for_receipt(db, receipt, user_id=str(current_user.id))
-    sheet = lrs.label_sheet_for_lot(db, lot, payload.count, receipt=receipt)
+    lot = lrs.ensure_lot_for_receipt(
+        db,
+        receipt,
+        user_id=str(current_user.id),
+        # Carries "50 bags to a pallet" from the entry form onto the lot, which
+        # is what lets a PALLET-scope sticker be printed at all. Without it a
+        # Log Receipt of 500 bags could only ever print 500 bag stickers.
+        units_per_pallet=receipt.units_per_pallet,
+    )
+    sheet = lrs.label_sheet_for_lot(
+        db, lot, payload.count, receipt=receipt, scope=payload.scope
+    )
     db.commit()
     return sheet
 
@@ -445,9 +500,27 @@ def print_labels_for_lot(
     # A lot carries the warehouse it was first received into. Stickers for
     # another site's material are not this user's to print.
     _require_same_warehouse(current_user, lot, "lot")
-    sheet = lrs.label_sheet_for_lot(db, lot, payload.count)
+    sheet = lrs.label_sheet_for_lot(db, lot, payload.count, scope=payload.scope)
     db.commit()
     return sheet
+
+
+@router.get("/received-into")
+def received_into(
+    product_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Which rack each DELIVERY of this product was put away on.
+
+    One request for the whole product rather than one per receipt: the caller
+    is a table of receipts, and N round trips to fill one column is how a modal
+    becomes slow.
+
+    Replayed from the event ledger — see `received_into_by_receipt` for why the
+    projection cannot answer it.
+    """
+    return lps.received_into_by_receipt(db, product_id)
 
 
 @router.get("/resolve-row")

@@ -110,9 +110,20 @@ class UnlabelledLot(BaseSchema):
     lot_unknown: bool = False
     bbd: CalendarDateOut = None
     unit_label: Optional[str] = None
+    # Drives the pallet-vs-unit choice in the print dialog. A field the
+    # schema omits is dropped no matter what the service returns.
+    units_per_pallet: Optional[int] = None
     full_units: int = 0
     open_units: int = 0
     row_count: int = 0
+    # Quarantine. `is_held` is the whole lot, `held_units` is a count on
+    # specific racks — a lot can have neither, one, or (after a whole-lot hold
+    # over an existing partial) both. Must be on the RESPONSE schema: a field
+    # the schema omits is dropped no matter what the service returns, and a
+    # dropped hold reads on screen as "available".
+    held_units: int = 0
+    is_held: bool = False
+    hold_reason: Optional[str] = None
     needs_review: bool = False
     # Non-null when stickers cannot be printed for this lot yet — a missing lot
     # number or best-by, or a flagged review.

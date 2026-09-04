@@ -51,6 +51,8 @@ ROW_2 = "row-recv-2"
 USER = "user-recv-1"
 
 BBD = datetime(2027, 3, 1, tzinfo=timezone.utc)
+# Releasing requires an arrival day: the plant's screen is organised by day.
+EXPECTED_DATE = datetime(2026, 8, 25, tzinfo=timezone.utc)
 
 
 @pytest.fixture
@@ -104,7 +106,7 @@ def _order(db, *, lines=None, released=True):
         warehouse_id=WH,
     )
     if released:
-        lrs.release_order(db, order, user_id=USER)
+        lrs.release_order(db, order, user_id=USER, expected_date=EXPECTED_DATE)
     return order
 
 

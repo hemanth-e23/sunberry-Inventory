@@ -801,8 +801,14 @@ const LocationsSection = ({ onAssignFGArea }) => {
                                                   capacity ·{" "}
                                                   {Number(row.occupiedPallets || 0).toFixed(2)}/
                                                   {row.palletCapacity} pallets in
-                                                  use · {row.occupiedCases || 0}{" "}
-                                                  cases stored
+                                                  use ·{" "}
+                                                  {Number(row.occupiedCases || 0).toLocaleString()}{" "}
+                                                  {/* `occupied_cases` is overloaded: CASES for
+                                                      packaging, derived POUNDS for anything
+                                                      lot-tracked. Labelling all of it "cases"
+                                                      made four 470 lb drums read as
+                                                      "1880 cases stored". */}
+                                                  {row.contentUnit || "cases"} stored
                                                 </>
                                               )}
                                             </span>

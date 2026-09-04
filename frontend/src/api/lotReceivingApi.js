@@ -26,9 +26,19 @@ export const getIncomingOrder = (orderId) =>
 export const createIncomingOrder = (payload) =>
   unwrap(apiClient.post('/lot-receiving/orders', payload));
 
-/** Draft -> in transit. Corporate says it has left. */
-export const releaseIncomingOrder = (orderId) =>
-  unwrap(apiClient.post(`/lot-receiving/orders/${orderId}/release`));
+/**
+ * Draft -> in transit, WITH the arrival slot.
+ *
+ * A separate step from creating: corporate raises the order when they have the
+ * PO, and agrees the day with the carrier afterwards. The server requires a
+ * date, because the plant's screen is organised by day and an order without one
+ * would sit outside every day view.
+ */
+export const releaseIncomingOrder = (orderId, { expected_date, expected_time } = {}) =>
+  unwrap(apiClient.post(`/lot-receiving/orders/${orderId}/release`, {
+    expected_date: expected_date || null,
+    expected_time: expected_time || null,
+  }));
 
 /** Close it, short or complete. A short close REQUIRES a reason. */
 export const closeIncomingOrder = (orderId, reason) =>
@@ -85,15 +95,27 @@ export const scanLotUnit = (receiptId, payload) =>
 export const undoLastScan = (receiptId) =>
   unwrap(apiClient.post(`/lot-receiving/sessions/${receiptId}/undo`));
 
-/** `count` IDENTICAL stickers for this session's lot. Printing is NOT receiving. */
-export const printSessionLabels = (receiptId, count) =>
-  unwrap(apiClient.post(`/lot-receiving/sessions/${receiptId}/print-labels`, { count }));
+/**
+ * `count` IDENTICAL stickers for this session's lot. Printing is NOT receiving.
+ *
+ * `scope` is 'unit' (one per drum/bag/box) or 'pallet' (one per wrapped pallet,
+ * for material nobody destacks at the dock). Same sticker either way — same lot,
+ * same code, same QR — with one word different in the middle band.
+ */
+export const printSessionLabels = (receiptId, count, { scope = 'unit' } = {}) =>
+  unwrap(apiClient.post(`/lot-receiving/sessions/${receiptId}/print-labels`, { count, scope }));
 
 /** Stickers for a lot on demand, with no receiving session — the lazy cutover path. */
-export const printLotLabels = (lotId, count) =>
-  unwrap(apiClient.post(`/lot-receiving/lots/${lotId}/print-labels`, { count }));
+export const printLotLabels = (lotId, count, { scope = 'unit' } = {}) =>
+  unwrap(apiClient.post(`/lot-receiving/lots/${lotId}/print-labels`, { count, scope }));
 
 /** A scanned rack label -> exactly one row. Refuses an ambiguous name. */
+/** Which rack each DELIVERY of a product was put away on, from the ledger.
+  * The projection cannot answer this — placements belong to the lot, not to
+  * one truck. See `received_into_by_receipt`. */
+export const receivedInto = (productId) =>
+  unwrap(apiClient.get('/lot-receiving/received-into', { params: { product_id: productId } }));
+
 export const resolveRow = (code) =>
   unwrap(apiClient.get('/lot-receiving/resolve-row', { params: { code } }));
 

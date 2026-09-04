@@ -47,6 +47,12 @@ const readField = (source, keys) => {
   return undefined;
 };
 
+/** "bag" -> "BAGS". The unit words are a fixed short list. */
+const pluralUnit = (unit) => {
+  const u = String(unit || 'unit').toUpperCase();
+  return u.endsWith('S') ? u : `${u}S`;
+};
+
 const formatQty = (value) => {
   const n = Number(value);
   if (!Number.isFinite(n)) return '';
@@ -66,6 +72,7 @@ const LotLabel = ({ label }) => {
   const netWeight = readField(source, ['net_weight', 'netWeight', 'weight_per_unit']);
   const weightUnit = readField(source, ['weight_unit', 'qty_unit', 'weightUnit']);
   const unitLabel = readField(source, ['unit_label', 'unitLabel']);
+  const packScope = readField(source, ['pack_scope', 'packScope']) || 'unit';
   const receiptDate = readField(source, ['receipt_date', 'receiptDate']);
 
   // The payload never carries a lot number the sticker does not print. A
@@ -101,27 +108,44 @@ const LotLabel = ({ label }) => {
       </div>
       <div className="container-label__rule" />
 
-      <BigCodeText serial={lotCode} />
+      {/* THE VENDOR'S OWN LOT NUMBER in the big slot — the one thing a person
+          on a dock recognises, because it is what the manufacturer printed on
+          the drum. The system's code is machine-only and appears small at the
+          bottom; putting it here was the mistake that made a warehouse worker
+          ask why we had invented a second lot number. */}
+      <BigCodeText serial={lotUnknown ? 'LOT UNKNOWN' : vendorLot} />
       <div className="container-label__sequence">
         <span className="container-label__sequence-rule" />
-        {/* Where the per-drum sticker printed "17 of 80", this says what the
-            unit IS. There is no ordinal to print, and the unit word is what a
-            counter needs: it must never read "cases", which is what a defaulted
+        {/* THE ONE THING THAT DIFFERS between a pallet sticker and a unit
+            sticker. Same lot, same code, same QR — scanning either resolves to
+            the same material, because a bag does not become something else by
+            coming off a pallet. This band exists so a person can see at a glance
+            whether they hold one bag or a wrapped pallet of them.
+
+            Deliberately NO COUNT on the pallet form. "PALLET · 50 BAGS" would
+            start lying the moment somebody took one, and nobody re-labels a
+            pallet per bag. The count lives in the system, where it can change.
+
+            The word must never read "cases" — that is what a defaulted
             Receipt.unit produced on an 80-barrel receipt. */}
         <span className="container-label__sequence-text">
-          {String(unitLabel || 'UNIT').toUpperCase()}
+          {packScope === 'pallet'
+            ? `PALLET OF ${pluralUnit(unitLabel)}`
+            : String(unitLabel || 'UNIT').toUpperCase()}
         </span>
         <span className="container-label__sequence-rule" />
       </div>
       <div className="container-label__rule" />
 
       <div className="container-label__grid">
+        {/* SID and BBD lead: after the lot number they are the two things
+            anybody asks about. The lot number itself is no longer repeated here
+            — it is the big text above. */}
         <LabelField label="SID" value={sid} />
-        <LabelField label="Vendor" value={vendorName} />
-        <LabelField label="Lot" value={lotUnknown ? 'UNKNOWN' : vendorLot} />
         {/* The CURRENT best-by. An approved extension is the one case where
             stickers are reprinted and reapplied, and this date is the reason. */}
         <LabelField label="BBD" value={formatCalendarDate(bbd)} />
+        <LabelField label="Vendor" value={vendorName} />
         <LabelField label="Net" value={netLine} />
         {/* RCV is a real INSTANT, so it goes through dateUtils to reach the
             warehouse calendar day, then prints zero-padded to match the BBD
@@ -129,6 +153,11 @@ const LotLabel = ({ label }) => {
             food-safety label is a misread waiting to happen. */}
         <LabelField label="RCV" value={formatCalendarDate(toDateKey(receiptDate))} />
       </div>
+
+      {/* The system's code, small. Nobody needs to read it — the QR carries it —
+          but printing it costs nothing and answers "which lot is this really?"
+          without a lookup when somebody is diagnosing a mis-scan. */}
+      <div className="container-label__code">{lotCode}</div>
     </div>
   );
 };

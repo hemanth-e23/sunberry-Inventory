@@ -64,6 +64,7 @@ const InventoryOverview = () => {
     locationsTree,
     storageAreas,
     locations,
+    vendors,
   } = useAppData();
 
   // Tab state
@@ -320,6 +321,12 @@ const InventoryOverview = () => {
   }, [productCategories, locationsTree, locationLookup, rowLookup, rowNameCache]);
 
   // Inventory rows computation (needed by the table and print modal)
+  const vendorNameById = useMemo(() => {
+    const map = {};
+    (vendors || []).forEach((v) => { map[v.id] = v.name; });
+    return map;
+  }, [vendors]);
+
   const inventoryRows = useMemo(() => {
     const totals = {};
     const pendingCount = {};
@@ -356,6 +363,7 @@ const InventoryOverview = () => {
         if (receipt.lotNo) {
           totals[productId].lots.add(receipt.lotNo);
         }
+
       }
 
       if (["recorded", "pending", "reviewed"].includes(receipt.status)) {
@@ -707,6 +715,7 @@ const InventoryOverview = () => {
                 productsById={productsById}
                 categoriesById={categoriesById}
                 receipts={receipts}
+                vendorNameById={vendorNameById}
                 rowLookup={rowLookup}
                 rowNameCache={rowNameCache}
                 getReceiptLocations={getReceiptLocations}

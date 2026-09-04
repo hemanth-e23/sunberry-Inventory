@@ -44,6 +44,27 @@ export const formatDate = (value) => {
   return date.toLocaleDateString('en-US', opts);
 };
 
+/**
+ * Display a `YYYY-MM-DD` CALENDAR KEY. Lexical — no timezone maths.
+ *
+ * `formatDate` is for INSTANTS and is correct for them, but it is wrong for a
+ * day key: `new Date('2026-08-21')` parses as midnight UTC, and rendering that
+ * in an America/New_York warehouse gives 8/20/2026. The day navigator showed
+ * "Today · 8/20/2026" while its own date input said 08/21 — the label was a day
+ * behind the thing it described.
+ *
+ * Anything that is a DAY rather than a moment — a scheduled arrival, a best-by,
+ * a day-view key — belongs here. Same rule the label payload has carried since
+ * the per-drum work: a best-by printed one day early is a food-safety defect.
+ */
+export const formatDateKey = (key) => {
+  if (!key) return "—";
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(key));
+  if (!m) return formatDate(key);
+  const [, y, mo, d] = m;
+  return `${Number(mo)}/${Number(d)}/${y}`;
+};
+
 export const formatTimeAgo = (dateValue) => {
   if (!dateValue) return 'Unknown';
   const date = new Date(ensureUtc(dateValue));

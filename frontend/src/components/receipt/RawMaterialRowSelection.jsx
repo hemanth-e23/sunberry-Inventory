@@ -11,6 +11,19 @@ const RawMaterialRowSelection = ({
   rawMaterialRowAllocations,
   setRawMaterialRowAllocations,
 }) => {
+  // `formData.quantity` is the CONTAINER count for raw material — 40 drums —
+  // and `quantityUnits` names them. See the payload builder in useReceiptForm,
+  // where the same field becomes `containerCount`.
+  const totalUnits = Number(formData.quantity) || 0;
+  const unitWordPlural = formData.quantityUnits || 'units';
+  const palletsNeeded = Number(formData.pallets) || 0;
+  const palletsPlaced = rawMaterialRowAllocations.reduce(
+    (sum, a) => sum + (Number(a.pallets) || 0), 0
+  );
+  const unitsPlaced = rawMaterialRowAllocations.reduce(
+    (sum, a) => sum + (Number(a.units) || 0), 0
+  );
+
   return (
     <>
       {/* Step 1: Enter total pallets needed FIRST */}
@@ -87,16 +100,28 @@ const RawMaterialRowSelection = ({
                           );
                           const totalNeeded = Number(formData.pallets) || 0;
                           const remainingToAllocate = Math.max(0, totalNeeded - alreadyAllocated);
-                          // null capacity = unlimited: take the full remainder.
-                          const palletsForThisRow = row.available === null
-                            ? remainingToAllocate
-                            : Math.min(remainingToAllocate, row.available || 0);
+                          // Seed with what is left to place, capped by the row's
+                          // nominal room only when that leaves something to put
+                          // there. A full row seeded 0 pallets and looked broken;
+                          // capacity is a hint, so the seed follows the remainder
+                          // and the person adjusts it.
+                          const nominalRoom = row.available === null ? Infinity : (row.available || 0);
+                          const palletsForThisRow = nominalRoom > 0
+                            ? Math.min(remainingToAllocate, nominalRoom)
+                            : remainingToAllocate;
+
+                          const unitsAlready = rawMaterialRowAllocations.reduce(
+                            (sum, a) => sum + (Number(a.units) || 0), 0
+                          );
 
                           const newAlloc = {
                             id: `raw-alloc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                             rowId: row.value,
                             rowName: row.rowData.name,
                             pallets: palletsForThisRow,
+                            // First row selected gets every container, so the
+                            // common single-row case needs no typing at all.
+                            units: Math.max(0, totalUnits - unitsAlready),
                             available: row.available,
                             capacity: row.capacity,
                           };
@@ -133,7 +158,12 @@ const RawMaterialRowSelection = ({
               border: '1px solid #ddd'
             }}>
               <div style={{ fontWeight: 'bold', marginBottom: '8px' }}>
-                Distribute Pallets Across Selected Rows
+                Split Across Selected Rows
+              </div>
+              <div style={{ display: 'flex', gap: '8px', fontSize: '0.8rem', color: '#666', marginBottom: '4px' }}>
+                <span style={{ minWidth: '100px' }} />
+                <span style={{ width: '80px' }}>Pallets</span>
+                <span style={{ width: '80px' }}>{unitWordPlural}</span>
               </div>
               {rawMaterialRowAllocations.map((alloc) => {
                 const row = availableRows.find(r => r.value === alloc.rowId);
@@ -151,35 +181,60 @@ const RawMaterialRowSelection = ({
                       type="number"
                       value={alloc.pallets}
                       onChange={(e) => {
-                        const newPallets = Math.max(0, Math.min(Number(e.target.value), maxPallets));
+                        // Capacity is a hint, so this no longer clamps to it.
+                        const newPallets = Math.max(0, Number(e.target.value));
                         setRawMaterialRowAllocations(prev =>
                           prev.map(a => a.id === alloc.id ? { ...a, pallets: newPallets } : a)
                         );
                       }}
                       min="0"
-                      max={maxPallets === Infinity ? undefined : maxPallets}
                       step="1"
                       style={{ width: '80px', padding: '4px 8px' }}
                     />
-                    <span style={{ fontSize: '0.875rem', color: '#666' }}>
-                      (max: {maxPallets})
-                    </span>
+                    {/* The count that becomes a placement. Pallets are the
+                        footprint and cannot imply it — 4 pallets of drums could
+                        be 40 or 70, and nothing downstream can tell which. */}
+                    <input
+                      type="number"
+                      value={alloc.units ?? ''}
+                      onChange={(e) => {
+                        const newUnits = Math.max(0, Number(e.target.value));
+                        setRawMaterialRowAllocations(prev =>
+                          prev.map(a => a.id === alloc.id ? { ...a, units: newUnits } : a)
+                        );
+                      }}
+                      min="0"
+                      step="1"
+                      placeholder="0"
+                      style={{ width: '80px', padding: '4px 8px' }}
+                    />
+                    {maxPallets !== Infinity && (
+                      <span style={{ fontSize: '0.8rem', color: '#999' }}>
+                        rack holds ~{maxPallets}
+                      </span>
+                    )}
                   </div>
                 );
               })}
               <div style={{ marginTop: '8px', padding: '8px', backgroundColor: '#fff', borderRadius: '4px' }}>
-                <strong>Total: </strong>
-                <span style={{
-                  color: rawMaterialRowAllocations.reduce((sum, a) => sum + (Number(a.pallets) || 0), 0) === Number(formData.pallets)
-                    ? '#4caf50'
-                    : '#f44336',
-                  fontWeight: 'bold'
-                }}>
-                  {rawMaterialRowAllocations.reduce((sum, a) => sum + (Number(a.pallets) || 0), 0)} / {formData.pallets}
-                </span>
-                {rawMaterialRowAllocations.reduce((sum, a) => sum + (Number(a.pallets) || 0), 0) !== Number(formData.pallets) && (
-                  <div style={{ fontSize: '0.875rem', color: '#f44336', marginTop: '4px' }}>
-                    Total must equal {formData.pallets} pallets
+                <div>
+                  <strong>Pallets: </strong>
+                  <span style={{ color: palletsPlaced === palletsNeeded ? '#4caf50' : '#f44336', fontWeight: 'bold' }}>
+                    {palletsPlaced} / {palletsNeeded}
+                  </span>
+                </div>
+                {totalUnits > 0 && (
+                  <div style={{ marginTop: '4px' }}>
+                    <strong>{unitWordPlural}: </strong>
+                    <span style={{ color: unitsPlaced === totalUnits ? '#4caf50' : '#f44336', fontWeight: 'bold' }}>
+                      {unitsPlaced} / {totalUnits}
+                    </span>
+                    {unitsPlaced !== totalUnits && (
+                      <div style={{ fontSize: '0.875rem', color: '#f44336', marginTop: '4px' }}>
+                        Say how many {unitWordPlural} are on each row — this is what
+                        tells the system where to find them.
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -197,6 +252,7 @@ const RawMaterialRowSelection = ({
             }}>
               <div style={{ fontSize: '0.875rem', color: '#2e7d32' }}>
                 {rawMaterialRowAllocations[0].rowName} will store {formData.pallets} pallets
+                {totalUnits > 0 && ` — all ${totalUnits} ${unitWordPlural}`}
               </div>
             </div>
           )}

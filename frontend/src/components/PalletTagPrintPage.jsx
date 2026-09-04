@@ -5,6 +5,8 @@ import { useAuth } from '../context/AuthContext';
 import { getDashboardPath } from '../App';
 import { formatDate } from '../utils/dateUtils';
 import JsBarcode from 'jsbarcode';
+import LotLabel from './ingredient/LotLabel';
+import { apiErrorMessage, printSessionLabels } from '../api/lotReceivingApi';
 import jsPDF from 'jspdf';
 import PalletStickerLayout from './palletizer/PalletStickerLayout';
 import SearchableSelect from './SearchableSelect';
@@ -39,8 +41,15 @@ const PalletTagPrintPage = () => {
     products,
     categories,
     locations,
+    vendors,
     fetchPalletLicences,
   } = useAppData();
+
+  const vendorNameById = useMemo(() => {
+    const map = {};
+    (vendors || []).forEach((v) => { map[v.id] = v.name; });
+    return map;
+  }, [vendors]);
 
   // Get pre-selected receipt from URL
   const preselectedReceiptId = searchParams.get('receiptId');
@@ -58,6 +67,13 @@ const PalletTagPrintPage = () => {
   // narrow a long list down to one specific pallet ID quickly.
   const [palletSearchByReceipt, setPalletSearchByReceipt] = useState({});
   const [copiesPerTag, setCopiesPerTag] = useState(1);
+  // Pallet stickers or one per container. Only meaningful for lot-tracked
+  // material that arrives wrapped — see the chooser below the preview button.
+  const [lotScope, setLotScope] = useState('unit');
+  // receiptId -> the label the SERVER built. The lot code, vendor name and
+  // best-by all live server-side, so unlike the legacy tag this cannot be
+  // assembled from the receipt in the browser.
+  const [lotLabels, setLotLabels] = useState({});
   const [showPreview, setShowPreview] = useState(false);
   const [previewTags, setPreviewTags] = useState([]); // [{ kind: 'receipt'|'pallet', receipt, pallet? }]
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -122,7 +138,12 @@ const PalletTagPrintPage = () => {
         const matchesPallet = cachedPallets.some((p) =>
           (p.licence_number || '').toLowerCase().includes(searchLower)
         );
-        if (!matchesProduct && !matchesLot && !matchesFCC && !matchesPallet) return false;
+        // Searchable too: with two suppliers on one lot number, the vendor is
+        // the only way to narrow to the one you want.
+        const matchesVendor = (vendorNameById[receipt.vendorId] || '')
+          .toLowerCase().includes(searchLower);
+        if (!matchesProduct && !matchesLot && !matchesFCC && !matchesPallet
+          && !matchesVendor) return false;
       }
 
       // For FG receipts: once we've fetched the pallet list and it has
@@ -258,6 +279,8 @@ const PalletTagPrintPage = () => {
     const timeoutId = setTimeout(() => {
       Array.from({ length: copiesPerTag }).forEach((_, copyIndex) => {
         previewTags.forEach((tag) => {
+          // Lot stickers carry a QR built by <LotLabel>; only the legacy
+          // tag needs these two CODE128 barcodes drawn into it.
           if (tag.kind !== 'receipt') return;
           const receipt = tag.receipt;
           const product = products.find((p) => p.id === receipt.productId);
@@ -323,6 +346,19 @@ const PalletTagPrintPage = () => {
   // selected RM/packaging receipt → 1 tag. For each selected FG receipt →
   // one tag per pallet (explicitly checked pallets if any, else every
   // in-building pallet).
+  /**
+   * A receipt whose material carries a lot identity.
+   *
+   * These print the LOT sticker — one QR carrying `SB2|lot_code|vendor_lot|bbd`
+   * — not the legacy tag below it, which encodes only SID and lot number as two
+   * CODE128 barcodes. That legacy tag cannot be scanned into the receive flow,
+   * and worse, it is IDENTICAL for two suppliers shipping the same lot number:
+   * the vendor is what separates those lots and the old design has nowhere to
+   * put it.
+   */
+  const isLotTrackedReceipt = (r) =>
+    Boolean(r?.materialLotId || r?.material_lot_id) && !isFinishedGoodsReceipt(r);
+
   const buildTagsToPrint = (palletData) => {
     const tags = [];
     for (const r of availableReceipts) {
@@ -335,6 +371,8 @@ const PalletTagPrintPage = () => {
         for (const p of toTag) {
           tags.push({ kind: 'pallet', receipt: r, pallet: p });
         }
+      } else if (isLotTrackedReceipt(r)) {
+        tags.push({ kind: 'lot', receipt: r });
       } else {
         tags.push({ kind: 'receipt', receipt: r });
       }
@@ -362,6 +400,31 @@ const PalletTagPrintPage = () => {
         }
       }
       const tags = buildTagsToPrint(merged);
+
+      // Ask the server for the sticker of every lot-tracked receipt selected.
+      // `count: 1` deliberately — one label is fetched and then repeated by the
+      // copies control, exactly as the legacy tag is. Asking for N would stamp
+      // `label_printed_at` no differently but would ship N identical copies of
+      // the same payload over the wire.
+      const lotTags = tags.filter((t) => t.kind === 'lot');
+      if (lotTags.length > 0) {
+        const fetched = { ...lotLabels };
+        await Promise.all(lotTags.map(async (t) => {
+          try {
+            const sheet = await printSessionLabels(t.receipt.id, 1, { scope: lotScope });
+            fetched[t.receipt.id] = { label: sheet.labels?.[0] || null, scope: sheet.scope };
+          } catch (err) {
+            // Blocked lots land here — no best-by, no vendor lot, flagged for
+            // review. Recorded against the receipt so the preview can say why
+            // rather than rendering a blank tag.
+            fetched[t.receipt.id] = {
+              error: apiErrorMessage(err, 'Stickers cannot be printed for this lot'),
+            };
+          }
+        }));
+        setLotLabels(fetched);
+      }
+
       setPreviewTags(tags);
       setShowPreview(true);
     } finally {
@@ -386,6 +449,25 @@ const PalletTagPrintPage = () => {
     return n;
   }, // eslint-disable-next-line react-hooks/exhaustive-deps
   [selectedReceipts, selectedPallets, palletsByReceipt, availableReceipts, products, categories]);
+
+  // True when any selected receipt actually rides a pallet. `units_per_pallet`
+  // is NULL for drums and totes, where the container is the thing carried.
+  const anyPalletisedSelected = useMemo(
+    () => availableReceipts.some(
+      (r) => selectedReceipts.has(r.id)
+        && Number(r.unitsPerPallet || r.units_per_pallet || 0) > 1,
+    ),
+    [availableReceipts, selectedReceipts],
+  );
+
+  // The body class the print CSS keys off. Added only while the preview is up,
+  // because the rules under it hide EVERYTHING — leaving it on would blank any
+  // other page in the SPA that someone printed afterwards.
+  useEffect(() => {
+    if (!showPreview) return undefined;
+    document.body.classList.add('pallet-tag-print-mode');
+    return () => document.body.classList.remove('pallet-tag-print-mode');
+  }, [showPreview]);
 
   const handlePrint = () => {
     window.print();
@@ -581,7 +663,7 @@ const PalletTagPrintPage = () => {
                 <span>Search</span>
                 <input
                   type="text"
-                  placeholder="Search by product, lot, FCC, or pallet ID..."
+                  placeholder="Search by product, vendor, lot, FCC, or pallet ID..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                 />
@@ -621,6 +703,11 @@ const PalletTagPrintPage = () => {
                   <th style={{ width: '32px' }}></th>
                   <th>Product</th>
                   <th>Lot Number</th>
+                  {/* Without this two suppliers shipping the same lot number
+                      are indistinguishable rows that print DIFFERENT stickers.
+                      The vendor is the segment of the lot key that separates
+                      them, so it has to be visible where the choice is made. */}
+                  <th>Vendor</th>
                   <th>FCC Code</th>
                   <th>Quantity</th>
                   <th>Production Date</th>
@@ -670,6 +757,7 @@ const PalletTagPrintPage = () => {
                           )}
                         </td>
                         <td>{receipt.lotNo || '-'}</td>
+                        <td>{vendorNameById[receipt.vendorId] || '-'}</td>
                         <td>{product?.fcc || '-'}</td>
                         <td>{receipt.quantity} {receipt.quantityUnits || 'cases'}</td>
                         <td>{formatDate(receipt.productionDate)}</td>
@@ -804,6 +892,20 @@ const PalletTagPrintPage = () => {
               ← Back to Selection
             </button>
             <div className="preview-options">
+              {/* Only shown when something selected is palletised. "Copies"
+                  duplicates a tag; this chooses WHAT the tag is — a pallet
+                  sticker reading "PALLET OF BAGS", or one per container. For
+                  drums the two collapse to the same thing, so asking would be
+                  a question with one answer. */}
+              {anyPalletisedSelected && (
+                <label>
+                  <span>Sticker for:</span>
+                  <select value={lotScope} onChange={(e) => setLotScope(e.target.value)}>
+                    <option value="unit">Each container</option>
+                    <option value="pallet">Each wrapped pallet</option>
+                  </select>
+                </label>
+              )}
               <label>
                 <span>Copies per tag:</span>
                 <input
@@ -847,7 +949,35 @@ const PalletTagPrintPage = () => {
                   );
                 }
 
-                // ─── RM / packaging receipt tag — existing inline layout
+                // ─── Lot-tracked material — the sticker the gun can read
+                if (tag.kind === 'lot') {
+                  const entry = lotLabels[receipt.id];
+                  if (entry?.error) {
+                    return (
+                      <div key={`loterr-${receipt.id}-${copyIndex}`} className="pallet-tag">
+                        <div className="tag-product-name">
+                          {product?.name || 'Unknown Product'}
+                        </div>
+                        <div className="tag-divider"></div>
+                        {/* Says WHY rather than printing a blank. A sticker with
+                            a missing best-by goes on forty drums and nothing can
+                            tell them apart afterwards. */}
+                        <div style={{ padding: 12, color: '#b45309', fontSize: '0.8rem' }}>
+                          {entry.error}
+                        </div>
+                      </div>
+                    );
+                  }
+                  if (!entry?.label) return null;
+                  return (
+                    <LotLabel
+                      key={`lot-${receipt.id}-${copyIndex}-${idx}`}
+                      label={entry.label}
+                    />
+                  );
+                }
+
+                // ─── Packaging / legacy receipt tag — existing inline layout
                 const tagKey = `${receipt.id}-${copyIndex}-${idx}`;
                 const sid = product?.sid || '-';
                 return (

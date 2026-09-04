@@ -188,26 +188,61 @@ def _placements_by_bucket(
     exists; receiving approval checks the paperwork afterwards and was
     explicitly agreed not to gate availability.
 
+    HOLDS COME FROM TWO PLACES and both have to land in the held bucket:
+
+      * ``MaterialLot.is_held`` — the whole lot, wherever it sits
+      * ``LotPlacement.held_units`` — N drums quarantined on one rack
+
+    So a single placement can be PARTLY held, which the old group-by could not
+    express: it grouped by the lot's flag, so a rack with eight quarantined
+    drums out of forty reported all forty as available. The split is computed
+    per placement instead, and each placement contributes to both buckets.
+
+    Open units stay with the unheld side unless the whole lot is held. A partial
+    hold quarantines whole sealed drums — you cannot release half of an opened
+    one, so holding it would be a claim nobody can act on.
+
     Returns ``[(is_held, weight_unit, qty, placement_count, unit_count), ...]``.
     """
-    qty_expr = func.coalesce(
-        func.sum(
-            LotPlacement.full_units * func.coalesce(MaterialLot.weight_per_unit, 0.0)
-            + func.coalesce(LotPlacement.open_remaining_qty, 0.0)
+    per_unit = func.coalesce(MaterialLot.weight_per_unit, 0.0)
+    # Units quarantined on this placement: all of them when the lot is held,
+    # otherwise the explicit per-rack count (clamped, defensively — the database
+    # constrains it too).
+    held_units = case(
+        (MaterialLot.is_held == True, LotPlacement.full_units),  # noqa: E712
+        else_=func.least(
+            func.coalesce(LotPlacement.held_units, 0), LotPlacement.full_units
         ),
-        0.0,
     )
-    units_expr = func.coalesce(
-        func.sum(LotPlacement.full_units + LotPlacement.open_units), 0
+    free_units = LotPlacement.full_units - held_units
+    # A wholly-held lot takes its opened remainder with it; a per-rack hold
+    # leaves it available.
+    held_open_qty = case(
+        (MaterialLot.is_held == True, func.coalesce(LotPlacement.open_remaining_qty, 0.0)),  # noqa: E712
+        else_=0.0,
+    )
+    held_open_units = case(
+        (MaterialLot.is_held == True, LotPlacement.open_units),  # noqa: E712
+        else_=0,
     )
 
     q = (
         db.query(
-            MaterialLot.is_held,
             MaterialLot.weight_unit,
-            qty_expr,
+            func.coalesce(func.sum(held_units * per_unit + held_open_qty), 0.0),
+            func.coalesce(func.sum(held_units + held_open_units), 0),
+            func.coalesce(
+                func.sum(
+                    free_units * per_unit
+                    + func.coalesce(LotPlacement.open_remaining_qty, 0.0)
+                    - held_open_qty
+                ),
+                0.0,
+            ),
+            func.coalesce(
+                func.sum(free_units + LotPlacement.open_units - held_open_units), 0
+            ),
             func.count(LotPlacement.id),
-            units_expr,
         )
         .join(MaterialLot, MaterialLot.id == LotPlacement.material_lot_id)
         .filter(
@@ -215,17 +250,23 @@ def _placements_by_bucket(
             MaterialLot.is_deleted == False,  # noqa: E712
             (LotPlacement.full_units > 0) | (LotPlacement.open_units > 0),
         )
-        .group_by(MaterialLot.is_held, MaterialLot.weight_unit)
+        .group_by(MaterialLot.weight_unit)
     )
     if warehouse_id:
         # Scope on the placement, not the lot: the same vendor lot legitimately
         # sits in two plants, and only the placement knows which drums are where.
         q = q.filter(LotPlacement.warehouse_id == warehouse_id)
 
-    return [
-        (bool(is_held), unit, float(qty or 0.0), int(count or 0), int(units or 0))
-        for is_held, unit, qty, count, units in q.all()
-    ]
+    out = []
+    for unit, held_qty, held_n, free_qty, free_n, count in q.all():
+        # The placement count is reported against the unheld bucket. It counts
+        # ROWS, not drums, and a partly-held rack is still one row that has
+        # something on it.
+        if float(free_qty or 0) or int(free_n or 0):
+            out.append((False, unit, float(free_qty or 0.0), int(count or 0), int(free_n or 0)))
+        if float(held_qty or 0) or int(held_n or 0):
+            out.append((True, unit, float(held_qty or 0.0), 0, int(held_n or 0)))
+    return out
 
 
 def _containers_by_bucket(

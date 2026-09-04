@@ -230,13 +230,22 @@ def _attach_live_unit_aggregates(db: Session, sub_locations: list) -> None:
     `occupied_*` columns, which is why a drum room could say nothing better than
     "0.00/22 pallets in use". Two grouped queries, no N+1 over rows.
     """
+    # EVERY row, not only unit-typed rooms.
+    #
+    # `content_unit` (set at the bottom) has to be answerable for a pallet-typed
+    # room too, because that is exactly where it was wrong: `occupied_cases` is
+    # overloaded — it holds CASES for packaging and derived POUNDS for anything
+    # lot-tracked — and the card labelled all of it "cases". A row holding four
+    # 470 lb drums read "1880 cases stored".
+    all_row_ids: list[str] = []
     row_ids: list[str] = []
     for sub in sub_locations:
-        if not getattr(sub, "storage_unit", None):
-            continue
+        typed = bool(getattr(sub, "storage_unit", None))
         for row in (sub.rows or []):
-            row_ids.append(row.id)
-    if not row_ids:
+            all_row_ids.append(row.id)
+            if typed:
+                row_ids.append(row.id)
+    if not all_row_ids:
         return
 
     placement_q = (
@@ -256,7 +265,7 @@ def _attach_live_unit_aggregates(db: Session, sub_locations: list) -> None:
         )
         .join(MaterialLot, MaterialLot.id == LotPlacement.material_lot_id)
         .filter(
-            LotPlacement.storage_row_id.in_(row_ids),
+            LotPlacement.storage_row_id.in_(all_row_ids),
             MaterialLot.is_deleted == False,  # noqa: E712
             (LotPlacement.full_units > 0) | (LotPlacement.open_units > 0),
         )
@@ -265,11 +274,15 @@ def _attach_live_unit_aggregates(db: Session, sub_locations: list) -> None:
 
     totals: dict[str, list] = defaultdict(lambda: [0, 0])
     lots: dict[str, list[dict]] = defaultdict(list)
+    content_units: dict[str, str] = {}
     for (
         row_id, lot_id, product_id, full_units, open_units, open_qty,
         lot_code, vendor_lot, weight_per_unit, weight_unit, bbd, is_held,
     ) in placement_q:
         units = int(full_units or 0) + int(open_units or 0)
+        # First lot on the row decides. One canonical weight unit is enforced at
+        # entry (see weightUnitOptions), so a mixed row is not reachable.
+        content_units.setdefault(row_id, weight_unit or "lbs")
         totals[row_id][0] += units
         totals[row_id][1] += int(open_units or 0)
         lots[row_id].append({
@@ -290,9 +303,14 @@ def _attach_live_unit_aggregates(db: Session, sub_locations: list) -> None:
         })
 
     for sub in sub_locations:
-        if not getattr(sub, "storage_unit", None):
-            continue
+        typed = bool(getattr(sub, "storage_unit", None))
         for row in (sub.rows or []):
+            # What `occupied_cases` is MEASURED IN for this row. Lot-tracked
+            # material stores derived weight there, so the card can stop calling
+            # it cases; a row with no placements keeps the legacy meaning.
+            row.content_unit = content_units.get(row.id)
+            if not typed:
+                continue
             units, open_units = totals.get(row.id, (0, 0))
             # Set on the ORM instance so Pydantic (from_attributes=True) reads it
             row.live_units = int(units)

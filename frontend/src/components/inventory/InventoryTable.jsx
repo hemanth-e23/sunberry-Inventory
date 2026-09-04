@@ -81,7 +81,10 @@ const InventoryTable = ({
           <tbody>
             {inventoryRows.length === 0 ? (
               <tr>
-                <td colSpan={11} className="empty">
+                {/* Derived, not the hardcoded 11 it used to be — that was
+                    already one short of the columns actually rendered, and
+                    every new column would silently make it worse. */}
+                <td colSpan={Object.values(visibleColumns).filter(Boolean).length} className="empty">
                   No inventory found with the current filters.
                 </td>
               </tr>

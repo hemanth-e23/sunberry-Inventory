@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
-from app.models import Receipt, InventoryAdjustment, PalletLicence
+from app.models import MaterialLot, Receipt, InventoryAdjustment, PalletLicence
 from app.models.location import StorageRow
 from app.enums import AdjustmentStatus, ReceiptStatus, PalletStatus, AdjustmentType
 from app.enums import DEDUCTION_TYPES  # noqa: F401  (re-exported; routers/adjustments.py:65 reads adjustment_service.DEDUCTION_TYPES)
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE
+from app.services import lot_placement_service as lps
 from app.services.ship_out_service import _release_row_capacity
 from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
 from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, deduct_rm_total
@@ -81,12 +82,62 @@ def _apply_row_breakdown(db: Session, receipt: Receipt, adjustment: InventoryAdj
     otherwise prorate the adjustment across the lot's current allocations so a
     plain quantity deduction no longer leaves rows/JSON untouched."""
     deductions = parse_breakdown(adjustment.source_breakdown)
+
+    if lps.is_counted_lot(db, receipt.material_lot_id):
+        _apply_row_breakdown_counted(db, receipt, adjustment, deductions)
+        return
+
     if deductions:
         # Free exactly the pallets the operator entered per row (no cases/cpp).
         pallets = parse_pallet_breakdown(adjustment.source_breakdown)
         deduct_rm_rows(db, receipt, deductions, pallets_by_row=pallets, update_rows=True)
     else:
         deduct_rm_total(db, receipt, float(adjustment.quantity or 0), update_rows=True)
+
+
+def _apply_row_breakdown_counted(
+    db: Session, receipt: Receipt, adjustment: InventoryAdjustment, deductions: dict
+) -> None:
+    """The same deduction against a counted lot: whole containers off racks.
+
+    An adjustment is somebody saying the shelf does not match the system —
+    a drum leaked, or the count was wrong. It is recorded as an ADJUSTED event
+    per rack, so the ledger shows the correction rather than quietly restating
+    history, and `reconcile_lot` can still tie the two together afterwards.
+    """
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    if not lot:
+        return
+
+    if deductions:
+        # The operator named the racks, so honour exactly that. Their weight per
+        # rack becomes a count per rack.
+        for row_id, qty in deductions.items():
+            units = lps.units_for_quantity(lot, float(qty or 0))
+            if units <= 0:
+                continue
+            lps.take_units(
+                db, lot,
+                units=units,
+                event_type=lps.EVENT_ADJUSTED,
+                from_row_id=row_id,
+                ref_type="adjustment",
+                ref_id=adjustment.id,
+                reason=adjustment.reason,
+            )
+        return
+
+    # No racks named — take it off the fullest first and let the ledger record
+    # which racks it actually came from.
+    units = lps.units_for_quantity(lot, float(adjustment.quantity or 0))
+    lps.take_units(
+        db, lot,
+        units=units,
+        event_type=lps.EVENT_ADJUSTED,
+        ref_type="adjustment",
+        ref_id=adjustment.id,
+        reason=adjustment.reason,
+    )
 
 
 def reject_adjustment(db: Session, adjustment: InventoryAdjustment, reason: str, current_user) -> InventoryAdjustment:

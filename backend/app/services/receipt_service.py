@@ -66,6 +66,17 @@ def approve_receipt(db: Session, receipt: Receipt, current_user) -> Receipt:
         PalletLicence.status == PalletStatus.PENDING,
     ).update({"status": PalletStatus.IN_STOCK}, synchronize_session=False)
 
+    # Finished goods became locatable a moment ago, when their licences turned
+    # in_stock. Raw material has no licences, so this is the equivalent step:
+    # the rows typed on the form become placements, which is what makes the
+    # material findable by picking, staging and the row cards.
+    #
+    # Imported here rather than at module scope only to keep the receipt service
+    # free of a lot-model dependency at import time; there is no cycle.
+    from app.services import lot_receiving_service
+
+    lot_receiving_service.place_logged_receipt(db, receipt, actor_id=str(current_user.id))
+
     return receipt
 
 

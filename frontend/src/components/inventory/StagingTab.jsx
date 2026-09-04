@@ -8,6 +8,139 @@ import apiClient from '../../api/client';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES } from '../../constants';
 
+/**
+ * What is available, said in the unit the lot is actually counted in.
+ *
+ * "40 drums" for a counted lot, "20000 lbs" for a legacy one. The dropdown is
+ * where somebody chooses which lot to pull from, so it has to be comparable to
+ * what they will see on the rack — a weight is not.
+ */
+const describeAvailable = (suggestion) => {
+  if (suggestion.is_counted) {
+    const label = suggestion.unit_label || 'unit';
+    const n = suggestion.available_units || 0;
+    const held = suggestion.held_units || 0;
+    return `${n} ${label}${n === 1 ? '' : 's'}${held ? ` (${held} on hold)` : ''}`;
+  }
+  return `${suggestion.available_quantity} ${suggestion.unit || 'cases'}`;
+};
+
+/**
+ * How much of this lot to pull — in whatever the lot is actually counted in.
+ *
+ * A COUNTED lot asks for containers, because that is what a person carries.
+ * The weight is derived and shown beside it, since production schedules in
+ * pounds and the number still has to be recognisable to them.
+ *
+ * There is no pallet input for a counted lot, deliberately. The rack footprint
+ * is DERIVED from the container count (see `_project_rows`), so a separate
+ * pallet figure would be a second number for the same shelf, free to disagree
+ * with the first — and `_stage_free_counted` ignores it anyway. An input whose
+ * value is silently discarded is worse than no input.
+ *
+ * A legacy receipt keeps the old weight-and-pallets entry: it has no container
+ * count, so containers is not a question it can answer.
+ */
+const LotAmountInputs = ({ lot, unit, onChange }) => {
+  const suggestion = lot.suggestion;
+
+  if (suggestion?.is_counted) {
+    const label = suggestion.unit_label || 'unit';
+    const per = Number(suggestion.weight_per_container) || 0;
+    const units = Number(lot.units) || 0;
+    return (
+      <>
+        <input
+          type="number"
+          value={lot.units ?? ''}
+          onChange={(e) => onChange('units', e.target.value)}
+          min="0"
+          step="1"
+          max={suggestion.available_units || 0}
+          title={`How many ${label}s to pull`}
+          style={{ width: '80px', padding: '0.25rem' }}
+        />
+        <span style={{ fontSize: '0.875rem', whiteSpace: 'nowrap' }}>
+          {label}{units === 1 ? '' : 's'}
+          {per > 0 && (
+            <span style={{ color: '#6b7280' }}>
+              {' '}= {(units * per).toLocaleString()} {suggestion.weight_unit || 'lbs'}
+            </span>
+          )}
+        </span>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <input
+        type="number"
+        value={lot.quantity || ''}
+        onChange={(e) => onChange('quantity', e.target.value)}
+        min="0.01"
+        step="0.01"
+        max={suggestion?.available_quantity || 999999}
+        style={{ width: '100px', padding: '0.25rem' }}
+      />
+      <span style={{ fontSize: '0.875rem', whiteSpace: 'nowrap' }}>{lot.unit || unit}</span>
+      <input
+        type="number"
+        value={lot.pallets ?? ''}
+        onChange={(e) => onChange('pallets', e.target.value)}
+        min="0"
+        step="1"
+        placeholder="pallets"
+        title="Pallets emptied from the rack"
+        style={{ width: '80px', padding: '0.25rem' }}
+      />
+    </>
+  );
+};
+
+/**
+ * Which racks to walk to, and what to take off each.
+ *
+ * The whole point of counting containers rather than smearing a weight across
+ * every rack proportionally: this can be printed on a pull ticket and checked
+ * against the shelf.
+ */
+const PullPlan = ({ lot, plan }) => {
+  const suggestion = lot?.suggestion;
+  if (!suggestion?.is_counted) return null;
+
+  const label = suggestion.unit_label || 'unit';
+  const held = suggestion.held_units || 0;
+
+  return (
+    <div style={{ marginTop: '0.35rem', fontSize: '0.8rem' }}>
+      {plan.length > 0 ? (
+        <span style={{ color: '#166534' }}>
+          Take{' '}
+          {plan.map((rack, i) => (
+            <span key={rack.storage_row_id}>
+              {i > 0 ? ', ' : ''}
+              <strong>{rack.take}</strong> from <strong>{rack.storage_row_name}</strong>
+            </span>
+          ))}
+        </span>
+      ) : (
+        <span style={{ color: '#6b7280' }}>
+          {suggestion.available_units} {label}
+          {suggestion.available_units === 1 ? '' : 's'} across{' '}
+          {(suggestion.racks || []).map(r => r.storage_row_name).join(', ') || 'no rack'}
+        </span>
+      )}
+      {/* Quarantined containers are on the rack but cannot be pulled. Saying so
+          here stops somebody counting forty on the shelf and concluding the
+          system is wrong. */}
+      {held > 0 && (
+        <span style={{ color: '#b45309' }}> · {held} on hold, not pickable</span>
+      )}
+    </div>
+  );
+};
+
 const StagingTab = () => {
   const navigate = useNavigate();
   const { addToast } = useToast();
@@ -166,6 +299,24 @@ const StagingTab = () => {
 
               const newQuantity = Math.min(maxAvailable, Math.max(remainingNeeded, currentQuantity)) || Math.min(maxAvailable, remainingNeeded) || maxAvailable || 0;
 
+              // A counted lot is pulled in whole containers, so seed the
+              // container count and derive the weight from it — not the other
+              // way round. Rounded UP: 600 lbs of a 500 lb drum is two drums off
+              // the rack, and the remainder comes back as a partial.
+              if (suggestion.is_counted) {
+                const per = Number(suggestion.weight_per_container) || 0;
+                const wanted = per > 0 ? Math.ceil(newQuantity / per) : 0;
+                const units = Math.min(wanted, suggestion.available_units || 0);
+                return {
+                  ...lot,
+                  receiptId: value,
+                  suggestion,
+                  units,
+                  quantity: units * per,
+                  unit: suggestion.unit || item.unit || 'cases',
+                };
+              }
+
               return {
                 ...lot,
                 receiptId: value,
@@ -173,6 +324,15 @@ const StagingTab = () => {
                 quantity: newQuantity,
                 unit: suggestion.unit || item.unit || 'cases'
               };
+            } else if (field === 'units') {
+              // Containers in, weight derived. The API still carries weight —
+              // production schedules in pounds — but the number a person types
+              // is the number of things they will carry.
+              const suggestion = lot.suggestion;
+              const per = Number(suggestion?.weight_per_container) || 0;
+              const max = suggestion?.available_units || 0;
+              const units = Math.min(Math.max(0, Math.round(Number(value) || 0)), max);
+              return { ...lot, units, quantity: units * per };
             } else if (field === 'quantity') {
               const qty = parseFloat(value) || 0;
               const maxAvailable = lot.suggestion?.available_quantity || 999999;
@@ -191,6 +351,34 @@ const StagingTab = () => {
       })
     }));
     setStagingError('');
+  };
+
+  /**
+   * Which racks a pull of `units` containers will actually come off.
+   *
+   * MIRRORS `lot_placement_service.take_units`: fullest rack first, because
+   * that produces an instruction somebody can follow — "two off ROW 3" — and
+   * empties racks rather than leaving ones and twos scattered across the barn.
+   *
+   * Shown, not sent. The server recomputes it from the placements as they are
+   * at approval time, which is the only moment that can be authoritative — a
+   * drum may move between now and then. If the two ever disagree the server
+   * wins and the pull ticket is regenerated.
+   */
+  const pullPlan = (suggestion, units) => {
+    if (!suggestion?.is_counted || !units) return [];
+    const racks = [...(suggestion.racks || [])]
+      .filter(r => r.available_units > 0)
+      .sort((a, b) => b.available_units - a.available_units);
+    const plan = [];
+    let left = units;
+    for (const rack of racks) {
+      if (left <= 0) break;
+      const take = Math.min(rack.available_units, left);
+      plan.push({ ...rack, take });
+      left -= take;
+    }
+    return plan;
   };
 
   const handleRemoveStagingLot = (itemIndex, lotIndex) => {
@@ -247,7 +435,7 @@ const StagingTab = () => {
         <th style="width: 25%">Product Name</th>
         <th style="width: 15%">Lot Number</th>
         <th style="width: 12%">Expiration Date</th>
-        <th style="width: 18%">Current Location</th>
+        <th style="width: 18%">Pick from</th>
         <th style="width: 10%" class="num">Quantity</th>
         <th style="width: 15%">Unit</th>
       </tr>
@@ -266,15 +454,31 @@ const StagingTab = () => {
             ? formatDate(suggestion.expiration_date)
             : '—';
 
+          // For a counted lot the ticket names the RACKS and a container count,
+          // because that is what the person holding this piece of paper has to
+          // do: walk to ROW 3 and pick up two drums. A weight and a room name
+          // cannot be checked against a shelf.
+          const counted = suggestion?.is_counted;
+          const plan = counted ? pullPlan(suggestion, lot.units) : [];
+          const whereText = plan.length
+            ? plan.map(r => `${escapeHtml(r.storage_row_name)} × ${r.take}`).join(', ')
+            : locationText;
+          const amount = counted
+            ? (lot.units || 0)
+            : (lot.quantity || 0);
+          const amountUnit = counted
+            ? `${escapeHtml(suggestion.unit_label || 'unit')}s`
+            : escapeHtml(lot.unit || unit);
+
           return `
           <tr>
             <td>${itemIndex + 1}${item.lots.length > 1 ? `-${lotIndex + 1}` : ''}</td>
             <td><strong>${escapeHtml(product?.name) || 'Unknown'}</strong></td>
             <td>${escapeHtml(suggestion?.lot_number) || '—'}</td>
             <td>${expirationDate}</td>
-            <td>${locationText}</td>
-            <td class="num"><strong>${(lot.quantity || 0).toLocaleString()}</strong></td>
-            <td>${escapeHtml(lot.unit || unit)}</td>
+            <td>${whereText}</td>
+            <td class="num"><strong>${amount.toLocaleString()}</strong></td>
+            <td>${amountUnit}</td>
           </tr>`;
         });
       }).join('')}
@@ -524,32 +728,18 @@ const StagingTab = () => {
                                       <option key={idx} value={suggestion.receipt_id} disabled={isSelected}>
                                         Lot {suggestion.lot_number} - {suggestion.location_name || 'Unknown'}
                                         {suggestion.expiration_date ? ` (Exp: ${formatDate(suggestion.expiration_date)})` : ''}
-                                        - {suggestion.available_quantity} {suggestion.unit || 'cases'}
+                                        - {describeAvailable(suggestion)}
                                       </option>
                                     );
                                   })}
                                 </select>
                                 {item.lots[0]?.receiptId && (
                                   <>
-                                    <input
-                                      type="number"
-                                      value={item.lots[0].quantity || ''}
-                                      onChange={(e) => handleStagingLotChange(itemIndex, 0, 'quantity', e.target.value)}
-                                      min="0.01"
-                                      step="0.01"
-                                      max={item.lots[0].suggestion?.available_quantity || 999999}
-                                      style={{ width: '100px', padding: '0.25rem' }}
-                                    />
-                                    <span style={{ fontSize: '0.875rem', whiteSpace: 'nowrap' }}>{item.lots[0].unit || unit}</span>
-                                    <input
-                                      type="number"
-                                      value={item.lots[0].pallets ?? ''}
-                                      onChange={(e) => handleStagingLotChange(itemIndex, 0, 'pallets', e.target.value)}
-                                      min="0"
-                                      step="1"
-                                      placeholder="pallets"
-                                      title="Pallets emptied from the rack"
-                                      style={{ width: '80px', padding: '0.25rem' }}
+                                    <LotAmountInputs
+                                      lot={item.lots[0]}
+                                      unit={unit}
+                                      onChange={(field, value) =>
+                                        handleStagingLotChange(itemIndex, 0, field, value)}
                                     />
                                     {item.lots.length > 1 && (
                                       <button
@@ -564,6 +754,7 @@ const StagingTab = () => {
                                   </>
                                 )}
                               </div>
+                              <PullPlan lot={item.lots[0]} plan={pullPlan(item.lots[0]?.suggestion, item.lots[0]?.units)} />
                             </td>
                             <td rowSpan={totalRows} style={{ padding: '0.5rem', border: '1px solid #ddd', verticalAlign: 'top' }}>
                               <button
@@ -592,34 +783,18 @@ const StagingTab = () => {
                                         <option key={idx} value={suggestion.receipt_id} disabled={isSelected}>
                                           Lot {suggestion.lot_number} - {suggestion.location_name || 'Unknown'}
                                           {suggestion.expiration_date ? ` (Exp: ${formatDate(suggestion.expiration_date)})` : ''}
-                                          - {suggestion.available_quantity} {suggestion.unit || 'cases'}
+                                          - {describeAvailable(suggestion)}
                                         </option>
                                       );
                                     })}
                                   </select>
                                   {lot.receiptId && (
-                                    <>
-                                      <input
-                                        type="number"
-                                        value={lot.quantity || ''}
-                                        onChange={(e) => handleStagingLotChange(itemIndex, lotIndex + 1, 'quantity', e.target.value)}
-                                        min="0.01"
-                                        step="0.01"
-                                        max={lot.suggestion?.available_quantity || 999999}
-                                        style={{ width: '100px', padding: '0.25rem' }}
-                                      />
-                                      <span style={{ fontSize: '0.875rem', whiteSpace: 'nowrap' }}>{lot.unit || unit}</span>
-                                      <input
-                                        type="number"
-                                        value={lot.pallets ?? ''}
-                                        onChange={(e) => handleStagingLotChange(itemIndex, lotIndex + 1, 'pallets', e.target.value)}
-                                        min="0"
-                                        step="1"
-                                        placeholder="pallets"
-                                        title="Pallets emptied from the rack"
-                                        style={{ width: '80px', padding: '0.25rem' }}
-                                      />
-                                    </>
+                                    <LotAmountInputs
+                                      lot={lot}
+                                      unit={unit}
+                                      onChange={(field, value) =>
+                                        handleStagingLotChange(itemIndex, lotIndex + 1, field, value)}
+                                    />
                                   )}
                                   <button
                                     type="button"
@@ -630,6 +805,7 @@ const StagingTab = () => {
                                     x
                                   </button>
                                 </div>
+                                <PullPlan lot={lot} plan={pullPlan(lot.suggestion, lot.units)} />
                               </td>
                             </tr>
                           ))}

@@ -359,6 +359,21 @@
 }
 .og-empty .big { font-size: 2rem; margin-bottom: 8px; }
 
+/* an explanatory line at the top of a modal — what this form will DO */
+.og-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--color-info-soft, var(--color-surface-muted));
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.og-note svg { flex-shrink: 0; margin-top: 2px; }
+
 /* overdue section */
 .og-section-label {
   display: flex;
@@ -759,4 +774,16 @@
   gap: 6px;
   padding: 14px 18px;
   min-width: 160px;
+}
+
+/* Group heading between the unscheduled backlog and a day's arrivals. */
+.og-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 18px 0 8px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--color-text);
 }

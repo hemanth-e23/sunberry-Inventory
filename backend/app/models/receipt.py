@@ -25,6 +25,14 @@ class Receipt(Base):
     container_unit = Column(String(30), nullable=True)
     weight_per_container = Column(Float, nullable=True)
     weight_unit = Column(String(10), nullable=True)
+    # How many containers ride one wrapped pallet — 50 bags, 24 boxes. NULL for
+    # barrels and totes, where the container is the thing handled.
+    #
+    # Lives here as well as on MaterialLot because both readers run AFTER the
+    # entry form is gone: `ensure_lot_for_receipt` when Print is pressed, which
+    # may be days later, and `place_logged_receipt` at approval. The lot is
+    # where it ends up; the receipt is how it gets there.
+    units_per_pallet = Column(Integer, nullable=True)
     production_date = Column(DateTime(timezone=True))
     expiration_date = Column(DateTime(timezone=True))
     receipt_date = Column(DateTime(timezone=True), server_default=func.now())

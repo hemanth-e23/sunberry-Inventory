@@ -553,9 +553,45 @@
     background: white !important;
   }
 
-  @page {
+  /* Blank the app chrome WITHOUT needing to know its class names: hide
+     everything, then re-show the print area and its descendants.
+     `visibility` rather than `display` so ancestors keep their boxes and the
+     area can still be positioned at the top of the sheet.
+
+     The enumerated hide-list above never knew about `.sidebar`, so the whole
+     nav printed down the left of every tag. A list that has to name every
+     element is wrong by construction — the next component added to the layout
+     would have reintroduced it. Same idiom as IngredientIntakesPage.css. */
+  body.pallet-tag-print-mode * {
+    visibility: hidden;
+  }
+
+  body.pallet-tag-print-mode .print-area,
+  body.pallet-tag-print-mode .print-area * {
+    visibility: visible;
+  }
+
+  body.pallet-tag-print-mode .print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* A NAMED page, not a bare `@page`.
+     This stylesheet stays loaded for the rest of the SPA session, so a bare
+     rule silently resized every other print in the app — including the 4x6
+     lot stickers now rendered here, which came out cropped on a 5.75in sheet.
+     ContainerLabel.css documents the same trap. */
+  @page pallet-tag-page {
     size: 4in 5.75in;
     margin: 0;
+  }
+
+  .pallet-tag {
+    page: pallet-tag-page;
   }
 }
 /* ======================================== */

@@ -27,6 +27,15 @@ class ReceiptBase(BaseSchema):
     container_unit: Optional[str] = None
     weight_per_container: Optional[float] = None
     weight_unit: Optional[str] = None
+    # How many containers ride one wrapped pallet. NULL for barrels and totes,
+    # where the container IS the thing handled — set for bags, boxes and
+    # bottles, where a pallet is what moves and nobody destacks it to sticker
+    # each bag.
+    #
+    # Deliberately NOT `cases_per_pallet` a few fields below: that is a CASES
+    # figure with a fallback of 40 that `row_allocation._cpp` reads on the
+    # legacy path, and overloading it would silently corrupt that arithmetic.
+    units_per_pallet: Optional[int] = None
     receipt_date: Optional[datetime] = None
     production_date: Optional[datetime] = None
     expiration_date: Optional[datetime] = None
@@ -71,6 +80,15 @@ class ReceiptUpdate(BaseSchema):
     container_unit: Optional[str] = None
     weight_per_container: Optional[float] = None
     weight_unit: Optional[str] = None
+    # How many containers ride one wrapped pallet. NULL for barrels and totes,
+    # where the container IS the thing handled — set for bags, boxes and
+    # bottles, where a pallet is what moves and nobody destacks it to sticker
+    # each bag.
+    #
+    # Deliberately NOT `cases_per_pallet` a few fields below: that is a CASES
+    # figure with a fallback of 40 that `row_allocation._cpp` reads on the
+    # legacy path, and overloading it would silently corrupt that arithmetic.
+    units_per_pallet: Optional[int] = None
     receipt_date: Optional[datetime] = None
     production_date: Optional[datetime] = None
     expiration_date: Optional[datetime] = None

@@ -9,6 +9,44 @@ import ReceivingCheck from './ReceivingCheck';
 
 const STATUS_PENDING = new Set([RECEIPT_STATUS.RECORDED, RECEIPT_STATUS.REVIEWED]);
 
+/**
+ * What an approver can walk out and COUNT, said before the weight.
+ *
+ * The card used to show "1125 lbs" alone. Pounds are DERIVED —
+ * `containers x weight each` — so there is nothing on a dock an approver can
+ * hold up against them. Containers and pallets are countable, which is the
+ * whole reason the lot model counts them.
+ *
+ * Returns `{ primary, secondary }`: the countable line and the derived weight.
+ * Falls back to the raw quantity for anything with no container count, which
+ * after the cutover means legacy receipts only.
+ */
+const describeReceiptQuantity = (receipt) => {
+  const containers = Number(receipt.containerCount) || 0;
+  const unit = receipt.containerUnit || "";
+  const perPallet = Number(receipt.unitsPerPallet) || 0;
+
+  if (containers <= 0 || !unit) {
+    return {
+      primary: `${receipt.quantity} ${receipt.quantityUnits || ""}`.trim(),
+      secondary: null,
+    };
+  }
+
+  const parts = [`${containers.toLocaleString()} ${unit}`];
+  if (perPallet > 1) {
+    // Rounded UP: a part-used pallet still takes a whole slot, and this has to
+    // agree with the rack card the approval will produce.
+    const pallets = Math.ceil(containers / perPallet);
+    parts.push(`${pallets} pallet${pallets === 1 ? "" : "s"}`);
+  }
+
+  return {
+    primary: parts.join(" · "),
+    secondary: `${Number(receipt.quantity || 0).toLocaleString()} ${receipt.quantityUnits || ""}`.trim(),
+  };
+};
+
 const getPriorityLevel = (days) => {
   if (days === 0) return { level: 'low', label: 'New', color: '#10b981' };
   if (days < 3) return { level: 'low', label: 'Recent', color: '#10b981' };
@@ -336,7 +374,19 @@ const ReceiptsTab = ({
           <div>
             <dt>Quantity</dt>
             <dd>
-              {receipt.quantity} {receipt.quantityUnits}
+              {(() => {
+                const q = describeReceiptQuantity(receipt);
+                return (
+                  <>
+                    <span>{q.primary}</span>
+                    {q.secondary && (
+                      <span style={{ display: 'block', fontSize: '0.8rem', color: '#6b7280', fontWeight: 400 }}>
+                        {q.secondary}
+                      </span>
+                    )}
+                  </>
+                );
+              })()}
             </dd>
           </div>
           <div>
@@ -415,7 +465,11 @@ const ReceiptsTab = ({
                   rowInfo.push(`${rowName || rowId}${pallets > 0 ? ` (${pallets} pallets)` : ''}`);
                 }
                 if (rowInfo.length > 0) {
-                  return `${locationLabel} — Row${rowInfo.length > 1 ? 's' : ''}: ${rowInfo.join(', ')}`;
+                  const rows = `Row${rowInfo.length > 1 ? 's' : ''}: ${rowInfo.join(', ')}`;
+                  // A scanned receipt has NO location of its own — the rack comes
+                  // from the gun, so `locationLabel` is the em-dash placeholder.
+                  // Prefixing it anyway rendered "— — Row: ROW 1".
+                  return locationLabel === "—" ? rows : `${locationLabel} — ${rows}`;
                 }
                 return locationLabel;
               })()}
@@ -514,7 +568,9 @@ const ReceiptsTab = ({
             </div>
           </td>
           <td className="hide-tablet">{category?.name || "—"}</td>
-          <td>{receipt.quantity} {receipt.quantityUnits}</td>
+          {/* Same reasoning as the pending card: containers are what a
+              person can count, pounds are derived from them. */}
+          <td>{describeReceiptQuantity(receipt).primary}</td>
           <td className="hide-mobile">{receipt.lotNo || "—"}</td>
           <td className="hide-mobile">{formatDateTime(receipt.approvedAt)}</td>
         </tr>

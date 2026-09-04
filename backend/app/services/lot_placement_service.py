@@ -26,19 +26,22 @@ Three rules hold everywhere in this module, and none of them is optional:
 This module does NOT commit. The router owns the transaction boundary.
 """
 
+import math
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.exceptions import ConflictError, NotFoundError, ValidationError
+from app.utils.calendar_dates import calendar_day, calendar_day_compact
 from app.models import (
     LotPlacement,
     LotPlacementEvent,
     MaterialLot,
+    Product,
     Receipt,
     StorageArea,
     StorageRow,
@@ -65,6 +68,9 @@ _NO_WEIGHT_REASON = (
 
 def _mint_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
+
 
 
 # ─── lot identity ─────────────────────────────────────────────────────────────
@@ -102,7 +108,7 @@ def build_lot_key(
     shelf-life extension must not re-key the lot, or every sticker already
     applied to a drum in the barn would point at a lot that no longer exists.
     """
-    day = bbd_original.date().isoformat() if bbd_original else ""
+    day = calendar_day(bbd_original) or ""
     key = f"{product_id}|{vendor_id or ''}|{normalize_lot_number(vendor_lot_number)}|{day}"
 
     if lot_unknown or not normalize_lot_number(vendor_lot_number):
@@ -135,6 +141,7 @@ def find_or_create_lot(
     brix: Optional[float] = None,
     warehouse_id: Optional[str] = None,
     lot_unknown: bool = False,
+    units_per_pallet: Optional[int] = None,
 ) -> MaterialLot:
     """Resolve the lot this material belongs to, creating it on first sight.
 
@@ -181,7 +188,12 @@ def find_or_create_lot(
                 f"Arrived at {weight_per_unit} {weight_unit or ''} per unit but the lot "
                 f"is recorded as {existing.weight_per_unit} {existing.weight_unit or ''}."
             )
-        elif existing.weight_per_unit is None and weight_per_unit is not None:
+        # A packing fact, so a later arrival may simply know it when the first
+        # did not. Filled in when missing; never overwritten, because a pallet
+        # already received was counted under the old figure.
+        if existing.units_per_pallet is None and units_per_pallet:
+            existing.units_per_pallet = int(units_per_pallet)
+        if existing.weight_per_unit is None and weight_per_unit is not None:
             existing.weight_per_unit = weight_per_unit
             existing.weight_unit = weight_unit
             # The gap that flagged it is now filled, so the lot can be labelled.
@@ -194,9 +206,17 @@ def find_or_create_lot(
         db.flush()
         return existing
 
+    product = db.query(Product).filter(Product.id == product_id).first()
     lot = MaterialLot(
         id=_mint_id("mlot"),
-        lot_code=_next_lot_code(db),
+        lot_code=build_lot_code(
+            db,
+            product_sid=product.sid if product else None,
+            product_id=product_id,
+            vendor_id=vendor_id,
+            vendor_lot=vendor_lot_number,
+            bbd=bbd,
+        ),
         lot_key=lot_key,
         product_id=product_id,
         vendor_id=vendor_id,
@@ -215,6 +235,7 @@ def find_or_create_lot(
         # offer a choice; this is the backstop for anything that posts directly.
         weight_unit=weight_unit or "lbs",
         brix=brix,
+        units_per_pallet=int(units_per_pallet) if units_per_pallet else None,
         warehouse_id=warehouse_id,
         # See the docstring: a lot with no weight per unit derives zero pounds,
         # which reads as "no stock" to the production availability gate.
@@ -228,18 +249,82 @@ def find_or_create_lot(
     return lot
 
 
-def _next_lot_code(db: Session) -> str:
-    """Mint the short opaque code the QR carries.
+# Segment separator for the printed code.
+#
+# NOT a pipe: the QR payload is `SB2|<lot_code>|<vendor_lot>|<bbd>` and does not
+# escape, so a pipe inside the code would produce a label nothing can parse.
+# A dot is safe there, is in the QR ALPHANUMERIC character set (0-9 A-Z space
+# $%*+-./:) so the code stays in that denser mode rather than falling back to
+# byte mode, and cannot appear inside a segment because `_clean_for_code` strips
+# it — which keeps the join unambiguous.
+_CODE_SEP = "."
 
-    Uses a Postgres sequence rather than MAX()+1: the latter races, and it races
-    precisely when two trucks are being checked in at once. `IF NOT EXISTS`
-    because conftest builds the schema with create_all and never runs migrations.
+
+def _clean_for_code(value: str) -> str:
+    """Uppercase, keep A-Z 0-9 and dashes. Nothing else reaches a code.
+
+    Dashes survive because vendor lot numbers are full of them ("MG-2411") and
+    stripping them would make two different lots look alike. The separator is a
+    dot precisely so a dash inside a segment can never be confused for one.
     """
-    from sqlalchemy import text
+    return re.sub(r"[^A-Z0-9-]", "", (value or "").upper())
 
-    db.execute(text("CREATE SEQUENCE IF NOT EXISTS material_lot_code_seq"))
-    seq = db.execute(text("SELECT nextval('material_lot_code_seq')")).scalar()
-    return f"L{int(seq):07d}"
+
+def build_lot_code(
+    db: Session,
+    *,
+    product_sid: str = None,
+    product_id: str = None,
+    vendor_id: str = None,
+    vendor_lot: str = None,
+    bbd: Optional[datetime] = None,
+) -> str:
+    """The identifier on the sticker. THE WHOLE NATURAL KEY, and nothing else.
+
+        S528506.VENDOR-1772201342794.LOT001234.20270820
+        └──┬──┘ └────────┬─────────┘ └───┬───┘ └──┬───┘
+          SID          vendor        THEIR lot   BBD
+
+    NO MARKER, NO COUNTER, NOTHING INVENTED. Every segment is a fact about the
+    material, and the four together are unique by construction — which is the
+    whole reason a marker was never actually necessary. Two vendors shipping a
+    "001" differ in the vendor segment; one vendor reusing "001" next year
+    differs in the BBD; the same product, vendor, lot and BBD IS the same
+    material, and matching it is the point rather than a collision.
+
+    LENGTH DOES NOT MATTER because nobody reads this. A scanner does not care
+    whether it is 20 characters or 60, and the label's big text carries the
+    vendor's lot number — the thing a person on a dock actually recognises — so
+    this string is never spoken aloud or keyed by hand.
+
+    `vendor_id` rather than the vendor's NAME, deliberately. The name is not
+    unique and can be retyped; the id cannot collide. Since nothing reads the
+    code, legibility buys nothing and a collision would cost a UNIQUE violation
+    at exactly the wrong moment — a truck on the dock.
+
+    Falls back to `product_id` when a product has no SID (29 of 113 do not), so
+    the product segment is never empty.
+    """
+    parts = [
+        _clean_for_code(product_sid) or _clean_for_code(product_id),
+        _clean_for_code(vendor_id),
+        _clean_for_code(vendor_lot),
+        calendar_day_compact(bbd),
+    ]
+    code = _CODE_SEP.join(p for p in parts if p)
+
+    # Uniqueness backstop, and it should never fire for anything printable.
+    #
+    # It exists for the lot with NO lot number: `build_lot_key` gives those a
+    # random suffix so two unreadable deliveries never merge, and without the
+    # same treatment here their codes would collide. Such a lot cannot be
+    # stickered at all (`can_print_labels` refuses), so the suffix never reaches
+    # a label — it only keeps the column's UNIQUE constraint honest.
+    if not code:
+        code = "LOT"
+    if db.query(MaterialLot.id).filter(MaterialLot.lot_code == code).first():
+        code = f"{code}{_CODE_SEP}{uuid.uuid4().hex[:6].upper()}"
+    return code
 
 
 def can_print_labels(lot: MaterialLot) -> tuple:
@@ -301,6 +386,11 @@ def units_on_hand(db: Session, material_lot_id: str) -> dict:
         "open_units": sum(int(p.open_units or 0) for p in rows),
         "open_remaining_qty": sum(float(p.open_remaining_qty or 0) for p in rows),
         "row_count": len(rows),
+        # Quarantined containers are ON the rack and counted, but not available.
+        # Reported separately rather than netted out of `full_units`, because a
+        # count that silently excluded them would disagree with the rack when
+        # somebody walks over and counts it.
+        "held_units": sum(int(p.held_units or 0) for p in rows),
     }
 
 
@@ -579,6 +669,26 @@ def move_units(
     if full_units <= 0:
         raise ValidationError("Move at least one unit")
 
+    # A quarantine is quarantine-IN-PLACE. Held drums cannot be carried to
+    # another rack, because the hold is recorded against the rack they are on
+    # and moving them would either strand the count on an empty rack or silently
+    # launder held material into a clean one. Releasing first is a decision with
+    # somebody's name on it.
+    if lot.is_held:
+        raise ConflictError(
+            f"Lot {lot.lot_code} is on hold"
+            f"{f' — {lot.hold_reason}' if lot.hold_reason else ''}. "
+            "Release the hold before moving any of it."
+        )
+    source = _lock_placement(db, lot.id, from_row_id)
+    if source is not None and _free_units(source) < full_units:
+        held = int(source.held_units or 0)
+        raise ConflictError(
+            f"Only {_free_units(source)} {lot.unit_label}s of lot {lot.lot_code} "
+            f"can be moved from that rack ({held} on hold). "
+            "Release the hold first if they need to move."
+        )
+
     ref = ref_id or _mint_id("mv")
     src = apply_delta(
         db, lot, from_row_id, event_type=EVENT_MOVED,
@@ -592,6 +702,219 @@ def move_units(
         actor_id=actor_id, ref_type="move", ref_id=ref, reason=reason,
     )
     return {"from": src, "to": dst, "ref_id": ref}
+
+
+def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
+    """`{receipt_id: [{storage_row_id, storage_row_name, units}]}` — where each
+    DELIVERY was put, from the ledger.
+
+    The projection cannot answer this. Placements belong to the LOT, not to one
+    truck: eight drums of the same vendor lot arriving on two days are one
+    placement picture, and `project_lot` writes that whole picture onto the
+    newest receipt and blanks the older ones. Ask it "which rack did Tuesday's
+    delivery go on" and it has nothing to say.
+
+    The EVENT ledger does, because every put-away is stamped with the receipt
+    that caused it. So this is a replay of `received` events, grouped by
+    receipt.
+
+    IT IS WHERE IT WENT, NOT WHERE IT IS. A later rack-to-rack move writes its
+    own events and does not rewrite these — which is the honest reading of "ROW
+    10 received this day", and the reason this is shown beside a receipt date
+    rather than offered as a current location.
+    """
+    rows = (
+        db.query(LotPlacementEvent, StorageRow)
+        .join(StorageRow, StorageRow.id == LotPlacementEvent.storage_row_id)
+        .join(MaterialLot, MaterialLot.id == LotPlacementEvent.material_lot_id)
+        .filter(
+            MaterialLot.product_id == product_id,
+            LotPlacementEvent.ref_type == "receipt",
+            LotPlacementEvent.event_type == EVENT_RECEIVED,
+            LotPlacementEvent.full_units_delta > 0,
+        )
+        .order_by(LotPlacementEvent.occurred_at)
+        .all()
+    )
+
+    out: Dict[str, list] = {}
+    for event, row in rows:
+        if not event.ref_id:
+            continue
+        bucket = out.setdefault(event.ref_id, [])
+        # One receipt can put away onto the same rack twice (a paused and
+        # resumed scan); report the rack once with the total.
+        for entry in bucket:
+            if entry["storage_row_id"] == row.id:
+                entry["units"] += int(event.full_units_delta)
+                break
+        else:
+            bucket.append({
+                "storage_row_id": row.id,
+                "storage_row_name": row.name,
+                "units": int(event.full_units_delta),
+            })
+    return out
+
+
+# ─── translating the legacy quantity language into units ──────────────────────
+#
+# Staging, adjustments and transfers all speak in CONTENT — "stage 500 lbs",
+# "adjust down by 250". A placement counts CONTAINERS. These two functions are
+# the whole of the translation, and every converted caller goes through them.
+#
+# The old code did this by spreading the requested weight across every rack
+# holding the lot, proportionally to each rack's share. That is a smear: it
+# leaves 12.7 drums on one rack and 27.3 on another, and nobody ever removed
+# seven tenths of a drum. Worse, it makes the numbers unfalsifiable — you cannot
+# walk to a rack and check a fraction. Whole units off named racks can be
+# checked, which is the entire point of counting them.
+
+def _free_units(placement: LotPlacement) -> int:
+    """Sealed units on this rack that are NOT quarantined.
+
+    The one definition of "available on this rack", used by every path that
+    takes or moves units so a hold cannot be walked around by picking a
+    different operation.
+    """
+    return max(0, int(placement.full_units or 0) - int(placement.held_units or 0))
+
+
+def units_for_quantity(lot: MaterialLot, quantity: float) -> int:
+    """Whole units carrying at least `quantity` of content.
+
+    Rounds UP, because containers are indivisible: pulling 600 lbs of a 500 lb
+    drum means taking two drums off the rack, not one and a fifth. The remainder
+    comes back as a partial when production returns it.
+
+    A lot with no weight per unit cannot answer this. That is already blocked
+    upstream — `find_or_create_lot` flags such a lot for review and no sticker
+    prints for it — so reaching here means something skipped the gate.
+    """
+    per_unit = float(lot.weight_per_unit or 0)
+    if per_unit <= 0:
+        raise ValidationError(
+            f"Lot {lot.lot_code} has no weight per {lot.unit_label}, so a "
+            f"quantity of {quantity} cannot be turned into a count."
+        )
+    return int(math.ceil((float(quantity) - 1e-9) / per_unit))
+
+
+def take_units(
+    db: Session,
+    lot: MaterialLot,
+    *,
+    units: int,
+    event_type: str,
+    from_row_id: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    ref_type: Optional[str] = None,
+    ref_id: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> List[dict]:
+    """Remove `units` whole units from this lot's racks. Returns what went where.
+
+    `from_row_id` names the rack when the caller knows it. When it does not, the
+    racks are drained FULLEST FIRST — a deliberate choice over "a bit from each",
+    because it produces a pull instruction a person can follow ("take 2 from
+    ROW 3") and it empties racks rather than leaving a scatter of ones and twos
+    across the warehouse.
+
+    The returned list is what actually happened, per rack, and is what the caller
+    should show on the ticket.
+    """
+    if units <= 0:
+        return []
+
+    # A held lot is quarantined entire, wherever it sits. Refused here rather
+    # than filtered to zero further down, because "there is none" and "it is on
+    # hold" are different facts and only one of them is somebody's to fix.
+    if lot.is_held:
+        raise ConflictError(
+            f"Lot {lot.lot_code} is on hold"
+            f"{f' — {lot.hold_reason}' if lot.hold_reason else ''}. "
+            "Release the hold before moving any of it."
+        )
+
+    if from_row_id:
+        candidates = [p for p in placements_for_lot(db, lot.id) if p.storage_row_id == from_row_id]
+        if not candidates:
+            raise ConflictError(
+                f"Lot {lot.lot_code} has nothing in that rack to take."
+            )
+    else:
+        candidates = sorted(
+            placements_for_lot(db, lot.id),
+            key=lambda p: _free_units(p),
+            reverse=True,
+        )
+
+    # Quarantined drums are frozen in place: they are on the rack but they are
+    # not available, so they count towards neither what can be taken nor what
+    # "there is not enough" is measured against.
+    on_hand = sum(_free_units(p) for p in candidates)
+    if on_hand < units:
+        held = sum(int(p.held_units or 0) for p in candidates)
+        raise ConflictError(
+            f"Lot {lot.lot_code} has {on_hand} {lot.unit_label}"
+            f"{'' if on_hand == 1 else 's'} in reach but {units} "
+            f"{'was' if units == 1 else 'were'} asked for"
+            + (f" ({held} on hold)" if held else "")
+            + ". Count the racks and correct them, or take less."
+        )
+
+    taken: List[dict] = []
+    remaining = units
+    for placement in candidates:
+        if remaining <= 0:
+            break
+        available = _free_units(placement)
+        if available <= 0:
+            continue
+        n = min(available, remaining)
+        apply_delta(
+            db, lot, placement.storage_row_id,
+            event_type=event_type,
+            full_units_delta=-n,
+            actor_id=actor_id, ref_type=ref_type, ref_id=ref_id, reason=reason,
+        )
+        taken.append({"storage_row_id": placement.storage_row_id, "units": n})
+        remaining -= n
+
+    return taken
+
+
+def put_units(
+    db: Session,
+    lot: MaterialLot,
+    *,
+    units: int,
+    to_row_id: str,
+    event_type: str,
+    actor_id: Optional[str] = None,
+    ref_type: Optional[str] = None,
+    ref_id: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> Optional[LotPlacement]:
+    """Put `units` back on a named rack — the reverse of `take_units`.
+
+    Always takes a rack rather than guessing one. Material coming back from
+    staging goes where somebody physically puts it, and the caller knows that
+    (staging remembers `original_storage_row_id`); inventing a rack here would
+    make the system confidently wrong about where to look for it.
+    """
+    if units <= 0:
+        return None
+    if not to_row_id:
+        raise ValidationError(
+            f"Returning {units} {lot.unit_label}s needs a rack to put them on."
+        )
+    return apply_delta(
+        db, lot, to_row_id,
+        event_type=event_type,
+        full_units_delta=int(units),
+        actor_id=actor_id, ref_type=ref_type, ref_id=ref_id, reason=reason,
+    )
 
 
 # ─── projection into the legacy shape ─────────────────────────────────────────
@@ -663,6 +986,15 @@ def project_lot(db: Session, lot: MaterialLot) -> None:
             # for anything that learns to read them.
             "units": units,
             "unitLabel": lot.unit_label,
+            # QUARANTINE, projected so every reader of this JSON can see it
+            # without asking the lot separately.
+            #
+            # A whole-lot hold reports ALL of them held, because that is what it
+            # means — the flag lives on the lot and the placements know nothing
+            # about it. Without this a partially-held lot looked completely
+            # un-held to `receipt.hold`, which is what made it impossible to
+            # release from the Holds screen.
+            "heldUnits": units if lot.is_held else int(placement.held_units or 0),
         })
 
     primary.raw_material_row_allocations = entries
@@ -692,6 +1024,32 @@ def _areas_by_id(db: Session, area_ids) -> Dict[str, StorageArea]:
     }
 
 
+def _pallet_footprint(lot: Optional[MaterialLot], units: int) -> int:
+    """How many rack pallet-slots `units` of this lot take up.
+
+    For barrels and totes the container IS the thing on the shelf, so the
+    footprint is the count — one drum, one slot. That was the only case when
+    this was written, and drum rooms carry `pallet_capacity = 0` ("no opinion"),
+    so nobody noticed it was the only case.
+
+    For bags and boxes it is wrong by a factor of fifty. Five hundred bags are
+    ten wrapped pallets, and a rack holding ten pallets that reports 500 against
+    a capacity of 100 is telling the warehouse something untrue about its own
+    shelf.
+
+    Rounded UP and computed PER LOT, never per row: two lots of twenty-five bags
+    are two part-used pallets, not one, because different lots do not share a
+    wrap. Summing ceilings is therefore the honest total even though it exceeds
+    ceil(sum).
+    """
+    if units <= 0:
+        return 0
+    per = int(getattr(lot, "units_per_pallet", None) or 0)
+    if per > 1:
+        return int(math.ceil(units / per))
+    return int(units)
+
+
 def _project_rows(db: Session, lot: MaterialLot, by_row: Dict[str, LotPlacement]) -> None:
     """Recompute StorageRow.occupied_* for every row this lot touches.
 
@@ -714,23 +1072,19 @@ def _project_rows(db: Session, lot: MaterialLot, by_row: Dict[str, LotPlacement]
         for other in db.query(MaterialLot).filter(MaterialLot.id.in_(missing)).all():
             lots[other.id] = other
 
-    unit_totals: Dict[str, int] = {rid: 0 for rid in row_ids}
+    footprints: Dict[str, int] = {rid: 0 for rid in row_ids}
     weight_totals: Dict[str, float] = {rid: 0.0 for rid in row_ids}
     for placement in placements:
         rid = placement.storage_row_id
-        unit_totals[rid] = unit_totals.get(rid, 0) + int(placement.full_units or 0) + int(
-            placement.open_units or 0
-        )
+        units = int(placement.full_units or 0) + int(placement.open_units or 0)
         p_lot = lots.get(placement.material_lot_id)
+        footprints[rid] = footprints.get(rid, 0) + _pallet_footprint(p_lot, units)
         if p_lot:
             weight_totals[rid] = weight_totals.get(rid, 0.0) + derived_weight(p_lot, placement)
 
     for row in _rows_by_id(db, row_ids).values():
         row.occupied_cases = round(weight_totals.get(row.id, 0.0), 3)
-        # For a unit-typed room the footprint IS the unit count. Rows in these
-        # rooms carry pallet_capacity = 0 ("no opinion"), so this never trips the
-        # pallet capacity gates in routers/receipts.py.
-        row.occupied_pallets = unit_totals.get(row.id, 0)
+        row.occupied_pallets = footprints.get(row.id, 0)
         # Deliberately NOT setting row.product_id: it encodes one-product-per-row,
         # which directly contradicts a row holding several lots and products. The
         # products in a row are derived from its placements instead.

@@ -178,7 +178,16 @@ class IngredientIntake(Base):
     # Set when corporate transfers stock between sites, so the source is a real
     # warehouse we can decrement rather than a name.
     origin_warehouse_id = Column(String(50), ForeignKey("warehouses.id"), nullable=True)
+    # WHEN THE TRUCK IS EXPECTED. Set at RELEASE, not at creation: corporate
+    # raises the order as soon as they have the PO, and the arrival slot is
+    # agreed later with the carrier. A draft with no date is a normal state.
+    #
+    # Split date/time, mirroring InventoryTransfer.scheduled_date +
+    # appointment_time on the outbound side — so both halves of the Shipping
+    # screen sort, filter and read the same way. The time is free text ("07:00
+    # AM") because that is what a carrier quotes; nothing computes with it.
     expected_date = Column(DateTime(timezone=True), nullable=True, index=True)
+    expected_time = Column(String(20), nullable=True)
     released_at = Column(DateTime(timezone=True), nullable=True)
     released_by = Column(String(50), ForeignKey("users.id"), nullable=True)
     closed_at = Column(DateTime(timezone=True), nullable=True)
@@ -225,6 +234,10 @@ class IntakeLot(Base):
     brix = Column(Float, nullable=True)
     net_weight_per_container = Column(Float, nullable=True)
     weight_unit = Column(String(20), nullable=True)
+    # Bags/boxes per pallet, when corporate knows it. Copied onto the material
+    # lot at start-receiving so the gun can prefill "how many on this pallet?".
+    # NULL for drums and totes, which are stickered individually.
+    units_per_pallet = Column(Integer, nullable=True)
 
     # ── Incoming order line (2026-08, Phase 2) ───────────────────────────────
     # Resolved when the plant starts receiving this line, NOT when corporate

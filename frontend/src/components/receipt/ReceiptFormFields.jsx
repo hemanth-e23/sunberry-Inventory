@@ -1,7 +1,7 @@
 import React from "react";
 import SearchableSelect from "../SearchableSelect";
 import RawMaterialRowSelection from "./RawMaterialRowSelection";
-import { unitOptions, weightUnitOptions, formatNumber } from "./useReceiptForm";
+import { unitOptions, weightUnitOptions, formatNumber, isPalletisedUnit, asksPerPallet } from "./useReceiptForm";
 
 const requiredStar = <span className="required">*</span>;
 
@@ -40,6 +40,14 @@ const ReceiptFormFields = ({
   handleSubLocationChange,
   handlePalletsChange,
 }) => {
+  // MUST be answered — bags and boxes are always many to a pallet, and this
+  // also switches the count entry to "full pallets + loose".
+  const palletised = isIngredient && isPalletisedUnit(formData.quantityUnits);
+  // ASKED at all. Drums ride pallets too, two or four to a pallet — leaving
+  // this unasked made the rack report four slots for two pallets of drums,
+  // with nothing to correct it. Blank means one per slot.
+  const asksPallet = isIngredient && asksPerPallet(formData.quantityUnits);
+
   if (!formData.categoryId) {
     return (
       <div className="form-hint full-width">
@@ -98,13 +106,14 @@ const ReceiptFormFields = ({
 
       {(isIngredient || isPackaging) && (
         <label>
-          <span>Vendor</span>
+          <span>Vendor {isIngredient && requiredStar}</span>
           <select
             name="vendorId"
             value={formData.vendorId}
             onChange={handleChange}
+            required={isIngredient}
           >
-            <option value="">Select vendor (optional)</option>
+            <option value="">{isIngredient ? "Select vendor" : "Select vendor (optional)"}</option>
             {vendors.map((vendor) => (
               <option key={vendor.id} value={vendor.id}>
                 {vendor.name}
@@ -234,18 +243,14 @@ const ReceiptFormFields = ({
           {/* Inline container row: count [type] x weight [unit] */}
           <label className="full-width">
             <span>Received As {requiredStar}</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <input
-                type="number"
-                name="quantity"
-                value={formData.quantity}
-                onChange={handleChange}
-                min="0"
-                step="0.01"
-                required
-                placeholder="Count"
-                style={{ width: 90 }}
-              />
+
+            {/* CONTAINER TYPE FIRST, and for palletised material the packing
+                right beside it — because "50 bags per pallet" is a fact about
+                how this product comes, not about today's delivery.
+                Asking the count first put a bare number above a "bags per
+                pallet" box, so 50 read as fifty pallets until you got to the
+                second field and had to re-read the first. */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: asksPallet ? 10 : 0 }}>
               <select
                 name="quantityUnits"
                 value={formData.quantityUnits}
@@ -260,6 +265,80 @@ const ReceiptFormFields = ({
                   </option>
                 ))}
               </select>
+              {asksPallet && (
+                <>
+                  <input
+                    type="number"
+                    name="unitsPerPallet"
+                    value={formData.unitsPerPallet}
+                    onChange={handleChange}
+                    min="1"
+                    step="1"
+                    required={palletised}
+                    placeholder={palletised ? '50' : '1'}
+                    style={{ width: 80 }}
+                  />
+                  <span style={{ fontSize: '0.875rem', color: '#374151' }}>
+                    per pallet {palletised ? requiredStar : (
+                      <span style={{ color: '#9ca3af', fontWeight: 400 }}>
+                        — leave blank for one per slot
+                      </span>
+                    )}
+                  </span>
+                </>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              {/* Palletised material is counted in FULL PALLETS PLUS LOOSE,
+                  because that is what stands on a truck — nobody counts five
+                  hundred bags, and two full pallets with a part-used third is
+                  130 bags, neither 100 nor 150. `quantity` is derived from the
+                  two and remains the container count underneath, which is what
+                  placements store. */}
+              {palletised ? (
+                <>
+                  <input
+                    type="number"
+                    name="palletCount"
+                    value={formData.palletCount}
+                    onChange={handleChange}
+                    min="0"
+                    step="1"
+                    placeholder="0"
+                    style={{ width: 80 }}
+                  />
+                  <span style={{ fontSize: '0.875rem', color: '#374151' }}>
+                    full pallets
+                  </span>
+                  <span style={{ color: '#9ca3af', fontWeight: 600 }}>+</span>
+                  <input
+                    type="number"
+                    name="looseCount"
+                    value={formData.looseCount}
+                    onChange={handleChange}
+                    min="0"
+                    step="1"
+                    placeholder="0"
+                    style={{ width: 80 }}
+                  />
+                  <span style={{ fontSize: '0.875rem', color: '#374151' }}>
+                    loose {formData.quantityUnits}
+                  </span>
+                </>
+              ) : (
+                <input
+                  type="number"
+                  name="quantity"
+                  value={formData.quantity}
+                  onChange={handleChange}
+                  min="0"
+                  step="0.01"
+                  required
+                  placeholder="Count"
+                  style={{ width: 90 }}
+                />
+              )}
 
               {isIngredient && (
                 <>
@@ -303,6 +382,18 @@ const ReceiptFormFields = ({
                 <span style={{ fontWeight: 700, color: '#15803d', fontSize: '0.95rem' }}>
                   {formData.quantity} {formData.quantityUnits}
                 </span>
+                {/* The rack footprint, said out loud. A part-used pallet still
+                    takes a whole slot, so this rounds UP — matching what the
+                    rack card will read after approval. */}
+                {Number(formData.unitsPerPallet) > 1 && Number(formData.quantity) > 0 && (
+                  <>
+                    <span style={{ color: '#9ca3af' }}>·</span>
+                    <span style={{ fontWeight: 700, color: '#15803d', fontSize: '0.95rem' }}>
+                      {Math.ceil(Number(formData.quantity) / Number(formData.unitsPerPallet))} pallet
+                      {Math.ceil(Number(formData.quantity) / Number(formData.unitsPerPallet)) === 1 ? '' : 's'} on the rack
+                    </span>
+                  </>
+                )}
                 <span style={{ color: '#9ca3af' }}>·</span>
                 <span style={{ fontWeight: 700, color: '#1a5276', fontSize: '0.95rem' }}>
                   {Number(formData.weight).toLocaleString()} {formData.weightUnits} total
@@ -394,12 +485,13 @@ const ReceiptFormFields = ({
       {isIngredient && (
         <React.Fragment>
           <label>
-            <span>BOL (Bill of Lading)</span>
+            <span>BOL (Bill of Lading) {isIngredient && requiredStar}</span>
             <input
               type="text"
               name="bol"
               value={formData.bol}
               onChange={handleChange}
+              required={isIngredient}
             />
           </label>
 
