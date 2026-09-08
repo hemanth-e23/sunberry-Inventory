@@ -50,7 +50,7 @@ from app.enums import (
     ReceiptStatus,
 )
 from app.exceptions import ConflictError, NotFoundError, ValidationError
-from app.constants import CATEGORY_FINISHED
+from app.constants import CATEGORY_FINISHED, is_palletised_unit
 from app.models import (
     Category,
     IngredientIntake,
@@ -114,7 +114,15 @@ def ensure_lot_for_receipt(
             # overwritten: pallets already received were counted under the old
             # figure, and restating it would restate their footprint too. Same
             # rule `find_or_create_lot` applies on the second-truck path.
-            if lot.units_per_pallet is None and units_per_pallet:
+            # ...and only for material that arrives wrapped. This path skips
+            # `find_or_create_lot`, so it needs the same guard: a drum lot given
+            # a per-pallet figure prints pallet stickers for containers that
+            # each wear their own.
+            if (
+                lot.units_per_pallet is None
+                and units_per_pallet
+                and is_palletised_unit(lot.unit_label)
+            ):
                 lot.units_per_pallet = int(units_per_pallet)
                 db.flush()
             return lot

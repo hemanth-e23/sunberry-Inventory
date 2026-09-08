@@ -61,18 +61,16 @@ const OPEN_STATUSES = ['draft', 'in_transit', 'receiving'];
 // Units that arrive wrapped on a pallet and cannot be stickered individually at
 // the dock — these MUST state a per-pallet count, because it drives the sticker
 // run and the gun's multiplier.
+//
+// DRUMS ARE NOT ON THIS LIST, and asking them the question is what printed
+// "PALLET OF DRUMS" for a 69-drum delivery. Drums do ride pallets, two or four
+// to a pallet, but they do not SHARE a sticker: each one is labelled and pulled
+// on its own, so one scan must mean one drum. The rack count that motivated
+// asking is answered by the room's `storage_unit` instead.
 const PALLETISED_UNITS = new Set(['bag', 'box', 'bottle', 'case', 'pail']);
 
-// Measures rather than containers, plus the pallet itself. Nothing else: DRUMS
-// RIDE PALLETS TOO, two or four to a pallet, and refusing to ask made the rack
-// count them one slot each — twenty drums reported twenty of twenty-two slots
-// on a rack holding ten pallets. Optional for those, because some genuinely are
-// one per slot; blank means exactly that.
-const NOT_A_CONTAINER = new Set(['gallon', 'liter', 'litre', 'pallet']);
-const asksPerPallet = (unit) => {
-  const u = String(unit || '').toLowerCase().replace(/s$/, '');
-  return Boolean(u) && !NOT_A_CONTAINER.has(u);
-};
+const asksPerPallet = (unit) =>
+  PALLETISED_UNITS.has(String(unit || '').toLowerCase().replace(/s$/, ''));
 
 /** Move a YYYY-MM-DD key by N days without touching a timezone. */
 const shiftDateKey = (key, days) => {
@@ -376,7 +374,13 @@ const IncomingTab = () => {
     vendor_lot: line.vendor_lot || '',
     bbd: line.bbd ? String(line.bbd).slice(0, 10) : '',
     weight_per_unit: line.weight_per_unit == null ? '' : String(line.weight_per_unit),
-    units_per_pallet: line.units_per_pallet == null ? '' : String(line.units_per_pallet),
+    // Blank for anything stickered one container at a time, even when the line
+    // carries a figure raised before that rule existed — loading it would put a
+    // number into a field nobody can see, question or correct.
+    units_per_pallet:
+      line.units_per_pallet == null || !asksPerPallet(line.unit_label)
+        ? ''
+        : String(line.units_per_pallet),
     expected_count: String(line.expected_count ?? ''),
     bol: order.bol || '',
   });
@@ -416,6 +420,14 @@ const IncomingTab = () => {
       return;
     }
     setBusy(true);
+    // NEVER SEND WHAT WAS NOT ASKED. Hiding the input does not empty it: the
+    // form prefills from `line.units_per_pallet`, so a drum line that was given
+    // a figure before this rule existed still carried it here invisibly — and
+    // it would be written to the freshly minted lot, print pallet stickers, and
+    // arm the gun's multiplier, with nothing on screen to explain any of it.
+    const per = asksPerPallet(line.unit_label)
+      ? Number(startForm.units_per_pallet) || 0
+      : 0;
     try {
       const summary = await startReceiving(order.id, {
         line_id: line.id,
@@ -424,7 +436,7 @@ const IncomingTab = () => {
         bbd: startForm.bbd || null,
         weight_per_unit: Number(startForm.weight_per_unit),
         weight_unit: 'lbs',
-        units_per_pallet: Number(startForm.units_per_pallet) || null,
+        units_per_pallet: per || null,
         expected_count: Number(startForm.expected_count) || null,
         bol: startForm.bol || null,
       });
@@ -434,7 +446,6 @@ const IncomingTab = () => {
       // going to destack a wrapped pallet at the dock to label every bag. The
       // sticker is identical either way; only the middle band differs, and the
       // gun's multiplier turns one scan into a whole pallet.
-      const per = Number(startForm.units_per_pallet) || 0;
       const palletised = per > 1;
       const count = palletised
         ? Math.ceil(summary.expected_count / per)
@@ -622,7 +633,12 @@ const IncomingTab = () => {
                         className="og-btn og-btn-ghost"
                         style={{ marginRight: 8 }}
                         onClick={() => {
-                          const per = Number(line.units_per_pallet) || 0;
+                          // Ignore a stored figure on material that is stickered
+                          // one container at a time — a reprint must hand back
+                          // the same sticker the drums already wear.
+                          const per = asksPerPallet(line.unit_label)
+                            ? Number(line.units_per_pallet) || 0
+                            : 0;
                           const remaining = Math.max(
                             0, (line.expected_count || 0) - (line.received_count || 0),
                           ) || line.expected_count || 1;
@@ -1059,18 +1075,18 @@ const IncomingTab = () => {
             {/* Correctable here because vendors are not consistent: the order
                 said 50 to a pallet and the truck brought 40. This is the gun's
                 multiplier, so a wrong number books the wrong count 10 times. */}
-            {/* Shown for any container, NOT only when the order already set a
-                figure. That gate was self-defeating: corporate could not state a
-                per-pallet count for drums because the order form never asked,
-                and then this field stayed hidden because the count was empty —
-                so the number could never be entered anywhere, and every drum
-                took a whole rack slot. */}
+            {/* Shown whenever the material is wrapped, NOT only when the order
+                already set a figure. That gate was self-defeating: the field
+                stayed hidden because the count was empty, so the number could
+                never be entered anywhere. Drums never reach here — they are
+                stickered one at a time, so one scan is one drum. */}
             {asksPerPallet(startForm.line.unit_label) && (
               <label>
                 <span>
                   Per pallet{' '}
                   <span className="og-prefill">
-                    how many {startForm.line.unit_label || 'unit'}s on one pallet
+                    how many {startForm.line.unit_label || 'unit'}s are wrapped
+                    on one pallet
                   </span>
                 </span>
                 <input
@@ -1309,7 +1325,16 @@ const IncomingTab = () => {
                   <span>Unit</span>
                   <select
                     value={line.unit_label}
-                    onChange={(e) => patchLine(index, { unit_label: e.target.value })}
+                    onChange={(e) => {
+                      const unit = e.target.value;
+                      // Switching to something stickered one at a time hides the
+                      // per-pallet input; drop the figure with it, or the line
+                      // would carry a number the form no longer shows and the
+                      // dock could not correct.
+                      patchLine(index, asksPerPallet(unit)
+                        ? { unit_label: unit }
+                        : { unit_label: unit, units_per_pallet: '' });
+                    }}
                   >
                     <option value="drum">Drums</option>
                     <option value="bag">Bags</option>
@@ -1326,9 +1351,7 @@ const IncomingTab = () => {
                     <span>
                       Per pallet{' '}
                       <span className="og-prefill">
-                        {PALLETISED_UNITS.has(line.unit_label)
-                          ? `how many ${line.unit_label}s are wrapped on one pallet`
-                          : `how many ${line.unit_label}s ride one pallet — blank if one per slot`}
+                        how many {line.unit_label}s are wrapped on one pallet
                       </span>
                     </span>
                     <input

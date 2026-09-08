@@ -40,12 +40,13 @@ const ReceiptFormFields = ({
   handleSubLocationChange,
   handlePalletsChange,
 }) => {
-  // MUST be answered — bags and boxes are always many to a pallet, and this
+  // MUST be answered — wrapped material shares one sticker per pallet, and this
   // also switches the count entry to "full pallets + loose".
   const palletised = isIngredient && isPalletisedUnit(formData.quantityUnits);
-  // ASKED at all. Drums ride pallets too, two or four to a pallet — leaving
-  // this unasked made the rack report four slots for two pallets of drums,
-  // with nothing to correct it. Blank means one per slot.
+  // ASKED at all — the same rule, so a required field is never off screen.
+  // Drums are excluded on purpose: they ride pallets but do not share a
+  // sticker, and asking printed "PALLET OF DRUMS" for material that is
+  // labelled and pulled one drum at a time.
   const asksPallet = isIngredient && asksPerPallet(formData.quantityUnits);
 
   if (!formData.categoryId) {

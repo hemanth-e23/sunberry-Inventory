@@ -126,42 +126,42 @@ export const unitOptions = [
 ];
 
 /**
- * "How many ride one pallet" is a CONTAINER question, not a bags question.
+ * `unitsPerPallet` answers ONE question: how many units share one sticker and
+ * one scan?
  *
- * This was originally restricted to bags and boxes, on the reasoning that a
- * drum IS the thing carried. That was wrong, and the warehouse's own data said
- * so: four drums logged as sitting on two pallets. Drums ride pallets too, just
- * two or four to a pallet instead of fifty.
+ * Fifty bags come shrink-wrapped, wear a single sticker and enter stock in a
+ * single scan, so the answer is fifty. A drum wears its own sticker and is
+ * pulled on its own, so the answer is one — recorded as blank.
  *
- * The cost of getting it wrong was silent. `_pallet_footprint` falls back to
- * the unit count when this is unset, so a rack holding two pallets of drums
- * reported four slots — double — and there was no way to correct it, because
- * the footprint is derived and the figure it derives from was never collected.
+ * Every reader follows from that one meaning. The print run is units over per;
+ * the gun's multiplier is per; and `_pallet_footprint` returns the number of
+ * STICKERED HANDLING UNITS on the rack — ten for the bags, sixty-nine for the
+ * drums — which the room's `storage_unit` then names "pallets" or "drums".
  *
- * So it is asked for EVERY container now. The difference is only whether it
- * must be answered:
+ * It was briefly asked for drums as well, to fix a rack reading twenty of
+ * twenty-two slots while holding ten pallets. That conflated two facts that
+ * only agree for bags: how many RIDE a pallet, and how many SHARE a sticker.
+ * Drums ride pallets but do not share a sticker, so answering it printed
+ * "PALLET OF DRUMS" and offered to book two drums per scan. The rack is
+ * answered where it belongs instead — a room with `storage_unit` set reports
+ * live drums straight from `lot_placements`.
  *
- *   REQUIRED for bags, bottles, cases, pails — always many to a pallet, and a
- *   blank here misprints five hundred stickers instead of ten.
- *
- *   OPTIONAL for drums, barrels, totes — often genuinely one per slot, which is
- *   what blank means. Gallons and litres are measures rather than containers,
- *   and `pallets` is already the pallet, so those are skipped entirely.
+ * So this is asked only for material that arrives wrapped and genuinely cannot
+ * be labelled container-by-container at the dock, and there it is REQUIRED: a
+ * blank would print five hundred stickers instead of ten.
  */
 export const PALLETISED_UNITS = new Set(["bags", "bottles", "cases", "pails"]);
 
-// Containers where a pallet count is meaningless: measures, and the pallet itself.
-const NOT_A_CONTAINER = new Set(["gallons", "liters", "pallets"]);
-
-/** Must this be answered? Bags and boxes always ride pallets. */
+/** Wrapped on a pallet — cannot be stickered one container at a time. */
 export const isPalletisedUnit = (unit) =>
   PALLETISED_UNITS.has(String(unit || "").toLowerCase());
 
-/** Should we ask at all? Everything that is a physical container. */
-export const asksPerPallet = (unit) => {
-  const u = String(unit || "").toLowerCase();
-  return Boolean(u) && !NOT_A_CONTAINER.has(u);
-};
+/**
+ * Shown exactly when it must be answered — the field and the validation share
+ * one rule, so a required field can never be off screen. Kept under its own
+ * name because the two call sites ask different questions of it.
+ */
+export const asksPerPallet = isPalletisedUnit;
 
 /**
  * POUNDS, AND ONLY POUNDS.
@@ -472,8 +472,15 @@ const useReceiptForm = () => {
           // Switched to a container that is not palletised — the pallet inputs
           // no longer mean anything, and leaving them would silently keep
           // driving `quantity` from numbers nobody can see.
+          //
+          // `unitsPerPallet` goes with them. The field is hidden for drums, but
+          // hiding is not clearing: a figure typed while the unit still said
+          // "bags" would be submitted anyway, land on the lot, print pallet
+          // stickers and arm the gun's multiplier for material that wears one
+          // sticker per drum.
           next.palletCount = "";
           next.looseCount = "";
+          next.unitsPerPallet = "";
         }
       }
 
@@ -977,10 +984,13 @@ const useReceiptForm = () => {
       containerUnit: formData.quantityUnits || null,
       weightPerContainer: formData.weightPerUnit ? parseFloat(formData.weightPerUnit) : null,
       weightUnit: formData.weightUnits || null,
-      // Only sent when it means something. A 1 would claim "one bag per pallet",
-      // which is what a barrel already is, and would switch on pallet stickers
-      // for material that does not come on pallets.
-      unitsPerPallet: Number(formData.unitsPerPallet) > 1
+      // Only sent when it means something, and only for material that was
+      // ASKED. A 1 would claim "one bag per pallet", which is what a barrel
+      // already is. The unit test is not belt-and-braces: the field is hidden
+      // for drums rather than removed from state, so without it a figure typed
+      // under a different unit still reaches the server.
+      unitsPerPallet: isPalletisedUnit(formData.quantityUnits)
+        && Number(formData.unitsPerPallet) > 1
         ? parseInt(formData.unitsPerPallet, 10)
         : null,
       weight: formData.weight,

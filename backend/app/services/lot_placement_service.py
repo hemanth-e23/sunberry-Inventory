@@ -35,6 +35,7 @@ from typing import Dict, List, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.constants import is_palletised_unit
 from app.exceptions import ConflictError, NotFoundError, ValidationError
 from app.utils.calendar_dates import calendar_day, calendar_day_compact
 from app.models import (
@@ -164,6 +165,19 @@ def find_or_create_lot(
     """
     if not product_id:
         raise ValidationError("A lot needs a product")
+
+    # A per-pallet figure is only meaningful for material that arrives wrapped.
+    # Drums ride pallets but do not SHARE a sticker, and a drum lot carrying the
+    # figure prints "PALLET OF DRUMS" and arms the gun to book four drums per
+    # scan — one scan of one drum's own label.
+    #
+    # Dropped here rather than trusted from the caller, for the same reason
+    # `weight_unit` is forced to lbs below: the forms no longer offer it, and
+    # this is the backstop for anything that posts directly. It is also what
+    # protects lines raised before the rule existed, which still carry a figure
+    # the form no longer shows.
+    if units_per_pallet and not is_palletised_unit(unit_label):
+        units_per_pallet = None
 
     lot_key = build_lot_key(
         product_id, vendor_id, vendor_lot_number, bbd, lot_unknown=lot_unknown

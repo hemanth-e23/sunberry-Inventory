@@ -749,6 +749,80 @@ class TestPalletisedMaterial:
         assert summary["units_per_pallet"] == 50
 
 
+class TestDrumsNeverCarryAPerPalletFigure:
+    """A 76-drum delivery printed nineteen stickers reading "PALLET OF DRUMS".
+
+    The figure had been asked of drums to fix a rack that read twenty of
+    twenty-two slots while holding ten pallets. That conflated two facts which
+    agree only for bags: how many RIDE a pallet, and how many SHARE a sticker.
+    Drums ride four to a pallet and share nothing — each is labelled and pulled
+    on its own, so one scan must mean one drum.
+
+    The forms stopped asking, but hiding an input does not empty it: every line
+    raised beforehand still carried its figure and still sent it. So the rule
+    lives here too, at the one function every path goes through.
+    """
+
+    def test_a_drum_lot_drops_the_figure(self, db_session, seed):
+        lot = lps.find_or_create_lot(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR,
+            vendor_lot_number="ITCSVTMC/25F25/32", bbd=BBD, unit_label="drum",
+            weight_per_unit=502.0, warehouse_id=WH, units_per_pallet=4,
+        )
+        assert lot.units_per_pallet is None
+
+    def test_a_bag_lot_keeps_it(self, db_session, seed):
+        lot = lps.find_or_create_lot(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR,
+            vendor_lot_number="SUGAR-KEEP", bbd=BBD, unit_label="bags",
+            weight_per_unit=25.0, warehouse_id=WH, units_per_pallet=50,
+        )
+        assert lot.units_per_pallet == 50
+
+    def test_singular_and_plural_agree(self, db_session, seed):
+        """The order line stores "drum", the receipt form stores "drums"."""
+        for i, label in enumerate(("drum", "drums", "barrel", "tote", "totes")):
+            lot = lps.find_or_create_lot(
+                db_session, product_id=PRODUCT, vendor_id=VENDOR,
+                vendor_lot_number=f"PLURAL-{i}", bbd=BBD, unit_label=label,
+                weight_per_unit=500.0, warehouse_id=WH, units_per_pallet=4,
+            )
+            assert lot.units_per_pallet is None, label
+
+        for i, label in enumerate(("bag", "bags", "box", "boxes", "cases")):
+            lot = lps.find_or_create_lot(
+                db_session, product_id=PRODUCT, vendor_id=VENDOR,
+                vendor_lot_number=f"WRAPPED-{i}", bbd=BBD, unit_label=label,
+                weight_per_unit=25.0, warehouse_id=WH, units_per_pallet=50,
+            )
+            assert lot.units_per_pallet == 50, label
+
+    def test_the_short_circuit_path_is_guarded_too(self, db_session, seed):
+        """`ensure_lot_for_receipt` fills an existing lot without going through
+        `find_or_create_lot`, so it needs the rule as well."""
+        receipt = _approve(db_session, _receipt(
+            db_session, units=76, allocs=[{"rowId": ROW_1, "units": 76}]))
+        lot = db_session.get(MaterialLot, receipt.material_lot_id)
+        assert lot.units_per_pallet is None
+
+        receipt.units_per_pallet = 4
+        db_session.flush()
+        lrs.ensure_lot_for_receipt(db_session, receipt, units_per_pallet=4)
+        assert lot.units_per_pallet is None
+
+    def test_the_gun_offers_no_multiplier_for_drums(self, db_session, seed):
+        """The half that would have corrupted stock: one scan of one drum's own
+        sticker booking four drums onto the rack."""
+        receipt = _approve(db_session, _receipt(
+            db_session, units=76, allocs=[{"rowId": ROW_1, "units": 76}]))
+        receipt.units_per_pallet = 4
+        db_session.flush()
+        lrs.ensure_lot_for_receipt(db_session, receipt, units_per_pallet=4)
+
+        summary = lrs.receiving_summary(db_session, receipt)
+        assert summary["units_per_pallet"] is None
+
+
 class TestHoldItemRowResolution:
     """Storage row ids contain the separator the parser split on.
 
