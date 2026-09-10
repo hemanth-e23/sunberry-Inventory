@@ -34,6 +34,7 @@ const ReceiptFormFields = ({
   autoQuantity,
   // Location / row
   availableRows,
+  roomStorageUnit,
   rawMaterialRowAllocations,
   setRawMaterialRowAllocations,
   handleLocationChange,
@@ -466,6 +467,7 @@ const ReceiptFormFields = ({
               requiresRowSelection={requiresRowSelection}
               isUnlimitedStorage={isUnlimitedStorage}
               availableRows={availableRows}
+              roomStorageUnit={roomStorageUnit}
               rawMaterialRowAllocations={rawMaterialRowAllocations}
               setRawMaterialRowAllocations={setRawMaterialRowAllocations}
             />

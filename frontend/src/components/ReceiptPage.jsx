@@ -54,6 +54,7 @@ const ReceiptPage = () => {
 
     // Location / row
     availableRows,
+    roomStorageUnit,
 
     // FG placement state
     manualAllocations,
@@ -199,6 +200,7 @@ const ReceiptPage = () => {
                 totalWeight={totalWeight}
                 autoQuantity={autoQuantity}
                 availableRows={availableRows}
+                roomStorageUnit={roomStorageUnit}
                 rawMaterialRowAllocations={rawMaterialRowAllocations}
                 setRawMaterialRowAllocations={setRawMaterialRowAllocations}
                 handleLocationChange={handleLocationChange}

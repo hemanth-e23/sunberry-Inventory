@@ -10,6 +10,7 @@ const RawMaterialRowSelection = ({
   availableRows,
   rawMaterialRowAllocations,
   setRawMaterialRowAllocations,
+  roomStorageUnit = null,
 }) => {
   // `formData.quantity` is the CONTAINER count for raw material — 40 drums —
   // and `quantityUnits` names them. See the payload builder in useReceiptForm,
@@ -24,33 +25,55 @@ const RawMaterialRowSelection = ({
     (sum, a) => sum + (Number(a.units) || 0), 0
   );
 
+  // A DRUM ROOM HAS NO OPINION ABOUT PALLETS, so it must not be asked for one.
+  //
+  // The count is already above — "40 drums" — and what actually gets placed is
+  // the per-row unit figure further down; `logged_rows` reads `units` and
+  // ignores `pallets` outright. Asking for a pallet total here was asking a
+  // second time, in a unit the room does not use, and checking the answer
+  // against `StorageRow.pallet_capacity` — a leftover 22 on rooms master data
+  // now reports as 88 drums a row.
+  const countsInUnits = Boolean(roomStorageUnit);
+
+  // Whichever number gates the row list. Pallet rooms still step through the
+  // pallet total; unit rooms are ready as soon as a container count exists.
+  const gate = countsInUnits ? totalUnits : Number(formData.pallets) || 0;
+
   return (
     <>
-      {/* Step 1: Enter total pallets needed FIRST */}
-      <label>
-        <span>Total Pallets Needed {requiredStar}</span>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <input
-            type="number"
-            name="pallets"
-            value={formData.pallets}
-            onChange={handlePalletsChange}
-            min="1"
-            step="1"
-            required={requiresRowSelection}
-            style={{ flex: 1 }}
-            placeholder="Enter total pallet count"
-          />
+      {/* Step 1: Enter total pallets needed FIRST — pallet rooms only. */}
+      {!countsInUnits && (
+        <label>
+          <span>Total Pallets Needed {requiredStar}</span>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <input
+              type="number"
+              name="pallets"
+              value={formData.pallets}
+              onChange={handlePalletsChange}
+              min="1"
+              step="1"
+              required={requiresRowSelection}
+              style={{ flex: 1 }}
+              placeholder="Enter total pallet count"
+            />
+          </div>
+          <div className="form-hint" style={{ marginTop: '4px', color: '#666', fontSize: '0.875rem' }}>
+            {isUnlimitedStorage
+              ? "Unlimited storage - no row selection needed. Enter total pallets and submit."
+              : "Enter the total number of pallets you need to store. Then select one or more rows below."}
+          </div>
+        </label>
+      )}
+
+      {countsInUnits && !isUnlimitedStorage && totalUnits === 0 && (
+        <div className="form-hint full-width">
+          Enter how many {unitWordPlural} arrived, then choose the racks they go on.
         </div>
-        <div className="form-hint" style={{ marginTop: '4px', color: '#666', fontSize: '0.875rem' }}>
-          {isUnlimitedStorage
-            ? "Unlimited storage - no row selection needed. Enter total pallets and submit."
-            : "Enter the total number of pallets you need to store. Then select one or more rows below."}
-        </div>
-      </label>
+      )}
 
       {/* Step 2: Select rows (only when sub location has rows; 0/0 = unlimited, no selection) */}
-      {formData.pallets && Number(formData.pallets) > 0 && !isUnlimitedStorage && (
+      {gate > 0 && !isUnlimitedStorage && (
         <div>
           <label style={{ display: 'block', marginBottom: '8px' }}>
             <span>Select Row(s) {requiredStar}</span>
@@ -58,8 +81,9 @@ const RawMaterialRowSelection = ({
 
           {availableRows.length === 0 ? (
             <div className="form-error" style={{ padding: '12px', borderRadius: '4px', backgroundColor: '#fee', border: '1px solid #fcc' }}>
-              No rows available with sufficient capacity for {formData.pallets} pallets.
-              Please add more rows in Master Data or reduce the pallet count.
+              No rows available with sufficient capacity for {gate}{' '}
+              {countsInUnits ? unitWordPlural : 'pallets'}.
+              Please add more rows in Master Data or reduce the count.
             </div>
           ) : (
             <div style={{
@@ -74,7 +98,7 @@ const RawMaterialRowSelection = ({
                 const isSelected = rawMaterialRowAllocations.some(alloc => alloc.rowId === row.value);
                 // Capacity is a soft hint — a row with no capacity set (null)
                 // is treated as unlimited, not un-allocatable.
-                const canFitAll = row.available === null || row.available >= Number(formData.pallets);
+                const canFitAll = row.available === null || row.available >= gate;
 
                 return (
                   <label
@@ -217,12 +241,17 @@ const RawMaterialRowSelection = ({
                 );
               })}
               <div style={{ marginTop: '8px', padding: '8px', backgroundColor: '#fff', borderRadius: '4px' }}>
-                <div>
-                  <strong>Pallets: </strong>
-                  <span style={{ color: palletsPlaced === palletsNeeded ? '#4caf50' : '#f44336', fontWeight: 'bold' }}>
-                    {palletsPlaced} / {palletsNeeded}
-                  </span>
-                </div>
+                {/* Pallet rooms only. A drum room places drums, and the counter
+                    below is the one that matters — it is the figure
+                    `logged_rows` actually reads. */}
+                {!countsInUnits && (
+                  <div>
+                    <strong>Pallets: </strong>
+                    <span style={{ color: palletsPlaced === palletsNeeded ? '#4caf50' : '#f44336', fontWeight: 'bold' }}>
+                      {palletsPlaced} / {palletsNeeded}
+                    </span>
+                  </div>
+                )}
                 {totalUnits > 0 && (
                   <div style={{ marginTop: '4px' }}>
                     <strong>{unitWordPlural}: </strong>
@@ -251,8 +280,12 @@ const RawMaterialRowSelection = ({
               border: '1px solid #4caf50'
             }}>
               <div style={{ fontSize: '0.875rem', color: '#2e7d32' }}>
-                {rawMaterialRowAllocations[0].rowName} will store {formData.pallets} pallets
-                {totalUnits > 0 && ` — all ${totalUnits} ${unitWordPlural}`}
+                {countsInUnits
+                  ? `${rawMaterialRowAllocations[0].rowName} will store all `
+                    + `${totalUnits} ${unitWordPlural}`
+                  : `${rawMaterialRowAllocations[0].rowName} will store `
+                    + `${formData.pallets} pallets`
+                    + (totalUnits > 0 ? ` — all ${totalUnits} ${unitWordPlural}` : '')}
               </div>
             </div>
           )}

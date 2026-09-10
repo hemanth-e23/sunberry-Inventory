@@ -359,13 +359,37 @@ const useReceiptForm = () => {
     const rows = Array.isArray(finalSubLoc.rows) ? finalSubLoc.rows : [];
     if (rows.length === 0) return [];
 
-    const totalPalletsNeeded = Number(formData.pallets) || 0;
+    // A DRUM ROOM IS COUNTED IN DRUMS, and the two capacity systems are separate
+    // columns that do not talk to each other:
+    //
+    //   SubLocation.storage_unit + unit_capacity   what master data now sets
+    //   StorageRow.pallet_capacity + occupied_*    what this form used to read
+    //
+    // A room switched to drums kept whatever `pallet_capacity` its rows had
+    // beforehand, so Apple Barn offered "22 available of 22" against a room
+    // master data reports as 88 drums a row. The scanner already reads the unit
+    // pair (ScannerLotReceiveFlow groups racks by `storage_unit`); this did not.
+    //
+    // `liveUnits` rather than `occupied_pallets` for the same reason it exists
+    // on the row card: it is counted from `lot_placements` at read time, not a
+    // denormalised column that only ever climbed.
+    const roomUnit = finalSubLoc.storageUnit || null;
+    const roomCapacity = Number(finalSubLoc.unitCapacity) || 0;
+
+    // For a unit-typed room the figure being placed is CONTAINERS, which the
+    // form already collected above — asking again under another name is asking
+    // twice for one fact. `pallets` stays the driver for pallet rooms.
+    const totalNeeded = roomUnit
+      ? Number(formData.quantity) || 0
+      : Number(formData.pallets) || 0;
 
     return rows
       .filter(row => row && row.active !== false)
       .map(row => {
-        const capacity = row.palletCapacity || 0;
-        const occupied = row.occupiedPallets || 0;
+        const capacity = roomUnit ? roomCapacity : (row.palletCapacity || 0);
+        const occupied = roomUnit
+          ? Number(row.liveUnits) || 0
+          : (row.occupiedPallets || 0);
         const available = capacity > 0 ? Math.max(0, capacity - occupied) : null;
 
         // Capacity is a planning hint, never a gate. Every branch below leaves
@@ -375,21 +399,26 @@ const useReceiptForm = () => {
         // 22) disappeared from the form permanently, and the entry that would
         // have corrected it was the very thing being refused.
         let fitStatus = '';
-        if (totalPalletsNeeded > 0 && available !== null) {
-          if (available >= totalPalletsNeeded) {
+        if (totalNeeded > 0 && available !== null) {
+          if (available >= totalNeeded) {
             fitStatus = 'Can fit all';
           } else if (available > 0) {
-            fitStatus = `${available} of ${totalPalletsNeeded} within capacity`;
+            fitStatus = `${available} of ${totalNeeded} within capacity`;
           } else {
             fitStatus = `Already at ${occupied} of ${capacity} — over capacity`;
           }
         }
 
+        // Say the unit. "22 available of 22" gave no clue which of the two
+        // capacity systems was being quoted, which is exactly how a drum room
+        // came to read a pallet figure without anybody noticing.
+        const unitWord = roomUnit ? ` ${roomUnit}s` : '';
+
         return {
           value: row.id,
           rowData: row,
           label: available !== null
-            ? `${row.name} (${available} available of ${capacity})`
+            ? `${row.name} (${available} available of ${capacity}${unitWord})`
             : row.name,
           available: available,
           capacity: capacity,
@@ -397,7 +426,20 @@ const useReceiptForm = () => {
           fitStatus: fitStatus,
         };
       });
-  }, [formData.location, formData.subLocation, formData.pallets, locations, subLocationMap]);
+  }, [formData.location, formData.subLocation, formData.pallets, formData.quantity,
+      locations, subLocationMap]);
+
+  /** The room's own unit ('drum', 'bag'), or null when it is counted in pallets.
+   *
+   * Exported so the form can stop asking for a pallet figure in a room that has
+   * no opinion about pallets — see RawMaterialRowSelection. */
+  const roomStorageUnit = useMemo(() => {
+    if (!formData.subLocation || !formData.location) return null;
+    const location = locations.find(loc => loc.id === formData.location);
+    const sub = location?.subLocations?.find(s => s.id === formData.subLocation)
+      || subLocationMap[formData.location]?.find(s => s.id === formData.subLocation);
+    return sub?.storageUnit || null;
+  }, [formData.location, formData.subLocation, locations, subLocationMap]);
 
   const isUnlimitedStorage = requiresRowSelection && formData.subLocation && availableRows.length === 0;
 
@@ -884,10 +926,20 @@ const useReceiptForm = () => {
     }
 
     if (requiresRowSelection && formData.subLocation) {
-      if (!formData.pallets || Number(formData.pallets) <= 0) {
+      // A unit-typed room is never asked for a pallet total — the count above is
+      // the figure, and the per-row units below are what actually get placed.
+      // Requiring a hidden field would refuse the form with no way to comply.
+      if (!roomStorageUnit && (!formData.pallets || Number(formData.pallets) <= 0)) {
         setFeedback({
           type: "error",
           message: "Please enter the total number of pallets needed.",
+        });
+        return;
+      }
+      if (roomStorageUnit && !(Number(formData.quantity) > 0)) {
+        setFeedback({
+          type: "error",
+          message: `How many ${formData.quantityUnits || "units"} arrived?`,
         });
         return;
       }
@@ -1250,6 +1302,7 @@ const useReceiptForm = () => {
 
     // Location / row
     availableRows,
+    roomStorageUnit,
 
     // FG placement state
     manualAllocations,
