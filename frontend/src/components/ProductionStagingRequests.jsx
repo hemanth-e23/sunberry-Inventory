@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useAppData } from '../context/AppDataContext';
 import { getDashboardPath } from '../App';
 import apiClient from '../api/client';
-import { formatDate, formatDateTime, escapeHtml } from '../utils/dateUtils';
+import { formatDate, formatDateKey, formatDateTime, escapeHtml } from '../utils/dateUtils';
 import './StagingOverview.css'; // Re-use staging styles
 import { STAGING_ITEM_STATUS, STAGING_REQUEST_STATUS } from '../constants';
 import QuickStageModal from './staging/QuickStageModal';
@@ -412,7 +412,7 @@ const ProductionStagingRequests = () => {
               ].filter(Boolean);
               const locName = locParts.length > 0 ? locParts.map(escapeHtml).join(' → ') : '—';
               const expDate = lot.expiration_date
-                ? formatDate(lot.expiration_date)
+                ? formatDateKey(lot.expiration_date)
                 : '—';
               const qtyToShow = lot.allocated || lot.available_quantity;
               const lotUnit = lot.unit || '';

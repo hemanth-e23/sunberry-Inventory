@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { receivedInto } from "../../api/lotReceivingApi";
-import { formatDateTime as formatDate } from "../../utils/dateUtils";
+import { formatDateTime as formatDate, formatDateKey } from "../../utils/dateUtils";
 
 const ProductDetailModal = ({
   productId,
@@ -309,7 +309,7 @@ const ProductDetailModal = ({
                         })()}
                       </td>
                       <td className="hide-mobile">{formatDate(r.approvedAt) || formatDate(r.submittedAt) || formatDate(r.receiptDate)}</td>
-                      <td className="hide-mobile">{formatDate(r.expiration) || formatDate(r.expirationDate) || '—'}</td>
+                      <td className="hide-mobile">{formatDateKey(r.expiration) || formatDateKey(r.expirationDate) || '—'}</td>
                     </tr>
                   );
                 })}

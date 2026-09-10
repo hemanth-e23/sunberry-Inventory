@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from "react";
-import { formatDate, formatDateTime } from "../../utils/dateUtils";
+import { formatDate, formatDateKey, formatDateTime } from "../../utils/dateUtils";
 import { LoadingBox, ErrorBox, RunButton } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber } from "./reportUtils";
 
@@ -68,7 +68,7 @@ const LotTraceReport = () => {
                 {receipt.vendor_name && <span>Vendor: <strong>{receipt.vendor_name}</strong></span>}
                 <span>Received: <strong>{formatDate(receipt.receipt_date)}</strong></span>
                 {receipt.production_date && <span>Production: <strong>{formatDate(receipt.production_date)}</strong></span>}
-                {receipt.expiration_date && <span>Expires: <strong>{formatDate(receipt.expiration_date)}</strong></span>}
+                {receipt.expiration_date && <span>Expires: <strong>{formatDateKey(receipt.expiration_date)}</strong></span>}
                 <span>Initial Qty: <strong>{formatNumber(receipt.initial_quantity)} {receipt.unit}</strong></span>
               </div>
               {/* Approval / submission trail */}

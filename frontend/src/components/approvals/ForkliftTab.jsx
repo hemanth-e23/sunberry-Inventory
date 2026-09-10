@@ -3,7 +3,7 @@ import { useAuth } from "../../context/AuthContext";
 import { useAppData } from "../../context/AppDataContext";
 import { useToast } from "../../context/ToastContext";
 import { useConfirm } from "../../context/ConfirmContext";
-import { formatDateTime, formatDate, toDateKey } from "../../utils/dateUtils";
+import { formatDateTime, formatDate, formatDateKey, toDateKey } from "../../utils/dateUtils";
 import { cleanScannedLicence } from "../../utils/scannerFeedback";
 import { FORKLIFT_REQUEST_STATUS, PALLET_STATUS } from '../../constants';
 
@@ -314,7 +314,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                     />
                   ) : (
                     <div style={{ marginTop: '2px', fontWeight: 600 }}>
-                      {formatDate(fr.expiration_date)}
+                      {formatDateKey(fr.expiration_date)}
                     </div>
                   )}
                 </div>

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../../context/AppDataContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { formatDate, formatDateTime, escapeHtml } from '../../utils/dateUtils';
+import { formatDateKey, formatDateTime, escapeHtml } from '../../utils/dateUtils';
 import apiClient from '../../api/client';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES } from '../../constants';
@@ -451,7 +451,7 @@ const StagingTab = () => {
             ? `${escapeHtml(suggestion.location_name) || 'Unknown'}${suggestion.sub_location_name ? ` / ${escapeHtml(suggestion.sub_location_name)}` : ''}`
             : 'Unknown';
           const expirationDate = suggestion?.expiration_date
-            ? formatDate(suggestion.expiration_date)
+            ? formatDateKey(suggestion.expiration_date)
             : '—';
 
           // For a counted lot the ticket names the RACKS and a container count,
@@ -727,7 +727,7 @@ const StagingTab = () => {
                                     return (
                                       <option key={idx} value={suggestion.receipt_id} disabled={isSelected}>
                                         Lot {suggestion.lot_number} - {suggestion.location_name || 'Unknown'}
-                                        {suggestion.expiration_date ? ` (Exp: ${formatDate(suggestion.expiration_date)})` : ''}
+                                        {suggestion.expiration_date ? ` (Exp: ${formatDateKey(suggestion.expiration_date)})` : ''}
                                         - {describeAvailable(suggestion)}
                                       </option>
                                     );
@@ -782,7 +782,7 @@ const StagingTab = () => {
                                       return (
                                         <option key={idx} value={suggestion.receipt_id} disabled={isSelected}>
                                           Lot {suggestion.lot_number} - {suggestion.location_name || 'Unknown'}
-                                          {suggestion.expiration_date ? ` (Exp: ${formatDate(suggestion.expiration_date)})` : ''}
+                                          {suggestion.expiration_date ? ` (Exp: ${formatDateKey(suggestion.expiration_date)})` : ''}
                                           - {describeAvailable(suggestion)}
                                         </option>
                                       );

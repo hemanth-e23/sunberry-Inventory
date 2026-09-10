@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
 import { getDashboardPath } from '../App';
-import { formatDate } from '../utils/dateUtils';
+import { formatDate, formatDateKey } from '../utils/dateUtils';
 import JsBarcode from 'jsbarcode';
 import LotLabel from './ingredient/LotLabel';
 import { apiErrorMessage, printSessionLabels } from '../api/lotReceivingApi';
@@ -760,8 +760,8 @@ const PalletTagPrintPage = () => {
                         <td>{vendorNameById[receipt.vendorId] || '-'}</td>
                         <td>{product?.fcc || '-'}</td>
                         <td>{receipt.quantity} {receipt.quantityUnits || 'cases'}</td>
-                        <td>{formatDate(receipt.productionDate)}</td>
-                        <td>{formatDate(receipt.expiration)}</td>
+                        <td>{formatDateKey(receipt.productionDate)}</td>
+                        <td>{formatDateKey(receipt.expiration)}</td>
                         <td>{location?.name || '-'}</td>
                       </tr>
                       {isFG && isExpanded && (
@@ -995,7 +995,7 @@ const PalletTagPrintPage = () => {
                     {receipt.expiration && (
                       <div className="tag-bbd-section">
                         <span className="bbd-label">BBD</span>
-                        <span className="bbd-value">{formatDate(receipt.expiration)}</span>
+                        <span className="bbd-value">{formatDateKey(receipt.expiration)}</span>
                       </div>
                     )}
                     <div className="tag-divider"></div>

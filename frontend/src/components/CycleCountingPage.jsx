@@ -6,7 +6,7 @@ import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useToast } from '../context/ToastContext';
 import { getDashboardPath } from '../App';
-import { formatDate, getTodayDateKey, toDateKey, escapeHtml } from '../utils/dateUtils';
+import { formatDate, formatDateKey, getTodayDateKey, toDateKey, escapeHtml } from '../utils/dateUtils';
 import { ROLES, RECEIPT_STATUS, CATEGORY_TYPES } from '../constants';
 import './Shared.css';
 import './CycleCountingPage.css';
@@ -333,7 +333,7 @@ const CycleCountingPage = () => {
       ws.addRow([
         v.productName,
         v.lotNo,
-        v.expiryDate ? formatDate(v.expiryDate) : '—',
+        v.expiryDate ? formatDateKey(v.expiryDate) : '—',
         v.location,
         v.expectedQuantity,
         v.actualQuantity,
@@ -404,7 +404,7 @@ const CycleCountingPage = () => {
         html += `    <tr>
       <td>${escapeHtml(item.product?.name) || '—'}</td>
       <td class="mono">${escapeHtml(item.lotNo) || '—'}</td>
-      <td>${item.expiryDate ? formatDate(item.expiryDate) : '—'}</td>
+      <td>${item.expiryDate ? formatDateKey(item.expiryDate) : '—'}</td>
       <td>${escapeHtml(getLocationLabel(item))}</td>
       <td class="num">${sysLabel}</td>
       <td class="count-col"></td>
@@ -499,7 +499,7 @@ const CycleCountingPage = () => {
                     <tr key={idx}>
                       <td>{v.productName}</td>
                       <td style={{ fontFamily: 'monospace', fontWeight: 600 }}>{v.lotNo}</td>
-                      <td>{v.expiryDate ? formatDate(v.expiryDate) : '—'}</td>
+                      <td>{v.expiryDate ? formatDateKey(v.expiryDate) : '—'}</td>
                       <td>{v.location}</td>
                       <td className="text-right">{v.expectedQuantity.toLocaleString()}{v.unit ? ` ${v.unit}` : ''}</td>
                       <td className="text-right">{v.actualQuantity.toLocaleString()}{v.unit ? ` ${v.unit}` : ''}</td>
@@ -680,7 +680,7 @@ const CycleCountingPage = () => {
                                 {item.lotNo || '—'}
                               </td>
                               <td className={isExpired ? 'cc-expired' : ''}>
-                                {item.expiryDate ? formatDate(item.expiryDate) : '—'}
+                                {item.expiryDate ? formatDateKey(item.expiryDate) : '—'}
                               </td>
                               <td>{getLocationLabel(item)}</td>
                               <td className="text-right">{sysLabel}</td>
@@ -749,7 +749,7 @@ const CycleCountingPage = () => {
                           <div className="cc-card-meta-row">
                             <span className="cc-card-label">Expires</span>
                             <span className={`cc-card-value ${isExpired ? 'cc-expired' : ''}`}>
-                              {item.expiryDate ? formatDate(item.expiryDate) : '—'}
+                              {item.expiryDate ? formatDateKey(item.expiryDate) : '—'}
                             </span>
                           </div>
                           <div className="cc-card-meta-row">
@@ -943,7 +943,7 @@ const CycleCountingPage = () => {
                             <tr key={idx}>
                               <td>{item.productName}</td>
                               <td style={{ fontFamily: 'monospace', fontWeight: 600 }}>{item.lotNo}</td>
-                              <td>{item.expiryDate ? formatDate(item.expiryDate) : '—'}</td>
+                              <td>{item.expiryDate ? formatDateKey(item.expiryDate) : '—'}</td>
                               <td>{item.location || '—'}</td>
                               <td className="text-right">{(item.expectedQuantity ?? 0).toLocaleString()}</td>
                               <td className="text-right">{(item.actualQuantity ?? 0).toLocaleString()}</td>

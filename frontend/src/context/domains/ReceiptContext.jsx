@@ -4,7 +4,8 @@ import { useLocationContext as useLocation } from './LocationContext';
 import { useAuth } from '../AuthContext';
 import apiClient from '../../api/client';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
-import { getTodayDateKey, toDateKey } from '../../utils/dateUtils';
+import { getTodayDateKey } from '../../utils/dateUtils';
+import { toCalendarKey } from '../../utils/labelPayload';
 import { resolveReceiptUnit } from '../../utils/units';
 import {
   EPSILON,
@@ -19,6 +20,16 @@ import {
 export { reassignFinishedGood };
 
 // ─── Receipt mapping ──────────────────────────────────────────────────────────
+
+/** A calendar day as midnight UTC, or null. Lexical — never `new Date(x)`.
+ *
+ * The server stores these fields at midnight UTC (schemas/base.py), and reads
+ * them back with `toCalendarKey`, so this is the third side of the same rule:
+ * what is typed, what is stored and what is shown are all the same day. */
+const calendarIso = (value) => {
+  const key = toCalendarKey(value);
+  return key ? `${key}T00:00:00.000Z` : null;
+};
 
 const mapReceipt = (rec, products, categories = []) => {
   const product = products.find((p) => p.id === rec.product_id);
@@ -35,17 +46,25 @@ const mapReceipt = (rec, products, categories = []) => {
     unitsPerPallet: rec.units_per_pallet || null,
     weightUnit: rec.weight_unit || null,
     lotNo: rec.lot_number || '',
+    // CALENDAR DAYS, so read LEXICALLY — `toCalendarKey`, never `toDateKey`.
+    //
+    // A best-by is the same day in every timezone. These are stored as midnight
+    // UTC (see schemas/base._coerce_calendar_date, and the write path below,
+    // which agrees). `toDateKey` is timezone-aware and correct for instants, but
+    // on midnight UTC in a warehouse behind UTC it returns the PREVIOUS DAY: an
+    // expiry typed as 12/02 came back 12/01 everywhere, because the day was lost
+    // here, at the mapping, before any screen formatted it.
     receiptDate: rec.receipt_date
-      ? toDateKey(rec.receipt_date)
+      ? toCalendarKey(rec.receipt_date)
       : getTodayDateKey(),
     expiryDate: rec.expiration_date
-      ? toDateKey(rec.expiration_date)
+      ? toCalendarKey(rec.expiration_date)
       : null,
     expiration: rec.expiration_date
-      ? toDateKey(rec.expiration_date)
+      ? toCalendarKey(rec.expiration_date)
       : null,
     productionDate: rec.production_date
-      ? toDateKey(rec.production_date)
+      ? toCalendarKey(rec.production_date)
       : null,
     vendorId: rec.vendor_id || null,
     status: rec.status || 'recorded',
@@ -299,11 +318,14 @@ export const ReceiptProvider = ({ children }) => {
       units_per_pallet: receipt.unitsPerPallet || null,
       weight_unit: receipt.weightUnit || null,
       lot_number: receipt.lotNo || null,
-      receipt_date: receipt.receiptDate ? new Date(receipt.receiptDate).toISOString() : null,
-      expiration_date: (receipt.expiryDate || receipt.expiration)
-        ? new Date(receipt.expiryDate || receipt.expiration).toISOString()
-        : null,
-      production_date: receipt.productionDate ? new Date(receipt.productionDate).toISOString() : null,
+      // MIDNIGHT UTC, built lexically. `new Date(x).toISOString()` is right for
+      // a bare `YYYY-MM-DD` and wrong for anything else: a `MM/DD/YYYY` parses
+      // as LOCAL midnight and shifts a day on the way out. Going through the
+      // calendar key means the format of what arrives here cannot matter, and
+      // it mirrors `_coerce_calendar_date` on the server exactly.
+      receipt_date: calendarIso(receipt.receiptDate),
+      expiration_date: calendarIso(receipt.expiryDate || receipt.expiration),
+      production_date: calendarIso(receipt.productionDate),
       vendor_id: receipt.vendorId || null,
       location_id: locationId,
       sub_location_id: subLocationId,
@@ -379,17 +401,20 @@ export const ReceiptProvider = ({ children }) => {
         unitsPerPallet: response.data.units_per_pallet || null,
         weightUnit: response.data.weight_unit || null,
         lotNo: response.data.lot_number || '',
+        // Calendar days — lexical, same rule as the list mapper above. This is
+        // the response to a create/update, so a shift here would put the wrong
+        // day on screen the instant the form was submitted.
         receiptDate: response.data.receipt_date
-          ? toDateKey(response.data.receipt_date)
+          ? toCalendarKey(response.data.receipt_date)
           : getTodayDateKey(),
         expiryDate: response.data.expiration_date
-          ? toDateKey(response.data.expiration_date)
+          ? toCalendarKey(response.data.expiration_date)
           : null,
         expiration: response.data.expiration_date
-          ? toDateKey(response.data.expiration_date)
+          ? toCalendarKey(response.data.expiration_date)
           : null,
         productionDate: response.data.production_date
-          ? toDateKey(response.data.production_date)
+          ? toCalendarKey(response.data.production_date)
           : null,
         vendorId: response.data.vendor_id || null,
         locationId: response.data.location_id || locationId || receipt.locationId || receipt.location || null,

@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useCallback } from "react";
-import { formatDate } from "../../utils/dateUtils";
+import { formatDate, formatDateKey } from "../../utils/dateUtils";
 import { useAppData } from "../../context/AppDataContext";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton } from "./ReportSharedComponents";
@@ -128,7 +128,7 @@ const SnapshotReport = ({ productOptions, categoryOptions }) => {
     { label: "Lot #", value: (r) => r.lot_number || "—" },
     { label: "Vendor", value: (r) => r.vendor_name || "—" },
     { label: "Receipt Date", value: (r) => formatDate(r.receipt_date) },
-    { label: "Expiry Date", value: (r) => formatDate(r.expiration_date) },
+    { label: "Expiry Date", value: (r) => formatDateKey(r.expiration_date) },
     { label: "Quantity", value: (r) => `${formatNumber(r.quantity)} ${r.unit}` },
   ];
 

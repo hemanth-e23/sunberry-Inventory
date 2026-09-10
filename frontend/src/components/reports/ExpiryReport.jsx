@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { formatDate } from "../../utils/dateUtils";
+import { formatDateKey } from "../../utils/dateUtils";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, LoadingBox, ErrorBox, RunButton } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber } from "./reportUtils";
@@ -44,7 +44,7 @@ const ExpiryReport = () => {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const expiryCols = [
-    { label: "Expiry Date", value: (r) => formatDate(r.expiration_date) },
+    { label: "Expiry Date", value: (r) => formatDateKey(r.expiration_date) },
     { label: "Days Left", value: (r) => r.days_until_expiry < 0 ? `${Math.abs(r.days_until_expiry)}d overdue` : `${r.days_until_expiry}d` },
     { label: "Status", value: (r) => r.urgency_bucket },
     { label: "Product", value: (r) => r.product_name },

@@ -3,7 +3,7 @@ import { useAppData } from '../../context/AppDataContext';
 import { useToast } from '../../context/ToastContext';
 import apiClient from '../../api/client';
 import ModalOverlay from './ModalOverlay';
-import { formatDate, formatDateTime, escapeHtml } from '../../utils/dateUtils';
+import { formatDateKey, formatDateTime, escapeHtml } from '../../utils/dateUtils';
 
 /**
  * QuickStageModal
@@ -520,7 +520,7 @@ const QuickStageModal = ({
                         </td>
                         <td style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem' }}>
                           {lot.expiration_date
-                            ? formatDate(lot.expiration_date)
+                            ? formatDateKey(lot.expiration_date)
                             : '—'}
                         </td>
                         <td
