@@ -104,6 +104,18 @@ def get_production_today(
     #     lot date flipping mid-run.
     # The INNER join also drops manual / no-session pallets, which are out-of-band
     # corrections we deliberately exclude from production KPI.
+    #
+    # _VOID: a pallet can be voided AFTER it was counted, and voiding never
+    # changes pl.cases. Three of the four code paths that void a pallet leave
+    # is_deleted = false, so filtering on that alone keeps counting goods that
+    # no longer exist:
+    #   - adjustment_service.approve_adjustment  -> stock correction write-off
+    #   - scanner_service.reject_request         -> whole forklift session voided
+    #   - receipt_service                        -> receipt rejected
+    # (the fourth, the soft-delete in scanner_service, does set is_deleted.)
+    # 'not_produced' marks a sticker-sequence gap the line never made; it carries
+    # cases = 0 so it can't move the total, but it would inflate the pallet counts.
+    # Excluding both by status is what makes an approved adjustment show up in KPI.
     rows = db.execute(
         text(
             """
@@ -118,6 +130,9 @@ def get_production_today(
             JOIN forklift_requests fr ON fr.id = pl.forklift_request_id
             WHERE pl.warehouse_id = :wid
               AND pl.is_deleted = false
+              -- Voided pallets keep their cases and is_deleted = false, so only
+              -- a status filter keeps them out of production. See _VOID note.
+              AND pl.status NOT IN ('cancelled', 'not_produced')
               AND fr.created_at >= :win_start
               AND fr.created_at <  :win_end
               AND pl.licence_number ~ '^MP\\d{3}\\d{2}L\\d+-'
@@ -217,6 +232,9 @@ def get_production_detail(
             LEFT JOIN products p ON p.id = pl.product_id
             WHERE pl.warehouse_id = :wid
               AND pl.is_deleted = false
+              -- Voided pallets keep their cases and is_deleted = false, so only
+              -- a status filter keeps them out of production. See _VOID note.
+              AND pl.status NOT IN ('cancelled', 'not_produced')
               AND fr.created_at >= :win_start
               AND fr.created_at <  :win_end
               AND pl.licence_number ~ '^MP\\d{3}\\d{2}L\\d+-'
@@ -260,6 +278,9 @@ def get_production_detail(
             LEFT JOIN products p ON p.id = pl.product_id
             WHERE pl.warehouse_id = :wid
               AND pl.is_deleted = false
+              -- Voided pallets keep their cases and is_deleted = false, so only
+              -- a status filter keeps them out of production. See _VOID note.
+              AND pl.status NOT IN ('cancelled', 'not_produced')
               AND fr.created_at >= :win_start
               AND fr.created_at <  :win_end
               AND pl.scanned_at IS NOT NULL
@@ -355,6 +376,9 @@ def get_production_range(
             LEFT JOIN products p ON p.id = pl.product_id
             WHERE pl.warehouse_id = :wid
               AND pl.is_deleted = false
+              -- Voided pallets keep their cases and is_deleted = false, so only
+              -- a status filter keeps them out of production. See _VOID note.
+              AND pl.status NOT IN ('cancelled', 'not_produced')
               AND pl.licence_number ~ '^MP\\d{{3}}\\d{{2}}L\\d+-'
               AND {prod_day_expr} BETWEEN :d0 AND :d1
             GROUP BY prod_day, 2, 3, 4, 5
