@@ -113,12 +113,6 @@ const AdminDashboard = () => {
               <li><strong>{fgHeldPallets ?? 0}</strong> on hold</li>
               <li><strong>{fgTotalPalletCapacity ?? 0}</strong> total</li>
             </ul>
-            {fgUtilizationStatus === 'critical' && (
-              <p className="metric-alert">
-                <AlertCircle size={16} />
-                <span>Rack space above 90%. Consider dispatch or expansion.</span>
-              </p>
-            )}
           </div>
         </article>
 
@@ -159,12 +153,6 @@ const AdminDashboard = () => {
               <li><strong>{rmHeldPallets ?? 0}</strong> on hold</li>
               <li><strong>{rmTotalPalletCapacity ?? 0}</strong> total</li>
             </ul>
-            {rmUtilizationStatus === 'critical' && (
-              <p className="metric-alert">
-                <AlertCircle size={16} />
-                <span>Rack space above 90%. Consider dispatch or expansion.</span>
-              </p>
-            )}
           </div>
         </article>
 
