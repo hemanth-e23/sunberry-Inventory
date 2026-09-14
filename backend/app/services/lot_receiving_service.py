@@ -445,6 +445,80 @@ def scan_unit(
     )
 
 
+def submit_session(
+    db: Session,
+    *,
+    receipt_id: str,
+    user_id: Optional[str] = None,
+    confirmed: bool = False,
+) -> dict:
+    """The worker says this line is finished, and it leaves the gun.
+
+    Completion is an ACTION, never an inference. `open_sessions` deliberately
+    does not hide a line once scanned >= expected, because over-receiving is
+    legal and auto-hiding would strand the 81st drum of an expected 80. So the
+    only honest way for a line to close is somebody saying so.
+
+    A count that disagrees with the paperwork is not blocked — it is confirmed.
+    Both directions happen and both are legal: short means the truck was short,
+    over means it carried more. Refusing either would teach workers to make the
+    number fit rather than report what they counted. Without `confirmed` a
+    mismatch comes back as `needs_confirm` with the difference spelled out, and
+    the same call with `confirmed=True` goes through.
+
+    Does NOT touch `receipt.status`. Pending-approval is status in
+    (recorded, reviewed); moving it to clear the gun would also drop the receipt
+    out of the office's approvals queue, which is the check that happens next.
+    """
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if not receipt:
+        raise NotFoundError("Receipt", receipt_id)
+
+    if receipt.forklift_submitted_at:
+        return {
+            "status": "already_submitted",
+            "message": "This line was already marked finished.",
+            "summary": receiving_summary(db, receipt),
+        }
+
+    counts = session_counts(db, receipt)
+    scanned = int(counts.get("total") or 0)
+    expected = int(expected_units(db, receipt) or 0)
+    difference = scanned - expected
+
+    if difference != 0 and not confirmed:
+        lot = (
+            db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+            if receipt.material_lot_id else None
+        )
+        word = unit_word(lot, abs(difference))
+        detail = (
+            f"{difference} more {word} than the paperwork says."
+            if difference > 0
+            else f"{-difference} {word} short of the paperwork."
+        )
+        return {
+            "status": "needs_confirm",
+            "message": f"{detail} Finish this line anyway?",
+            "scanned_count": scanned,
+            "expected_count": expected,
+            "difference": difference,
+            "summary": receiving_summary(db, receipt),
+        }
+
+    receipt.forklift_submitted_at = datetime.now(timezone.utc)
+    receipt.forklift_submitted_by = user_id
+
+    return {
+        "status": "submitted",
+        "message": "Finished. The office checks the paperwork against these counts.",
+        "scanned_count": scanned,
+        "expected_count": expected,
+        "difference": difference,
+        "summary": receiving_summary(db, receipt),
+    }
+
+
 def undo_last_scan(db: Session, *, receipt_id: str, user_id: Optional[str] = None) -> dict:
     """Take one unit back off. The honest answer to "I think that double-counted".
 
@@ -990,6 +1064,10 @@ def open_sessions(db: Session, *, warehouse_id: Optional[str] = None, limit: int
             Receipt.material_lot_id.isnot(None),
             Receipt.is_deleted == False,  # noqa: E712
             Receipt.status.in_((ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED)),
+            # The worker said this line is finished. Still pending the office's
+            # paperwork check — that is `status` — but done at the gun, so it
+            # stops competing for attention with lines still expecting a truck.
+            Receipt.forklift_submitted_at.is_(None),
             ~closed_order,
         )
     )

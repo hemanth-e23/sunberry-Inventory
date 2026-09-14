@@ -367,6 +367,59 @@
   max-width: 100%;
 }
 
+/* ── Rack tally ───────────────────────────────────────────────────────────── */
+/* Where this line's drums already are, across every rack and every visit.
+   "Recent scans" below is this visit only; a driver returning to a half-done
+   line saw an empty list and read it as "nothing was ever scanned". */
+
+.sir-rack-tally {
+  margin-top: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+}
+
+.sir-rack-tally-label {
+  display: block;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #6b7280;
+  margin-bottom: 0.35rem;
+}
+
+.sir-rack-tally-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.sir-rack-tally-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.95rem;
+}
+
+.sir-rack-tally-list strong {
+  color: #111;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sir-rack-tally-list span {
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* ── Recent scans ─────────────────────────────────────────────────────────── */
 
 .sir-history { margin-top: 1.1rem; }

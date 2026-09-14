@@ -446,6 +446,42 @@ def undo(
     return result
 
 
+@router.post("/sessions/{receipt_id}/submit")
+def submit(
+    receipt_id: str,
+    confirmed: bool = Query(
+        False,
+        description="Proceed even though the count disagrees with the paperwork",
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Finish a receiving line and take it off the gun.
+
+    A line that has all its drums in still sat on the gun looking identical to
+    one still waiting for a truck, because `open_sessions` cannot infer
+    completion — over-receiving is legal, so "scanned >= expected" is not the
+    same question as "finished".
+
+    A mismatch returns `needs_confirm` with the difference in words rather than
+    an error; call again with `confirmed=true` to go through. Short and over are
+    both legal and both get said out loud.
+
+    The receipt stays in the office approvals queue either way — this closes the
+    scanning, not the paperwork check.
+    """
+    _get_receipt(db, receipt_id, current_user)
+    result = lrs.submit_session(
+        db,
+        receipt_id=receipt_id,
+        user_id=str(current_user.id),
+        confirmed=confirmed,
+    )
+    if result.get("status") != "needs_confirm":
+        db.commit()
+    return result
+
+
 @router.post("/sessions/{receipt_id}/print-labels", response_model=LotLabelSheet)
 def print_labels(
     receipt_id: str,

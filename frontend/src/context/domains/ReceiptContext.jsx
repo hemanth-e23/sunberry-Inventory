@@ -31,7 +31,13 @@ const calendarIso = (value) => {
   return key ? `${key}T00:00:00.000Z` : null;
 };
 
-const mapReceipt = (rec, products, categories = []) => {
+// Exported because InventoryContext writes to the SAME receipts state after an
+// approval. It used to keep a private near-copy of this function, and the copy
+// silently lagged: it omitted `materialLotId`, so approving a hold or an
+// adjustment stripped that field from every receipt in the store and blanked
+// the scanned-counts panel on every pending receipt card until a reload. Two
+// mappers for one shape, writing one state, cannot be kept in step by hand.
+export const mapReceipt = (rec, products, categories = []) => {
   const product = products.find((p) => p.id === rec.product_id);
   const categoryType = categories.find((c) => c.id === rec.category_id)?.type;
   return {

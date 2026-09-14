@@ -1,12 +1,10 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useFoundationContext as useFoundation } from './FoundationContext';
 import { useLocationContext as useLocation } from './LocationContext';
-import { useReceipt } from './ReceiptContext';
+import { useReceipt, mapReceipt } from './ReceiptContext';
 import { useAuth } from '../AuthContext';
 import apiClient from '../../api/client';
 import { CATEGORY_TYPES, RECEIPT_STATUS, TRANSFER_STATUS } from '../../constants';
-import { getTodayDateKey, toDateKey } from '../../utils/dateUtils';
-import { resolveReceiptUnit } from '../../utils/units';
 import {
   EPSILON,
   roundTo,
@@ -19,71 +17,9 @@ import {
 
 // ─── Local receipt mapper (mirrors ReceiptContext.mapReceipt) ─────────────────
 
-const mapReceiptFromApi = (rec, products, categories = []) => ({
-  id: rec.id,
-  productId: rec.product_id,
-  categoryId: rec.category_id || null,
-  quantity: Number(rec.quantity) || 0,
-  quantityUnits: resolveReceiptUnit(
-    rec,
-    categories.find((c) => c.id === rec.category_id)?.type,
-  ),
-  containerCount: rec.container_count || null,
-  containerUnit: rec.container_unit || null,
-  weightPerContainer: rec.weight_per_container || null,
-  weightUnit: rec.weight_unit || null,
-  lotNo: rec.lot_number || '',
-  receiptDate: rec.receipt_date
-    ? toDateKey(rec.receipt_date)
-    : getTodayDateKey(),
-  expiryDate: rec.expiration_date
-    ? toDateKey(rec.expiration_date)
-    : null,
-  expiration: rec.expiration_date
-    ? toDateKey(rec.expiration_date)
-    : null,
-  productionDate: rec.production_date
-    ? toDateKey(rec.production_date)
-    : null,
-  vendorId: rec.vendor_id || null,
-  status: rec.status || 'recorded',
-  submittedBy: rec.submitted_by || '',
-  submittedAt: rec.submitted_at || null,
-  approvedBy: rec.approved_by || null,
-  approvedAt: rec.approved_at || null,
-  note: rec.note || '',
-  locationId: rec.location_id || null,
-  location: rec.location_id || null,
-  subLocationId: rec.sub_location_id || null,
-  subLocation: rec.sub_location_id || null,
-  storageAreaId: rec.storage_area_id || null,
-  storageRowId: rec.storage_row_id || null,
-  pallets: rec.pallets || null,
-  rawMaterialRowAllocations: rec.raw_material_row_allocations || null,
-  fullPallets: rec.full_pallets || 0,
-  partialCases: rec.partial_cases || 0,
-  casesPerPallet: rec.cases_per_pallet || null,
-  bol: rec.bol || null,
-  purchaseOrder: rec.purchase_order || null,
-  hold: rec.hold || false,
-  heldQuantity: rec.held_quantity || 0,
-  holdLocation: rec.hold_location || null,
-  shift: rec.shift_id || null,
-  lineNumber: rec.line_id || null,
-  editHistory: [],
-  sid: products.find((p) => p.id === rec.product_id)?.sid || '',
-  allocation: (() => {
-    if (!rec.allocation) return null;
-    if (typeof rec.allocation === 'string') {
-      try {
-        return JSON.parse(rec.allocation);
-      } catch (e) {
-        return null;
-      }
-    }
-    return rec.allocation;
-  })(),
-});
+// Receipt mapping lives in ReceiptContext — the context that OWNS this state.
+// A second copy here drifted and dropped `materialLotId`, which silently blanked
+// the scanned-counts panel on every pending receipt after any approval.
 
 // ─── Context ──────────────────────────────────────────────────────────────────
 
@@ -482,7 +418,7 @@ export const InventoryProvider = ({ children }) => {
       updateTransferStatus(id, 'approved', approverId);
 
       const receiptsResponse = await apiClient.get('/receipts/', { params: { limit: 10000 } });
-      const recs = receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products, categories));
+      const recs = receiptsResponse.data.map((rec) => mapReceipt(rec, products, categories));
       setReceipts(recs);
 
       return { success: true };
@@ -620,7 +556,7 @@ export const InventoryProvider = ({ children }) => {
         // Pallet hold: receipt_id is null on the hold action; refetch all receipts so
         // held_quantity and hold flag reflect the updated pallet is_held values.
         const receiptsResponse = await apiClient.get('/receipts/', { params: { limit: 10000 } });
-        const recs = receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products, categories));
+        const recs = receiptsResponse.data.map((rec) => mapReceipt(rec, products, categories));
         setReceipts(recs);
       } else if (targetHold) {
         setReceipts((current) =>
@@ -797,7 +733,7 @@ export const InventoryProvider = ({ children }) => {
       // exactly. Local math here got it wrong (it omitted some deduction types
       // and skipped pallet-based adjustments).
       const receiptsResponse = await apiClient.get('/receipts/', { params: { limit: 10000 } });
-      setReceipts(receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products, categories)));
+      setReceipts(receiptsResponse.data.map((rec) => mapReceipt(rec, products, categories)));
       return { success: true };
     } catch (error) {
       console.error('Error approving adjustment:', error);
@@ -888,7 +824,7 @@ export const InventoryProvider = ({ children }) => {
       await fetchForkliftRequests();
 
       const receiptsResponse = await apiClient.get('/receipts/', { params: { limit: 10000 } });
-      const recs = receiptsResponse.data.map((rec) => mapReceiptFromApi(rec, products, categories));
+      const recs = receiptsResponse.data.map((rec) => mapReceipt(rec, products, categories));
       setReceipts(recs);
 
       return { success: true };

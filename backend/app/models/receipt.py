@@ -62,6 +62,17 @@ class Receipt(Base):
     approved_by = Column(String(50), ForeignKey("users.id"))
     approved_at = Column(DateTime(timezone=True))
     submitted_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Set when the worker at the gun says a receiving line is finished — NOT
+    # `submitted_by`/`submitted_at`, which record who STARTED receiving.
+    #
+    # Deliberately separate from `status`: a finished line is still pending the
+    # office's paperwork check, and pending-approval is status in
+    # (recorded, reviewed). Moving the status to clear the gun would also drop
+    # the receipt out of the approvals queue. Mirrors
+    # InventoryTransfer.forklift_submitted_at, which solves the same problem on
+    # the ship-out side.
+    forklift_submitted_at = Column(DateTime(timezone=True), nullable=True)
+    forklift_submitted_by = Column(String(50), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     is_deleted = Column(Boolean, default=False, nullable=False, server_default="false")

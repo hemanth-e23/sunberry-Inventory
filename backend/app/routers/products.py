@@ -14,6 +14,8 @@ from app.utils.auth import (
     get_current_active_user, require_role, require_superadmin,
     get_accessible_category_ids, get_accessible_group_ids, can_create_products,
 )
+from app.utils.schema_filter import model_kwargs
+
 
 router = APIRouter()
 
@@ -83,7 +85,7 @@ def create_product(
         if db.query(Product).filter(Product.short_code == product_data.short_code, Product.id != product_data.id).first():
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Product with short code '{product_data.short_code}' already exists")
 
-    db_product = Product(**product_data.dict())
+    db_product = Product(**model_kwargs(product_data, Product))
     db.add(db_product)
     db.commit()
     db.refresh(db_product)
@@ -179,7 +181,7 @@ def create_category_group(
     if existing_group:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Category group with this ID already exists")
 
-    db_group = CategoryGroup(**category_group_data.dict())
+    db_group = CategoryGroup(**model_kwargs(category_group_data, CategoryGroup))
     db.add(db_group)
     db.commit()
     db.refresh(db_group)
@@ -241,7 +243,7 @@ def create_category(
     if existing_category:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Category with this ID already exists")
 
-    db_category = Category(**category_data.dict())
+    db_category = Category(**model_kwargs(category_data, Category))
     db.add(db_category)
     db.commit()
     db.refresh(db_category)
@@ -288,7 +290,7 @@ def create_vendor(
     if existing_vendor:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Vendor with this ID already exists")
 
-    db_vendor = Vendor(**vendor_data.dict())
+    db_vendor = Vendor(**model_kwargs(vendor_data, Vendor))
     db.add(db_vendor)
     db.commit()
     db.refresh(db_vendor)

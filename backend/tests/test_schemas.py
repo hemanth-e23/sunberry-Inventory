@@ -150,3 +150,97 @@ class TestVendorSchemas:
                 name="a" * 101,  # Too long (max 100)
                 contact_person="John"
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Create-schema / model contract
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+class TestCreateSchemaModelContract:
+    """A create endpoint must never splat a request schema into a model.
+
+    `StorageRow(**row_data.dict())` looks harmless and worked for months. Then
+    display-only fields (`live_pallets`, `live_cases`, …) were added to the
+    shared base that `StorageRowCreate` inherits from, and every such field went
+    straight into the SQLAlchemy constructor, which rejects it:
+
+        TypeError: 'live_pallets' is an invalid keyword argument for StorageRow
+
+    That raises inside the route, becomes a 500 that loses its CORS headers, and
+    reaches the browser as a bare "Network Error" with no clue what failed.
+    Creating a storage row was impossible from the UI for three months, and
+    creating a storage area for six, before anyone traced it.
+
+    The failure is silent at the point it is introduced: whoever added
+    `live_pallets` to the RESPONSE schema had no reason to think they had broken
+    creation. So the rule is enforced here rather than left to review — request
+    payloads must be filtered to real columns via `model_kwargs`.
+
+    Asserting "no create schema has extra fields" would be the wrong rule.
+    Several legitimately do — `UserCreate.password` becomes `hashed_password`,
+    `ReceiptCreate.allocations` is consumed by the router. Extra fields are
+    fine; splatting them at a model is not.
+    """
+
+    def _splat_sites(self):
+        import ast
+        import os
+
+        import app.models as models
+
+        model_names = {
+            n for n in dir(models)
+            if hasattr(getattr(models, n), "__table__")
+        }
+        routers_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "app", "routers",
+        )
+        found = []
+        for entry in sorted(os.listdir(routers_dir)):
+            if not entry.endswith(".py"):
+                continue
+            path = os.path.join(routers_dir, entry)
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), path)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not (isinstance(node.func, ast.Name) and node.func.id in model_names):
+                    continue
+                for kw in node.keywords:
+                    # `**something` is a keyword with arg=None.
+                    if kw.arg is not None:
+                        continue
+                    val = kw.value
+                    if isinstance(val, ast.Call) and isinstance(val.func, ast.Attribute) \
+                            and val.func.attr in {"dict", "model_dump"}:
+                        found.append(f"{entry}:{node.lineno} {node.func.id}(**…{val.func.attr}())")
+        return found
+
+    def test_no_router_splats_a_schema_into_a_model(self):
+        offenders = self._splat_sites()
+        assert not offenders, (
+            "These endpoints pass a request schema straight into a model "
+            "constructor. Any field on the schema that is not a column raises "
+            "TypeError and surfaces as an unexplained 'Network Error'. Filter "
+            "with app.utils.schema_filter.model_kwargs instead:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_model_kwargs_drops_non_columns_and_keeps_columns(self):
+        from app.models import StorageRow
+        from app.schemas.location import StorageRowCreate
+        from app.utils.schema_filter import model_kwargs
+
+        payload = StorageRowCreate(
+            id="row-x", name="Row X", pallet_capacity=7, live_pallets=3.0,
+        )
+        kwargs = model_kwargs(payload, StorageRow)
+
+        assert "live_pallets" not in kwargs, "display-only field must be dropped"
+        assert kwargs["name"] == "Row X"
+        assert kwargs["pallet_capacity"] == 7
+        # The whole point: this must not raise.
+        StorageRow(**kwargs)

@@ -26,6 +26,8 @@ from app.schemas import (
 )
 from app.utils.auth import get_current_active_user, require_role, warehouse_filter, require_superadmin
 from app.constants import ROLE_SUPERADMIN
+from app.utils.schema_filter import model_kwargs
+from app.services import ingredient_row_service
 
 router = APIRouter()
 
@@ -54,7 +56,7 @@ def create_warehouse(
         raise HTTPException(status_code=400, detail="Warehouse ID already exists")
     if db.query(Warehouse).filter(Warehouse.code == data.code).first():
         raise HTTPException(status_code=400, detail="Warehouse code already in use")
-    wh = Warehouse(**data.model_dump())
+    wh = Warehouse(**model_kwargs(data, Warehouse))
     db.add(wh)
     db.commit()
     db.refresh(wh)
@@ -187,7 +189,8 @@ def create_location(
             detail="Location with this ID already exists"
         )
     
-    db_location = Location(**location_data.dict(), warehouse_id=current_user.warehouse_id)
+    db_location = Location(**model_kwargs(location_data, Location,
+                                          warehouse_id=current_user.warehouse_id))
     db.add(db_location)
     db.commit()
     db.refresh(db_location)
@@ -353,7 +356,7 @@ def create_sub_location(
             detail="Sub-location with this ID already exists"
         )
     
-    db_sub_location = SubLocation(**sub_location_data.dict())
+    db_sub_location = SubLocation(**model_kwargs(sub_location_data, SubLocation))
     db.add(db_sub_location)
     db.commit()
     db.refresh(db_sub_location)
@@ -377,7 +380,12 @@ def update_sub_location(
     update_data = sub_location_update.dict(exclude_unset=True)
     for field, value in update_data.items():
         setattr(sub_location, field, value)
-    
+
+    # Marking a room as holding drums or bags used to leave it unscannable: the
+    # rack picker lists ROWS, so a room with none never appeared in it, and
+    # nothing on screen said why. Give it one row named after itself.
+    ingredient_row_service.ensure_default_row(db, sub_location, current_user)
+
     db.commit()
     db.refresh(sub_location)
     return sub_location
@@ -490,7 +498,7 @@ def create_storage_area(
             detail="Storage area with this ID already exists"
         )
     
-    db_storage_area = StorageArea(**storage_area_data.dict())
+    db_storage_area = StorageArea(**model_kwargs(storage_area_data, StorageArea))
     db.add(db_storage_area)
     db.commit()
     db.refresh(db_storage_area)
@@ -534,7 +542,7 @@ def create_storage_row(
             detail="Storage row with this ID already exists"
         )
     
-    db_row = StorageRow(**row_data.dict())
+    db_row = StorageRow(**model_kwargs(row_data, StorageRow))
     db.add(db_row)
     db.commit()
     db.refresh(db_row)
@@ -602,7 +610,7 @@ def create_production_shift(
             detail="Production shift with this ID already exists"
         )
     
-    db_shift = ProductionShift(**shift_data.dict())
+    db_shift = ProductionShift(**model_kwargs(shift_data, ProductionShift))
     db.add(db_shift)
     db.commit()
     db.refresh(db_shift)
@@ -655,7 +663,7 @@ def create_production_line(
             detail="Production line with this ID already exists"
         )
     
-    db_line = ProductionLine(**line_data.dict())
+    db_line = ProductionLine(**model_kwargs(line_data, ProductionLine))
     db.add(db_line)
     db.commit()
     db.refresh(db_line)
@@ -713,7 +721,8 @@ def create_package_size(
 ):
     if db.query(PackageSize).filter(func.lower(PackageSize.label) == data.label.lower()).first():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A package size with that label already exists")
-    ps = PackageSize(id=f"pkgsize-{_uuid.uuid4().hex[:12]}", **data.dict())
+    ps = PackageSize(**model_kwargs(data, PackageSize,
+                                    id=f"pkgsize-{_uuid.uuid4().hex[:12]}"))
     db.add(ps)
     db.commit()
     db.refresh(ps)

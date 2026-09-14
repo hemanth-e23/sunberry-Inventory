@@ -38,6 +38,7 @@ which is the correct outcome.
 """
 
 import re
+import uuid
 from typing import List, Optional
 
 from sqlalchemy import func
@@ -385,3 +386,69 @@ def assign_barcodes(
         "assigned_count": len(assigned),
         "skipped_count": len(skipped),
     }
+
+
+def ensure_default_row(db: Session, sub_location: SubLocation, current_user) -> Optional[StorageRow]:
+    """Give a unit-typed room one row named after itself, if it has none.
+
+    A drum cannot be received into a room — only into a row. `lot_placements`
+    requires `storage_row_id`, because staging directs a forklift to a rack, the
+    full/over-capacity prompt counts per rack, and a recall trace answers "which
+    rack". So the row requirement stays.
+
+    What does not need to stay is asking somebody to create it. A reefer or a
+    cage is one open space: the row IS the room, and typing the room's name a
+    second time into a second form is bookkeeping, not information. Before this,
+    marking a room as holding drums left it silently unscannable — the rack
+    picker lists rows, so a room with none simply never appeared, with nothing on
+    screen to explain why.
+
+    Only ever ADDS. A room that already has rows is left alone: somebody has
+    described that space deliberately and a default row would be a phantom
+    location competing with the real ones.
+
+    Returns the new row, or None when nothing was needed.
+    """
+    if not getattr(sub_location, "storage_unit", None):
+        return None   # a pallet room — rows are created by hand, as before
+
+    existing = (
+        db.query(StorageRow.id)
+        .filter(StorageRow.sub_location_id == sub_location.id)
+        .first()
+    )
+    if existing:
+        return None
+
+    row = StorageRow(
+        id=f"row-{uuid.uuid4().hex[:12]}",
+        name=sub_location.name,
+        sub_location_id=sub_location.id,
+        # Hangs off the sub-location, not a storage area: `_rows_query` resolves
+        # the location path through EITHER parent, and a unit-typed room has no
+        # area between it and its rows.
+        storage_area_id=None,
+        # Zero is correct, not a placeholder — capacity for these rooms is
+        # `sub_location.unit_capacity` in drums, not pallets. See list_rows.
+        pallet_capacity=0,
+        default_cases_per_pallet=0,
+        occupied_pallets=0,
+        occupied_cases=0,
+        hold=False,
+        is_active=True,
+        is_partial_pallet_location=False,
+    )
+    db.add(row)
+    db.flush()   # the row needs an id before a barcode can be minted for it
+
+    # Without a barcode the rack label will not resolve at the gun, and the
+    # manual picker becomes the only way in. Mint it now so the room is usable
+    # the moment it is typed.
+    try:
+        assign_barcodes(db, current_user, row_ids=[row.id])
+    except Exception:
+        # A missing barcode is recoverable — the picker still works, and
+        # assign-barcodes can be re-run. Failing room setup over it is not.
+        pass
+
+    return row

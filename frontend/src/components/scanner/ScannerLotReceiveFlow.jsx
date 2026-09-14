@@ -14,7 +14,8 @@ import {
 import { decodeLotPayload } from '../../utils/labelPayload';
 import {
   apiErrorMessage, getReceivingSession, listReceivingSessions,
-  lotScanEndpoint, receiptIdFromEndpoint, resolveRow, undoLastScan,
+  lotScanEndpoint, receiptIdFromEndpoint, resolveRow, submitReceivingSession,
+  undoLastScan,
 } from '../../api/lotReceivingApi';
 import { listIngredientRows } from '../../api/ingredientIntakeApi';
 import './ScannerIngredientReceiveFlow.css';
@@ -275,6 +276,10 @@ const SessionView = ({ receiptId }) => {
   const scanInFlight = useRef(false);
   const [rowFull, setRowFull] = useState(null);
   const [rowPicker, setRowPicker] = useState(false);
+  // Set when finishing a line whose count disagrees with the paperwork. Holds
+  // the server's wording of the difference so the worker is told WHAT
+  // disagrees, not just that something does.
+  const [submitConfirm, setSubmitConfirm] = useState(null);
   // HOW MANY UNITS ONE SCAN MEANS. 1 for drums and totes, which are stickered
   // individually. For bags and boxes it defaults to what a pallet holds, so
   // scanning the sticker on a wrapped pallet books all of them at once —
@@ -431,6 +436,23 @@ const SessionView = ({ receiptId }) => {
   const unit = session?.count_unit || 'units';
   const rowCount = row ? (serverRowCounts[row.id] || 0) + pendingForRow : 0;
   const remaining = Math.max(0, expected - totalScanned);
+
+  // Every rack this line has drums in, whatever visit put them there.
+  //
+  // Driven off serverRowCounts rather than session.rows: the session payload is
+  // a snapshot from load, so a rack scanned during THIS visit would be missing
+  // from it. Names are resolved from whichever source knows them — the session
+  // snapshot, the cached rack list, or the rack in hand.
+  const rackTally = useMemo(() => {
+    const names = {};
+    (session?.rows || []).forEach((b) => { names[b.storage_row_id] = b.storage_row_name; });
+    rows.forEach((r) => { if (!names[r.id]) names[r.id] = r.name; });
+    if (row) names[row.id] = row.name;
+    return Object.entries(serverRowCounts)
+      .filter(([, count]) => count > 0)
+      .map(([id, count]) => ({ id, count, name: names[id] || id }))
+      .sort((a, b) => b.count - a.count);
+  }, [serverRowCounts, session, rows, row]);
   const dialogOpen = !!rowPicker;
 
   // ── Load ───────────────────────────────────────────────────────────────────
@@ -632,6 +654,38 @@ const SessionView = ({ receiptId }) => {
   }, [rowFull, recordUnit]);
 
   // ── Undo ───────────────────────────────────────────────────────────────────
+  /**
+   * Finish the line and leave the gun.
+   *
+   * A line stays on the gun until somebody says it is done — `open_sessions`
+   * cannot infer it, because over-receiving is legal and hiding at the
+   * paperwork count would strand the 81st drum of an expected 80.
+   *
+   * A mismatch is confirmed, never blocked. Both directions are legal and both
+   * happen; refusing either would teach drivers to make the number fit rather
+   * than report what they counted.
+   */
+  const handleSubmit = useCallback(async (confirmed = false) => {
+    if (pendingItems.length > 0) {
+      showError('Wait for queued scans to sync before finishing.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await submitReceivingSession(receiptId, { confirmed });
+      if (result.status === 'needs_confirm') {
+        setSubmitConfirm(result);
+        return;
+      }
+      setSubmitConfirm(null);
+      navigate('/forklift/lot-receiving');
+    } catch (err) {
+      showError(apiErrorMessage(err, 'Could not finish this line.'));
+    } finally {
+      setBusy(false);
+    }
+  }, [receiptId, pendingItems.length, navigate, showError]);
+
   const handleUndo = useCallback(async () => {
     if (pendingItems.length > 0) {
       showError('Wait for queued scans to sync before undoing.');
@@ -870,6 +924,29 @@ const SessionView = ({ receiptId }) => {
           </div>
         </div>
 
+        {/* Where this line's drums already are, across every rack.
+            "Recent scans" below is this visit only — walk away and come back and
+            it is empty, which read as "nothing was ever scanned" on a line that
+            was half done. This survives, because the server has counted it all
+            along; it just was not being shown.
+
+            Per RACK, never per drum: every drum of a lot wears an identical
+            sticker, so the gun cannot tell drum 4 from drum 7. A per-drum list
+            would be invented detail. */}
+        {rackTally.length > 0 && (
+          <div className="sir-rack-tally">
+            <span className="sir-rack-tally-label">Counted in so far</span>
+            <ul className="sir-rack-tally-list">
+              {rackTally.map((entry) => (
+                <li key={entry.id}>
+                  <strong>{entry.name}</strong>
+                  <span>{entry.count} {unit}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {totalScanned > expected && expected > 0 && (
           <div className="sir-warn">
             <AlertTriangle size={18} />
@@ -926,19 +1003,64 @@ const SessionView = ({ receiptId }) => {
           </button>
         </div>
 
+        {/* A count that disagrees with the paperwork ASKS. Inline, not a modal,
+            for the same reason the full-rack warning is: a dialog that steals
+            focus and does not give it back leaves the driver scanning into the
+            void. Amber, never red — short and over are both legal, and
+            colouring a legal outcome red trains people to click past it. */}
+        {submitConfirm && (
+          <div className="sir-warn">
+            <AlertTriangle size={18} />
+            <div>
+              <strong>{submitConfirm.message}</strong>
+              <div className="sir-warn-detail">
+                Counted {submitConfirm.scanned_count} of {submitConfirm.expected_count}
+                {' '}{unit} on the paperwork.
+              </div>
+              <div className="sir-warn-actions">
+                <button
+                  type="button"
+                  className="sir-btn sir-btn--warn"
+                  onClick={() => handleSubmit(true)}
+                  disabled={busy}
+                >
+                  Yes, finish this line
+                </button>
+                <button
+                  type="button"
+                  className="sir-btn sir-btn--ghost"
+                  onClick={() => setSubmitConfirm(null)}
+                >
+                  Keep scanning
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <button
           type="button"
           className="sir-submit"
-          onClick={() => navigate('/forklift/lot-receiving')}
+          onClick={() => handleSubmit(false)}
+          disabled={busy || pendingItems.length > 0}
         >
           {remaining > 0
-            ? `Done for now — ${remaining} ${unit} still expected`
-            : 'Done'}
+            ? `Finish — ${remaining} ${unit} still expected`
+            : 'Finish'}
+        </button>
+
+        <button
+          type="button"
+          className="sir-link"
+          onClick={() => navigate('/forklift/lot-receiving')}
+        >
+          Leave for now — keep this line open
         </button>
 
         <p className="sir-muted sir-fineprint">
-          Everything scanned is already in stock. The office checks the paperwork
-          against these counts afterwards.
+          Everything scanned is already in stock. Finishing takes this line off
+          the gun; the office checks the paperwork against these counts
+          afterwards.
         </p>
       </div>
 

@@ -67,6 +67,21 @@ export const getReceivingSession = (receiptId) =>
   unwrap(apiClient.get(`/lot-receiving/sessions/${receiptId}`));
 
 /**
+ * Finish a line and take it off the gun.
+ *
+ * Returns `needs_confirm` with the difference in words when the count disagrees
+ * with the paperwork — call again with `confirmed` to go through. Short and over
+ * are both legal; the confirm exists so the difference is said out loud, not to
+ * block it.
+ */
+export const submitReceivingSession = (receiptId, { confirmed = false } = {}) =>
+  unwrap(apiClient.post(
+    `/lot-receiving/sessions/${receiptId}/submit`,
+    null,
+    { params: { confirmed } },
+  ));
+
+/**
  * Path of the lot-scan endpoint.
  *
  * Exported rather than inlined because it is used twice for the same call: as
