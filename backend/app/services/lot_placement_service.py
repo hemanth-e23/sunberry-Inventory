@@ -744,13 +744,22 @@ def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
     nothing a forklift had ever scanned, so every scanned delivery showed no
     rack at all — the column fell through to an em dash on exactly the
     receipts that knew their rack most precisely.
+
+    UNDOS ARE NETTED OFF. `undo_last_scan` writes a compensating `adjusted`
+    event rather than deleting the scan, so the counts here must sum the signed
+    delta the way session_counts does. Reading only positive `received` events
+    reports drums the worker explicitly took back off, and the per-rack numbers
+    then disagree with the receipt they sit beside.
     """
+    from sqlalchemy import or_
+
     from app.models.location import Location, SubLocation
 
     rows = (
         db.query(LotPlacementEvent, StorageRow, SubLocation, Location)
         .join(StorageRow, StorageRow.id == LotPlacementEvent.storage_row_id)
         .join(MaterialLot, MaterialLot.id == LotPlacementEvent.material_lot_id)
+        .join(Receipt, Receipt.id == LotPlacementEvent.ref_id)
         # Outer: a rack reached through a storage_area has no sub_location_id,
         # and losing its put-away row over a missing room name would be a worse
         # answer than naming the rack alone.
@@ -759,8 +768,16 @@ def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
         .filter(
             MaterialLot.product_id == product_id,
             LotPlacementEvent.ref_type.in_(("receipt", "receiving")),
-            LotPlacementEvent.event_type == EVENT_RECEIVED,
-            LotPlacementEvent.full_units_delta > 0,
+            # Scoped to the session's own lot, as session_counts is. A cross-lot
+            # scan is legal — one truck carries mango and guava — and it is
+            # recorded against the lot actually scanned but with THIS session's
+            # ref_id, so without this the guava drums would be reported as part
+            # of the mango delivery. Legacy receipts carry no lot; they keep
+            # every event written against them.
+            or_(
+                Receipt.material_lot_id.is_(None),
+                Receipt.material_lot_id == LotPlacementEvent.material_lot_id,
+            ),
         )
         .order_by(LotPlacementEvent.occurred_at)
         .all()
@@ -771,7 +788,17 @@ def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
         if not event.ref_id:
             continue
         bucket = out.setdefault(event.ref_id, [])
-        # One receipt can put away onto the same rack twice (a paused and
+        # SUM THE SIGNED DELTA, every event type. Undo does not delete the scan
+        # it reverses — a ledger you can delete from is not a ledger — it writes
+        # a COMPENSATING event, `adjusted` with a negative delta. Counting only
+        # `received` rows with a positive delta therefore reports drums that were
+        # explicitly taken back off, which is how a 60-drum delivery came to read
+        # "ROW 5 (4 drums), ROW 4 (57 drums)" — 61 for a receipt of 60.
+        #
+        # session_counts and order_received_count both sum every delta for the
+        # ref. This is the same question, so it gets the same arithmetic.
+        #
+        # One receipt can also put away onto the same rack twice (a paused and
         # resumed scan); report the rack once with the total.
         for entry in bucket:
             if entry["storage_row_id"] == row.id:
@@ -798,7 +825,14 @@ def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
                     else (sub.name if sub else None)
                 ),
             })
-    return out
+
+    # A rack that netted to nothing was scanned and then fully undone. Naming it
+    # with "(0 drums)" reports a put-away that was taken back.
+    return {
+        ref_id: kept
+        for ref_id, entries in out.items()
+        if (kept := [e for e in entries if e["units"] > 0])
+    }
 
 
 # ─── translating the legacy quantity language into units ──────────────────────

@@ -181,3 +181,70 @@ class TestReceivedIntoByReceipt:
         entry = lps.received_into_by_receipt(
             db_session, seed_data["product"].id)[receipt.id][0]
         assert entry["unit_label"] == "pallets"
+
+    def test_an_undone_scan_is_not_reported(self, db_session, seed_data):
+        """The per-rack counts must add up to the receipt.
+
+        A real 60-drum delivery read "ROW 5 (4 drums), ROW 4 (57 drums)" — 61.
+        The extra drum was scanned and then undone, and undo writes a
+        COMPENSATING event rather than deleting the scan, so counting only
+        positive `received` events still reported it.
+        """
+        lot = _lot(db_session, seed_data, "undo")
+        receipt = _receipt(db_session, seed_data, lot, suffix="undo", drums=3)
+
+        for _ in range(4):
+            lps.apply_delta(
+                db_session, lot, "row-1",
+                event_type=lps.EVENT_RECEIVED, full_units_delta=1,
+                actor_id=None, ref_type="receiving", ref_id=receipt.id,
+            )
+        # The worker says "that double-counted".
+        lps.apply_delta(
+            db_session, lot, "row-1",
+            event_type=lps.EVENT_ADJUSTED, full_units_delta=-1,
+            actor_id=None, ref_type="receiving", ref_id=receipt.id,
+            reason="Undo last scan", reason_code="undo",
+        )
+        db_session.commit()
+
+        result = lps.received_into_by_receipt(db_session, seed_data["product"].id)
+        assert result[receipt.id][0]["units"] == 3, "the undone drum must come off"
+
+    def test_a_fully_undone_rack_is_dropped(self, db_session, seed_data):
+        """"ROW 5 (0 drums)" reports a put-away that was taken back."""
+        from app.models import StorageRow
+        db_session.add(StorageRow(
+            id="row-3", name="Row C",
+            sub_location_id=seed_data["sub_location"].id,
+            storage_area_id="area-1", pallet_capacity=10, is_active=True,
+        ))
+        db_session.commit()
+
+        lot = _lot(db_session, seed_data, "wipe")
+        receipt = _receipt(db_session, seed_data, lot, suffix="wipe", drums=2)
+
+        lps.apply_delta(
+            db_session, lot, "row-1",
+            event_type=lps.EVENT_RECEIVED, full_units_delta=2,
+            actor_id=None, ref_type="receiving", ref_id=receipt.id,
+        )
+        # One drum onto the wrong rack, then taken straight back off.
+        lps.apply_delta(
+            db_session, lot, "row-3",
+            event_type=lps.EVENT_RECEIVED, full_units_delta=1,
+            actor_id=None, ref_type="receiving", ref_id=receipt.id,
+        )
+        lps.apply_delta(
+            db_session, lot, "row-3",
+            event_type=lps.EVENT_ADJUSTED, full_units_delta=-1,
+            actor_id=None, ref_type="receiving", ref_id=receipt.id,
+            reason="Undo last scan", reason_code="undo",
+        )
+        db_session.commit()
+
+        entries = lps.received_into_by_receipt(
+            db_session, seed_data["product"].id)[receipt.id]
+
+        assert [e["storage_row_name"] for e in entries] == ["Row A"]
+        assert entries[0]["units"] == 2
