@@ -314,12 +314,17 @@ const InventoryOverview = () => {
 
     const rowInfo = [];
 
+    // Footprint is counted in whatever the ROOM stores — drums on a drum room's
+    // shelves, pallets elsewhere. "(20 pallets)" beside a quantity given in
+    // drums names a unit that room never uses.
+    const footprintFor = (rowId) => rowUnitLookup[rowId] || 'pallets';
+
     if (receipt.rawMaterialRowAllocations && Array.isArray(receipt.rawMaterialRowAllocations)) {
       receipt.rawMaterialRowAllocations.forEach(alloc => {
         const rowName = rowLookup[alloc.rowId] || alloc.rowName || alloc.rowId;
         const pallets = alloc.pallets || 0;
         if (rowName) {
-          rowInfo.push(`${rowName}${pallets > 0 ? ` (${pallets} pallets)` : ''}`);
+          rowInfo.push(`${rowName}${pallets > 0 ? ` (${pallets} ${footprintFor(alloc.rowId)})` : ''}`);
         }
       });
     }
@@ -328,7 +333,7 @@ const InventoryOverview = () => {
       const rowName = rowLookup[rowId] || rowNameCache[rowId];
       const pallets = receipt.pallets || 0;
       if (rowName) {
-        rowInfo.push(`${rowName}${pallets > 0 ? ` (${pallets} pallets)` : ''}`);
+        rowInfo.push(`${rowName}${pallets > 0 ? ` (${pallets} ${footprintFor(rowId)})` : ''}`);
       }
     }
 
@@ -337,7 +342,7 @@ const InventoryOverview = () => {
       return [{ label, detail }];
     }
     return [];
-  }, [productCategories, locationsTree, locationLookup, rowLookup, rowNameCache]);
+  }, [productCategories, locationsTree, locationLookup, rowLookup, rowUnitLookup, rowNameCache]);
 
   // Inventory rows computation (needed by the table and print modal)
   const vendorNameById = useMemo(() => {
