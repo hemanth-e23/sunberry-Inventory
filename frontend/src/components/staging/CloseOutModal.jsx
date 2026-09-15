@@ -93,8 +93,7 @@ const CloseOutModal = ({
 
   const openReturnFromRow = (row) => {
     const details = row.staging_details.map((d) => ({
-      staging_item_id: d.staging_item_id,
-      available: d.available,
+      ...d,
       _itemId: d.item_id,
       lot_number: d.lot_number ?? '—',
       location_name: d.location_name ?? '',

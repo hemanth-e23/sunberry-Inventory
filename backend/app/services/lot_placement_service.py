@@ -931,6 +931,84 @@ def put_units(
     )
 
 
+def return_units(
+    db: Session,
+    lot: MaterialLot,
+    *,
+    quantity: float,
+    to_row_id: str,
+    full_units: Optional[int] = None,
+    weighed_partial_qty: Optional[float] = None,
+    actor_id: Optional[str] = None,
+    ref_type: Optional[str] = None,
+    ref_id: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> dict:
+    """Put a returned WEIGHT back on a rack: whole units plus an open one.
+
+    `put_units` speaks whole containers; a return from production usually is
+    not whole — 200 lbs comes back against 400 lb drums. Rounding up invents
+    a sealed drum that is not there; rounding down (the old behaviour) loses
+    the partial from every rack until a count finds it. The honest answer is
+    both halves: full units back as full, and the remainder as ONE open unit
+    whose content is the weighed number the worker wrote on the drum.
+
+    Callers may state the split (`full_units` + `weighed_partial_qty`, checked
+    against `quantity`), or send only `quantity` and let the split be derived
+    from `weight_per_unit`.
+    """
+    if not to_row_id:
+        raise ValidationError(
+            f"Returning {lot.unit_label or 'unit'}s needs a rack to put them on."
+        )
+
+    per_unit = float(lot.weight_per_unit or 0)
+    if full_units is None and weighed_partial_qty is None:
+        full_units = int(float(quantity) / per_unit) if per_unit > 0 else 0
+        weighed_partial_qty = max(0.0, float(quantity) - full_units * per_unit)
+        # Float dust from a whole-drum return is not an open drum.
+        if weighed_partial_qty <= 0.01:
+            weighed_partial_qty = 0.0
+    else:
+        full_units = int(full_units or 0)
+        weighed_partial_qty = float(weighed_partial_qty or 0)
+        if full_units < 0 or weighed_partial_qty < 0:
+            raise ValidationError("A return cannot carry negative amounts.")
+        if per_unit > 0 and weighed_partial_qty > per_unit + 0.01:
+            raise ValidationError(
+                f"The weighed remainder ({weighed_partial_qty}) is more than a "
+                f"full {lot.unit_label or 'unit'} holds ({per_unit}). Count it "
+                "as full units instead."
+            )
+        if per_unit > 0:
+            expected = full_units * per_unit + weighed_partial_qty
+            if abs(expected - float(quantity)) > 0.01:
+                raise ValidationError(
+                    f"Return does not add up: {full_units} full × {per_unit} + "
+                    f"{weighed_partial_qty} weighed = {round(expected, 3)}, but "
+                    f"the returned quantity is {quantity}."
+                )
+
+    if full_units > 0:
+        put_units(
+            db, lot,
+            units=full_units,
+            to_row_id=to_row_id,
+            event_type=EVENT_RETURNED,
+            actor_id=actor_id, ref_type=ref_type, ref_id=ref_id, reason=reason,
+        )
+    if weighed_partial_qty > 0:
+        apply_delta(
+            db, lot, to_row_id,
+            event_type=EVENT_RETURNED,
+            open_units_delta=1,
+            open_qty_delta=weighed_partial_qty,
+            actor_id=actor_id, ref_type=ref_type, ref_id=ref_id,
+            reason=reason or "Weighed partial returned",
+        )
+    return {"full_units": full_units, "weighed_partial_qty": weighed_partial_qty}
+
+
 # ─── projection into the legacy shape ─────────────────────────────────────────
 
 def project_lot(db: Session, lot: MaterialLot) -> None:
@@ -1009,6 +1087,12 @@ def project_lot(db: Session, lot: MaterialLot) -> None:
             # un-held to `receipt.hold`, which is what made it impossible to
             # release from the Holds screen.
             "heldUnits": units if lot.is_held else int(placement.held_units or 0),
+            # Provenance. These entries are a PROJECTION of the placement
+            # ledger, not something a person typed. `logged_rows` must never
+            # read them back as a placement instruction — that is how approving
+            # an already-scanned receipt doubled every rack (scan 40, approve,
+            # rack says 80).
+            "source": "projection",
         })
 
     primary.raw_material_row_allocations = entries

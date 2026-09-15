@@ -158,6 +158,35 @@ def suggest_lots_for_staging(
         q = q.filter(Receipt.warehouse_id == wh_id)
     receipts = q.order_by(Receipt.expiration_date.asc().nullslast()).all()
 
+    # A counted lot's drums live on racks, not in `Receipt.quantity`. Usage
+    # sync decrements the paperwork weight and can zero it (status depleted)
+    # while sealed drums still sit on a rack — the `quantity > 0` filter above
+    # would then hide a lot a picker can walk to and touch. Rescue: any lot of
+    # this product that still has placements is offered; the availability
+    # check below reads the racks, so an actually-empty lot still drops out.
+    seen_lot_ids = {r.material_lot_id for r in receipts if r.material_lot_id}
+    seen_receipt_ids = {r.id for r in receipts}
+    rescue_q = db.query(Receipt).filter(
+        Receipt.product_id == product_id,
+        Receipt.material_lot_id.isnot(None),
+        Receipt.status.in_([ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED]),
+        Receipt.hold == False,  # noqa: E712
+        Receipt.is_deleted == False,  # noqa: E712
+    )
+    if wh_id:
+        rescue_q = rescue_q.filter(Receipt.warehouse_id == wh_id)
+    # Newest first: `project_lot` writes the lot's picture onto the newest
+    # receipt, so that is the one to speak for the lot.
+    for rescued in rescue_q.order_by(
+        Receipt.receipt_date.desc(), Receipt.created_at.desc()
+    ).all():
+        if rescued.id in seen_receipt_ids or rescued.material_lot_id in seen_lot_ids:
+            continue
+        seen_lot_ids.add(rescued.material_lot_id)
+        receipts.append(rescued)
+    # Keep FEFO across the combined list.
+    receipts.sort(key=lambda r: (r.expiration_date is None, r.expiration_date or 0))
+
     suggestions = []
     for receipt in receipts:
         available_quantity = _compute_available_quantity(db, receipt)
@@ -466,25 +495,23 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
     # Put it back where the worker says they put it.
     if request.to_storage_row_id:
         if lps.is_counted_lot(db, receipt.material_lot_id):
-            # Whole containers, on the named rack. Rounding DOWN here, the
-            # opposite of the pull: 600 lbs returned against 500 lb drums is one
-            # full drum back on the shelf plus a partial still in production, and
-            # counting the partial as a whole drum would invent stock that is not
-            # on the rack to be found.
+            # Whole containers back whole, and the remainder as ONE open unit
+            # holding the weighed leftover — 600 lbs against 500 lb drums is a
+            # full drum on the shelf plus an open drum with 100 lbs in it.
+            # Rounding up would invent a sealed drum; the old round-down lost
+            # the partial from every rack until a count found it.
             lot = db.query(MaterialLot).filter(
                 MaterialLot.id == receipt.material_lot_id
             ).first()
-            per_unit = float(lot.weight_per_unit or 0) if lot else 0
-            whole = int(float(request.quantity) / per_unit) if per_unit > 0 else 0
-            lps.put_units(
-                db, lot,
-                units=whole,
-                to_row_id=request.to_storage_row_id,
-                event_type=lps.EVENT_RETURNED,
-                ref_type="staging",
-                ref_id=staging_item.id,
-                reason="Returned from staging",
-            )
+            if lot:
+                lps.return_units(
+                    db, lot,
+                    quantity=float(request.quantity),
+                    to_row_id=request.to_storage_row_id,
+                    ref_type="staging",
+                    ref_id=staging_item.id,
+                    reason="Returned from staging",
+                )
         else:
             # Content + explicit pallets onto the chosen row, tracked
             # independently — no cases/cases_per_pallet.

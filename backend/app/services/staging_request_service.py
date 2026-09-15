@@ -18,11 +18,12 @@ from app.config import settings
 from app.models import (
     Product, Receipt, StagingRequest, StagingRequestItem,
     StagingItem, InventoryAdjustment, InventoryTransfer,
-    Location, SubLocation, StorageRow,
+    Location, SubLocation, StorageRow, MaterialLot,
 )
 from app.enums import ReceiptStatus, AdjustmentStatus, StagingItemStatus, StagingRequestStatus
 from app.exceptions import NotFoundError, ValidationError
 from app.services.row_allocation import deduct_rm_total
+from app.services import lot_placement_service as lps
 
 import logging
 logger = logging.getLogger(__name__)
@@ -388,6 +389,20 @@ def get_staging_details(db: Session, request_id: str, item_id: str) -> dict:
         total_used += si.quantity_used
         total_returned += si.quantity_returned
 
+        # Counted-lot facts the return UI needs to record the full/weighed
+        # split and pre-select the rack the drums came off.
+        is_counted = lps.is_counted_lot(db, receipt.material_lot_id) if receipt else False
+        lot = None
+        if is_counted:
+            lot = db.query(MaterialLot).filter(
+                MaterialLot.id == receipt.material_lot_id
+            ).first()
+        original_row = None
+        if si.original_storage_row_id:
+            original_row = db.query(StorageRow).filter(
+                StorageRow.id == si.original_storage_row_id
+            ).first()
+
         result.append({
             "staging_item_id": si.id,
             "receipt_id": si.receipt_id,
@@ -401,6 +416,12 @@ def get_staging_details(db: Session, request_id: str, item_id: str) -> dict:
             "available": round(available, 3),
             "status": si.status,
             "staged_at": si.staged_at.isoformat() if si.staged_at else None,
+            "is_counted": is_counted,
+            "weight_per_unit": float(lot.weight_per_unit) if lot and lot.weight_per_unit else None,
+            "weight_unit": lot.weight_unit if lot else None,
+            "unit_label": lot.unit_label if lot else None,
+            "original_storage_row_id": si.original_storage_row_id,
+            "original_storage_row_name": original_row.name if original_row else None,
         })
 
     return {
@@ -489,6 +510,52 @@ def mark_request_item_used(
 # Return staged items to warehouse
 # ---------------------------------------------------------------------------
 
+def _recredit_rack_on_return(
+    db: Session,
+    receipt: Receipt,
+    staging_item: StagingItem,
+    *,
+    quantity: float,
+    storage_row_id: Optional[str] = None,
+    full_units: Optional[int] = None,
+    weighed_partial_qty: Optional[float] = None,
+) -> None:
+    """The physical half of a return: drums back onto a rack.
+
+    For a counted lot the placements are the truth — a return that only
+    writes a transfer leaves the material off every rack until somebody
+    counts it back into existence. Full drums go back whole; the weighed
+    remainder becomes an open drum on the same rack (`lps.return_units`).
+
+    Legacy (uncounted) receipts are untouched here; their JSON allocation
+    path is handled by the caller as before.
+    """
+    if not lps.is_counted_lot(db, receipt.material_lot_id):
+        return
+    lot = db.query(MaterialLot).filter(
+        MaterialLot.id == receipt.material_lot_id
+    ).first()
+    if not lot:
+        return
+
+    row_id = storage_row_id or staging_item.original_storage_row_id
+    if not row_id:
+        raise ValidationError(
+            "Returning a counted lot needs a rack — pick the row the "
+            "material physically went back to."
+        )
+    lps.return_units(
+        db, lot,
+        quantity=quantity,
+        to_row_id=row_id,
+        full_units=full_units,
+        weighed_partial_qty=weighed_partial_qty,
+        ref_type="staging",
+        ref_id=staging_item.id,
+        reason="Returned from staging",
+    )
+
+
 def return_request_item(
     db: Session,
     request_id: str,
@@ -497,6 +564,9 @@ def return_request_item(
     quantity: float,
     to_location_id: str,
     to_sub_location_id: Optional[str] = None,
+    to_storage_row_id: Optional[str] = None,
+    full_units: Optional[int] = None,
+    weighed_partial_qty: Optional[float] = None,
 ) -> dict:
     """Return unused staged material back to a warehouse location."""
     item = db.query(StagingRequestItem).filter(
@@ -546,9 +616,27 @@ def return_request_item(
     )
     db.add(return_transfer)
 
-    # Update receipt location to return location
-    receipt.location_id = to_location_id
-    receipt.sub_location_id = to_sub_location_id
+    # Drums physically back on a rack. Raises before any state changes stick
+    # if the split does not add up or no rack is known.
+    _recredit_rack_on_return(
+        db, receipt, staging_item,
+        quantity=quantity,
+        storage_row_id=to_storage_row_id,
+        full_units=full_units,
+        weighed_partial_qty=weighed_partial_qty,
+    )
+
+    # Only re-home the receipt when this return clears the staged item — a
+    # partial return must not claim the whole lot moved to the return spot.
+    is_full_return = (
+        staging_item.quantity_returned + quantity
+        >= staging_item.quantity_staged - staging_item.quantity_used - 0.001
+    )
+    if is_full_return:
+        receipt.location_id = to_location_id
+        receipt.sub_location_id = to_sub_location_id
+        if to_storage_row_id:
+            receipt.storage_row_id = to_storage_row_id
 
     # Update staging item
     staging_item.quantity_returned += quantity
@@ -585,6 +673,7 @@ def undo_staging(
     item_id: str,
     to_location_id: str,
     to_sub_location_id: Optional[str] = None,
+    to_storage_row_id: Optional[str] = None,
 ) -> dict:
     """Undo all staging for a request item — return everything and reset to pending."""
     item = db.query(StagingRequestItem).filter(
@@ -638,6 +727,14 @@ def undo_staging(
             status="completed",
         )
         db.add(return_transfer)
+
+        # Drums physically back on a rack (counted lots only). An undo puts
+        # back everything still out, so the split is derived from the weight.
+        _recredit_rack_on_return(
+            db, receipt, si,
+            quantity=available,
+            storage_row_id=to_storage_row_id,
+        )
 
         receipt.location_id = to_location_id
         receipt.sub_location_id = to_sub_location_id
@@ -1124,6 +1221,21 @@ async def get_close_out_data(db: Session, request_id: str) -> dict:
             lot_number = receipt.lot_number if receipt else "\u2014"
             loc_name, sub_loc_name = _get_location_names(db, si, receipt)
 
+            # Counted-lot facts so the return-from-close-out flow can record
+            # the full/weighed split and the rack (same shape as
+            # get_staging_details).
+            is_counted = lps.is_counted_lot(db, receipt.material_lot_id) if receipt else False
+            lot = None
+            if is_counted:
+                lot = db.query(MaterialLot).filter(
+                    MaterialLot.id == receipt.material_lot_id
+                ).first()
+            original_row = None
+            if si.original_storage_row_id:
+                original_row = db.query(StorageRow).filter(
+                    StorageRow.id == si.original_storage_row_id
+                ).first()
+
             g["staging_details"].append({
                 "staging_item_id": si.id,
                 "available": round(available, 3),
@@ -1131,6 +1243,13 @@ async def get_close_out_data(db: Session, request_id: str) -> dict:
                 "lot_number": lot_number,
                 "location_name": loc_name,
                 "sub_location_name": sub_loc_name,
+                "quantity_staged": si.quantity_staged,
+                "is_counted": is_counted,
+                "weight_per_unit": float(lot.weight_per_unit) if lot and lot.weight_per_unit else None,
+                "weight_unit": lot.weight_unit if lot else None,
+                "unit_label": lot.unit_label if lot else None,
+                "original_storage_row_id": si.original_storage_row_id,
+                "original_storage_row_name": original_row.name if original_row else None,
             })
 
     items_list = []

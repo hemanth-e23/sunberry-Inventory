@@ -41,7 +41,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.enums import (
@@ -169,9 +169,20 @@ def logged_rows(receipt: Receipt) -> list:
     allocs = receipt.raw_material_row_allocations
 
     if isinstance(allocs, list) and allocs:
+        # Entries written by `project_lot` are a read-model of the placement
+        # ledger, not a person's claim about where drums went. Treating them
+        # as typed rows re-applies every scanned unit at approval time — and
+        # when they are ALL projected, the answer is "nothing left to place",
+        # not the storage_row_id fallback below (same replay, other door).
+        human = [
+            a for a in allocs
+            if not (isinstance(a, dict) and a.get("source") == "projection")
+        ]
+        if not human:
+            return []
         typed = [
             (a.get("rowId"), int(float(a.get("units") or 0)))
-            for a in allocs
+            for a in human
             if isinstance(a, dict) and a.get("rowId")
         ]
         stated = [(rid, units) for rid, units in typed if units > 0]
@@ -216,6 +227,31 @@ def place_logged_receipt(db: Session, receipt: Receipt, *, actor_id=None):
     )
     if category and category.type == CATEGORY_FINISHED:
         return None
+
+    # If ANY unit of this receipt was scanned in on the gun, the scans are the
+    # placement and approval must not add a second one on top. The projection
+    # filter in `logged_rows` is the primary defence; this guard also covers
+    # older receipts whose JSON predates the `source` tag.
+    if receipt.material_lot_id:
+        scanned = (
+            db.query(LotPlacementEvent.id)
+            .filter(
+                LotPlacementEvent.material_lot_id == receipt.material_lot_id,
+                LotPlacementEvent.event_type == lps.EVENT_RECEIVED,
+                LotPlacementEvent.ref_id == receipt.id,
+                or_(
+                    LotPlacementEvent.idempotency_key.is_(None),
+                    ~LotPlacementEvent.idempotency_key.like("logged:%"),
+                ),
+            )
+            .first()
+        )
+        if scanned:
+            return (
+                db.query(MaterialLot)
+                .filter(MaterialLot.id == receipt.material_lot_id)
+                .first()
+            )
 
     rows = logged_rows(receipt)
     if not rows:

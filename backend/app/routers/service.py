@@ -299,10 +299,17 @@ class ReturnBody(BaseModel):
     quantity: float
     to_location_id: str
     to_sub_location_id: Optional[str] = None
+    # Counted lots: the rack the material physically went back to, and the
+    # full/weighed-partial split the worker recorded. When the split is
+    # omitted it is derived from `quantity` and the lot's weight per unit.
+    to_storage_row_id: Optional[str] = None
+    full_units: Optional[int] = None
+    weighed_partial_qty: Optional[float] = None
 
 class UndoStageBody(BaseModel):
     to_location_id: str
     to_sub_location_id: Optional[str] = None
+    to_storage_row_id: Optional[str] = None
 
 class IngredientUsedNotification(BaseModel):
     production_batch_uid: str
@@ -387,6 +394,9 @@ def return_request_item(
         db, request_id, item_id,
         body.staging_item_id, body.quantity,
         body.to_location_id, body.to_sub_location_id,
+        to_storage_row_id=body.to_storage_row_id,
+        full_units=body.full_units,
+        weighed_partial_qty=body.weighed_partial_qty,
     )
 
 
@@ -400,6 +410,7 @@ def undo_staging(
     """Undo all staging for a request item — return everything and reset to pending."""
     return staging_request_service.undo_staging(
         db, request_id, item_id, body.to_location_id, body.to_sub_location_id,
+        to_storage_row_id=body.to_storage_row_id,
     )
 
 
