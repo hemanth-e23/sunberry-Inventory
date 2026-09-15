@@ -88,6 +88,81 @@ def parse_breakdown(breakdown) -> dict:
     return out
 
 
+def resolve_breakdown(db: Session, breakdown) -> tuple:
+    """``({row_id: cases}, [unresolved ids])`` — like ``parse_breakdown``, but it
+    tells you what it could not place instead of dropping it.
+
+    ``parse_breakdown`` keeps only ids shaped ``row-<id>`` and silently skips
+    everything else. That is safe for a DESTINATION, where a room with no rack is
+    not somewhere you can put a pallet. It is not safe for a SOURCE, and on
+    2026-09-15 it moved 20 of 88 drums out of the Grater Room: the form sent the
+    room's own id, because the receipt had been taken in when that room had no
+    rows at all, so nothing matched, nothing was deducted, and the destination
+    was credited anyway.
+
+    The damage depends on what the source already had. With no allocation entry
+    it looks like loss — 68 drums with no rack. With one it is worse and quieter:
+    the content is added at the destination while the source keeps its full
+    amount, and the lot now totals more than the receipt says it holds.
+
+    Two shapes resolve:
+
+      * ``row-<id>``       the rack itself, exactly as before
+      * a sub-location id  that room's row, WHEN IT HAS EXACTLY ONE
+
+    The second is what makes room-level material movable. Every unit-typed room
+    has had a single default row since migration ``c8d9e0f1a2b3``, so the common
+    case resolves. A room with several rows does NOT: picking one of them would
+    invent a rack nobody counted from, and that is indistinguishable afterwards
+    from a rack somebody did. Such an id comes back as unresolved so the caller
+    can refuse and ask a person which rack they pulled from.
+    """
+    out: dict = {}
+    unresolved: list = []
+
+    for entry in (breakdown or []):
+        sid = (entry or {}).get("id", "")
+        if not isinstance(sid, str) or not sid:
+            continue
+        qty = float((entry or {}).get("quantity", 0) or 0)
+        if qty <= 0:
+            continue
+
+        if sid.startswith("row-"):
+            rid = sid.removeprefix("row-")
+            out[rid] = out.get(rid, 0.0) + qty
+            continue
+
+        # A bare id — the form's shape for material held at room level.
+        rows = (
+            db.query(StorageRow.id)
+            .filter(
+                StorageRow.sub_location_id == sid,
+                StorageRow.is_active.isnot(False),
+            )
+            .all()
+        )
+        if len(rows) == 1:
+            rid = rows[0][0]
+            out[rid] = out.get(rid, 0.0) + qty
+        else:
+            unresolved.append(sid)
+
+    return out, unresolved
+
+
+def room_label(db: Session, sub_location_id: str) -> str:
+    """A room's name for an error message, falling back to its id."""
+    from app.models.location import SubLocation
+
+    sub = (
+        db.query(SubLocation.name)
+        .filter(SubLocation.id == sub_location_id)
+        .first()
+    )
+    return sub[0] if sub and sub[0] else sub_location_id
+
+
 def parse_pallet_breakdown(breakdown) -> dict:
     """Turn a ``[{id: 'row-X', pallets}]`` breakdown into ``{row_id: pallets}``,
     including ONLY entries that carry an explicit ``pallets`` key. Entries without

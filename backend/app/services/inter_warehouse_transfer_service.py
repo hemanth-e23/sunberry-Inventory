@@ -10,8 +10,12 @@ from fastapi import HTTPException
 
 from app.models import Receipt, InterWarehouseTransfer, StorageRow, StorageArea, Category, PalletLicence
 from app.enums import ReceiptStatus
+from app.exceptions import ValidationError
 from app.constants import CATEGORY_FINISHED
-from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
+from app.services.row_allocation import (
+    parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, add_rm_rows,
+    deduct_rm_total, resolve_breakdown, room_label,
+)
 from app.utils import category_rules
 
 
@@ -180,10 +184,19 @@ def _deduct_rm_from_breakdown(db: Session, transfer: InterWarehouseTransfer, rec
     """Deduct RM/ingredient inventory from specific source rows, freeing the
     EXPLICIT pallets-out the sender entered per row (no cases/cases_per_pallet),
     keeping storage rows and the allocation JSON (cases + pallets) in sync."""
+    # Room-level sources resolve to that room's rack. Skipping one here would
+    # ship the material off-site while its rack record stayed behind.
+    source_cases, unresolved = resolve_breakdown(db, transfer.source_breakdown)
+    if unresolved:
+        rooms = ", ".join(room_label(db, sid) for sid in unresolved)
+        raise ValidationError(
+            f"Material in {rooms} is not on a single rack. Pick the rack it is "
+            f"being sent from."
+        )
     deduct_rm_rows(
         db,
         receipt,
-        parse_breakdown(transfer.source_breakdown),
+        source_cases,
         pallets_by_row=parse_pallet_breakdown(transfer.source_breakdown),
         update_rows=True,
     )
@@ -417,10 +430,15 @@ def _restore_rm_from_breakdown(db: Session, transfer: InterWarehouseTransfer, re
     """Restore RM row occupancy + allocation JSON from source_breakdown via the
     shared helper, symmetric with the deduct: restore exactly the content and the
     EXPLICIT pallets that were freed when the transfer shipped (no cases/cpp)."""
+    # Resolved the same way as the deduct above, so a restore puts the content
+    # back on the rack it came off. Deliberately does NOT raise: the send
+    # already refused anything unresolvable, so this cannot see one — and
+    # blocking a cancellation would strand the material in neither warehouse.
+    restore_cases, _unresolved = resolve_breakdown(db, transfer.source_breakdown)
     add_rm_rows(
         db,
         receipt,
-        parse_breakdown(transfer.source_breakdown),
+        restore_cases,
         pallets_by_row=parse_pallet_breakdown(transfer.source_breakdown),
         update_rows=True,
     )

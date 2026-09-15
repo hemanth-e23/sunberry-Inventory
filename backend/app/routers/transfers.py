@@ -281,6 +281,15 @@ def create_transfer(
     transfer_dict = transfer_data.dict()
     transfer_id = f"transfer-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
 
+    # Inherit the receipt's unit unless the caller stated one. Both the schema
+    # and the column default to "cases", and no client sends the field — which
+    # is how a 46,552 lb drum transfer came to be recorded as "cases". The
+    # receipt already knows it is lbs of drums; ignoring that and writing the
+    # default makes the record say something the receipt contradicts.
+    if not transfer_dict.get("unit") or transfer_dict.get("unit") == "cases":
+        if receipt is not None and receipt.unit:
+            transfer_dict["unit"] = receipt.unit
+
     db_transfer = InventoryTransfer(
         id=transfer_id,
         **transfer_dict,

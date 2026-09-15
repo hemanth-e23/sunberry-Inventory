@@ -10,7 +10,10 @@ from app.enums import TransferStatus, PalletStatus, ReceiptStatus
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED
 from app.services import lot_placement_service as lps
-from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, add_rm_rows, deduct_rm_total
+from app.services.row_allocation import (
+    parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, add_rm_rows,
+    deduct_rm_total, resolve_breakdown, room_label,
+)
 from app.utils import category_rules
 from app.utils.locations import warehouse_id_for_row
 
@@ -190,10 +193,28 @@ def _apply_raw_material_internal_transfer(
     warehouse-transfers, using the EXPLICIT per-row pallet counts the worker
     entered (pallets-out at source, pallets-in at destination). Content (cases)
     and pallets move independently — no cases/cases_per_pallet derivation."""
-    source_cases = parse_breakdown(transfer.source_breakdown)
+    # Resolving, not parsing: a source held at ROOM level (no rack) used to be
+    # silently skipped here, which deducted nothing while the destination was
+    # credited anyway. See resolve_breakdown for what that cost.
+    source_cases, unresolved = resolve_breakdown(db, transfer.source_breakdown)
+    if unresolved:
+        rooms = ", ".join(room_label(db, sid) for sid in unresolved)
+        raise ValidationError(
+            f"Material in {rooms} is not on a single rack, so there is nothing "
+            f"to move it from. Pick the rack it is being taken from."
+        )
     source_pallets = parse_pallet_breakdown(transfer.source_breakdown)
     dest_cases = parse_breakdown(transfer.destination_breakdown)
     dest_pallets = parse_pallet_breakdown(transfer.destination_breakdown)
+
+    # A move must never credit one end without debiting the other. Ship-out
+    # degrades safely here (deduct_rm_total below); this branch had no
+    # equivalent, so an unmatched source left the content existing twice.
+    if dest_cases and not source_cases:
+        raise ValidationError(
+            "This transfer has a destination but no rack to take the material "
+            "from, so it would add stock without removing any. Pick a source rack."
+        )
 
     if lps.is_counted_lot(db, receipt.material_lot_id):
         _move_counted_lot(db, receipt, source_cases, dest_cases, transfer.id)
@@ -203,9 +224,20 @@ def _apply_raw_material_internal_transfer(
         # Reserve destination rows (content + explicit pallets) and sync the JSON.
         add_rm_rows(db, receipt, dest_cases, pallets_by_row=dest_pallets, update_rows=True)
 
-    # Update receipt.storage_row_id when there's a single destination row.
+    # Move the receipt's location pointer ONLY when the whole receipt moved.
+    #
+    # This used to fire on any single-destination move, which is how 20 of 88
+    # drums going to ROW 14 took the other 68 with them on screen: the pointer
+    # is what Inventory Overview reads, so the entire receipt appeared at the
+    # destination. A split receipt has no single location, and claiming one is
+    # worse than leaving the previous answer in place.
+    #
+    # Same test the staging returns already apply (staging_service.py:604,
+    # staging_request_service.py:635) — they only reassign on a FULL return.
     dest_row_ids = list(dest_cases.keys())
-    if len(dest_row_ids) == 1:
+    moved = sum(dest_cases.values())
+    whole_receipt = moved >= float(receipt.quantity or 0) - 1e-6
+    if len(dest_row_ids) == 1 and whole_receipt:
         receipt.storage_row_id = dest_row_ids[0]
 
 
@@ -259,7 +291,17 @@ def _apply_raw_material_ship_out(
     pallets per row (no cases/cases_per_pallet). Legacy fallback (no per-row
     breakdown): prorate content across the lot's allocations, with pallets
     scaled to each row's real footprint."""
-    source_cases = parse_breakdown(transfer.source_breakdown)
+    # Room-level sources resolve to that room's rack rather than being skipped.
+    # A skipped source here means stock stays on the books after it physically
+    # left on a truck — the deduct_rm_total fallback below only covers the case
+    # where NO breakdown was given at all, not one that silently emptied.
+    source_cases, unresolved = resolve_breakdown(db, transfer.source_breakdown)
+    if unresolved:
+        rooms = ", ".join(room_label(db, sid) for sid in unresolved)
+        raise ValidationError(
+            f"Material in {rooms} is not on a single rack. Pick the rack it is "
+            f"being shipped from."
+        )
 
     if lps.is_counted_lot(db, receipt.material_lot_id):
         lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()

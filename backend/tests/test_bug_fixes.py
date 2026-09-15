@@ -461,7 +461,18 @@ class TestBug6RawMaterialTransferUpdatesStorageRows:
     def test_warehouse_transfer_updates_receipt_storage_row_id(
         self, client, admin_headers, approved_raw_receipt, db_session, base_seed
     ):
-        """When transferring to a single destination row, receipt.storage_row_id updates."""
+        """Moving a receipt ENTIRELY to a single row updates receipt.storage_row_id.
+
+        This used to move 40 of the receipt's 100 and still assert the pointer
+        followed — which is the bug it now guards against rather than the
+        behaviour it once asserted. On 2026-09-15 that cost a real lot its
+        location: 20 of 88 drums went to another rack and Inventory Overview
+        showed all 88 there, because the pointer is what it reads.
+
+        A split receipt has no single location. The pointer may only move when
+        there is nothing left behind, so the quantity here is the whole 100.
+        The partial case is asserted in test_room_level_source_moves.py.
+        """
         assert approved_raw_receipt.storage_row_id == "row-src"
 
         create_resp = client.post(
@@ -470,9 +481,9 @@ class TestBug6RawMaterialTransferUpdatesStorageRows:
                 "receipt_id": approved_raw_receipt.id,
                 "transfer_type": "warehouse-transfer",
                 "reason": "Move to new row",
-                "quantity": 40,
-                "source_breakdown": [{"id": "row-row-src", "quantity": 40}],
-                "destination_breakdown": [{"id": "row-row-dst", "quantity": 40}],
+                "quantity": 100,
+                "source_breakdown": [{"id": "row-row-src", "quantity": 100}],
+                "destination_breakdown": [{"id": "row-row-dst", "quantity": 100}],
             },
             headers=admin_headers,
         )

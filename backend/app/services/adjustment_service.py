@@ -10,7 +10,10 @@ from app.constants import ROLE_WAREHOUSE
 from app.services import lot_placement_service as lps
 from app.services.ship_out_service import _release_row_capacity
 from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
-from app.services.row_allocation import parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, deduct_rm_total
+from app.services.row_allocation import (
+    parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, deduct_rm_total,
+    resolve_breakdown,
+)
 
 # DEDUCTION_TYPES moved to app/enums.py (2026-08-03) and is imported above.
 # It is derived from AdjustmentType there so a new adjustment type cannot be
@@ -81,7 +84,15 @@ def _apply_row_breakdown(db: Session, receipt: Receipt, adjustment: InventoryAdj
     shared helper. When the operator picked specific rows, deduct exactly those;
     otherwise prorate the adjustment across the lot's current allocations so a
     plain quantity deduction no longer leaves rows/JSON untouched."""
-    deductions = parse_breakdown(adjustment.source_breakdown)
+    # Resolve room-level sources to that room's rack instead of dropping them.
+    #
+    # Unlike a transfer, this one does NOT raise on an unresolved id: the
+    # `deduct_rm_total` fallback below already keeps the receipt total correct
+    # and only approximates the per-row split. Refusing would block an
+    # adjustment that works today, to fix a rounding of detail — worse than the
+    # thing it prevents. A transfer earns the refusal because its silent failure
+    # credits one rack without debiting another.
+    deductions, _unresolved = resolve_breakdown(db, adjustment.source_breakdown)
 
     if lps.is_counted_lot(db, receipt.material_lot_id):
         _apply_row_breakdown_counted(db, receipt, adjustment, deductions)
