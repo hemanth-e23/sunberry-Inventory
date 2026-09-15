@@ -17,7 +17,7 @@
  * The numbers below are the real ones from Apple Barn on 2026-09-15.
  */
 import { describe, it, expect } from 'vitest'
-import { rowCapacityInfo } from '../utils/rowSources'
+import { rowCapacityInfo, buildRowUnitLookup } from '../utils/rowSources'
 
 const appleBarn = { storageUnit: 'drum', unitCapacity: 88 }
 const palletRoom = { storageUnit: null, unitCapacity: null }
@@ -69,5 +69,39 @@ describe('rowCapacityInfo', () => {
 
     expect(Math.min(info.capacity, info.occupied)).toBe(84)   // was 22
     expect(info.free).toBe(4)
+  })
+})
+
+describe('buildRowUnitLookup', () => {
+  // The exact shape of `locationsTree` from LocationContext.
+  const tree = [{
+    id: 'loc-paw-paw',
+    name: 'Sunberry Paw Paw',
+    subLocations: [
+      { id: 'sub-apple', name: 'Apple Barn', storageUnit: 'drum', unitCapacity: 88,
+        rows: [{ id: 'row-14', name: 'ROW 14', palletCapacity: 22, occupiedPallets: 78 }] },
+      { id: 'sub-dry', name: 'Dry Store', storageUnit: null, unitCapacity: null,
+        rows: [{ id: 'row-d1', name: 'D1', palletCapacity: 20, occupiedPallets: 3 }] },
+    ],
+  }]
+
+  it('resolves each rack to its room unit', () => {
+    const map = buildRowUnitLookup(tree)
+    expect(map['row-14']).toBe('drums')
+    expect(map['row-d1']).toBe('pallets')
+  })
+
+  it('returns EMPTY for the flat dropdown list — the trap this exists to catch', () => {
+    // `locations` on the same context is locationOptions: [{id, name}] with no
+    // subLocations. Walking it throws nothing and finds nothing, so every rack
+    // silently falls back to the default — which kept a drum room printing
+    // "20 pallets" through three rounds of fixes aimed at the right code.
+    const flat = [{ id: 'loc-paw-paw', name: 'Sunberry Paw Paw' }]
+    expect(buildRowUnitLookup(flat)).toEqual({})
+  })
+
+  it('survives missing branches rather than throwing', () => {
+    expect(buildRowUnitLookup()).toEqual({})
+    expect(buildRowUnitLookup([{ id: 'l', subLocations: [{ id: 's' }] }])).toEqual({})
   })
 })

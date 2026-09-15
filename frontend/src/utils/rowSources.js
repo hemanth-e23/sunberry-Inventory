@@ -347,3 +347,28 @@ export const rowCapacityInfo = (sub, row) => {
     free: capacity > 0 ? Math.max(0, Math.round(capacity - occupied)) : null,
   };
 };
+
+
+/**
+ * `{rowId: footprint unit}` for every rack in the location tree.
+ *
+ * TAKES THE TREE, NOT `locations`. Those are two different values on the same
+ * context and only one of them has rows: `locations` is `locationOptions`, a
+ * flat [{id, name}] built for dropdowns, while `locationsTree` is the nested
+ * state. Walking the flat one for `subLocations` throws nothing and yields
+ * nothing — the lookup just comes back empty and every rack silently reports
+ * the default. That is exactly how a drum room kept printing "20 pallets"
+ * through three rounds of fixes that were all in the right place and reading
+ * the wrong variable.
+ */
+export const buildRowUnitLookup = (locationsTree = []) => {
+  const map = {};
+  (locationsTree || []).forEach((location) => {
+    (location.subLocations || []).forEach((subLoc) => {
+      (subLoc.rows || []).forEach((row) => {
+        if (row.id) map[row.id] = rowCapacityInfo(subLoc, row).unit;
+      });
+    });
+  });
+  return map;
+};

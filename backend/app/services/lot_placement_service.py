@@ -736,6 +736,14 @@ def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
     own events and does not rewrite these — which is the honest reading of "ROW
     10 received this day", and the reason this is shown beside a receipt date
     rather than offered as a current location.
+
+    BOTH receiving paths count. Material arrives two ways and they stamp
+    different refs: a typed Log Receipt writes `receipt`
+    (lot_receiving_service.place_logged_rows), a drum scanned on the gun writes
+    `receiving` (REF_TYPE_RECEIVING). Filtering on the first alone matched
+    nothing a forklift had ever scanned, so every scanned delivery showed no
+    rack at all — the column fell through to an em dash on exactly the
+    receipts that knew their rack most precisely.
     """
     rows = (
         db.query(LotPlacementEvent, StorageRow)
@@ -743,7 +751,7 @@ def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
         .join(MaterialLot, MaterialLot.id == LotPlacementEvent.material_lot_id)
         .filter(
             MaterialLot.product_id == product_id,
-            LotPlacementEvent.ref_type == "receipt",
+            LotPlacementEvent.ref_type.in_(("receipt", "receiving")),
             LotPlacementEvent.event_type == EVENT_RECEIVED,
             LotPlacementEvent.full_units_delta > 0,
         )

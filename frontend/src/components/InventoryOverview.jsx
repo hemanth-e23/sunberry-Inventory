@@ -17,7 +17,7 @@ import InventoryTable from "./inventory/InventoryTable";
 import ProductDetailModal from "./inventory/ProductDetailModal";
 import PrintReportModal from "./inventory/PrintReportModal";
 import LocationsTab from "./inventory/LocationsTab";
-import { rowCapacityInfo } from "../utils/rowSources";
+import { buildRowUnitLookup } from "../utils/rowSources";
 
 const parseDate = (value) => {
   if (!value) return null;
@@ -64,7 +64,6 @@ const InventoryOverview = () => {
     locationLookup,
     locationsTree,
     storageAreas,
-    locations,
     vendors,
   } = useAppData();
 
@@ -131,7 +130,9 @@ const InventoryOverview = () => {
   // Row lookup: get row name from storageRowId
   const rowLookup = useMemo(() => {
     const map = { ...rowNameCache };
-    locations?.forEach((location) => {
+    // locationsTree, not `locations` — the latter is the flat dropdown list and
+    // has no rows, which left every RM row name to the per-row API fallback.
+    locationsTree?.forEach((location) => {
       location.subLocations?.forEach((subLoc) => {
         subLoc.rows?.forEach((row) => {
           if (row.id && row.name) {
@@ -148,7 +149,7 @@ const InventoryOverview = () => {
       });
     });
     return map;
-  }, [locations, storageAreas, rowNameCache]);
+  }, [locationsTree, storageAreas, rowNameCache]);
 
   // rowId -> the word that rack's FOOTPRINT is counted in. A drum room counts
   // drums on its shelves, not pallets; labelling a drum rack's occupancy
@@ -156,17 +157,11 @@ const InventoryOverview = () => {
   //
   // Finished-goods areas are absent on purpose: they genuinely count pallet
   // slots, and the default below is already "pallets".
-  const rowUnitLookup = useMemo(() => {
-    const map = {};
-    locations?.forEach((location) => {
-      location.subLocations?.forEach((subLoc) => {
-        subLoc.rows?.forEach((row) => {
-          if (row.id) map[row.id] = rowCapacityInfo(subLoc, row).unit;
-        });
-      });
-    });
-    return map;
-  }, [locations]);
+  // Built from locationsTree, NOT `locations`. They are not the same shape:
+  // `locations` is locationOptions, a flat [{id, name}] for dropdowns, so
+  // walking it for subLocations silently yields nothing and every rack falls
+  // back to "pallets". `locationsTree` is the real nested state.
+  const rowUnitLookup = useMemo(() => buildRowUnitLookup(locationsTree), [locationsTree]);
 
   // Helper function to fetch row name from backend if not in lookup
   const fetchRowName = useCallback(async (rowId) => {
