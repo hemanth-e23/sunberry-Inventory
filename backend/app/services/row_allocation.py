@@ -17,6 +17,13 @@ pallets, and applies each independently to ``StorageRow.occupied_cases`` /
 footprint, because for weight/drum lots with no cases-per-pallet it produces
 nonsense (e.g. 4500 lbs / 40 = 112.5 "pallets").
 
+ROOMS THAT COUNT CONTAINERS ARE THE EXCEPTION. All of the above describes a
+pallet room, where footprint is a physical judgement only the handler can make.
+In a drum room one drum takes one slot, so footprint is not a judgement at all —
+it is the container count, and it follows from the content exactly. There
+``container_footprint`` computes it and overrides whatever was supplied, because
+"35,972 lbs arrived as 0 drums" is not an estimate to respect.
+
 Entries a helper does not touch are preserved verbatim; pruning applies only to
 touched entries whose content reaches zero.
 """
@@ -187,6 +194,44 @@ def _cpp(receipt: Receipt) -> float:
     return float(receipt.cases_per_pallet or DEFAULT_CASES_PER_PALLET)
 
 
+def container_footprint(db: Session, row_id: str, receipt: Receipt, content: float):
+    """Footprint in a room that counts CONTAINERS, or None if it doesn't.
+
+    The header above is right for pallet rooms: a barrel can occupy a whole
+    pallet, consolidation frees a pallet without changing content, and only the
+    person who handled it knows. None of that holds in a drum room. There one
+    drum takes one slot, so the footprint is not a judgement anybody makes — it
+    IS the container count, and it follows from the content exactly.
+
+    Which is why this overrides a supplied pallet figure rather than merely
+    filling a blank one. 35,972 lbs of guava landing on a rack "as 0 drums" is
+    not a worker's estimate to respect, it is arithmetic that disagrees with
+    itself — and it is what happened: the source rack's stored footprint was 0,
+    the form scaled its suggestion from that 0, and a 68-drum move recorded no
+    footprint at all. The row then showed "ROW 17" with nothing beside it and
+    its occupancy never moved.
+
+    Returns None for pallet rooms and whenever the receipt does not say what one
+    container weighs, so both fall through to the caller's existing behaviour.
+    """
+    from app.models.location import SubLocation
+
+    row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
+    if not row or not row.sub_location_id:
+        return None
+    sub = (
+        db.query(SubLocation)
+        .filter(SubLocation.id == row.sub_location_id)
+        .first()
+    )
+    if not sub or not sub.storage_unit:
+        return None
+    per_container = float(receipt.weight_per_container or 0)
+    if per_container <= 0:
+        return None
+    return abs(float(content or 0)) / per_container
+
+
 def _entry_cases(alloc: dict, cpp: float) -> float:
     """Effective cases of an allocation entry, regardless of which field the
     writer recorded. Explicit cases win; otherwise derive from pallets."""
@@ -244,7 +289,10 @@ def deduct_rm_rows(
             row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
             if not row:
                 continue
-            if row_id in pallets_by_row:
+            counted = container_footprint(db, row_id, receipt, cases)
+            if counted is not None:
+                pallets = counted
+            elif row_id in pallets_by_row:
                 pallets = float(pallets_by_row[row_id] or 0)
             else:
                 pallets = (cases / cpp) if cpp > 0 else 0
@@ -261,7 +309,13 @@ def deduct_rm_rows(
             rid = alloc.get("rowId")
             if rid in deductions_by_row:
                 remaining = _entry_cases(alloc, cpp) - deductions_by_row[rid]
-                if rid in pallets_by_row:
+                counted = container_footprint(db, rid, receipt, remaining)
+                if counted is not None:
+                    # What is LEFT, recomputed from what is left — not the old
+                    # footprint minus a delta, which is how a wrong figure
+                    # survives every move that touches it.
+                    _write_entry(alloc, remaining, cpp, pallets=counted)
+                elif rid in pallets_by_row:
                     remaining_pallets = _entry_pallets(alloc) - float(pallets_by_row[rid] or 0)
                     _write_entry(alloc, remaining, cpp, pallets=remaining_pallets)
                 else:
@@ -298,7 +352,10 @@ def add_rm_rows(
             row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
             if not row:
                 continue
-            if row_id in pallets_by_row:
+            counted = container_footprint(db, row_id, receipt, cases)
+            if counted is not None:
+                pallets = counted
+            elif row_id in pallets_by_row:
                 pallets = float(pallets_by_row[row_id] or 0)
             else:
                 pallets = (cases / cpp) if cpp > 0 else 0
@@ -315,7 +372,10 @@ def add_rm_rows(
         if row_id in by_id:
             alloc = by_id[row_id]
             new_cases = _entry_cases(alloc, cpp) + cases
-            if explicit_pallets is not None:
+            counted = container_footprint(db, row_id, receipt, new_cases)
+            if counted is not None:
+                _write_entry(alloc, new_cases, cpp, pallets=counted)
+            elif explicit_pallets is not None:
                 _write_entry(alloc, new_cases, cpp, pallets=_entry_pallets(alloc) + explicit_pallets)
             else:
                 _write_entry(alloc, new_cases, cpp)
@@ -331,7 +391,11 @@ def add_rm_rows(
                 "areaId": row.storage_area_id if row else None,
                 "areaName": area.name if area else "",
             }
-            _write_entry(entry, cases, cpp, pallets=explicit_pallets)
+            counted = container_footprint(db, row_id, receipt, cases)
+            _write_entry(
+                entry, cases, cpp,
+                pallets=counted if counted is not None else explicit_pallets,
+            )
             new_allocs.append(entry)
     receipt.raw_material_row_allocations = new_allocs
 
