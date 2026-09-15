@@ -22,7 +22,7 @@ from app.routers import auth, users, products, receipts, inventory, master_data,
 from app.routers import transfers, adjustments, holds, cycle_counts, staging
 from app.routers import active_production, palletizer, kpi
 from app.routers import ingredient_intakes, ingredient_containers, ingredient_staging, ingredient_cutover, ingredient_rows
-from app.routers import lot_receiving, lot_cutover
+from app.routers import lot_receiving, lot_cutover, staging_pull
 from app.utils.logging_setup import setup_logging
 
 # Configure logging — writes to stdout AND a rotating file at /app/logs/app.log
@@ -534,6 +534,7 @@ app.include_router(ingredient_rows.router, prefix="/api/ingredient-rows", tags=[
 # Lot-level receiving (2026-08). The five ingredient_* routers above serve the
 # retired per-drum model and stay mounted only until their tables are dropped.
 app.include_router(lot_receiving.router, prefix="/api/lot-receiving", tags=["Lot Receiving"])
+app.include_router(staging_pull.router, prefix="/api/staging-pull", tags=["Staging Pull"])
 app.include_router(lot_cutover.router, prefix="/api/lot-cutover", tags=["Lot Cutover"])
 
 @app.get("/")

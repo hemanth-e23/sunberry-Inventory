@@ -20,7 +20,18 @@ const describeAvailable = (suggestion) => {
     const label = suggestion.unit_label || 'unit';
     const n = suggestion.available_units || 0;
     const held = suggestion.held_units || 0;
-    return `${n} ${label}${n === 1 ? '' : 's'}${held ? ` (${held} on hold)` : ''}`;
+    const open = suggestion.open_units || 0;
+    const openQty = suggestion.open_remaining_qty || 0;
+    let text = `${n} ${label}${n === 1 ? '' : 's'}`;
+    if (open) {
+      // "…+ 1 open (130 lb)" — the partial drum a picker should grab first.
+      text += ` + ${open} open (${Math.round(openQty * 10) / 10} ${suggestion.weight_unit || 'lb'})`;
+    }
+    if (held) text += ` (${held} on hold)`;
+    if ((suggestion.already_staged_qty || 0) > 0.01) {
+      text += ` — ${suggestion.already_staged_qty} already in staging`;
+    }
+    return text;
   }
   return `${suggestion.available_quantity} ${suggestion.unit || 'cases'}`;
 };

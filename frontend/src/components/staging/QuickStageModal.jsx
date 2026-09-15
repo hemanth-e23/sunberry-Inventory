@@ -527,7 +527,22 @@ const QuickStageModal = ({
                           style={{ padding: '0.4rem 0.6rem', textAlign: 'right' }}
                         >
                           {lot.available_quantity.toLocaleString()} {lot.unit || ''}
-                          {lot.weight_per_container &&
+                          {lot.is_counted ? (
+                            <div style={{ fontSize: '0.7rem', color: '#666' }}>
+                              {lot.available_units || 0} {lot.unit_label || 'unit'}
+                              {(lot.available_units || 0) === 1 ? '' : 's'}
+                              {(lot.open_units || 0) > 0 && (
+                                <span style={{ color: '#b45309', fontWeight: 600 }}>
+                                  {' '}+ {lot.open_units} open (
+                                  {Math.round((lot.open_remaining_qty || 0) * 10) / 10}{' '}
+                                  {lot.weight_unit || 'lb'}) — use first
+                                </span>
+                              )}
+                              {(lot.held_units || 0) > 0 && (
+                                <span> ({lot.held_units} on hold)</span>
+                              )}
+                            </div>
+                          ) : lot.weight_per_container &&
                           lot.container_unit &&
                           lot.weight_per_container > 0 ? (
                             <div style={{ fontSize: '0.7rem', color: '#666' }}>
@@ -554,6 +569,38 @@ const QuickStageModal = ({
                               {lot.available_quantity} {lot.unit}
                             </div>
                           ) : null}
+                          {lot.is_counted && (lot.racks || []).length > 0 && (
+                            <div style={{ fontSize: '0.7rem', color: '#0f766e', marginTop: '2px' }}>
+                              {(lot.racks || []).slice(0, 2).map((r) => (
+                                <span
+                                  key={r.storage_row_id}
+                                  style={{
+                                    display: 'inline-block',
+                                    padding: '0 5px',
+                                    marginLeft: '3px',
+                                    borderRadius: '8px',
+                                    backgroundColor: '#ccfbf1',
+                                  }}
+                                >
+                                  {r.storage_row_name}: {r.available_units}
+                                  {r.open_units ? ` +${r.open_units} open` : ''}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {(lot.already_staged_qty || 0) > 0.01 && (
+                            <div
+                              style={{
+                                fontSize: '0.7rem',
+                                color: '#b45309',
+                                fontWeight: 600,
+                                marginTop: '2px',
+                              }}
+                            >
+                              {lot.already_staged_qty.toLocaleString()}{' '}
+                              {lot.unit || ''} already in staging — add more?
+                            </div>
+                          )}
                         </td>
                         <td
                           style={{

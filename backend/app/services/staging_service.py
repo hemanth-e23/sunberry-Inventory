@@ -86,17 +86,62 @@ def _stage_free_counted(db: Session, receipt: Receipt, staged_qty: float) -> flo
     if not lot:
         return 0.0
 
-    units = lps.units_for_quantity(lot, staged_qty)
-    taken = lps.take_units(
-        db, lot,
-        units=units,
-        event_type=lps.EVENT_STAGED,
-        ref_type="staging",
-        ref_id=receipt.id,
-        reason="Pulled for production staging",
-    )
+    # OPENED-FIRST: a part-used drum on the rack is exactly what a worker
+    # would grab before breaking a new seal, and pulling it here is what
+    # keeps a returned partial from stranding (availability counts its
+    # content, so refusing to pull it would offer weight take_units cannot
+    # deliver).
+    remaining = float(staged_qty)
+    freed_units = 0.0
+    if not lot.is_held:
+        for placement in lps.placements_for_lot(db, lot.id):
+            while remaining > 1e-6 and int(placement.open_units or 0) > 0:
+                open_units = int(placement.open_units)
+                open_qty = float(placement.open_remaining_qty or 0)
+                share = open_qty if open_units == 1 else open_qty / open_units
+                if share <= 1e-6:
+                    break
+                if share <= remaining + 1e-6:
+                    # The whole opened container goes to staging.
+                    lps.apply_delta(
+                        db, lot, placement.storage_row_id,
+                        event_type=lps.EVENT_STAGED,
+                        open_units_delta=-1,
+                        open_qty_delta=-share,
+                        ref_type="staging",
+                        ref_id=receipt.id,
+                        reason="Pulled for production staging (open container)",
+                    )
+                    remaining -= share
+                    freed_units += 1
+                else:
+                    # Less than one open container needed: pour from it — the
+                    # drum stays on the rack with the rest of its content.
+                    lps.apply_delta(
+                        db, lot, placement.storage_row_id,
+                        event_type=lps.EVENT_STAGED,
+                        open_qty_delta=-remaining,
+                        ref_type="staging",
+                        ref_id=receipt.id,
+                        reason="Pulled for production staging (from open container)",
+                    )
+                    remaining = 0.0
+                    break
+
+    if remaining > 1e-6:
+        units = lps.units_for_quantity(lot, remaining)
+        taken = lps.take_units(
+            db, lot,
+            units=units,
+            event_type=lps.EVENT_STAGED,
+            ref_type="staging",
+            ref_id=receipt.id,
+            reason="Pulled for production staging",
+        )
+        freed_units += float(sum(t["units"] for t in taken))
+
     # The footprint freed IS the container count — see `_project_rows`.
-    return float(sum(t["units"] for t in taken))
+    return freed_units
 
 
 def _compute_available_quantity(db: Session, receipt: Receipt) -> float:
@@ -132,10 +177,13 @@ def _compute_available_quantity(db: Session, receipt: Receipt) -> float:
         if lot:
             if lot.is_held:
                 return 0.0
-            free_units = sum(
-                lps._free_units(p) for p in lps.placements_for_lot(db, lot.id)
-            )
-            pickable = free_units * float(lot.weight_per_unit or 0)
+            placements = lps.placements_for_lot(db, lot.id)
+            free_units = sum(lps._free_units(p) for p in placements)
+            # Open (part-used) drums are pickable too — their weighed content
+            # is real stock a worker can carry, and staging pulls them
+            # opened-first so a partial never strands on a rack.
+            open_qty = sum(float(p.open_remaining_qty or 0) for p in placements)
+            pickable = free_units * float(lot.weight_per_unit or 0) + open_qty
             # The staging subtraction is already reflected in the placements —
             # staging takes the units off the rack — so it must not be applied
             # twice here.
@@ -190,7 +238,11 @@ def suggest_lots_for_staging(
     suggestions = []
     for receipt in receipts:
         available_quantity = _compute_available_quantity(db, receipt)
-        if available_quantity <= 0.01:
+        detail = _counted_lot_detail(db, receipt)
+        # A lot whose racks are empty but whose material sits in staging is
+        # still a fact the screen must state ("already staged — add more?"),
+        # not something to silently hide.
+        if available_quantity <= 0.01 and float(detail.get("already_staged_qty") or 0) <= 0.01:
             continue
 
         location_name = sub_location_name = storage_row_name = None
@@ -228,7 +280,7 @@ def suggest_lots_for_staging(
             "container_unit": receipt.container_unit,
             "weight_per_container": receipt.weight_per_container,
             "weight_unit": receipt.weight_unit,
-            **_counted_lot_detail(db, receipt),
+            **detail,
         })
 
     return suggestions
@@ -248,7 +300,8 @@ def _counted_lot_detail(db: Session, receipt: Receipt) -> dict:
     as available would offer material `take_units` will refuse.
     """
     empty = {"is_counted": False, "unit_label": None, "available_units": 0,
-             "held_units": 0, "racks": []}
+             "held_units": 0, "open_units": 0, "open_remaining_qty": 0.0,
+             "already_staged_qty": 0.0, "racks": []}
     if not lps.is_counted_lot(db, receipt.material_lot_id):
         return empty
 
@@ -265,7 +318,9 @@ def _counted_lot_detail(db: Session, receipt: Receipt) -> dict:
     for placement in placements:
         held = int(placement.held_units or 0)
         free = 0 if lot.is_held else max(0, int(placement.full_units or 0) - held)
-        if free <= 0 and held <= 0:
+        open_units = 0 if lot.is_held else int(placement.open_units or 0)
+        open_qty = 0.0 if lot.is_held else float(placement.open_remaining_qty or 0)
+        if free <= 0 and held <= 0 and open_units <= 0:
             continue
         row = rows.get(placement.storage_row_id)
         racks.append({
@@ -273,16 +328,34 @@ def _counted_lot_detail(db: Session, receipt: Receipt) -> dict:
             "storage_row_name": row.name if row else placement.storage_row_id,
             "available_units": free,
             "held_units": int(placement.full_units or 0) if lot.is_held else held,
+            # Opened containers — shown so a picker uses them up first.
+            "open_units": open_units,
+            "open_remaining_qty": round(open_qty, 3),
         })
     # Fullest first — the same order `take_units` drains them in, so the screen
     # shows the racks in the order a picker will actually walk them.
     racks.sort(key=lambda r: r["available_units"], reverse=True)
+
+    # What is already out in staging for this lot's receipt, so the screen can
+    # say "1,200 lbs already staged — add more?" instead of silently hiding.
+    staged_items = db.query(StagingItem).filter(
+        StagingItem.receipt_id == receipt.id,
+        StagingItem.status.in_(["staged", "partially_used", "partially_returned"]),
+    ).all()
+    already_staged = sum(
+        max(0.0, float(i.quantity_staged or 0) - float(i.quantity_used or 0)
+            - float(i.quantity_returned or 0))
+        for i in staged_items
+    )
 
     return {
         "is_counted": True,
         "unit_label": lot.unit_label,
         "available_units": sum(r["available_units"] for r in racks),
         "held_units": sum(r["held_units"] for r in racks),
+        "open_units": sum(r["open_units"] for r in racks),
+        "open_remaining_qty": round(sum(r["open_remaining_qty"] for r in racks), 3),
+        "already_staged_qty": round(already_staged, 3),
         "racks": racks,
     }
 
