@@ -92,13 +92,30 @@ const ProductDetailModal = ({
     }
   });
 
+  // A lot-counted receipt has no location of its own — `receipts.location` and
+  // `storage_row_id` are both null on one, because its placement lives in the
+  // ledger. So getReceiptLocations, which reads those two columns, returns
+  // nothing and both columns fall to an em dash on exactly the deliveries whose
+  // position is known best: the gun records them drum by drum.
+  //
+  // Ask the ledger first, and only fall back to the receipt's own columns.
+  const ledgerLocations = (r) => {
+    const putAway = receivedRows[r.id];
+    if (!putAway?.length) return null;
+    const labels = Array.from(
+      new Set(putAway.map((x) => x.location_label).filter(Boolean)),
+    );
+    return labels.length ? labels : null;
+  };
+
   const lots = Array.from(new Set(detailReceipts.map(r => r.lotNo).filter(Boolean)));
   const locationTotals = {};
   detailReceipts.forEach(r => {
-    const locs = getReceiptLocations(r);
     const qty = Number(r.quantity) || 0;
-    locs.forEach(l => {
-      locationTotals[l.label] = (locationTotals[l.label] || 0) + qty;
+    const fromLedger = ledgerLocations(r);
+    const labels = fromLedger || getReceiptLocations(r).map(l => l.label);
+    labels.forEach(label => {
+      locationTotals[label] = (locationTotals[label] || 0) + qty;
     });
   });
 
@@ -229,8 +246,9 @@ const ProductDetailModal = ({
               <tbody>
                 {detailReceipts.map(r => {
                   const locations = getReceiptLocations(r);
-                  const locationLabel = locations[0]?.label || '—';
                   const rowDetail = locations[0]?.detail || '';
+                  const locationLabel =
+                    ledgerLocations(r)?.join(', ') || locations[0]?.label || '—';
 
                   let rowDisplay = '—';
                   // WHERE THIS DELIVERY WENT, from the ledger.
@@ -250,8 +268,16 @@ const ProductDetailModal = ({
                   // receipt date, that is the honest reading.
                   const putAway = receivedRows[r.id];
                   if (putAway?.length) {
+                    // "(68)" alone leaves the reader to guess the unit beside a
+                    // quantity given in lbs. The room names it: Apple Barn
+                    // shelves drums, so 68 there is 68 drums.
                     rowDisplay = putAway
-                      .map((x) => `${x.storage_row_name} (${x.units})`)
+                      .map((x) => {
+                        const unit = x.unit_label
+                          || rowUnitLookup[x.storage_row_id]
+                          || 'pallets';
+                        return `${x.storage_row_name} (${x.units} ${unit})`;
+                      })
                       .join(', ');
                   } else if (rowDetail) {
                     rowDisplay = rowDetail.replace('Rows: ', '').replace('Row: ', '');

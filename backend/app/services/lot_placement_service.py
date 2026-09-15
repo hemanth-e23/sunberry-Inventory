@@ -745,10 +745,17 @@ def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
     rack at all — the column fell through to an em dash on exactly the
     receipts that knew their rack most precisely.
     """
+    from app.models.location import Location, SubLocation
+
     rows = (
-        db.query(LotPlacementEvent, StorageRow)
+        db.query(LotPlacementEvent, StorageRow, SubLocation, Location)
         .join(StorageRow, StorageRow.id == LotPlacementEvent.storage_row_id)
         .join(MaterialLot, MaterialLot.id == LotPlacementEvent.material_lot_id)
+        # Outer: a rack reached through a storage_area has no sub_location_id,
+        # and losing its put-away row over a missing room name would be a worse
+        # answer than naming the rack alone.
+        .outerjoin(SubLocation, SubLocation.id == StorageRow.sub_location_id)
+        .outerjoin(Location, Location.id == SubLocation.location_id)
         .filter(
             MaterialLot.product_id == product_id,
             LotPlacementEvent.ref_type.in_(("receipt", "receiving")),
@@ -760,7 +767,7 @@ def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
     )
 
     out: Dict[str, list] = {}
-    for event, row in rows:
+    for event, row, sub, location in rows:
         if not event.ref_id:
             continue
         bucket = out.setdefault(event.ref_id, [])
@@ -771,10 +778,25 @@ def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
                 entry["units"] += int(event.full_units_delta)
                 break
         else:
+            # The room counts what it stores. Apple Barn shelves drums — one
+            # drum, one slot — so "(68)" beside a rack there means 68 drums,
+            # and saying "pallets" names a unit that room does not use.
+            raw_unit = (sub.storage_unit if sub else None) or "pallet"
             bucket.append({
                 "storage_row_id": row.id,
                 "storage_row_name": row.name,
                 "units": int(event.full_units_delta),
+                "unit_label": raw_unit if raw_unit.endswith("s") else f"{raw_unit}s",
+                # A lot-counted receipt carries no location of its own — its
+                # placement lives here, in the ledger — so the room travels with
+                # the rack. Without it the Location column has nothing to read
+                # and falls to an em dash on material whose position is known
+                # precisely, drum by drum.
+                "sub_location_id": sub.id if sub else None,
+                "location_label": (
+                    f"{location.name} / {sub.name}" if (sub and location)
+                    else (sub.name if sub else None)
+                ),
             })
     return out
 

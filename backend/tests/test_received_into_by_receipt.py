@@ -135,3 +135,49 @@ class TestReceivedIntoByReceipt:
         # Still the rack it ARRIVED on, with the count that arrived.
         assert result[receipt.id][0]["storage_row_name"] == "Row A"
         assert result[receipt.id][0]["units"] == 10
+
+    def test_it_reports_the_room_and_its_unit_word(self, db_session, seed_data):
+        """A lot-counted receipt carries no location of its own.
+
+        `receipts.location` and `receipts.storage_row_id` are both NULL on one —
+        its placement lives in the ledger — so the Location column had nothing to
+        read and showed an em dash on material whose position is known drum by
+        drum. The room travels with the rack now, and it names its own unit:
+        Apple Barn shelves drums, so 60 there is 60 drums, not 60 pallets.
+        """
+        sub = seed_data["sub_location"]
+        sub.storage_unit = "drum"
+        sub.unit_capacity = 88
+        db_session.commit()
+
+        lot = _lot(db_session, seed_data, "room")
+        receipt = _receipt(db_session, seed_data, lot, suffix="room", drums=60)
+
+        lps.apply_delta(
+            db_session, lot, "row-1",
+            event_type=lps.EVENT_RECEIVED, full_units_delta=60,
+            actor_id=None, ref_type="receiving", ref_id=receipt.id,
+        )
+        db_session.commit()
+
+        entry = lps.received_into_by_receipt(
+            db_session, seed_data["product"].id)[receipt.id][0]
+
+        assert entry["unit_label"] == "drums"
+        assert entry["sub_location_id"] == sub.id
+        assert sub.name in entry["location_label"]
+
+    def test_a_pallet_room_still_says_pallets(self, db_session, seed_data):
+        lot = _lot(db_session, seed_data, "pal")
+        receipt = _receipt(db_session, seed_data, lot, suffix="pal", drums=5)
+
+        lps.apply_delta(
+            db_session, lot, "row-1",
+            event_type=lps.EVENT_RECEIVED, full_units_delta=5,
+            actor_id=None, ref_type="receipt", ref_id=receipt.id,
+        )
+        db_session.commit()
+
+        entry = lps.received_into_by_receipt(
+            db_session, seed_data["product"].id)[receipt.id][0]
+        assert entry["unit_label"] == "pallets"
