@@ -57,6 +57,17 @@ const ScannerHome = () => {
             <span className="scanner-home-desc">Scan a rack, then scan drums and bags into it</span>
           </div>
         </button>
+        <button
+          type="button"
+          className="scanner-home-btn staging"
+          onClick={() => navigate('/forklift/staging-pull')}
+        >
+          <div className="scanner-home-icon"><ClipboardList size={26} /></div>
+          <div className="scanner-home-text">
+            <span>Staging Pull</span>
+            <span className="scanner-home-desc">Pull material for production batches</span>
+          </div>
+        </button>
       </div>
     </div>
   );

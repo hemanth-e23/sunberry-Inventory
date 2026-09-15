@@ -58,6 +58,7 @@ const IngredientAuditsPage = lazy(() => import('./components/ingredient/Ingredie
 const RowLabelPrintPage = lazy(() => import('./components/ingredient/RowLabelPrintPage'));
 const IngredientStagingPage = lazy(() => import('./components/ingredient/IngredientStagingPage'));
 const ScannerIngredientStagingFlow = lazy(() => import('./components/scanner/ScannerIngredientStagingFlow'));
+const ScannerStagingPullFlow = lazy(() => import('./components/scanner/ScannerStagingPullFlow'));
 
 // Context
 import { ToastProvider } from './context/ToastContext';
@@ -302,6 +303,20 @@ function AppRoutes() {
         <Route path="/forklift/ingredient-staging/:itemId" element={
           <ProtectedRoute requiredRole="forklift">
             <ScannerIngredientStagingFlow />
+          </ProtectedRoute>
+        } />
+
+        {/* Batch staging pulls on the gun. Same list/session shape as
+            receiving: the optional :requestId selects one pull REQUEST — the
+            whole batch's cart — which the worker pulls and submits as a unit. */}
+        <Route path="/forklift/staging-pull" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerStagingPullFlow />
+          </ProtectedRoute>
+        } />
+        <Route path="/forklift/staging-pull/:requestId" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerStagingPullFlow />
           </ProtectedRoute>
         } />
 
