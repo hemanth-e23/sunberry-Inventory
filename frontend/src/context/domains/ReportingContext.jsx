@@ -4,6 +4,7 @@ import { useLocationContext as useLocation } from './LocationContext';
 import { useReceipt } from './ReceiptContext';
 import { useInventory } from './InventoryContext';
 import { numberFrom } from '../../utils/allocationUtils';
+import { rowCapacityInfo } from '../../utils/rowSources';
 import { toDateKey } from '../../utils/dateUtils';
 import { isRawMaterialType } from '../../constants';
 
@@ -265,11 +266,14 @@ export const ReportingProvider = ({ children }) => {
     locationsState.forEach((location) => {
       location.subLocations?.forEach((subLoc) => {
         subLoc.rows?.forEach((row) => {
-          totalPalletCapacity += numberFrom(row.palletCapacity, 0);
-          const used = Math.min(
-            numberFrom(row.palletCapacity, 0),
-            numberFrom(row.occupiedPallets, 0),
-          );
+          // A drum room's capacity is the ROOM's per-row container figure, not
+          // the row's leftover pallet number. Summing the latter while
+          // occupancy is counted in drums made every drum rack read as full —
+          // the clamp below hid it, reporting 22 of 22 on a rack holding 84 of
+          // 88 — and drove the headline utilisation to ~94%.
+          const { capacity, occupied } = rowCapacityInfo(subLoc, row);
+          totalPalletCapacity += capacity;
+          const used = Math.min(capacity, occupied);
           occupiedPallets += used;
           if (row.hold) heldPallets += used;
         });

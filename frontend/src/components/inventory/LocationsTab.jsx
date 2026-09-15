@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { RECEIPT_STATUS } from '../../constants';
+import { rowCapacityInfo } from '../../utils/rowSources';
 
 // ─── Tree builder ─────────────────────────────────────────────────────────────
 // Single hierarchical view: Location → (Sub-location | FG Area) → Row → Product
@@ -77,10 +78,13 @@ const buildTree = ({ locationsTree, storageAreas, receipts, productsById }) => {
           'row',
           loc.id,
           sub.id,
-          row.palletCapacity ? {
-            occupiedPallets: Number(row.occupiedPallets || 0),
-            total: Number(row.palletCapacity || 0),
-          } : null,
+          // Capacity per the room's own unit — containers in a drum or bag
+          // room, pallet slots elsewhere. Showing a drum rack's occupancy
+          // against its leftover pallet figure reads as permanently full.
+          (() => {
+            const { capacity, occupied } = rowCapacityInfo(sub, row);
+            return capacity ? { occupiedPallets: occupied, total: capacity } : null;
+          })(),
           row.productId || null,
           Number(row.occupiedCases || 0),
         );

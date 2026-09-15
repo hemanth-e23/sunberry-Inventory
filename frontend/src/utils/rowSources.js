@@ -283,3 +283,51 @@ export const dominantDisplayUnit = (entries = []) => {
   }
   return best;
 };
+
+
+/**
+ * What a rack's capacity and occupancy MEAN, given the room it sits in.
+ *
+ * Two different physical facts share one column, and reading the wrong one is
+ * how every Apple Barn row came to display "0 of 22 spaces free" while sitting
+ * half empty.
+ *
+ * A pallet room counts pallet slots: capacity is the row's own
+ * `palletCapacity`. A drum or bag room counts containers — the backend states
+ * it plainly: "for barrels and totes the container IS the thing on the shelf,
+ * so the footprint is the count — one drum, one slot"
+ * (lot_placement_service.py). Capacity there is the ROOM's `unitCapacity`,
+ * which is exactly what the receiving gun already reads
+ * (lot_receiving_service._row_capacity_warning).
+ *
+ * `occupiedPallets` holds the container count for such a room, so comparing it
+ * against the row's leftover pallet-era number understates free space by a
+ * factor of four and reports a full rack on an empty one.
+ *
+ * `free` is null when nothing states a capacity — "no opinion", which the
+ * backend spells as `pallet_capacity = 0`. Callers should show no figure rather
+ * than invent zero.
+ */
+export const rowCapacityInfo = (sub, row) => {
+  const typed = Boolean(sub?.storageUnit);
+  const capacity = typed
+    ? Number(sub?.unitCapacity || 0)
+    : Number(row?.palletCapacity || 0);
+  const occupied = Number(row?.occupiedPallets || 0);
+
+  let unit = 'pallets';
+  if (typed) {
+    const label = String(sub.storageUnit);
+    unit = label.endsWith('s') ? label : `${label}s`;
+  }
+
+  return {
+    typed,
+    capacity,
+    occupied,
+    unit,
+    // Never negative: an over-filled rack is legal (capacity is a soft hint),
+    // and "-10 free" is not a thing a warehouse can act on.
+    free: capacity > 0 ? Math.max(0, Math.round(capacity - occupied)) : null,
+  };
+};

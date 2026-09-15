@@ -6,7 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct, dominantDisplayUnit } from '../../utils/rowSources';
+import { buildEntriesForProduct, dominantDisplayUnit, rowCapacityInfo } from '../../utils/rowSources';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
@@ -114,12 +114,14 @@ const TransfersTab = () => {
     return (sub?.rows || [])
       .filter(r => r.active !== false)
       .map(r => {
-        const capacity = Number(r.palletCapacity || 0);
-        // RM rows track occupancy in pallet slots (default_cases_per_pallet is
-        // 0 for them), so "spaces" = capacity - occupied pallet slots. Soft hint
-        // only — never gates submit (over-fill is allowed).
-        const free = capacity > 0 ? Math.max(0, Math.round(capacity - Number(r.occupiedPallets || 0))) : null;
-        const label = free !== null ? `${r.name} — ${free} of ${capacity} spaces free` : r.name;
+        // Capacity means different things per room — pallet slots in a pallet
+        // room, containers in a drum or bag room. Reading the row's pallet-era
+        // number for a drum room showed "0 of 22 spaces free" on racks holding
+        // 32 of 88 drums. Soft hint either way; never gates submit.
+        const { capacity, free, unit } = rowCapacityInfo(sub, r);
+        const label = free !== null
+          ? `${r.name} — ${free} of ${capacity} ${unit} free`
+          : r.name;
         return { id: r.id, label };
       });
   }, [rmForm.toLocation, rmForm.toSubLocation, subLocationMap]);
