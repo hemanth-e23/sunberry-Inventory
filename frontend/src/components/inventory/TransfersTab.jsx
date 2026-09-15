@@ -126,6 +126,15 @@ const TransfersTab = () => {
       });
   }, [rmForm.toLocation, rmForm.toSubLocation, subLocationMap]);
 
+  // What the DESTINATION room counts its shelf space in. Drives the wording of
+  // the footprint field: asking a drum room for "pallets" invites a pallet
+  // count for something stored one drum to a slot.
+  const destFootprintUnit = useMemo(() => {
+    if (!rmForm.toLocation || !rmForm.toSubLocation) return 'pallets';
+    const sub = (subLocationMap[rmForm.toLocation] || []).find(s => s.id === rmForm.toSubLocation);
+    return rowCapacityInfo(sub, null).unit;
+  }, [rmForm.toLocation, rmForm.toSubLocation, subLocationMap]);
+
   // Proportional pallets-out suggestion for one source row, from the content the
   // worker typed for it: round(contentMoved / rowContent × rowPallets). A guess
   // only — fully editable, since the real footprint depends on how barrels are
@@ -638,7 +647,7 @@ const TransfersTab = () => {
                           {entry.rowId && !entry.isCounted && (
                             <label>
                               <span>
-                                ↳ Pallets emptied from this row
+                                ↳ {entry.footprintUnit === 'pallets' ? 'Pallets' : entry.footprintUnit.replace(/^./, c => c.toUpperCase())} emptied from this row
                                 {entry.rowPallets ? ` (row holds ${entry.rowPallets})` : ''}
                               </span>
                               <input
@@ -710,7 +719,7 @@ const TransfersTab = () => {
                     </select>
                   </label>
                   <label>
-                    <span>Pallets placed in this row</span>
+                    <span>{destFootprintUnit === 'pallets' ? 'Pallets' : destFootprintUnit.replace(/^./, ch => ch.toUpperCase())} placed in this row</span>
                     <input
                       type="number"
                       min="0"

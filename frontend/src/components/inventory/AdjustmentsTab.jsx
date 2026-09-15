@@ -562,7 +562,7 @@ const AdjustmentsTab = () => {
                           {entry.rowId && !entry.isCounted && (
                             <label>
                               <span>
-                                ↳ Pallets emptied from this row
+                                ↳ {entry.footprintUnit === 'pallets' ? 'Pallets' : entry.footprintUnit.replace(/^./, c => c.toUpperCase())} emptied from this row
                                 {entry.rowPallets ? ` (row holds ${entry.rowPallets})` : ''}
                               </span>
                               <input

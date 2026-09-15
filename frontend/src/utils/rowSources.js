@@ -31,7 +31,9 @@ const findRowInfo = (rowId, storageAreas = [], subLocationMap = {}, locations = 
       if (row) {
         const locName = locations.find((l) => l.id === locId)?.name || '';
         const label = locName ? `${locName} / ${sub.name}` : sub.name;
-        return { row, label };
+        // The room comes back too: what a rack's FOOTPRINT is counted in is a
+        // property of the room, not the row, and the forms need the word.
+        return { row, label, sub };
       }
     }
   }
@@ -59,7 +61,19 @@ const makeEntry = (overrides) => {
     displayUnit = cu;
     displayFactor = wpc;
   }
-  return { ...overrides, displayUnit, displayFactor };
+  // What this rack's FOOTPRINT is counted in — a property of the ROOM, not of
+  // what the receipt arrived in. A drum room counts drums on its shelves
+  // ("one drum, one slot"); a pallet room counts pallets, whatever is on them.
+  // Kept separate from displayUnit, which is how the CONTENT is measured: the
+  // two coincide for drums and are a factor of fifty apart for bags.
+  const room = overrides.room || null;
+  let footprintUnit = 'pallets';
+  if (room?.storageUnit) {
+    const label = String(room.storageUnit);
+    footprintUnit = label.endsWith('s') ? label : `${label}s`;
+  }
+  const { room: _room, ...rest } = overrides;
+  return { ...rest, displayUnit, displayFactor, footprintUnit };
 };
 
 const locationLabelForReceipt = (receipt, locations, subLocationMap) => {
@@ -108,6 +122,7 @@ export const buildEntriesForProduct = ({
         entries.push(makeEntry({
           key: `${receipt.id}::row-${a.rowId}`,
           receiptId: receipt.id,
+          room: info?.sub || null,
           // Counted lots move as WHOLE CONTAINERS off named racks, and their
           // footprint is derived from the count — so the screens must not ask
           // for a pallet figure the services then ignore.
@@ -153,6 +168,7 @@ export const buildEntriesForProduct = ({
       entries.push(makeEntry({
         key: `${receipt.id}::row-${receipt.storageRowId}`,
         receiptId: receipt.id,
+        room: info?.sub || null,
         isCounted: false,
         rowId: receipt.storageRowId,
         sourceId: `row-${receipt.storageRowId}`,
