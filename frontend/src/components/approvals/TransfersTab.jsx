@@ -99,7 +99,19 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
         const rowId = id.replace('row-', '');
         return { label: rowLookup[rowId] || rowId, cases: item?.quantity || 0, pallets };
       }
-      return { label: id === 'floor' ? 'Floor Staging' : id, cases: item?.quantity || 0, pallets };
+      if (id === 'floor') {
+        return { label: 'Floor Staging', cases: item?.quantity || 0, pallets };
+      }
+      // A bare id is a ROOM — the shape the form sends for material held at
+      // room level rather than on a rack. It used to fall through to the raw
+      // id, so an approver deciding on a transfer read
+      // "sub-1768926299596 — 30120 lbs" and had no way to tell which room that
+      // was without looking it up in the database.
+      return {
+        label: locationLookupMap?.[id] || id,
+        cases: item?.quantity || 0,
+        pallets,
+      };
     });
   };
 

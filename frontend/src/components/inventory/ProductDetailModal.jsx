@@ -9,6 +9,7 @@ const ProductDetailModal = ({
   receipts,
   vendorNameById,
   rowLookup,
+  rowUnitLookup = {},
   rowNameCache,
   getReceiptLocations,
   onClose,
@@ -261,11 +262,11 @@ const ProductDetailModal = ({
                     const rowName = rowLookup[rowId] || rowNameCache[rowId];
                     const pallets = r.pallets || 0;
 
-                    if (rowName) {
-                      rowDisplay = `${rowName}${pallets > 0 ? ` (${pallets} pallets)` : ''}`;
-                    } else {
-                      rowDisplay = `${rowId}${pallets > 0 ? ` (${pallets} pallets)` : ''}`;
-                    }
+                    // The room's own word — a drum rack holds drums, not
+                    // pallets, and saying otherwise names a unit it never uses.
+                    const footprint = rowUnitLookup[rowId] || 'pallets';
+                    const suffix = pallets > 0 ? ` (${pallets} ${footprint})` : '';
+                    rowDisplay = `${rowName || rowId}${suffix}`;
                   }
 
                   return (

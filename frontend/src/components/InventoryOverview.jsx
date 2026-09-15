@@ -17,6 +17,7 @@ import InventoryTable from "./inventory/InventoryTable";
 import ProductDetailModal from "./inventory/ProductDetailModal";
 import PrintReportModal from "./inventory/PrintReportModal";
 import LocationsTab from "./inventory/LocationsTab";
+import { rowCapacityInfo } from "../utils/rowSources";
 
 const parseDate = (value) => {
   if (!value) return null;
@@ -148,6 +149,24 @@ const InventoryOverview = () => {
     });
     return map;
   }, [locations, storageAreas, rowNameCache]);
+
+  // rowId -> the word that rack's FOOTPRINT is counted in. A drum room counts
+  // drums on its shelves, not pallets; labelling a drum rack's occupancy
+  // "20 pallets" describes a unit the room does not use.
+  //
+  // Finished-goods areas are absent on purpose: they genuinely count pallet
+  // slots, and the default below is already "pallets".
+  const rowUnitLookup = useMemo(() => {
+    const map = {};
+    locations?.forEach((location) => {
+      location.subLocations?.forEach((subLoc) => {
+        subLoc.rows?.forEach((row) => {
+          if (row.id) map[row.id] = rowCapacityInfo(subLoc, row).unit;
+        });
+      });
+    });
+    return map;
+  }, [locations]);
 
   // Helper function to fetch row name from backend if not in lookup
   const fetchRowName = useCallback(async (rowId) => {
@@ -717,6 +736,7 @@ const InventoryOverview = () => {
                 receipts={receipts}
                 vendorNameById={vendorNameById}
                 rowLookup={rowLookup}
+                rowUnitLookup={rowUnitLookup}
                 rowNameCache={rowNameCache}
                 getReceiptLocations={getReceiptLocations}
                 onClose={() => setDetailProductId(null)}
