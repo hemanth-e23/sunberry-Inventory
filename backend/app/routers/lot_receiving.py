@@ -615,5 +615,7 @@ def lookup_lot(
         "needs_review": bool(lot.needs_review),
         "full_units": on_hand["full_units"],
         "open_units": on_hand["open_units"],
+        "open_remaining_qty": on_hand["open_remaining_qty"],
+        "held_units": on_hand["held_units"],
         "row_count": on_hand["row_count"],
     }

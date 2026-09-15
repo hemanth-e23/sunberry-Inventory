@@ -967,8 +967,20 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
     batches_in_progress = sum(1 for b in batches_data.values() if b.get("status") not in ("Complete", "Pending", "not_found"))
     total_marked = 0
 
-    # Aggregate by SID: total quantity Production says was used (from completed batches only)
-    sid_total_from_production: Dict[str, float] = {}
+    # ── Attribution ──────────────────────────────────────────────────────
+    # Production now reports the LOT each scan actually consumed (lot_code
+    # parsed from the SB2 sticker). Usage is attributed to the staging items
+    # of that exact lot first; anything unattributable — legacy free-text
+    # lot, a lot that was never staged for this request — falls back to the
+    # old SID-order spread. Targets are computed ABSOLUTELY and then diffed
+    # per item, so a re-sync with unchanged production totals is a no-op and
+    # attribution never oscillates between lots.
+
+    def _norm_lot(value) -> str:
+        return (value or "").strip().upper()
+
+    # (sid, lot) buckets from completed batches; lot "" = unattributable.
+    bucket_totals: Dict[tuple, float] = {}
     for batch_uid, batch_info in batches_data.items():
         if batch_info.get("status") != "Complete":
             continue
@@ -979,7 +991,8 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
             final_qty = float(ingredient.get("final_quantity") or 0)
             if not sid or final_qty <= 0:
                 continue
-            sid_total_from_production[sid] = sid_total_from_production.get(sid, 0) + final_qty
+            key = (sid, _norm_lot(ingredient.get("lot_code")))
+            bucket_totals[key] = bucket_totals.get(key, 0) + final_qty
 
     def _get_staging_item_ids_for_sid(sid):
         seen = set()
@@ -991,88 +1004,118 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                     seen.add(si_id)
                     yield si_id
 
-    for sid, total_from_production in sid_total_from_production.items():
-        staging_item_ids_list = list(_get_staging_item_ids_for_sid(sid))
-        already_marked = 0
-        for si_id in staging_item_ids_list:
+    matched_by_lot_qty = 0.0
+    fallback_qty = 0.0
+
+    for sid in {k[0] for k in bucket_totals}:
+        items = []
+        for si_id in _get_staging_item_ids_for_sid(sid):
             si = db.query(StagingItem).filter(StagingItem.id == si_id).first()
             if si:
-                already_marked += si.quantity_used
-
-        delta = total_from_production - already_marked
-        if delta == 0:
+                items.append(si)
+        if not items:
             continue
 
-        if delta < 0:
-            # Over-marked — reduce quantity_used (credit inventory back)
-            to_reduce = -delta
-            for si_id in staging_item_ids_list:
-                if to_reduce <= 0:
-                    break
-                si = db.query(StagingItem).filter(StagingItem.id == si_id).first()
-                if not si or si.quantity_used <= 0:
-                    continue
-                reduce_qty = min(si.quantity_used, to_reduce)
-                si.quantity_used -= reduce_qty
-                to_reduce -= reduce_qty
-                receipt = db.query(Receipt).filter(Receipt.id == si.receipt_id).first()
-                if receipt:
-                    receipt.quantity = (receipt.quantity or 0) + reduce_qty
-                    if receipt.status == ReceiptStatus.DEPLETED:
-                        # It was approved before it depleted — restore to APPROVED,
-                        # not RECORDED, so it stays visible to availability queries.
-                        receipt.status = ReceiptStatus.APPROVED
-                    adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
-                    db.add(InventoryAdjustment(
-                        id=adj_id,
-                        receipt_id=receipt.id,
-                        product_id=receipt.product_id,
-                        adjustment_type="stock-correction",
-                        quantity=-reduce_qty,
-                        reason=f"Sync correction: was over-marked, restored to match Production ({batches_completed} completed batch(es))",
-                        status=AdjustmentStatus.APPROVED,
-                        original_quantity=receipt.quantity - reduce_qty,
-                        new_quantity=receipt.quantity,
-                        submitted_by=None,
-                        approved_by=None,
-                    ))
-                avail = si.quantity_staged - si.quantity_used - si.quantity_returned
-                si.status = StagingItemStatus.USED if avail <= 0 else StagingItemStatus.PARTIALLY_USED
-                total_marked += 1
-            continue
+        # Which lot each staging item pulled from.
+        lot_of: Dict[str, str] = {}
+        for si in items:
+            lot_code = ""
+            receipt = db.query(Receipt).filter(Receipt.id == si.receipt_id).first()
+            if receipt and receipt.material_lot_id:
+                lot = db.query(MaterialLot).filter(
+                    MaterialLot.id == receipt.material_lot_id
+                ).first()
+                lot_code = _norm_lot(lot.lot_code) if lot else ""
+            lot_of[si.id] = lot_code
 
-        remaining_to_mark = delta
-        for si_id in staging_item_ids_list:
-            if remaining_to_mark <= 0:
+        capacity = {
+            si.id: max(0.0, float(si.quantity_staged) - float(si.quantity_returned))
+            for si in items
+        }
+        target = {si.id: 0.0 for si in items}
+        fallback_pool = 0.0
+
+        # Lot-matched assignment first.
+        for (bsid, lot_key), qty in bucket_totals.items():
+            if bsid != sid:
+                continue
+            remaining = qty
+            if lot_key:
+                for si in items:
+                    if remaining <= 1e-9:
+                        break
+                    if lot_of.get(si.id) != lot_key:
+                        continue
+                    take = min(capacity[si.id] - target[si.id], remaining)
+                    if take > 0:
+                        target[si.id] += take
+                        remaining -= take
+                        matched_by_lot_qty += take
+            fallback_pool += max(0.0, remaining)
+
+        # SID-order spread for whatever could not be pinned to a lot.
+        for si in items:
+            if fallback_pool <= 1e-9:
                 break
-            si = db.query(StagingItem).filter(StagingItem.id == si_id).first()
-            if not si:
-                continue
-            available = si.quantity_staged - si.quantity_used - si.quantity_returned
-            if available <= 0:
-                continue
+            take = min(capacity[si.id] - target[si.id], fallback_pool)
+            if take > 0:
+                target[si.id] += take
+                fallback_pool -= take
+                fallback_qty += take
 
-            use_qty = min(available, remaining_to_mark)
-
+        # Apply per-item deltas: positive = newly used, negative = credit back.
+        for si in items:
+            delta = round(target[si.id] - float(si.quantity_used or 0), 6)
+            if abs(delta) < 1e-6:
+                continue
             receipt = db.query(Receipt).filter(Receipt.id == si.receipt_id).first()
             if not receipt:
                 continue
 
+            if delta < 0:
+                reduce_qty = min(float(si.quantity_used or 0), -delta)
+                if reduce_qty <= 0:
+                    continue
+                si.quantity_used -= reduce_qty
+                receipt.quantity = (receipt.quantity or 0) + reduce_qty
+                if receipt.status == ReceiptStatus.DEPLETED:
+                    # It was approved before it depleted — restore to APPROVED,
+                    # not RECORDED, so it stays visible to availability queries.
+                    receipt.status = ReceiptStatus.APPROVED
+                adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+                db.add(InventoryAdjustment(
+                    id=adj_id,
+                    receipt_id=receipt.id,
+                    product_id=receipt.product_id,
+                    adjustment_type="stock-correction",
+                    quantity=-reduce_qty,
+                    reason=f"Sync correction: was over-marked, restored to match Production ({batches_completed} completed batch(es))",
+                    status=AdjustmentStatus.APPROVED,
+                    original_quantity=receipt.quantity - reduce_qty,
+                    new_quantity=receipt.quantity,
+                    submitted_by=None,
+                    approved_by=None,
+                ))
+                avail = si.quantity_staged - si.quantity_used - si.quantity_returned
+                si.status = StagingItemStatus.USED if avail <= 0 else StagingItemStatus.PARTIALLY_USED
+                total_marked += 1
+                continue
+
+            use_qty = delta
             adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
-            adjustment = InventoryAdjustment(
+            db.add(InventoryAdjustment(
                 id=adj_id,
                 receipt_id=receipt.id,
                 product_id=receipt.product_id,
                 adjustment_type="stock-correction",
                 quantity=use_qty,
-                reason=f"Synced from Production \u2014 {batches_completed} completed batch(es)",
+                reason=f"Synced from Production — {batches_completed} completed batch(es)",
                 status=AdjustmentStatus.APPROVED,
                 original_quantity=receipt.quantity,
                 new_quantity=max(0, receipt.quantity - use_qty),
                 submitted_by=None,
                 approved_by=None,
-            )
-            db.add(adjustment)
+            ))
 
             # Staged material: rack freed at staging, so only reduce the lot total.
             receipt.quantity = max(0, receipt.quantity - use_qty)
@@ -1085,9 +1128,13 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
             else:
                 si.status = "partially_used"
             si.used_at = datetime.now(timezone.utc)
-
-            remaining_to_mark -= use_qty
             total_marked += 1
+
+    if matched_by_lot_qty or fallback_qty:
+        logger.info(
+            f"Sync {request_id}: attributed {round(matched_by_lot_qty, 3)} by exact lot, "
+            f"{round(fallback_qty, 3)} by SID-order fallback"
+        )
 
     sr.last_synced_at = datetime.now(timezone.utc)
     db.commit()

@@ -474,6 +474,82 @@ def close_out_staging_request(
     return staging_request_service.close_out_staging_request(db, request_id)
 
 
+@router.get("/lots/lookup")
+def lookup_lot_for_service(
+    code: str,
+    db: Session = Depends(get_db),
+):
+    """What a raw-material sticker says — the service-key twin of
+    GET /api/lot-receiving/lots/lookup, for the production app.
+
+    Accepts the raw scan (`SB2|<lot_code>|...` envelope or a bare lot code /
+    legacy SID token). Production parses the QR locally and NEVER blocks a
+    scan on this call — it is enrichment (current BBD, hold state, weight per
+    unit), so an unknown code is a 200 with `found: false`, not a 404.
+
+    `blocked_reasons` is computed here so every consumer applies the same
+    poka-yoke rules; note "no units on racks" is deliberately NOT a blocked
+    reason — staged material was taken off the racks at pull time and is
+    exactly what production is about to scan.
+    """
+    from datetime import datetime, timezone as _tz
+
+    from app.models import MaterialLot, Product, Vendor
+    from app.services import lot_placement_service as lps
+    from app.services.lot_receiving_service import resolve_lot_code
+
+    lot = resolve_lot_code(db, code)
+    if not lot:
+        return {"found": False, "code": code}
+
+    product = db.query(Product).filter(Product.id == lot.product_id).first()
+    vendor = (
+        db.query(Vendor).filter(Vendor.id == lot.vendor_id).first()
+        if lot.vendor_id else None
+    )
+    on_hand = lps.units_on_hand(db, lot.id)
+
+    bbd = lot.bbd_current or lot.bbd_original
+    expired = bool(bbd and bbd < datetime.now(_tz.utc))
+
+    blocked = []
+    if lot.is_held:
+        blocked.append("held")
+    if expired:
+        blocked.append("past_bbd")
+    if lot.needs_review:
+        blocked.append("needs_review")
+
+    return {
+        "found": True,
+        "lot_id": lot.id,
+        "lot_code": lot.lot_code,
+        # The mapping key: production resolves its Ingredient by this (or by
+        # the SID), so no separate product-barcode scan is needed.
+        "inventory_product_id": lot.product_id,
+        "product_name": product.name if product else None,
+        "product_sid": getattr(product, "sid", None) if product else None,
+        "vendor_name": vendor.name if vendor else None,
+        "vendor_lot": lot.vendor_lot_number,
+        "bbd": bbd,
+        "bbd_original": lot.bbd_original,
+        "expired": expired,
+        "unit_label": lot.unit_label,
+        "weight_per_unit": lot.weight_per_unit,
+        "weight_unit": lot.weight_unit,
+        "is_held": lot.is_held,
+        "hold_reason": lot.hold_reason,
+        "needs_review": lot.needs_review,
+        "full_units": on_hand.get("full_units", 0),
+        "open_units": on_hand.get("open_units", 0),
+        "open_remaining_qty": on_hand.get("open_remaining_qty", 0),
+        "held_units": on_hand.get("held_units", 0),
+        "row_count": on_hand.get("row_count", 0),
+        "usable": not blocked,
+        "blocked_reasons": blocked,
+    }
+
+
 @router.get("/health")
 def service_health():
     """Simple health-check (no auth required) so Production can verify connectivity."""
