@@ -262,13 +262,23 @@ def create_transfer(
         )
 
     # Available excludes any quantity on QA hold — held inventory must not be
-    # transferred or shipped. (held_quantity is the real hold; receipt.hold is
-    # also set transiently by this endpoint while a transfer is pending.)
-    available = receipt.quantity - (receipt.held_quantity or 0)
+    # transferred or shipped — AND anything already claimed by this receipt's
+    # other in-flight transfers. Pending transfers reserve their drums
+    # (decision T1, 2026-09-16): 20 pending out of 50 leaves 30 offerable,
+    # and the sum of transfers can never exceed the receipt.
+    reserved = transfer_service.open_reserved_quantity(db, receipt.id)
+    available = receipt.quantity - (receipt.held_quantity or 0) - reserved
     if transfer_data.quantity > available:
+        detail = "Requested quantity exceeds available (on-hold inventory excluded)"
+        if reserved > 0:
+            detail = (
+                f"Requested {transfer_data.quantity:g} but only "
+                f"{max(0.0, available):g} of this lot is unreserved — "
+                f"{reserved:g} is already on other pending transfers."
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Requested quantity exceeds available (on-hold inventory excluded)"
+            detail=detail,
         )
 
     # Validate order number for shipped-out transfers

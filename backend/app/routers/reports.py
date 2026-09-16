@@ -17,6 +17,7 @@ from app.services.report_builders import (
     build_adjustments_report,
     build_vendor_receipts_report,
     build_cycle_count_report,
+    build_reconciliation_report,
 )
 
 router = APIRouter()
@@ -301,4 +302,27 @@ def cycle_count_report(
         start_date=start_date,
         end_date=end_date,
         location_id=location_id,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. Receipts ↔ Placements Reconciliation (the standing alarm)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/reconciliation")
+def reconciliation_report(
+    transfer_days: int = 30,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Does the paper agree with the racks?
+
+    Phantom receipts (approved with no placements of their own), approved RM
+    transfers with no ledger events, and per-lot paper-vs-rack unit totals.
+    `totals.clean == true` means the books can be trusted. Run weekly.
+    """
+    return build_reconciliation_report(
+        db,
+        warehouse_id=warehouse_filter(current_user),
+        transfer_days=transfer_days,
     )

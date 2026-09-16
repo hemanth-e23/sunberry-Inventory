@@ -255,6 +255,25 @@ def place_logged_receipt(db: Session, receipt: Receipt, *, actor_id=None):
 
     rows = logged_rows(receipt)
     if not rows:
+        # Room-level receipt: the form named a room, not a rack. When the room
+        # has exactly ONE active row, that row is what the person meant — the
+        # same resolution `resolve_breakdown` applies to transfer sources. A
+        # room with several rows stays unplaced: picking one would invent a
+        # rack nobody counted from.
+        total = int(float(receipt.container_count or 0))
+        if total > 0 and receipt.sub_location_id:
+            row_ids = [
+                rid
+                for (rid,) in db.query(StorageRow.id)
+                .filter(
+                    StorageRow.sub_location_id == receipt.sub_location_id,
+                    StorageRow.is_active == True,  # noqa: E712
+                )
+                .all()
+            ]
+            if len(row_ids) == 1:
+                rows = [(row_ids[0], total)]
+    if not rows:
         return None
 
     lot = ensure_lot_for_receipt(
@@ -272,6 +291,116 @@ def place_logged_receipt(db: Session, receipt: Receipt, *, actor_id=None):
             ref_id=receipt.id,
             reason="Logged receipt",
             idempotency_key=f"logged:{receipt.id}:{row_id}",
+        )
+    return lot
+
+
+_WEIGHT_UNITS = {"lb", "lbs", "pound", "pounds", "kg", "kgs", "kilogram", "kilograms"}
+
+
+def _expected_units_for_approval(receipt: Receipt) -> Optional[int]:
+    """How many containers the paperwork claims, best effort.
+
+    Priority: the typed container count; then weight ÷ weight-per-container;
+    then — when the quantity is itself a count (its unit is neither a weight
+    nor the FG word "cases") — the quantity. None when no reading is
+    defensible, which the approval gate turns into a refusal rather than a
+    guess.
+    """
+    cc = float(receipt.container_count or 0)
+    if cc > 0:
+        return int(round(cc))
+    qty = float(receipt.quantity or 0)
+    w = float(receipt.weight_per_container or 0)
+    if qty > 0 and w > 0:
+        return int(round(qty / w))
+    unit = (receipt.unit or "").strip().lower()
+    if qty > 0 and unit and unit not in _WEIGHT_UNITS and unit != "cases":
+        return int(round(qty))
+    return None
+
+
+def approve_gate_and_place(db: Session, receipt: Receipt, *, actor_id=None):
+    """The approval-time contract: the ledger must end up matching the paper.
+
+    Approving a receipt is what puts its quantity into every product total, so
+    this is the moment the physical ledger has to agree — approving paper the
+    racks contradict is exactly the 2026-09-14 phantom incident (~170 drums in
+    the books, zero on any rack). Two intake modes, detected by whether the gun
+    touched this receipt:
+
+    * SCAN MODE (receiving scans exist): the scans ARE the placement. Approval
+      requires the forklift to have submitted the session, and the paperwork
+      is corrected TO the scanned count — the submitted session is the audit
+      trail for a short or over delivery.
+
+    * LOGGED MODE (no scans): drums were racked before the system heard of
+      them; the typed rows become placements here, and approval refuses unless
+      they fully cover the stated container count.
+
+    Finished goods pass straight through — pallet licences are their ledger.
+    """
+    if receipt is None or not receipt.product_id:
+        return None
+    category = (
+        db.query(Category).filter(Category.id == receipt.category_id).first()
+        if receipt.category_id
+        else None
+    )
+    if category and category.type == CATEGORY_FINISHED:
+        return None
+
+    scanned = int(session_counts(db, receipt).get("total") or 0)
+
+    if scanned > 0:
+        lot = ensure_lot_for_receipt(
+            db, receipt, user_id=actor_id, units_per_pallet=receipt.units_per_pallet
+        )
+        word = unit_word(lot, scanned)
+        if not receipt.forklift_submitted_at:
+            raise ValidationError(
+                f"{scanned} {word} scanned but the forklift has not submitted the "
+                "receiving session yet. Approval waits for the forklift's submit."
+            )
+        expected = _expected_units_for_approval(receipt)
+        if expected is None or scanned != expected:
+            w = float(receipt.weight_per_container or 0)
+            if w > 0:
+                receipt.quantity = float(scanned) * w
+            elif expected and float(receipt.quantity or 0) > 0:
+                receipt.quantity = float(receipt.quantity) * scanned / expected
+            else:
+                receipt.quantity = float(scanned)
+            receipt.container_count = float(scanned)
+            receipt.note = (
+                f"{receipt.note or ''}\n[Approval correction: booked at the "
+                f"{scanned} {word} the forklift scanned"
+                + (f"; paperwork said {expected}" if expected else "")
+                + "]"
+            ).strip()
+        return lot
+
+    expected = _expected_units_for_approval(receipt)
+    if not expected or expected <= 0:
+        raise ValidationError(
+            "This receipt does not say how many containers arrived. Add the "
+            "container count (or scan the units in) before approving."
+        )
+    lot = place_logged_receipt(db, receipt, actor_id=actor_id)
+    placed = int(
+        db.query(func.coalesce(func.sum(LotPlacementEvent.full_units_delta), 0))
+        .filter(
+            LotPlacementEvent.ref_type == "receipt",
+            LotPlacementEvent.ref_id == receipt.id,
+        )
+        .scalar()
+        or 0
+    )
+    if placed < expected:
+        word = unit_word(lot, expected)
+        raise ValidationError(
+            f"The rows on this receipt place {placed} of {expected} {word}. "
+            "Enter the count for every row (or scan the units in) before approving."
         )
     return lot
 

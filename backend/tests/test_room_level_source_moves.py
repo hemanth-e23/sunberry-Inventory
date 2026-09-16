@@ -44,7 +44,27 @@ def _room(db, *, name, room_id, with_row=True, rows=1):
     return made
 
 
-def _receipt(db, seed_data, *, drums, allocations=None, row_id=None):
+class _Approver:
+    id = "u-room-approver"
+    role = "admin"
+    name = "Approver"
+    warehouse_id = None
+
+
+def _receipt(db, seed_data, *, drums, allocations=None, row_id=None, legacy=False):
+    """A drum receipt. By default approved THROUGH the intake gate, so the lot
+    is counted onto its rack — the only shape a transfer may move since the
+    2026-09 audit. ``legacy=True`` inserts the outlawed approved-with-no-
+    placements shape directly, for tests that assert how it is refused."""
+    from app.models import User
+    from app.services import receipt_service
+
+    if not db.query(User).filter(User.id == "u-room-approver").first():
+        db.add(User(id="u-room-approver", username="roomapprover", name="Approver",
+                    email="room@x.test", hashed_password="x", role="admin",
+                    is_active=True))
+        db.flush()
+
     r = Receipt(
         id="rcpt-room-level",
         product_id=seed_data["product"].id,
@@ -55,11 +75,14 @@ def _receipt(db, seed_data, *, drums, allocations=None, row_id=None):
         container_unit="drums",
         weight_per_container=DRUM_LBS,
         lot_number="8CPB350398",
-        status="approved",
+        status="approved" if legacy else "recorded",
         storage_row_id=row_id,
         raw_material_row_allocations=allocations or [],
     )
     db.add(r)
+    db.flush()
+    if not legacy:
+        receipt_service.approve_receipt(db, r, _Approver())
     db.commit()
     return r
 
@@ -201,7 +224,10 @@ class TestPartialRoomLevelTransfer:
         _room(db_session, name="Cage", room_id="sub-cage", with_row=False)
         [dest_row] = _room(db_session, name="ROW 14", room_id="sub-apple")
 
-        receipt = _receipt(db_session, seed_data, drums=88, allocations=[])
+        # legacy shape on purpose: the refusal under test fires on source
+        # resolution, BEFORE the counted-lot guard would refuse this receipt.
+        receipt = _receipt(db_session, seed_data, drums=88, allocations=[],
+                           legacy=True)
         transfer = _transfer(db_session, receipt, source_id="sub-cage",
                              dest_row_id=dest_row, lbs=20 * DRUM_LBS)
 

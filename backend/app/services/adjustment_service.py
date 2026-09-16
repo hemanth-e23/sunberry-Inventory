@@ -30,10 +30,8 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
     if current_user.role == ROLE_WAREHOUSE and adjustment.submitted_by == str(current_user.id):
         raise ForbiddenError("You cannot approve your own adjustments. Only other users' adjustments can be approved.")
 
-    adjustment.status = AdjustmentStatus.APPROVED
-    adjustment.approved_by = str(current_user.id)
-    adjustment.approved_at = datetime.now(timezone.utc)
-
+    # Status flips at the END — the guards below refuse by raising, and a
+    # refused adjustment must be left exactly as it was.
     if adjustment.pallet_licence_ids:
         # Pallet-based (Finished Goods): subtract each pallet's cases from its receipt
         pallets = db.query(PalletLicence).filter(
@@ -63,9 +61,36 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
                 if receipt.quantity <= 0:
                     receipt.status = ReceiptStatus.DEPLETED
     else:
-        # Lot-based (RM / Packaging)
-        receipt = db.query(Receipt).filter(Receipt.id == adjustment.receipt_id).first()
+        # Lot-based (RM / Packaging). Locked: quantity is a read-modify-write,
+        # and staging/transfers may be consuming this receipt concurrently.
+        receipt = (
+            db.query(Receipt)
+            .filter(Receipt.id == adjustment.receipt_id)
+            .with_for_update()
+            .first()
+        )
         if receipt:
+            if adjustment.adjustment_type in DEDUCTION_TYPES:
+                # Quarantined stock cannot be written off around its hold —
+                # a "trash disposal" on a held lot needs the hold released
+                # first, with somebody's name on the release.
+                if _hold_blocks_deduction(db, receipt):
+                    raise ValidationError(
+                        f"Lot {receipt.lot_number or receipt.id} is on hold. "
+                        "Release the hold before writing any of it off."
+                    )
+                # Re-validate against CURRENT stock. The submit-time check can
+                # be days stale (staging consumed the lot meanwhile), and the
+                # old max(0, …) clamp silently swallowed the difference.
+                qty = float(adjustment.quantity or 0)
+                available = float(receipt.quantity or 0) - float(receipt.held_quantity or 0)
+                if qty > available + 1e-6:
+                    raise ValidationError(
+                        f"Only {available:g} {receipt.unit or 'units'} remain on "
+                        f"lot {receipt.lot_number or receipt.id} but this "
+                        f"adjustment asks for {qty:g}. Stock changed since it "
+                        "was submitted — edit the adjustment first."
+                    )
             adjustment.original_quantity = receipt.quantity
             if adjustment.adjustment_type in DEDUCTION_TYPES:
                 receipt.quantity = max(0, receipt.quantity - adjustment.quantity)
@@ -76,7 +101,25 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
             if receipt.quantity <= 0:
                 receipt.status = ReceiptStatus.DEPLETED
 
+    adjustment.status = AdjustmentStatus.APPROVED
+    adjustment.approved_by = str(current_user.id)
+    adjustment.approved_at = datetime.now(timezone.utc)
+
     return adjustment
+
+
+def _hold_blocks_deduction(db: Session, receipt: Receipt) -> bool:
+    """Whether a QA hold (or a transfer under review) stands between this
+    receipt and a write-off. Counted lots are also protected one layer down —
+    `take_units` refuses a held lot — but the refusal must not depend on which
+    bookkeeping layer the receipt lives in."""
+    if receipt.hold:
+        return True
+    if receipt.material_lot_id:
+        lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+        if lot is not None and lot.is_held:
+            return True
+    return False
 
 
 def _apply_row_breakdown(db: Session, receipt: Receipt, adjustment: InventoryAdjustment) -> None:

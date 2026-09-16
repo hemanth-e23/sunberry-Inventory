@@ -102,13 +102,29 @@ def test_warehouse_cannot_approve_own_transfer(
 
 @pytest.mark.integration
 def test_admin_can_approve_transfer(
-    client, auth_headers, admin_auth_headers, approved_receipt
+    client, auth_headers, admin_auth_headers, approved_receipt, db_session
 ):
-    """Admin can approve transfer submitted by warehouse."""
+    """Admin can approve transfer submitted by warehouse.
+
+    Counted lots must name real source and destination racks — approval now
+    refuses a transfer that would move nothing on the racks, so this test
+    supplies both (the fixture lot sits on row-1; row-2 is the destination).
+    """
+    from app.models import StorageRow
+
+    db_session.add(StorageRow(
+        id="row-2", name="Row B", sub_location_id="subloc-warehouse-a",
+        storage_area_id="area-1", pallet_capacity=10,
+    ))
+    db_session.commit()
     payload = {
         "receipt_id": approved_receipt.id,
         "quantity": 50,
         "unit": "cases",
+        "to_location_id": "loc-paw-paw",
+        "to_sub_location_id": "subloc-warehouse-a",
+        "source_breakdown": [{"id": "row-row-1", "quantity": 50}],
+        "destination_breakdown": [{"id": "row-row-2", "quantity": 50}],
     }
     create_resp = client.post(
         "/api/inventory/transfers",

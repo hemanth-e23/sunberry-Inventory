@@ -161,28 +161,39 @@ def base_seed(db_session, warehouse_a):
 
 @pytest.fixture
 def approved_raw_receipt(db_session, base_seed, warehouse_a, admin_user_wh):
-    """An approved raw material receipt with 100 quantity and 5 pallets in row-src."""
+    """An approved raw material receipt: 100 units counted onto row-src.
+
+    Approved through the intake gate so the lot is COUNTED — inserting
+    status="approved" directly with no placements is the phantom shape the
+    gate now outlaws. weight_per_container=1.0 keeps quantity↔unit 1:1, so
+    the historical "100 cases" numbers in these tests stay valid.
+    """
+    from app.services import receipt_service
+
     receipt = Receipt(
         id="rcpt-raw-1",
         product_id="prod-1",
         category_id="cat-raw",
         quantity=100,
         unit="cases",
+        container_count=100,
+        container_unit="drums",
+        weight_per_container=1.0,
+        weight_unit="lbs",
         cases_per_pallet=20,
         pallets=5,
         lot_number="LOT-001",
         location_id="loc-1",
         sub_location_id="subloc-1",
         storage_row_id="row-src",
-        status="approved",
+        status="recorded",
         submitted_by=str(admin_user_wh.id),
-        approved_by=str(admin_user_wh.id),
         warehouse_id="wh-a",
         is_deleted=False,
     )
     db_session.add(receipt)
-    row = db_session.query(StorageRow).filter(StorageRow.id == "row-src").first()
-    row.occupied_pallets = 5
+    db_session.flush()
+    receipt_service.approve_receipt(db_session, receipt, admin_user_wh)
     db_session.commit()
     return receipt
 

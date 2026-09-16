@@ -56,6 +56,19 @@ def approve_receipt(db: Session, receipt: Receipt, current_user) -> Receipt:
             "You cannot approve your own receipts. Only other users' receipts can be approved."
         )
 
+    # The gate runs BEFORE the status flips: for non-FG receipts it either
+    # verifies the forklift's scans (and corrects the paperwork to them) or
+    # turns the typed rows into placements — refusing when neither covers the
+    # stated count, so a refused receipt is left exactly as it was. Approving
+    # paper the racks contradict is how ~170 phantom drums entered the books
+    # on 2026-09-14; this is the guard that makes that loud.
+    #
+    # Imported here rather than at module scope only to keep the receipt service
+    # free of a lot-model dependency at import time; there is no cycle.
+    from app.services import lot_receiving_service
+
+    lot_receiving_service.approve_gate_and_place(db, receipt, actor_id=str(current_user.id))
+
     receipt.status = ReceiptStatus.APPROVED
     receipt.approved_by = str(current_user.id)
     receipt.approved_at = datetime.now(timezone.utc)
@@ -65,17 +78,6 @@ def approve_receipt(db: Session, receipt: Receipt, current_user) -> Receipt:
         PalletLicence.receipt_id == receipt.id,
         PalletLicence.status == PalletStatus.PENDING,
     ).update({"status": PalletStatus.IN_STOCK}, synchronize_session=False)
-
-    # Finished goods became locatable a moment ago, when their licences turned
-    # in_stock. Raw material has no licences, so this is the equivalent step:
-    # the rows typed on the form become placements, which is what makes the
-    # material findable by picking, staging and the row cards.
-    #
-    # Imported here rather than at module scope only to keep the receipt service
-    # free of a lot-model dependency at import time; there is no cycle.
-    from app.services import lot_receiving_service
-
-    lot_receiving_service.place_logged_receipt(db, receipt, actor_id=str(current_user.id))
 
     return receipt
 

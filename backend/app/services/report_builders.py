@@ -6,7 +6,7 @@ warehouse_id, then returns a plain dict ready for the router to return as JSON.
 """
 
 from typing import List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -1662,5 +1662,153 @@ def build_cycle_count_report(
             "item_rows": len(rows),
             "total_variance": round(total_variance, 2),
             "rows_with_discrepancy": len(rows_with_variance),
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. Receipts ↔ Placements Reconciliation (2026-09 audit — the standing alarm)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_reconciliation_report(
+    db: Session,
+    warehouse_id: Optional[str] = None,
+    transfer_days: int = 30,
+) -> dict:
+    """Does the paper agree with the racks? Three sections, each a class of
+    silent failure from the 2026-09 incident:
+
+    * ``phantom_receipts`` — approved non-FG receipts whose quantity is in the
+      books with no intake placements of their own (the ~170 phantom drums).
+    * ``noop_transfers`` — approved RM transfers that produced zero ledger
+      events (the five 09-15 no-ops).
+    * ``lot_imbalances`` — lots whose racked units disagree with the summed
+      container counts of their approved receipts.
+
+    Empty everywhere = the books can be trusted. Run weekly, and after any
+    incident. The approval gates make NEW entries here impossible; this
+    report exists to prove that stays true.
+    """
+    from sqlalchemy import and_, exists
+    from app.models import LotPlacement, LotPlacementEvent, MaterialLot
+
+    ev = LotPlacementEvent
+
+    # 1 ─ phantom receipts
+    intake_exists = exists().where(and_(
+        ev.ref_type.in_(("receipt", "receiving")),
+        ev.ref_id == Receipt.id,
+        ev.full_units_delta > 0,
+    ))
+    phantom_q = (
+        db.query(Receipt)
+        .join(Category, Category.id == Receipt.category_id)
+        .filter(
+            Receipt.status == ReceiptStatus.APPROVED,
+            Receipt.quantity > 0,
+            Category.type != CATEGORY_FINISHED,
+            or_(Receipt.material_lot_id.is_(None), ~intake_exists),
+        )
+    )
+    if warehouse_id:
+        phantom_q = phantom_q.filter(Receipt.warehouse_id == warehouse_id)
+    phantom_rows = []
+    for r in phantom_q.order_by(Receipt.submitted_at.desc()).all():
+        pname, pcode = product_info(db, r.product_id)
+        phantom_rows.append({
+            "receipt_id": r.id,
+            "lot_number": r.lot_number,
+            "product_name": pname,
+            "product_code": pcode,
+            "quantity": r.quantity,
+            "unit": r.unit,
+            "container_count": r.container_count,
+            "has_lot": bool(r.material_lot_id),
+            "submitted_at": r.submitted_at,
+            "approved_at": r.approved_at,
+            "approved_by": user_name(db, r.approved_by),
+        })
+
+    # 2 ─ approved transfers with no ledger events
+    event_exists = exists().where(or_(
+        ev.ref_id == InventoryTransfer.id,
+        ev.ref_id.like(InventoryTransfer.id.concat(":%")),
+    ))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=transfer_days)
+    noop_q = (
+        db.query(InventoryTransfer, Receipt)
+        .join(Receipt, Receipt.id == InventoryTransfer.receipt_id)
+        .join(Category, Category.id == Receipt.category_id)
+        .filter(
+            InventoryTransfer.status == TransferStatus.APPROVED,
+            InventoryTransfer.approved_at >= cutoff,
+            Category.type != CATEGORY_FINISHED,
+            ~event_exists,
+        )
+    )
+    if warehouse_id:
+        noop_q = noop_q.filter(InventoryTransfer.warehouse_id == warehouse_id)
+    noop_rows = []
+    for t, r in noop_q.order_by(InventoryTransfer.approved_at.desc()).all():
+        pname, _pcode = product_info(db, r.product_id)
+        noop_rows.append({
+            "transfer_id": t.id,
+            "transfer_type": t.transfer_type,
+            "lot_number": r.lot_number,
+            "product_name": pname,
+            "quantity": t.quantity,
+            "unit": t.unit,
+            "approved_at": t.approved_at,
+            "approved_by": user_name(db, t.approved_by),
+        })
+
+    # 3 ─ per-lot paper vs racks (container counts, the reliable currency)
+    placed_sub = (
+        db.query(
+            LotPlacement.material_lot_id.label("lot_id"),
+            func.coalesce(func.sum(LotPlacement.full_units + LotPlacement.open_units), 0)
+            .label("racked_units"),
+        )
+        .group_by(LotPlacement.material_lot_id)
+        .subquery()
+    )
+    paper_q = (
+        db.query(
+            MaterialLot,
+            func.coalesce(func.sum(Receipt.container_count), 0).label("paper_units"),
+            func.coalesce(placed_sub.c.racked_units, 0).label("racked_units"),
+        )
+        .join(Receipt, and_(
+            Receipt.material_lot_id == MaterialLot.id,
+            Receipt.status == ReceiptStatus.APPROVED,
+        ))
+        .outerjoin(placed_sub, placed_sub.c.lot_id == MaterialLot.id)
+        .group_by(MaterialLot.id, placed_sub.c.racked_units)
+    )
+    if warehouse_id:
+        paper_q = paper_q.filter(MaterialLot.warehouse_id == warehouse_id)
+    imbalance_rows = []
+    for lot, paper_units, racked_units in paper_q.all():
+        if int(round(paper_units or 0)) == int(racked_units or 0):
+            continue
+        pname, _pcode = product_info(db, lot.product_id)
+        imbalance_rows.append({
+            "lot_code": lot.lot_code,
+            "product_name": pname,
+            "unit_label": lot.unit_label,
+            "paper_units": int(round(paper_units or 0)),
+            "racked_units": int(racked_units or 0),
+            "difference": int(racked_units or 0) - int(round(paper_units or 0)),
+        })
+
+    return {
+        "phantom_receipts": phantom_rows,
+        "noop_transfers": noop_rows,
+        "lot_imbalances": imbalance_rows,
+        "totals": {
+            "phantom_receipts": len(phantom_rows),
+            "noop_transfers": len(noop_rows),
+            "lot_imbalances": len(imbalance_rows),
+            "clean": not (phantom_rows or noop_rows or imbalance_rows),
         },
     }

@@ -177,19 +177,25 @@ class TestLoggedReceiptIsPlaced:
         ]))
         assert _by_row(db_session, receipt.material_lot_id) == {ROW_1: 30, ROW_2: 20}
 
-    def test_multi_row_without_counts_places_nothing(self, db_session, seed):
-        """Refusing to guess.
+    def test_multi_row_without_counts_is_refused_at_approval(self, db_session, seed):
+        """Refusing to guess — and, since the 2026-09 phantom incident,
+        refusing to approve.
 
         Splitting 50 drums across two racks by their pallet share invents a
-        per-rack number nobody counted, and afterwards it is indistinguishable
-        from one somebody did. Unplaced is visible and fixable; fabricated is
-        neither.
+        per-rack number nobody counted. The old answer left the receipt
+        approved-but-unplaced, which is exactly how phantom paper stock enters
+        the books; the approval gate now refuses until every row states its
+        count (or the drums are scanned in).
         """
-        receipt = _approve(db_session, _receipt(db_session, units=50, allocs=[
+        from app.exceptions import ValidationError
+
+        receipt = _receipt(db_session, units=50, allocs=[
             {"rowId": ROW_1, "pallets": 3},
             {"rowId": ROW_2, "pallets": 2},
-        ]))
-        assert receipt.material_lot_id is None
+        ])
+        with pytest.raises(ValidationError, match="place 0 of 50"):
+            _approve(db_session, receipt)
+        assert receipt.status == ReceiptStatus.RECORDED
 
     def test_single_row_needs_no_typed_count(self, db_session, seed):
         """One row holds everything, so container_count is exact, not a guess."""

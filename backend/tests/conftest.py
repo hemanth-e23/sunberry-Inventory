@@ -143,6 +143,15 @@ def approved_receipt(client, auth_headers, admin_auth_headers, seed_data, db_ses
         "unit": "cases",
         "location_id": "loc-paw-paw",
         "sub_location_id": "subloc-warehouse-a",
+        # The approval gate refuses RM receipts whose typed rows don't cover the
+        # container count. Warehouse A has exactly one row, so the room-level
+        # fallback places all 100 there at approval. weight_per_container=1.0
+        # keeps quantity↔container arithmetic coherent (100 × 1.0 = 100), so
+        # counted-lot conversions in adjustment/transfer tests stay valid.
+        "container_count": 100,
+        "container_unit": "drums",
+        "weight_per_container": 1.0,
+        "weight_unit": "lbs",
     }
     create_resp = client.post("/api/receipts/", json=payload, headers=auth_headers)
     assert create_resp.status_code == 200

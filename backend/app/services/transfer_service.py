@@ -1,6 +1,9 @@
 import copy
 import json
 from datetime import datetime, timezone
+from typing import Optional
+
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -21,6 +24,55 @@ from app.utils.locations import warehouse_id_for_row
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def open_reserved_quantity(
+    db: Session, receipt_id: str, *, exclude_id: Optional[str] = None
+) -> float:
+    """Σ quantity of this receipt's transfers still in flight (pending or
+    forklift-submitted).
+
+    This is what reservation means for RM (decision T1, 2026-09-16): drums
+    named on a pending transfer are spoken for, and a second transfer may only
+    claim the remainder. Three transfers of 17+48+8 drums against a 69-drum
+    receipt each passed the old per-transfer check — the sum is what must be
+    checked, at create AND again at approve.
+
+    Approved transfers are deliberately excluded: a warehouse move keeps the
+    material on the receipt, and an approved ship-out already decremented it.
+    """
+    query = db.query(func.coalesce(func.sum(InventoryTransfer.quantity), 0.0)).filter(
+        InventoryTransfer.receipt_id == receipt_id,
+        InventoryTransfer.status.in_(
+            (TransferStatus.PENDING, TransferStatus.FORKLIFT_SUBMITTED)
+        ),
+    )
+    if exclude_id:
+        query = query.filter(InventoryTransfer.id != exclude_id)
+    return float(query.scalar() or 0.0)
+
+
+def _require_unreserved_coverage(
+    db: Session, transfer: InventoryTransfer, receipt: Receipt
+) -> None:
+    """Refuse approval when current stock minus holds minus OTHER in-flight
+    transfers no longer covers this one."""
+    others = open_reserved_quantity(db, transfer.receipt_id, exclude_id=transfer.id)
+    available = (
+        float(receipt.quantity or 0)
+        - float(receipt.held_quantity or 0)
+        - others
+    )
+    if float(transfer.quantity or 0) > available + 1e-6:
+        detail = (
+            f"Only {max(0.0, available):g} {receipt.unit or 'units'} of lot "
+            f"{receipt.lot_number or receipt.id} is unreserved"
+        )
+        if others > 0:
+            detail += f" ({others:g} is on other pending transfers)"
+        raise ValidationError(
+            detail + ". Approve or reject those first, or edit this transfer."
+        )
+
 
 def _is_finished_goods(db: Session, receipt: Receipt) -> bool:
     # Delegates to the shared predicate (app/utils/category_rules.py). This was
@@ -204,25 +256,61 @@ def _apply_raw_material_internal_transfer(
             f"to move it from. Pick the rack it is being taken from."
         )
     source_pallets = parse_pallet_breakdown(transfer.source_breakdown)
-    dest_cases = parse_breakdown(transfer.destination_breakdown)
+    # The destination gets the SAME resolve-or-refuse the source got in the
+    # 09-15 fix. `parse_breakdown` silently drops room-level ids, which let a
+    # counted-lot transfer approve having credited NOTHING — the mirrored half
+    # of the Grater Room incident.
+    dest_cases, dest_unresolved = resolve_breakdown(db, transfer.destination_breakdown)
+    if dest_unresolved:
+        rooms = ", ".join(room_label(db, sid) for sid in dest_unresolved)
+        raise ValidationError(
+            f"The destination in {rooms} is not a single rack, so there is "
+            f"nowhere to put the material. Pick the destination rack."
+        )
     dest_pallets = parse_pallet_breakdown(transfer.destination_breakdown)
 
-    # A move must never credit one end without debiting the other. Ship-out
-    # degrades safely here (deduct_rm_total below); this branch had no
-    # equivalent, so an unmatched source left the content existing twice.
+    # A move must never credit one end without debiting the other — nor the
+    # reverse. Either half missing means the material would appear from or
+    # vanish into nowhere.
     if dest_cases and not source_cases:
         raise ValidationError(
             "This transfer has a destination but no rack to take the material "
             "from, so it would add stock without removing any. Pick a source rack."
         )
+    if source_cases and not dest_cases:
+        raise ValidationError(
+            "This transfer has a source rack but no destination rack, so the "
+            "material would leave the books. Pick the destination rack."
+        )
 
-    if lps.is_counted_lot(db, receipt.material_lot_id):
-        _move_counted_lot(db, receipt, source_cases, dest_cases, transfer.id)
-    else:
-        # Free source rows (content + explicit pallets) and sync the allocation JSON.
-        deduct_rm_rows(db, receipt, source_cases, pallets_by_row=source_pallets, update_rows=True)
-        # Reserve destination rows (content + explicit pallets) and sync the JSON.
-        add_rm_rows(db, receipt, dest_cases, pallets_by_row=dest_pallets, update_rows=True)
+    # A lot nobody counted onto a rack cannot be moved between racks. The old
+    # fallback silently updated only the allocation JSON here — an approved
+    # transfer that moved nothing physical (the five 09-15 no-ops).
+    if not lps.is_counted_lot(db, receipt.material_lot_id):
+        raise ValidationError(
+            f"Lot {receipt.lot_number or receipt.id} is not counted on any "
+            "rack, so a transfer cannot move it. Receive or count it onto a "
+            "rack first."
+        )
+
+    moved_units = _move_counted_lot(db, receipt, source_cases, dest_cases, transfer.id)
+
+    # Postcondition: approval must move on the racks exactly what the paper
+    # says. Every silent-no-op incident in the 2026-09 audit was the absence
+    # of this check.
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    expected_units = lps.units_for_quantity(lot, float(transfer.quantity or 0)) if lot else 0
+    if moved_units <= 0:
+        raise ValidationError(
+            "Approving this transfer would move nothing on the racks. Check "
+            "the source and destination racks named on it."
+        )
+    if expected_units and moved_units != expected_units:
+        raise ValidationError(
+            f"This transfer's quantity works out to {expected_units} unit(s) "
+            f"but the racks named on it would move {moved_units}. Fix the "
+            "per-rack quantities so they match."
+        )
 
     # Move the receipt's location pointer ONLY when the whole receipt moved.
     #
@@ -243,8 +331,9 @@ def _apply_raw_material_internal_transfer(
 
 def _move_counted_lot(
     db: Session, receipt: Receipt, source_cases: dict, dest_cases: dict, ref_id: str
-) -> None:
+) -> int:
     """Rack-to-rack for a counted lot: whole containers, source rack to dest rack.
+    Returns the total units actually moved, for the caller's postcondition.
 
     Uses `move_units`, which writes the two halves of the move under one shared
     ref. That matters more here than anywhere else: a move is the one operation
@@ -258,12 +347,13 @@ def _move_counted_lot(
     """
     lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
     if not lot or not source_cases or not dest_cases:
-        return
+        return 0
 
     dest_rows = [rid for rid in dest_cases if rid]
     if not dest_rows:
-        return
+        return 0
 
+    moved = 0
     for index, (src_row, qty) in enumerate(source_cases.items()):
         units = lps.units_for_quantity(lot, float(qty or 0))
         if units <= 0 or not src_row:
@@ -279,6 +369,8 @@ def _move_counted_lot(
             reason="Warehouse transfer",
             ref_id=f"{ref_id}:{index}",
         )
+        moved += units
+    return moved
 
 
 def _apply_raw_material_ship_out(
@@ -574,18 +666,15 @@ def approve_transfer(db: Session, transfer: InventoryTransfer, current_user) -> 
     if finished and not pl_ids and receipt.allocation:
         _apply_finished_goods_occupancy_update(db, transfer, receipt)
 
+    # --- Raw materials / packaging: re-check coverage at approve time ---
+    # Stock, holds AND other in-flight transfers can all change between create
+    # and approve; the create-time check alone let 73 drums be approved out of
+    # a 69-drum receipt (each transfer individually under the total).
+    if not finished:
+        _require_unreserved_coverage(db, transfer, receipt)
+
     # --- Raw materials / packaging shipped out ---
     if transfer.transfer_type == "shipped-out" and not finished:
-        # Re-check against on-hold inventory at approve time — held_quantity can
-        # change between create and approve. FG pallets get an is_held check
-        # above; raw materials are guarded here.
-        available = receipt.quantity - (receipt.held_quantity or 0)
-        if transfer.quantity > available:
-            from fastapi import HTTPException
-            raise HTTPException(
-                status_code=400,
-                detail="Requested quantity exceeds available (on-hold inventory excluded)"
-            )
         _apply_raw_material_ship_out(db, transfer, receipt)
 
     # --- Raw materials / packaging internal transfer ---
