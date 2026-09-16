@@ -77,7 +77,7 @@ def _mint_id(prefix: str) -> str:
 # ─── lot identity ─────────────────────────────────────────────────────────────
 
 def normalize_lot_number(value: Optional[str]) -> str:
-    """Trim, collapse internal whitespace, upper. Nothing else.
+    """Trim, REMOVE internal whitespace, upper. Nothing else.
 
     Deliberately conservative. Over-normalizing (stripping punctuation, leading
     zeros, etc.) merges two genuinely different vendor lots — and because every
@@ -87,7 +87,13 @@ def normalize_lot_number(value: Optional[str]) -> str:
     """
     if not value:
         return ""
-    return re.sub(r"\s+", " ", value.strip()).upper()
+    # Internal whitespace is REMOVED, not collapsed (2026-09-16): a space is
+    # exactly how "ITCAGAMP/2106Y" and "ITCAGAMP/2106 Y" minted two lots for
+    # one physical delivery in prod (the `.4F942B` collision suffix is the
+    # scar). Vendors do not distinguish lots by spacing; typists do, by
+    # accident. Display strings keep whatever was typed — only the KEY loses
+    # its spaces.
+    return re.sub(r"\s+", "", value.strip()).upper()
 
 
 def build_lot_key(
@@ -674,10 +680,15 @@ def move_units(
     full_units: int,
     actor_id: Optional[str] = None,
     reason: Optional[str] = None,
+    ref_type: str = "move",
     ref_id: Optional[str] = None,
     idempotency_key: Optional[str] = None,
 ) -> dict:
-    """Move whole units between rows. Writes TWO events sharing a ref."""
+    """Move whole units between rows. Writes TWO events sharing a ref.
+
+    `ref_type` defaults to the historical "move"; transfer approvals pass
+    "transfer" so reconciliation can join events to transfers without
+    pattern-matching (audit T7)."""
     if from_row_id == to_row_id:
         raise ValidationError("Source and destination rows are the same")
     if full_units <= 0:
@@ -707,13 +718,13 @@ def move_units(
     src = apply_delta(
         db, lot, from_row_id, event_type=EVENT_MOVED,
         full_units_delta=-int(full_units), counterpart_row_id=to_row_id,
-        actor_id=actor_id, ref_type="move", ref_id=ref, reason=reason,
+        actor_id=actor_id, ref_type=ref_type, ref_id=ref, reason=reason,
         idempotency_key=idempotency_key,
     )
     dst = apply_delta(
         db, lot, to_row_id, event_type=EVENT_MOVED,
         full_units_delta=int(full_units), counterpart_row_id=from_row_id,
-        actor_id=actor_id, ref_type="move", ref_id=ref, reason=reason,
+        actor_id=actor_id, ref_type=ref_type, ref_id=ref, reason=reason,
     )
     return {"from": src, "to": dst, "ref_id": ref}
 
@@ -876,6 +887,50 @@ def units_for_quantity(lot: MaterialLot, quantity: float) -> int:
             f"quantity of {quantity} cannot be turned into a count."
         )
     return int(math.ceil((float(quantity) - 1e-9) / per_unit))
+
+
+def receipt_units_for_quantity(
+    receipt, lot: MaterialLot, quantity: float, *, exact: bool = True
+) -> int:
+    """Whole units for `quantity`, priced at THIS RECEIPT's own weight.
+
+    The lot-level figure is a single number, but one prod vendor lot has
+    arrived at 474, 502 and 559 lbs/drum across deliveries — converting with
+    the wrong figure moved 4 phantom drums off a rack (2026-09 audit T8/I9).
+    Each receipt knows what ITS drums weigh (the owner's 14×200 + 12×210
+    rule), so the receipt's `weight_per_container` wins and the lot's figure
+    is only a fallback for receipts that predate it.
+
+    ``exact=True`` (transfers, adjustments): the quantity must be a WHOLE
+    multiple — sealed drums move whole, and ceiling a partial is how a
+    250-lb write-off deleted a 500-lb drum. Refuse and show the arithmetic.
+
+    ``exact=False`` (staging): rounds UP like `units_for_quantity` — pulling
+    600 lbs of 500-lb drums takes two, and the remainder comes back as an
+    open container on return. Same semantics, per-receipt price.
+    """
+    per_unit = float(
+        (getattr(receipt, "weight_per_container", None) if receipt is not None else 0)
+        or lot.weight_per_unit
+        or 0
+    )
+    if per_unit <= 0:
+        raise ValidationError(
+            f"Lot {lot.lot_code} has no weight per {lot.unit_label}, so a "
+            f"quantity of {quantity} cannot be turned into a count."
+        )
+    ratio = float(quantity) / per_unit
+    if not exact:
+        return int(math.ceil(ratio - 1e-9))
+    rounded = int(round(ratio))
+    if rounded < 0 or abs(ratio - rounded) > 0.01:
+        word = lot.unit_label or "unit"
+        raise ValidationError(
+            f"{float(quantity):g} is not a whole number of {word}s at this "
+            f"receipt's {per_unit:g} per {word} (= {ratio:.2f}). Enter a "
+            f"whole-{word} amount."
+        )
+    return rounded
 
 
 def take_units(

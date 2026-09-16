@@ -22,6 +22,10 @@ def test_create_receipt_persists_camelcase_row_allocations(
         "unit": "lbs",
         "location_id": "loc-paw-paw",
         "sub_location_id": "subloc-warehouse-a",
+        "container_count": 100,
+        "container_unit": "drums",
+        "weight_per_container": 1.0,
+        "weight_unit": "lbs",
         "cases_per_pallet": 50,
         "rawMaterialRowAllocations": [
             {"rowId": "row-1", "cases": 100, "pallets": 2},
@@ -54,6 +58,10 @@ def test_snake_case_key_is_ignored(client, auth_headers, seed_data, db_session):
         "unit": "lbs",
         "location_id": "loc-paw-paw",
         "sub_location_id": "subloc-warehouse-a",
+        "container_count": 100,
+        "container_unit": "drums",
+        "weight_per_container": 1.0,
+        "weight_unit": "lbs",
         "raw_material_row_allocations": [{"rowId": "row-1", "cases": 100, "pallets": 2}],
     }
     resp = client.post("/api/receipts/", json=payload, headers=auth_headers)

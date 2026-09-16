@@ -529,6 +529,21 @@ def scan_unit(
     if not receipt:
         raise NotFoundError("Receipt", receipt_id)
 
+    # A closed receipt takes no more scans (audit I6): an offline queue
+    # replaying after the office rejected — or after approval booked the
+    # count — must not book stock against closed paperwork. Soft answer, so
+    # the queued scan is not marked permanently failed; genuine replays of
+    # already-recorded scans returned above, before this gate.
+    if receipt.status not in (ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED):
+        return _scan_payload(
+            db, receipt, None, None,
+            status="receipt_closed",
+            message=(
+                f"This receipt is {receipt.status} and takes no more scans. "
+                "See the office before placing these units."
+            ),
+        )
+
     lot = resolve_lot_code(db, lot_code)
     if lot is None:
         return _scan_payload(

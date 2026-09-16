@@ -35,7 +35,10 @@ def _lot_row_footprint(receipt: Receipt) -> dict:
     return footprint
 
 
-def _stage_free_rack(db: Session, receipt: Receipt, staged_qty: float, staged_pallets: float) -> float:
+def _stage_free_rack(
+    db: Session, receipt: Receipt, staged_qty: float, staged_pallets: float,
+    source_row_id=None,
+) -> float:
     """Free a lot's rack footprint when material is pulled for staging.
 
     Two languages, one meaning. A COUNTED lot — one with placements — comes off
@@ -47,7 +50,7 @@ def _stage_free_rack(db: Session, receipt: Receipt, staged_qty: float, staged_pa
     Returns the pallet count actually freed.
     """
     if lps.is_counted_lot(db, receipt.material_lot_id):
-        return _stage_free_counted(db, receipt, staged_qty)
+        return _stage_free_counted(db, receipt, staged_qty, source_row_id)
 
     footprint = _lot_row_footprint(receipt)
     total_cases = sum(r["cases"] for r in footprint.values())
@@ -73,7 +76,9 @@ def _stage_free_rack(db: Session, receipt: Receipt, staged_qty: float, staged_pa
     return float(staged_pallets or 0)
 
 
-def _stage_free_counted(db: Session, receipt: Receipt, staged_qty: float) -> float:
+def _stage_free_counted(
+    db: Session, receipt: Receipt, staged_qty: float, source_row_id=None
+) -> float:
     """Pull whole containers off named racks for a counted lot.
 
     The pallet argument is deliberately ignored here. For a counted lot the
@@ -94,7 +99,12 @@ def _stage_free_counted(db: Session, receipt: Receipt, staged_qty: float) -> flo
     remaining = float(staged_qty)
     freed_units = 0.0
     if not lot.is_held:
-        for placement in lps.placements_for_lot(db, lot.id):
+        # When the worker named the rack they pulled from (audit S8), stay on
+        # it — draining fullest-first swapped drums between rows on paper.
+        placements = lps.placements_for_lot(db, lot.id)
+        if source_row_id:
+            placements = [p for p in placements if p.storage_row_id == source_row_id]
+        for placement in placements:
             while remaining > 1e-6 and int(placement.open_units or 0) > 0:
                 open_units = int(placement.open_units)
                 open_qty = float(placement.open_remaining_qty or 0)
@@ -129,11 +139,12 @@ def _stage_free_counted(db: Session, receipt: Receipt, staged_qty: float) -> flo
                     break
 
     if remaining > 1e-6:
-        units = lps.units_for_quantity(lot, remaining)
+        units = lps.receipt_units_for_quantity(receipt, lot, remaining, exact=False)
         taken = lps.take_units(
             db, lot,
             units=units,
             event_type=lps.EVENT_STAGED,
+            from_row_id=source_row_id,
             ref_type="staging",
             ref_id=receipt.id,
             reason="Pulled for production staging",
@@ -430,7 +441,9 @@ def create_staging_transfer(db: Session, staging_data, current_user) -> dict:
             # estimate from the lot's real pallets when not supplied). Content and
             # pallets come off independently — no cases/cases_per_pallet.
             pallets_staged = _stage_free_rack(
-                db, receipt, float(lot_request.quantity), getattr(lot_request, "pallets", None)
+                db, receipt, float(lot_request.quantity),
+                getattr(lot_request, "pallets", None),
+                source_row_id=getattr(lot_request, "source_row_id", None),
             )
 
             receipt.location_id = staging_data.staging_location_id
@@ -453,6 +466,21 @@ def create_staging_transfer(db: Session, staging_data, current_user) -> dict:
             db.add(staging_item)
             created_transfers.append(transfer)
             created_staging_items.append(staging_item)
+
+    # Link to production request items in the SAME transaction (audit S9).
+    # The old flow did this with a second HTTP call, and a crash between the
+    # two left staged material linked to no request.
+    for f in (getattr(staging_data, "fulfillments", None) or []):
+        from app.services import staging_request_service
+
+        staging_request_service.fulfill_staging_request_item(
+            db,
+            request_id=f.request_id,
+            item_id=f.item_id,
+            quantity_fulfilled=float(f.quantity),
+            staging_item_ids=[s.id for s in created_staging_items],
+            commit=False,
+        )
 
     return {
         "staging_batch_id": staging_batch_id,
@@ -510,7 +538,10 @@ def mark_staging_used(db: Session, staging_item: StagingItem, request, current_u
     )
     # Rack/allocation already settled at staging time; consumption just reduces
     # the lot total.
-    receipt.quantity = max(0, receipt.quantity - request.quantity)
+    # Spills across the lot's receipts instead of clamping at zero (audit S5).
+    from app.services.staging_request_service import consume_receipt_quantity
+
+    consume_receipt_quantity(db, receipt, request.quantity)
     db.add(adjustment)
 
     return staging_item
@@ -522,6 +553,28 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
     if request.quantity > available_quantity:
         raise ValidationError(
             f"Cannot return more than available. Available: {available_quantity}, Requested: {request.quantity}"
+        )
+
+    # The rack is MANDATORY (audit S1): a return without one incremented
+    # quantity_returned while re-crediting no rack — the drums were deducted
+    # at pull and now existed nowhere until a physical count found them. The
+    # request-flow twin has always refused this; the desk flow now matches.
+    # A room named instead of a rack resolves to the room's single row, the
+    # same way intake and transfers resolve.
+    if not request.to_storage_row_id and getattr(request, "to_sub_location_id", None):
+        row_ids = [
+            rid for (rid,) in db.query(StorageRow.id).filter(
+                StorageRow.sub_location_id == request.to_sub_location_id,
+                StorageRow.is_active == True,  # noqa: E712
+            ).all()
+        ]
+        if len(row_ids) == 1:
+            request.to_storage_row_id = row_ids[0]
+    if not request.to_storage_row_id:
+        raise ValidationError(
+            "Pick the rack these containers are going back onto. A return "
+            "without a rack re-credits nothing, and the material vanishes "
+            "from every count."
         )
 
     receipt = db.query(Receipt).filter(Receipt.id == staging_item.receipt_id).first()

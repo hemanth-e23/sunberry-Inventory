@@ -14,7 +14,10 @@ from app.services import hold_service
 def test_send_back_sets_enum_status(client, auth_headers, admin_auth_headers, seed_data, db_session):
     create = client.post("/api/receipts/", json={
         "product_id": "product-1", "category_id": "raw-sunberry",
-        "quantity": 50, "unit": "lbs", "location_id": "loc-paw-paw",
+        "quantity": 50, "unit": "lbs",
+        "container_count": 50, "container_unit": "drums",
+        "weight_per_container": 1.0, "weight_unit": "lbs",
+        "location_id": "loc-paw-paw",
         "sub_location_id": "subloc-warehouse-a",
     }, headers=auth_headers)
     assert create.status_code == 200, create.text
@@ -39,7 +42,10 @@ def test_unsupported_adjustment_type_rejected(client, auth_headers, approved_rec
 def test_assign_storage_is_idempotent(client, auth_headers, seed_data, db_session):
     create = client.post("/api/receipts/", json={
         "product_id": "product-1", "category_id": "raw-sunberry",
-        "quantity": 100, "unit": "lbs", "location_id": "loc-paw-paw",
+        "quantity": 100, "unit": "lbs",
+        "container_count": 100, "container_unit": "drums",
+        "weight_per_container": 1.0, "weight_unit": "lbs",
+        "location_id": "loc-paw-paw",
         "sub_location_id": "subloc-warehouse-a", "cases_per_pallet": 50,
     }, headers=auth_headers)
     assert create.status_code == 200, create.text

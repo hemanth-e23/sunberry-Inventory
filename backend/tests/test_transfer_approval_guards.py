@@ -239,3 +239,68 @@ class TestHappyPath:
         assert _by_row(db_session, receipt.material_lot_id) == {
             ROW_1: 15, "row-guard-solo": 5,
         }
+
+
+class TestPerReceiptWeights:
+    """Audit T8/I9 — the owner's 14×200 + 12×210 rule: conversions price at
+    each receipt's own weight, never the lot's single figure."""
+
+    def _second_delivery(self, db, first, *, units, weight):
+        """Another truck of the SAME vendor lot, at a different lbs/drum."""
+        receipt = Receipt(
+            id=f"rcpt-guard-{uuid.uuid4().hex[:10]}",
+            product_id=PRODUCT,
+            category_id="cat-guard-raw",
+            vendor_id=VENDOR,
+            lot_number=first.lot_number,
+            expiration_date=BBD,
+            quantity=units * weight,
+            unit="lbs",
+            container_count=units,
+            container_unit="drums",
+            weight_per_container=weight,
+            weight_unit="lbs",
+            warehouse_id=WH,
+            sub_location_id=SUB,
+            storage_row_id=ROW_1,
+            status=ReceiptStatus.RECORDED,
+            submitted_by="u-guard-submit",
+        )
+        db.add(receipt)
+        db.flush()
+        receipt_service.approve_receipt(db, receipt, _Approver())
+        db.flush()
+        assert receipt.material_lot_id == first.material_lot_id, "same lot"
+        return receipt
+
+    def test_conversion_uses_this_receipts_weight_not_the_lots(
+        self, db_session, guard_seed
+    ):
+        """Prod case: lot minted at 500 lbs/drum, a later truck arrived at 400.
+        A 5-drum transfer off the 400-lb receipt is 2,000 lbs — the lot's
+        figure would ceil(2000/500)=4 and then fail the postcondition; the
+        receipt's own weight makes it exactly 5."""
+        first = _counted_receipt(db_session, units=10)          # 500 lbs/drum
+        second = self._second_delivery(db_session, first, units=10, weight=400.0)
+        transfer = _transfer(
+            db_session, second, qty=5 * 400.0,
+            src=[{"id": f"row-{ROW_1}", "quantity": 5 * 400.0}],
+            dest=[{"id": f"row-{ROW_2}", "quantity": 5 * 400.0}],
+        )
+        transfer_service.approve_transfer(db_session, transfer, _Approver())
+        db_session.commit()
+        assert transfer.status == TransferStatus.APPROVED
+        assert _by_row(db_session, first.material_lot_id) == {ROW_1: 15, ROW_2: 5}
+
+    def test_partial_drum_quantities_are_refused(self, db_session, guard_seed):
+        """250 lbs of 500-lb drums is not a thing that can move between racks —
+        refuse with the arithmetic instead of ceiling a whole drum away."""
+        receipt = _counted_receipt(db_session, units=10)
+        transfer = _transfer(
+            db_session, receipt, qty=1250.0,
+            src=[{"id": f"row-{ROW_1}", "quantity": 1250.0}],
+            dest=[{"id": f"row-{ROW_2}", "quantity": 1250.0}],
+        )
+        with pytest.raises(ValidationError, match="whole number"):
+            transfer_service.approve_transfer(db_session, transfer, _Approver())
+        assert transfer.status == TransferStatus.PENDING

@@ -299,8 +299,12 @@ def fulfill_staging_request_item(
     item_id: str,
     quantity_fulfilled: float,
     staging_item_ids: Optional[List[str]] = None,
+    commit: bool = True,
 ) -> dict:
-    """Mark a staging request item as (partially) fulfilled."""
+    """Mark a staging request item as (partially) fulfilled.
+
+    ``commit=False`` lets `create_staging_transfer` run this inside its own
+    transaction (audit S9) — the caller owns the commit."""
     sr = db.query(StagingRequest).filter(StagingRequest.id == request_id).first()
     if not sr:
         raise NotFoundError("Staging request", request_id)
@@ -331,7 +335,10 @@ def fulfill_staging_request_item(
 
     # Update parent request status
     _update_parent_request_status(db, request_id)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
 
     return {"status": "ok", "item_status": item.status, "request_status": sr.status}
 
@@ -483,11 +490,10 @@ def mark_request_item_used(
     db.add(adjustment)
 
     # Consuming staged material: the rack was already freed when this material
-    # was pulled for staging, so consumption only reduces the lot total — no
-    # storage-row or allocation-JSON change here.
-    receipt.quantity = max(0, receipt.quantity - quantity)
-    if receipt.quantity <= 0:
-        receipt.status = ReceiptStatus.DEPLETED
+    # was pulled for staging, so consumption only reduces the paper total — no
+    # storage-row or allocation-JSON change here. Spills across the lot's
+    # receipts instead of clamping at zero (audit S5).
+    consume_receipt_quantity(db, receipt, quantity)
 
     # Update staging item
     staging_item.quantity_used += quantity
@@ -829,6 +835,46 @@ def get_reconciliation_summary(db: Session) -> list:
 # Notify ingredient used (push from Production)
 # ---------------------------------------------------------------------------
 
+def consume_receipt_quantity(db: Session, receipt, amount: float) -> None:
+    """Decrement paper quantity by `amount`, SPILLING any excess across the
+    lot's other open receipts (oldest first) instead of clamping at zero
+    (audit S5). The gun pins a StagingItem to the lot's NEWEST receipt, so a
+    multi-receipt lot consumed through one receipt used to lose the excess —
+    Σ receipt.quantity drifted above physical forever."""
+    take = min(float(receipt.quantity or 0), float(amount))
+    receipt.quantity = float(receipt.quantity or 0) - take
+    if receipt.quantity <= 0:
+        receipt.status = ReceiptStatus.DEPLETED
+    excess = float(amount) - take
+    if excess <= 1e-9 or not receipt.material_lot_id:
+        return
+    siblings = (
+        db.query(Receipt)
+        .filter(
+            Receipt.material_lot_id == receipt.material_lot_id,
+            Receipt.id != receipt.id,
+            Receipt.status == ReceiptStatus.APPROVED,
+            Receipt.quantity > 0,
+        )
+        .order_by(Receipt.submitted_at.asc())
+        .all()
+    )
+    for sib in siblings:
+        if excess <= 1e-9:
+            break
+        t = min(float(sib.quantity or 0), excess)
+        sib.quantity = float(sib.quantity) - t
+        if sib.quantity <= 0:
+            sib.status = ReceiptStatus.DEPLETED
+        excess -= t
+    if excess > 1e-9:
+        logger.warning(
+            "consume_receipt_quantity: lot %s had no open receipts left to "
+            "absorb %.3f — paper under-states consumption",
+            receipt.material_lot_id, excess,
+        )
+
+
 def notify_ingredient_used(
     db: Session,
     production_batch_uid: str,
@@ -836,17 +882,51 @@ def notify_ingredient_used(
     quantity_used: float,
     unit: Optional[str] = None,
     lot_barcode: Optional[str] = None,
+    event_id: Optional[str] = None,
 ) -> dict:
     """
     Handle notification from Production when a floor worker scans an ingredient.
     Best-effort — returns 200 even if no matching staging request is found.
+
+    Audit S4 hardening: `event_id` (the production scan's own id) makes a
+    retried webhook idempotent — the same event never deducts twice. Batch
+    matching is EXACT against the comma-split uid list (substring matching
+    made "PB-12" hit "PB-123"). A `lot_barcode` restricts attribution to
+    staging items of THAT lot; one that resolves to nothing staged returns
+    without deducting — wrong-lot usage must be looked at, not FIFO'd away.
     """
-    matching_requests = db.query(StagingRequest).filter(
+    if event_id:
+        already = db.query(InventoryAdjustment.id).filter(
+            InventoryAdjustment.id == f"adj-prod-{event_id}"
+        ).first()
+        if already:
+            return {"status": "ok", "marked_count": 0,
+                    "message": "Event already processed (idempotent replay)"}
+
+    candidates = db.query(StagingRequest).filter(
         StagingRequest.production_batch_uid.contains(production_batch_uid)
     ).all()
+    matching_requests = [
+        sr for sr in candidates
+        if production_batch_uid in [
+            t.strip() for t in (sr.production_batch_uid or "").split(",")
+        ]
+    ]
 
     if not matching_requests:
         return {"status": "ok", "message": "No matching staging request found (may not have been staged yet)"}
+
+    # Resolve the scanned lot up front; a barcode that matches no lot means
+    # the deduction cannot be attributed and must NOT fall back to FIFO.
+    scanned_lot_id = None
+    if lot_barcode:
+        from app.services import lot_receiving_service as lrs
+
+        scanned_lot = lrs.resolve_lot_code(db, lot_barcode)
+        if scanned_lot is None:
+            return {"status": "unmatched_lot", "marked_count": 0,
+                    "message": f"Lot barcode {lot_barcode!r} matches no lot — nothing deducted"}
+        scanned_lot_id = scanned_lot.id
 
     marked_count = 0
     for sr in matching_requests:
@@ -883,13 +963,19 @@ def notify_ingredient_used(
                 receipt = db.query(Receipt).filter(Receipt.id == si.receipt_id).first()
                 if not receipt:
                     continue
+                if scanned_lot_id and receipt.material_lot_id != scanned_lot_id:
+                    # The worker scanned a specific lot; this item is another.
+                    continue
 
-                adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+                if event_id and marked_count == 0:
+                    adj_id = f"adj-prod-{event_id}"
+                else:
+                    adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
                 adjustment = InventoryAdjustment(
                     id=adj_id,
                     receipt_id=receipt.id,
                     product_id=receipt.product_id,
-                    adjustment_type="stock-correction",
+                    adjustment_type="production-consumption",
                     quantity=use_qty,
                     reason=f"Used in production scan (batch {production_batch_uid}, lot {lot_barcode or 'N/A'})",
                     status=AdjustmentStatus.APPROVED,
@@ -900,10 +986,9 @@ def notify_ingredient_used(
                 )
                 db.add(adjustment)
 
-                # Staged material: rack freed at staging, so only reduce the lot total.
-                receipt.quantity = max(0, receipt.quantity - use_qty)
-                if receipt.quantity <= 0:
-                    receipt.status = ReceiptStatus.DEPLETED
+                # Staged material: rack freed at staging, so only reduce the
+                # paper total — spilling across the lot's receipts (audit S5).
+                consume_receipt_quantity(db, receipt, use_qty)
 
                 si.quantity_used += use_qty
                 if si.quantity_used >= si.quantity_staged - si.quantity_returned:
@@ -1004,6 +1089,7 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                     seen.add(si_id)
                     yield si_id
 
+    overage_flagged: list = []
     matched_by_lot_qty = 0.0
     fallback_qty = 0.0
 
@@ -1063,6 +1149,36 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                 fallback_pool -= take
                 fallback_qty += take
 
+        # Whatever is STILL left is production using more than was ever
+        # staged. The old code dropped it on the floor (audit S3) — material
+        # left the building with inventory never told. It becomes a PENDING
+        # adjustment in the approvals queue: the next-day worker names the
+        # rack it actually came from, then approves.
+        if fallback_pool > 1e-6 and items:
+            overage = round(fallback_pool, 3)
+            anchor = db.query(Receipt).filter(Receipt.id == items[0].receipt_id).first()
+            if anchor is not None:
+                db.add(InventoryAdjustment(
+                    id=f"adj-overage-{uuid.uuid4().hex[:10]}",
+                    receipt_id=anchor.id,
+                    product_id=anchor.product_id,
+                    adjustment_type="stock-correction",
+                    quantity=overage,
+                    reason=(
+                        f"PRODUCTION OVERAGE — used {overage:g} more than was "
+                        f"staged for request {request_id} (SID {sid}). Confirm "
+                        "which rack it came from, correct the quantity if "
+                        "needed, then approve."
+                    ),
+                    status=AdjustmentStatus.PENDING,
+                    submitted_by=None,
+                ))
+                overage_flagged.append({"sid": sid, "quantity": overage})
+            logger.warning(
+                "Sync %s: production used %.3f more than staged for SID %s — "
+                "flagged for review", request_id, fallback_pool, sid,
+            )
+
         # Apply per-item deltas: positive = newly used, negative = credit back.
         for si in items:
             delta = round(target[si.id] - float(si.quantity_used or 0), 6)
@@ -1107,7 +1223,7 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                 id=adj_id,
                 receipt_id=receipt.id,
                 product_id=receipt.product_id,
-                adjustment_type="stock-correction",
+                adjustment_type="production-consumption",
                 quantity=use_qty,
                 reason=f"Synced from Production — {batches_completed} completed batch(es)",
                 status=AdjustmentStatus.APPROVED,
@@ -1117,10 +1233,9 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                 approved_by=None,
             ))
 
-            # Staged material: rack freed at staging, so only reduce the lot total.
-            receipt.quantity = max(0, receipt.quantity - use_qty)
-            if receipt.quantity <= 0:
-                receipt.status = ReceiptStatus.DEPLETED
+            # Staged material: rack freed at staging, so only reduce the
+            # paper total — spilling across the lot's receipts (audit S5).
+            consume_receipt_quantity(db, receipt, use_qty)
 
             si.quantity_used += use_qty
             if si.quantity_used >= si.quantity_staged - si.quantity_returned:
@@ -1147,6 +1262,7 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
         "total_batches": len(batch_uids),
         "marked_count": total_marked,
         "last_synced_at": sr.last_synced_at.isoformat(),
+        "overage_flagged": overage_flagged,
     }
 
 

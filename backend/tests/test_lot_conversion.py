@@ -27,6 +27,7 @@ from app.models import (
     InventoryAdjustment,
     InventoryHoldAction,
     InventoryTransfer,
+    StagingItem,
     Location,
     MaterialLot,
     Product,
@@ -853,3 +854,95 @@ class TestProjectionStaysHonest:
         report = lps.reconcile_lot(db_session, lot.id)
         assert report["drifted"] == 0
         assert report["rows"] == []
+
+
+class TestDeskStagingGuards:
+    """Audit S1/S8 (2026-09-16): desk-flow staging must name real racks."""
+
+    def test_desk_pull_honours_the_named_rack(self, db_session, seed):
+        """The worker pulled from A-02; the old fullest-first guess would have
+        deducted A-01 and swapped drums between rows on paper."""
+        receipt = _approve(db_session, _receipt(db_session, units=50, allocs=[
+            {"rowId": ROW_1, "pallets": 3, "units": 30},
+            {"rowId": ROW_2, "pallets": 2, "units": 20},
+        ]))
+        staging_service._stage_free_rack(
+            db_session, receipt, 5 * 500.0, None, source_row_id=ROW_2
+        )
+        db_session.commit()
+        assert _by_row(db_session, receipt.material_lot_id) == {ROW_1: 30, ROW_2: 15}
+
+    def test_return_without_a_rack_is_refused(self, db_session, seed):
+        """Audit S1: the desk return used to record quantity_returned while
+        re-crediting NO rack — drums deducted at pull then existing nowhere."""
+        from types import SimpleNamespace
+
+        receipt = _approve(db_session, _receipt(db_session, units=10, allocs=[
+            {"rowId": ROW_1, "pallets": 1, "units": 10}]))
+        staging_service._stage_free_rack(db_session, receipt, 5 * 500.0, None,
+                                         source_row_id=ROW_1)
+        transfer = InventoryTransfer(
+            id="transfer-desk-guard", receipt_id=receipt.id, quantity=5 * 500.0,
+            unit="lbs", transfer_type="staging", status="completed",
+            requested_by="u-submit",
+        )
+        db_session.add(transfer)
+        db_session.flush()
+        staging_item = StagingItem(
+            id="stag-desk-guard", transfer_id=transfer.id, receipt_id=receipt.id,
+            product_id=PRODUCT, quantity_staged=5 * 500.0, pallets_staged=0,
+        )
+        db_session.add(staging_item)
+        db_session.flush()
+
+        from app.exceptions import ValidationError
+
+        request = SimpleNamespace(
+            quantity=2 * 500.0, to_location_id="loc-conv",
+            to_sub_location_id=None, to_storage_row_id=None, pallets=None,
+        )
+        with pytest.raises(ValidationError, match="Pick the rack"):
+            staging_service.return_staging_item(
+                db_session, staging_item, request, _Approver()
+            )
+
+    def test_return_to_a_one_rack_room_resolves(self, db_session, seed):
+        """A return naming only the room lands on the room's single rack —
+        same resolution intake and transfers use."""
+        from types import SimpleNamespace
+
+        db_session.add(SubLocation(id="sub-conv-one", name="One-Rack Room",
+                                   location_id="loc-conv", storage_unit="drum"))
+        db_session.add(StorageRow(id="row-conv-solo", name="C-SOLO",
+                                  sub_location_id="sub-conv-one",
+                                  storage_area_id="area-conv", pallet_capacity=0))
+        db_session.commit()
+        receipt = _approve(db_session, _receipt(db_session, units=10, allocs=[
+            {"rowId": ROW_1, "pallets": 1, "units": 10}]))
+        staging_service._stage_free_rack(db_session, receipt, 5 * 500.0, None,
+                                         source_row_id=ROW_1)
+        transfer = InventoryTransfer(
+            id="transfer-desk-solo", receipt_id=receipt.id, quantity=5 * 500.0,
+            unit="lbs", transfer_type="staging", status="completed",
+            requested_by="u-submit",
+        )
+        db_session.add(transfer)
+        db_session.flush()
+        staging_item = StagingItem(
+            id="stag-desk-solo", transfer_id=transfer.id, receipt_id=receipt.id,
+            product_id=PRODUCT, quantity_staged=5 * 500.0, pallets_staged=0,
+        )
+        db_session.add(staging_item)
+        db_session.flush()
+
+        request = SimpleNamespace(
+            quantity=2 * 500.0, to_location_id="loc-conv",
+            to_sub_location_id="sub-conv-one", to_storage_row_id=None,
+            pallets=None,
+        )
+        staging_service.return_staging_item(
+            db_session, staging_item, request, _Approver()
+        )
+        db_session.commit()
+        by_row = _by_row(db_session, receipt.material_lot_id)
+        assert by_row.get("row-conv-solo") == 2

@@ -32,6 +32,10 @@ const QuickStageModal = ({
   const [modalSubLocation, setModalSubLocation] = useState('');
   const [lotSuggestions, setLotSuggestions] = useState([]);
   const [lotAllocations, setLotAllocations] = useState({});
+  // Which rack the containers physically come off, per lot (audit S8). For
+  // counted lots the backend pulls from THIS rack instead of guessing
+  // fullest-first — the guess swapped drums between rows on paper.
+  const [lotRacks, setLotRacks] = useState({});
   const [loadingLots, setLoadingLots] = useState(false);
   const [submittingStage, setSubmittingStage] = useState(false);
   const [actionError, setActionError] = useState('');
@@ -108,13 +112,32 @@ const QuickStageModal = ({
 
     const lots = Object.entries(lotAllocations)
       .filter(([, qty]) => parseFloat(qty) > 0)
-      .map(([receiptId, qty]) => ({
-        receipt_id: receiptId,
-        quantity: parseFloat(qty),
-      }));
+      .map(([receiptId, qty]) => {
+        const suggestion =
+          lotSuggestions.find((s) => s.receipt_id === receiptId) || {};
+        const racks = suggestion.racks || [];
+        // Counted lots pull off a NAMED rack: the picked one, or the lot's
+        // only rack when there is no choice to make.
+        const sourceRowId =
+          lotRacks[receiptId] ||
+          (racks.length === 1 ? racks[0].storage_row_id : null);
+        return {
+          receipt_id: receiptId,
+          quantity: parseFloat(qty),
+          ...(sourceRowId ? { source_row_id: sourceRowId } : {}),
+        };
+      });
 
     if (lots.length === 0) {
       setActionError('Please allocate quantity to at least one lot.');
+      return;
+    }
+    const missingRack = lots.find((l) => {
+      const s = lotSuggestions.find((x) => x.receipt_id === l.receipt_id) || {};
+      return s.is_counted && (s.racks || []).length > 1 && !l.source_row_id;
+    });
+    if (missingRack) {
+      setActionError('Pick which rack each lot is being pulled from.');
       return;
     }
 
@@ -122,7 +145,27 @@ const QuickStageModal = ({
       setSubmittingStage(true);
       setActionError('');
 
-      // 1. Transfer to staging location
+      // Stage AND link to the request items in ONE call (audit S9): the old
+      // second fulfill call could be lost to a crash/refresh, leaving staged
+      // material linked to no request. The backend applies both in a single
+      // transaction now.
+      const fulfillments = [];
+      {
+        const items = underlyingItems || (item.id ? [item] : []);
+        let remainingToAllocate = Math.min(totalAllocated, remaining);
+        for (const it of items) {
+          const itemRem = (it.quantity_needed || 0) - (it.quantity_fulfilled || 0);
+          if (itemRem <= 0) continue;
+          const fulfillQty = Math.min(itemRem, remainingToAllocate);
+          if (fulfillQty <= 0) break;
+          fulfillments.push({
+            request_id: requestId,
+            item_id: it.id,
+            quantity: fulfillQty,
+          });
+          remainingToAllocate -= fulfillQty;
+        }
+      }
       const transferPayload = {
         staging_location_id: modalLocation,
         staging_sub_location_id: modalSubLocation || null,
@@ -133,37 +176,9 @@ const QuickStageModal = ({
             lots,
           },
         ],
+        fulfillments,
       };
-      const transferResponse = await apiClient.post(
-        '/inventory/staging/transfer',
-        transferPayload
-      );
-      const stagingItemIds = (transferResponse.data?.staging_items || []).map(
-        (si) => si.id
-      );
-
-      // 2. Fulfill-item for each underlying request item
-      const items = underlyingItems || (item.id ? [item] : []);
-      if (items.length > 0) {
-        let remainingToAllocate = Math.min(totalAllocated, remaining);
-        for (const it of items) {
-          const itemRem = (it.quantity_needed || 0) - (it.quantity_fulfilled || 0);
-          if (itemRem <= 0) continue;
-          const fulfillQty = Math.min(itemRem, remainingToAllocate);
-          if (fulfillQty <= 0) break;
-          await apiClient.post(
-            `/service/staging-requests/${requestId}/fulfill-item?item_id=${it.id}&quantity_fulfilled=${fulfillQty}`,
-            { staging_item_ids: stagingItemIds }
-          );
-          remainingToAllocate -= fulfillQty;
-        }
-      } else {
-        const fulfillQty = Math.min(totalAllocated, remaining);
-        await apiClient.post(
-          `/service/staging-requests/${requestId}/fulfill-item?item_id=${item.id}&quantity_fulfilled=${fulfillQty}`,
-          { staging_item_ids: stagingItemIds }
-        );
-      }
+      await apiClient.post('/inventory/staging/transfer', transferPayload);
 
       // 3. Build pick-sheet data
       const stagingLocationName =
@@ -569,23 +584,51 @@ const QuickStageModal = ({
                               {lot.available_quantity} {lot.unit}
                             </div>
                           ) : null}
-                          {lot.is_counted && (lot.racks || []).length > 0 && (
+                          {lot.is_counted && (lot.racks || []).length === 1 && (
                             <div style={{ fontSize: '0.7rem', color: '#0f766e', marginTop: '2px' }}>
-                              {(lot.racks || []).slice(0, 2).map((r) => (
-                                <span
-                                  key={r.storage_row_id}
-                                  style={{
-                                    display: 'inline-block',
-                                    padding: '0 5px',
-                                    marginLeft: '3px',
-                                    borderRadius: '8px',
-                                    backgroundColor: '#ccfbf1',
-                                  }}
-                                >
-                                  {r.storage_row_name}: {r.available_units}
-                                  {r.open_units ? ` +${r.open_units} open` : ''}
-                                </span>
-                              ))}
+                              <span
+                                style={{
+                                  display: 'inline-block',
+                                  padding: '0 5px',
+                                  borderRadius: '8px',
+                                  backgroundColor: '#ccfbf1',
+                                }}
+                              >
+                                {lot.racks[0].storage_row_name}: {lot.racks[0].available_units}
+                                {lot.racks[0].open_units ? ` +${lot.racks[0].open_units} open` : ''}
+                              </span>
+                            </div>
+                          )}
+                          {lot.is_counted && (lot.racks || []).length > 1 && (
+                            <div style={{ fontSize: '0.7rem', marginTop: '3px' }}>
+                              {/* Which rack is being pulled from (audit S8) —
+                                  without this the system deducted from the
+                                  fullest rack, not the one actually emptied. */}
+                              <select
+                                value={lotRacks[lot.receipt_id] || ''}
+                                onChange={(e) =>
+                                  setLotRacks((prev) => ({
+                                    ...prev,
+                                    [lot.receipt_id]: e.target.value,
+                                  }))
+                                }
+                                style={{
+                                  fontSize: '0.72rem',
+                                  padding: '2px 4px',
+                                  borderRadius: '4px',
+                                  border: '1px solid #99f6e4',
+                                  color: '#0f766e',
+                                  maxWidth: '160px',
+                                }}
+                              >
+                                <option value="">Pulling from rack…</option>
+                                {(lot.racks || []).map((r) => (
+                                  <option key={r.storage_row_id} value={r.storage_row_id}>
+                                    {r.storage_row_name} — {r.available_units}
+                                    {r.open_units ? ` +${r.open_units} open` : ''}
+                                  </option>
+                                ))}
+                              </select>
                             </div>
                           )}
                           {(lot.already_staged_qty || 0) > 0.01 && (

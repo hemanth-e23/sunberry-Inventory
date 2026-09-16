@@ -317,6 +317,9 @@ class IngredientUsedNotification(BaseModel):
     quantity_used: float
     unit: Optional[str] = None
     lot_barcode: Optional[str] = None
+    # The production scan's own id — makes retried webhooks idempotent
+    # (audit S4). Optional for older callers.
+    event_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +438,7 @@ def notify_ingredient_used(
         payload.quantity_used,
         payload.unit,
         payload.lot_barcode,
+        event_id=payload.event_id,
     )
 
 

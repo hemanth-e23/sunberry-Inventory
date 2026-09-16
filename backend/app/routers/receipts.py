@@ -138,7 +138,27 @@ def create_receipt(
         # Container count only (no weight info) — quantity stays as container count
         receipt_dict["quantity"] = float(container_count)
         receipt_dict["unit"] = container_unit
-    
+    else:
+        # Neither shape above: for non-FG categories that is a receipt whose
+        # unit would fall back to "cases" and whose container count nobody
+        # stated — the approval gate would refuse it days later, and the UI
+        # marks these fields mandatory anyway. Enforce at the door (audit
+        # I10): the server must not trust that every client is the UI.
+        category = (
+            db.query(Category).filter(Category.id == receipt_dict.get("category_id")).first()
+            if receipt_dict.get("category_id") else None
+        )
+        if category and category.type not in (CATEGORY_FINISHED, "group"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Raw material / ingredient / packaging receipts must state "
+                    "how many containers arrived (and the weight per container "
+                    "for weighed goods)."
+                ),
+            )
+
+
     wh_id_for_write = resolve_warehouse_for_write(current_user)
 
     db_receipt = Receipt(

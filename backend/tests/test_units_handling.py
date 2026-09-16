@@ -56,6 +56,7 @@ def test_receipt_update_persists_unit(client, auth_headers, seed_data, db_sessio
         json={
             "product_id": "product-1", "category_id": "raw-sunberry",
             "quantity": 100, "unit": "cases",  # mislabeled
+            "container_count": 100, "container_unit": "drums",
             "location_id": "loc-paw-paw", "sub_location_id": "subloc-warehouse-a",
         },
         headers=auth_headers,
@@ -77,6 +78,10 @@ def test_receipt_update_recomputes_quantity_from_containers(
         json={
             "product_id": "product-1", "category_id": "raw-sunberry",
             "quantity": 100, "unit": "lbs",
+            # Created mislabeled-but-complete; the PUT below is the correction
+            # under test (audit I10 requires containers at the door).
+            "container_count": 100, "container_unit": "drums",
+            "weight_per_container": 1.0, "weight_unit": "lbs",
             "location_id": "loc-paw-paw", "sub_location_id": "subloc-warehouse-a",
         },
         headers=auth_headers,

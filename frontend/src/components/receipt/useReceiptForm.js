@@ -1119,6 +1119,24 @@ const useReceiptForm = () => {
       return;
     }
 
+    // Same BOL seen before? Probably the same truck entered twice — the
+    // 2026-09 double-entry doubled ~170 drums on paper (audit I8). Soft ask,
+    // never block: split deliveries legitimately share a BOL sometimes.
+    const bolTyped = (formData.bol || "").trim().toLowerCase();
+    if (bolTyped) {
+      const dup = (receipts || []).find(
+        (r) => (r.bol || "").trim().toLowerCase() === bolTyped
+      );
+      if (dup) {
+        const ok = await confirm(
+          `BOL "${(formData.bol || "").trim()}" is already on receipt ` +
+          `${dup.lotNo || dup.id}. Entering the same delivery twice doubles ` +
+          "the stock on paper. Are you sure this is a different delivery?"
+        );
+        if (!ok) return;
+      }
+    }
+
     if (isCorporateUser && selectedWarehouse) {
       const ok = await confirm(`You are about to log this receipt to "${selectedWarehouseName || 'Selected Warehouse'}". Is this the correct location?`);
       if (!ok) return;

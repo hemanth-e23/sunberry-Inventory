@@ -15,6 +15,8 @@ def test_adjustment_inherits_receipt_unit(client, auth_headers, seed_data, db_se
         json={
             "product_id": "product-1", "category_id": "raw-sunberry",
             "quantity": 5000, "unit": "lbs",
+            "container_count": 10, "container_unit": "drums",
+            "weight_per_container": 500.0, "weight_unit": "lbs",
             "location_id": "loc-paw-paw", "sub_location_id": "subloc-warehouse-a",
         },
         headers=auth_headers,

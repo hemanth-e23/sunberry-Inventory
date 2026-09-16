@@ -238,6 +238,12 @@ const ReceiptFormFields = ({
           required={isFinishedGood || isIngredient}
           aria-label="Lot number"
         />
+        {/* A single space split one physical lot into two system lots in prod
+            (audit I4) — the backend now ignores spaces for identity, and this
+            hint keeps the typed strings consistent too. */}
+        <span style={{ fontSize: '12px', color: '#6b7280' }}>
+          No spaces — type the lot exactly as printed, without spaces.
+        </span>
       </label>
 
       {(isIngredient || showPackagingFields) && (

@@ -78,6 +78,19 @@ class StagingLotRequest(BaseSchema):
     # Explicit pallets emptied from the rack when staging this lot (worker-entered).
     # None falls back to a proportional estimate from the lot's real pallets.
     pallets: Optional[float] = None
+    # Which rack the containers physically came off (audit S8). For counted
+    # lots the desk pull takes from THIS rack instead of guessing fullest-first
+    # — the guess swapped drums between rows until a count found them.
+    source_row_id: Optional[str] = None
+
+
+class StagingFulfillment(BaseSchema):
+    """Link the staging batch to a production request item in the SAME
+    transaction (audit S9): the old second HTTP call could be lost to a crash,
+    leaving staged material linked to no request."""
+    request_id: str
+    item_id: str
+    quantity: float
 
 class StagingItemRequest(BaseSchema):
     product_id: str
@@ -88,6 +101,7 @@ class CreateStagingRequest(BaseSchema):
     staging_location_id: str
     staging_sub_location_id: Optional[str] = None
     items: List[StagingItemRequest]
+    fulfillments: Optional[List[StagingFulfillment]] = None
 
 
 class MarkStagingUsedRequest(BaseSchema):

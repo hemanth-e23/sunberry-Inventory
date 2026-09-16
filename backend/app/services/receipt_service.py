@@ -87,6 +87,19 @@ def reject_receipt(db: Session, receipt: Receipt, reason: str, current_user) -> 
     if receipt.status not in (ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED):
         raise ValidationError("Receipt is not in a state that can be rejected")
 
+    # Scans are physical placements; rejecting the paperwork would leave the
+    # scanned drums as stock with a rejected paper trail (audit I7). Undo the
+    # scans on the gun first, then reject.
+    from app.services import lot_receiving_service
+
+    scanned = int(lot_receiving_service.session_counts(db, receipt).get("total") or 0)
+    if scanned > 0:
+        raise ValidationError(
+            f"{scanned} unit(s) of this receipt are already scanned onto "
+            "racks. Have the forklift undo the scans before rejecting, or "
+            "approve and adjust instead."
+        )
+
     if current_user.role == ROLE_WAREHOUSE and receipt.submitted_by == str(current_user.id):
         raise ForbiddenError(
             "You cannot reject your own receipts. Only other users' receipts can be rejected."

@@ -176,7 +176,7 @@ def _apply_row_breakdown_counted(
         # The operator named the racks, so honour exactly that. Their weight per
         # rack becomes a count per rack.
         for row_id, qty in deductions.items():
-            units = lps.units_for_quantity(lot, float(qty or 0))
+            units = lps.receipt_units_for_quantity(receipt, lot, float(qty or 0))
             if units <= 0:
                 continue
             lps.take_units(
@@ -192,7 +192,7 @@ def _apply_row_breakdown_counted(
 
     # No racks named — take it off the fullest first and let the ledger record
     # which racks it actually came from.
-    units = lps.units_for_quantity(lot, float(adjustment.quantity or 0))
+    units = lps.receipt_units_for_quantity(receipt, lot, float(adjustment.quantity or 0))
     lps.take_units(
         db, lot,
         units=units,

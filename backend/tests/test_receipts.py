@@ -117,6 +117,9 @@ def test_create_receipt_without_sub_location_still_works(
         "quantity": 100,
         "unit": "cases",
         "location_id": "loc-paw-paw",
+        # RM receipts must state their containers at the door (audit I10).
+        "container_count": 100,
+        "container_unit": "drums",
     }
 
     response = client.post("/api/receipts/", json=payload, headers=auth_headers)
@@ -158,6 +161,8 @@ def test_create_receipt_sub_location_derived_from_storage_row(
         "location_id": "loc-paw-paw",
         "storage_row_id": "row-1",
         "pallets": 2,
+        "container_count": 100,
+        "container_unit": "drums",
         # no sub_location_id — backend should derive from storage row
     }
 
@@ -185,6 +190,9 @@ def test_get_receipt_returns_sub_location(client, auth_headers, seed_data):
         "unit": "cases",
         "location_id": "loc-paw-paw",
         "sub_location_id": "subloc-warehouse-a",
+        # RM receipts must state their containers at the door (audit I10).
+        "container_count": 100,
+        "container_unit": "drums",
     }
 
     create_response = client.post(
@@ -236,6 +244,9 @@ def test_warehouse_cannot_approve_own_receipt(
         "quantity": 100,
         "unit": "cases",
         "location_id": "loc-paw-paw",
+        # RM receipts must state their containers at the door (audit I10).
+        "container_count": 100,
+        "container_unit": "drums",
     }
 
     create_response = client.post(

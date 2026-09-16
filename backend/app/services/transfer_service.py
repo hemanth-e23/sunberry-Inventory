@@ -275,6 +275,15 @@ def _apply_raw_material_internal_transfer(
         )
     dest_pallets = parse_pallet_breakdown(transfer.destination_breakdown)
 
+    # One submit = one transfer = one destination rack (decision T10): the
+    # index-zip below would otherwise send everything to the first row and
+    # ignore the quantities on the rest.
+    if len([rid for rid in dest_cases if rid]) > 1:
+        raise ValidationError(
+            "A transfer moves to ONE destination rack. Submit a separate "
+            "transfer per destination."
+        )
+
     # A move must never credit one end without debiting the other — nor the
     # reverse. Either half missing means the material would appear from or
     # vanish into nowhere.
@@ -305,7 +314,7 @@ def _apply_raw_material_internal_transfer(
     # says. Every silent-no-op incident in the 2026-09 audit was the absence
     # of this check.
     lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
-    expected_units = lps.units_for_quantity(lot, float(transfer.quantity or 0)) if lot else 0
+    expected_units = lps.receipt_units_for_quantity(receipt, lot, float(transfer.quantity or 0)) if lot else 0
     if moved_units <= 0:
         raise ValidationError(
             "Approving this transfer would move nothing on the racks. Check "
@@ -361,7 +370,7 @@ def _move_counted_lot(
 
     moved = 0
     for index, (src_row, qty) in enumerate(source_cases.items()):
-        units = lps.units_for_quantity(lot, float(qty or 0))
+        units = lps.receipt_units_for_quantity(receipt, lot, float(qty or 0))
         if units <= 0 or not src_row:
             continue
         dest_row = dest_rows[index] if index < len(dest_rows) else dest_rows[-1]
@@ -373,6 +382,7 @@ def _move_counted_lot(
             to_row_id=dest_row,
             full_units=units,
             reason="Warehouse transfer",
+            ref_type="transfer",
             ref_id=f"{ref_id}:{index}",
         )
         moved += units
@@ -408,7 +418,7 @@ def _apply_raw_material_ship_out(
         if source_cases:
             # The worker named the racks they pulled from. Honour exactly that.
             for row_id, qty in source_cases.items():
-                units = lps.units_for_quantity(lot, float(qty or 0))
+                units = lps.receipt_units_for_quantity(receipt, lot, float(qty or 0))
                 if units > 0 and row_id:
                     lps.take_units(
                         db, lot, units=units, event_type=lps.EVENT_MOVED,
@@ -418,7 +428,7 @@ def _apply_raw_material_ship_out(
         else:
             lps.take_units(
                 db, lot,
-                units=lps.units_for_quantity(lot, float(transfer.quantity)),
+                units=lps.receipt_units_for_quantity(receipt, lot, float(transfer.quantity)),
                 event_type=lps.EVENT_MOVED,
                 ref_type="transfer", ref_id=transfer.id, reason="Shipped out",
             )

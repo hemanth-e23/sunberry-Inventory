@@ -270,6 +270,9 @@ class TestBug3CategoryIdRequired:
             "quantity": 50,
             "unit": "cases",
             "location_id": "loc-1",
+            # RM receipts must state their containers at the door (audit I10).
+            "container_count": 50,
+            "container_unit": "drums",
         }
         resp = client.post("/api/receipts/", json=payload, headers=admin_headers)
         assert resp.status_code == 200
