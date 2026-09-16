@@ -44,7 +44,16 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
         for receipt_id, receipt_pallets in affected.items():
             receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
             if receipt and adjustment.adjustment_type in DEDUCTION_TYPES:
-                cases_removed = sum(p.cases or 0 for p in receipt_pallets)
+                # Only pallets still IN_STOCK count — one that shipped (or was
+                # cancelled) between submit and approval must not be cancelled
+                # again nor its cases deducted a second time. Mirror of the
+                # guard the hold-approval path already had.
+                live_pallets = [
+                    p for p in receipt_pallets if p.status == PalletStatus.IN_STOCK
+                ]
+                if not live_pallets:
+                    continue
+                cases_removed = sum(p.cases or 0 for p in live_pallets)
                 adjustment.original_quantity = receipt.quantity
                 receipt.quantity = max(0, receipt.quantity - cases_removed)
                 adjustment.new_quantity = receipt.quantity
@@ -52,7 +61,7 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
                 # rows they occupied. Without this they stayed IN_STOCK and
                 # could be picked again at ship-out — deducting the receipt a
                 # second time for goods that were already written off.
-                for pallet in receipt_pallets:
+                for pallet in live_pallets:
                     _release_row_capacity(db, pallet, pallet.cases or 0)
                     pallet.status = PalletStatus.CANCELLED
                 # Rebuild the FG occupancy view from the remaining IN_STOCK

@@ -154,3 +154,36 @@ def test_create_transfer_without_auth(approved_receipt, client):
         },
     )
     assert response.status_code == 403
+
+
+@pytest.mark.integration
+def test_void_releases_receipt_hold(
+    client, auth_headers, admin_auth_headers, approved_receipt, db_session
+):
+    """Audit T4: creating a ship-out sets the transient review lock
+    (receipt.hold); voiding it must release that lock exactly as reject does —
+    previously the lot stayed 'on hold' forever."""
+    create_resp = client.post(
+        "/api/inventory/transfers",
+        json={
+            "receipt_id": approved_receipt.id,
+            "quantity": 50,
+            "transfer_type": "shipped-out",
+            "order_number": "SO-VOID-1",
+        },
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 200
+    transfer_id = create_resp.json()["id"]
+    db_session.refresh(approved_receipt)
+    assert approved_receipt.hold is True
+
+    void_resp = client.post(
+        f"/api/inventory/transfers/{transfer_id}/void",
+        json={"reason": "order cancelled"},
+        headers=admin_auth_headers,
+    )
+    assert void_resp.status_code == 200
+    db_session.refresh(approved_receipt)
+    assert approved_receipt.hold is False
+    assert void_resp.json()["transfer"]["status"] == "voided"

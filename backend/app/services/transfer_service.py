@@ -63,14 +63,20 @@ def _require_unreserved_coverage(
         - others
     )
     if float(transfer.quantity or 0) > available + 1e-6:
+        held = float(receipt.held_quantity or 0)
+        causes = []
+        if held > 0:
+            causes.append(f"{held:g} on hold")
+        if others > 0:
+            causes.append(f"{others:g} on other pending transfers")
         detail = (
             f"Only {max(0.0, available):g} {receipt.unit or 'units'} of lot "
-            f"{receipt.lot_number or receipt.id} is unreserved"
+            f"{receipt.lot_number or receipt.id} is available"
         )
-        if others > 0:
-            detail += f" ({others:g} is on other pending transfers)"
+        if causes:
+            detail += f" ({', '.join(causes)})"
         raise ValidationError(
-            detail + ". Approve or reject those first, or edit this transfer."
+            detail + ". Resolve those first, or edit this transfer."
         )
 
 

@@ -158,3 +158,63 @@ class TestHeldStock:
         with pytest.raises(ValidationError, match="on hold"):
             adjustment_service.approve_adjustment(db_session, adjustment, _Approver())
         assert adjustment.status == AdjustmentStatus.PENDING
+
+
+class TestPalletAdjustmentGuard:
+    def test_shipped_pallet_is_not_cancelled_or_double_deducted(
+        self, db_session, adjg_seed
+    ):
+        """FG scope (audit A3): adjustment submitted Monday, one pallet ships
+        Tuesday, adjustment approved Wednesday — the shipped pallet must be
+        skipped, not cancelled and deducted a second time."""
+        from app.enums import PalletStatus
+        from app.models import PalletLicence
+
+        db_session.add(Category(id="cat-adjg-fin", name="Finished", type="finished"))
+        db_session.add(Product(id="prod-adjg-fg", name="Adj Juice",
+                               category_id="cat-adjg-fin"))
+        receipt = Receipt(
+            id="rcpt-adjg-fg",
+            product_id="prod-adjg-fg",
+            category_id="cat-adjg-fin",
+            quantity=80,
+            unit="cases",
+            lot_number="FG-ADJ-1",
+            warehouse_id=WH,
+            status=ReceiptStatus.APPROVED,
+            submitted_by="u-adjg-submit",
+        )
+        db_session.add(receipt)
+        db_session.add_all([
+            PalletLicence(id="pl-adjg-1", licence_number="PL-ADJG-1",
+                          receipt_id=receipt.id, product_id="prod-adjg-fg",
+                          cases=40, status=PalletStatus.IN_STOCK),
+            PalletLicence(id="pl-adjg-2", licence_number="PL-ADJG-2",
+                          receipt_id=receipt.id, product_id="prod-adjg-fg",
+                          cases=40, status="shipped"),
+        ])
+        db_session.flush()
+
+        adjustment = InventoryAdjustment(
+            id="adj-guard-fg",
+            receipt_id=receipt.id,
+            product_id="prod-adjg-fg",
+            adjustment_type=AdjustmentType.DAMAGE_REDUCTION.value,
+            quantity=80,
+            unit="cases",
+            reason="both pallets damaged (one shipped meanwhile)",
+            pallet_licence_ids=["pl-adjg-1", "pl-adjg-2"],
+            status=AdjustmentStatus.PENDING,
+            submitted_by="u-adjg-submit",
+        )
+        db_session.add(adjustment)
+        db_session.flush()
+
+        adjustment_service.approve_adjustment(db_session, adjustment, _Approver())
+        db_session.commit()
+
+        in_stock = db_session.query(PalletLicence).filter_by(id="pl-adjg-1").one()
+        shipped = db_session.query(PalletLicence).filter_by(id="pl-adjg-2").one()
+        assert in_stock.status == PalletStatus.CANCELLED
+        assert shipped.status == "shipped", "a shipped pallet must not be cancelled"
+        assert float(receipt.quantity) == 40, "only the in-stock pallet's cases deduct"

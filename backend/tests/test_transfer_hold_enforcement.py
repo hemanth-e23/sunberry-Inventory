@@ -78,4 +78,6 @@ def test_approve_shipout_blocks_when_held_increased(
         f"/api/inventory/transfers/{transfer_id}/approve", headers=admin_auth_headers
     )
     assert approve.status_code == 400
-    assert "on-hold" in approve.json()["detail"].lower()
+    # The refusal must NAME the hold as the cause — "not enough" and "it is
+    # quarantined" are different problems (message wording is free to change).
+    assert "hold" in approve.json()["detail"].lower()

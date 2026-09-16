@@ -84,8 +84,10 @@ def validate_and_build_hold_dict(db: Session, hold_action_data) -> dict:
         if hold_action_data.action == "release" and not held:
             raise ValidationError("Cannot release a lot that is not on hold")
 
-        if hold_action_data.action == "hold" and held:
-            raise ValidationError("Lot is already on hold")
+        # A hold on an already-held lot is ALLOWED (2026-09-16): it appends
+        # its reason at approval — two problems, one lot, both on record —
+        # instead of the old refusal (or, worse, the removed per-rack model
+        # where a second hold silently overwrote the first).
 
         result = hold_action_data.dict()
         result["pallet_licence_ids"] = None
@@ -177,21 +179,21 @@ def _rows_from_hold_items(db: Session, hold_items) -> dict:
 
 
 def _apply_lot_hold(db: Session, receipt: Receipt, hold_action, current_user) -> None:
-    """Quarantine (or release) the actual drums, at whichever granularity was asked.
+    """Quarantine (or release) the LOT — one switch, wherever its drums sit.
 
-    Two shapes, and the difference is which question QA is answering:
+    Per-rack partial holds ("hold 8 of the 20 on ROW 3") were REMOVED on
+    2026-09-16. Drums have no individual identity in the rack system, so a
+    partial hold was arithmetic on a shared counter — and the arithmetic
+    invited exactly the bugs it got: a second hold on the same rack silently
+    overwrote the first, and a rack-scoped release dropped the whole-lot flag.
+    The few-bad-drums case is handled PHYSICALLY instead: transfer the suspect
+    drums to the QUARANTINE rack, then release the lot.
 
-      * NO racks named -> the WHOLE LOT. A bad vendor certificate makes every
-        drum suspect wherever it is sitting, including drums from a different
-        truck of the same vendor lot. `MaterialLot.is_held` covers exactly that.
-
-      * racks named    -> N drums ON THOSE RACKS. Eight of the forty got wet.
-        The lot is fine; those eight are not. Held per placement.
-
-    A per-rack quantity arrives in the receipt's own unit (pounds), because that
-    is what the hold form has always collected, and is converted to whole drums.
-    Rounded UP: holding "500 lbs" of a 500 lb drum has to quarantine the whole
-    drum, since half a sealed drum cannot be released.
+    A hold on an already-held lot APPENDS its reason — two problems, one lot,
+    both on record. Racks named on the form are kept as context for the reader
+    (`hold_location`), never as granularity. Release clears the lot switch and
+    sweeps any legacy per-rack `held_units` left over from the removed model,
+    so nothing stays quarantined with no visible hold against it.
     """
     if not receipt.material_lot_id:
         return
@@ -201,21 +203,13 @@ def _apply_lot_hold(db: Session, receipt: Receipt, hold_action, current_user) ->
 
     now = datetime.now(timezone.utc)
     actor = str(current_user.id)
-    releasing = hold_action.action == "release"
-    by_row = _rows_from_hold_items(db, hold_action.hold_items)
 
-    if releasing:
-        # Release everything this lot has held, at both granularities. A release
-        # that only cleared the level the hold happened to use would leave
-        # material quarantined with no visible hold against it.
+    if hold_action.action == "release":
         lot.is_held = False
         lot.hold_reason = None
         lot.held_by = None
         lot.held_at = None
         for placement in lps.placements_for_lot(db, lot.id, include_empty=True):
-            if by_row and placement.storage_row_id not in by_row:
-                # A rack-scoped release leaves other racks quarantined.
-                continue
             placement.held_units = 0
             placement.hold_reason = None
             placement.held_by = None
@@ -228,35 +222,13 @@ def _apply_lot_hold(db: Session, receipt: Receipt, hold_action, current_user) ->
         db.flush()
         return
 
-    if not by_row:
-        lot.is_held = True
-        lot.hold_reason = hold_action.reason
-        lot.held_by = actor
-        lot.held_at = now
-        lps.project_lot(db, lot)
-        db.flush()
-        return
-
-    placements = {
-        p.storage_row_id: p
-        for p in lps.placements_for_lot(db, lot.id, include_empty=True)
-    }
-    for row_id, want in by_row.items():
-        placement = placements.get(row_id)
-        if placement is None:
-            continue
-        if want["units"] is not None:
-            units = int(want["units"])
-        else:
-            qty = want["quantity"]
-            units = lps.units_for_quantity(lot, qty) if qty > 0 else 0
-        # Never more than is on the rack — the database enforces this too, and a
-        # CheckConstraint violation mid-approval is a worse error message than
-        # quietly holding everything that is actually there.
-        placement.held_units = min(int(units), int(placement.full_units or 0))
-        placement.hold_reason = hold_action.reason
-        placement.held_by = actor
-        placement.held_at = now
+    if lot.is_held and lot.hold_reason and hold_action.reason:
+        lot.hold_reason = f"{lot.hold_reason}\n[also] {hold_action.reason}"
+    else:
+        lot.hold_reason = hold_action.reason or lot.hold_reason
+    lot.is_held = True
+    lot.held_by = actor
+    lot.held_at = now
     lps.project_lot(db, lot)
     db.flush()
 
@@ -303,24 +275,12 @@ def approve_hold_action(db: Session, hold_action: InventoryHoldAction, current_u
             raise NotFoundError("Receipt", hold_action.receipt_id)
 
         if hold_action.action == "hold":
-            # `receipt.hold` is a WHOLE-RECEIPT flag and the staging suggestion
-            # list filters on it, so setting it for a PARTIAL hold would hide a
-            # lot with thirty-two perfectly good drums because eight got wet.
-            #
-            # Only a counted lot can express the partial somewhere better: its
-            # placements carry the held count per rack, and availability
-            # subtracts exactly those. A legacy receipt has nowhere else to put
-            # it, so there the flag still goes on and the whole receipt is held —
-            # coarse, but not silently wrong.
-            partial_on_a_counted_lot = bool(
-                lps.is_counted_lot(db, receipt.material_lot_id)
-                and _rows_from_hold_items(db, hold_action.hold_items)
-            )
-            receipt.hold = not partial_on_a_counted_lot
-            if hold_action.total_quantity and hold_action.total_quantity > 0:
-                receipt.held_quantity = hold_action.total_quantity
-            elif receipt.hold:
-                receipt.held_quantity = receipt.quantity
+            # Lot-hold only (2026-09-16): a hold is the WHOLE lot, so the
+            # whole receipt is held too — no partial arithmetic. Suspect
+            # drums that shouldn't freeze the lot go to the QUARANTINE rack
+            # by physical transfer instead.
+            receipt.hold = True
+            receipt.held_quantity = receipt.quantity
 
             # Resolve hold location name from hold_items
             if hold_action.hold_items and len(hold_action.hold_items) > 0:

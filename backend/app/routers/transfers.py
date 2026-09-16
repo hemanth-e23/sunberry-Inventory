@@ -1252,6 +1252,15 @@ def void_ship_out_transfer(
     # v2: release any lot reservations on this order.
     ship_out_service.release_reservations(db, transfer)
 
+    # Release the transient review lock on the receipt, exactly as reject does
+    # (audit T4: a voided single-receipt RM ship-out left the lot flagged "on
+    # hold" forever). A real QA hold (held_quantity > 0) is independent and
+    # must survive the void.
+    if transfer.receipt_id:
+        receipt = db.query(Receipt).filter(Receipt.id == transfer.receipt_id).first()
+        if receipt and (not receipt.held_quantity or receipt.held_quantity <= 0):
+            receipt.hold = False
+
     transfer.status = TransferStatus.VOIDED
     transfer.voided_at = datetime.now(timezone.utc)
     transfer.voided_by = str(current_user.id)

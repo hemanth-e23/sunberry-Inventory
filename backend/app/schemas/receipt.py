@@ -61,6 +61,10 @@ class ReceiptBase(BaseSchema):
 
 class ReceiptCreate(ReceiptBase):
     id: Optional[str] = None
+    # Required at CREATE (the UI always sends it): a receipt with no category
+    # can't be routed FG-vs-RM anywhere downstream. Optional on the base class
+    # only so responses for pre-2026 rows still serialize.
+    category_id: str
     allocations: List[ReceiptAllocationCreate] = []
     rawMaterialRowAllocations: Optional[List[dict]] = None
 

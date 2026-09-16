@@ -43,10 +43,9 @@ const HoldsTab = () => {
   const [rmReason, setRmReason] = useState('');
   const [rmError, setRmError] = useState('');
   const [rmSubmitting, setRmSubmitting] = useState(false);
-  // 'lot' quarantines every container wherever it sits; 'racks' quarantines a
-  // stated number on named racks. See the note by the scope picker below.
-  const [rmScope, setRmScope] = useState('lot');
-  const [rmRackUnits, setRmRackUnits] = useState({});
+  // Lot-hold only (2026-09-16): a hold always covers the whole lot. The old
+  // per-rack "hold 8 of 20" scope was removed — suspect drums are physically
+  // transferred to the QUARANTINE rack instead, and the lot stays free.
 
   // ─── Lookups ──────────────────────────────────────────────────────────────
   const productLookup = useMemo(() => {
@@ -133,10 +132,6 @@ const HoldsTab = () => {
       }));
   }, [selectedRmReceipt]);
 
-  const rmHeldTotal = useMemo(
-    () => rmRacks.reduce((sum, rack) => sum + (Number(rmRackUnits[rack.rowId]) || 0), 0),
-    [rmRacks, rmRackUnits]
-  );
 
   const formatReceiptLabel = (receipt) => {
     const product = productLookup[receipt.productId];
@@ -250,35 +245,13 @@ const HoldsTab = () => {
 
     const action = isReceiptHeld(selectedRmReceipt) ? 'release' : 'hold';
 
-    // Naming racks is what makes this a partial hold; naming none holds the
-    // whole lot. The backend reads it the same way, so the two agree by
-    // construction rather than by a flag that could disagree with the items.
-    const holdingRacks = action === 'hold' && rmScope === 'racks';
-    if (holdingRacks && rmHeldTotal <= 0) {
-      setRmError('Say how many containers to hold on at least one rack.');
-      return;
-    }
-    const holdItems = holdingRacks
-      ? rmRacks
-          .filter(rack => Number(rmRackUnits[rack.rowId]) > 0)
-          .map(rack => ({
-            receiptId: rmReceiptId,
-            locationId: rack.rowId,
-            units: Number(rmRackUnits[rack.rowId]),
-            // Weight is sent alongside for the older readers of this payload;
-            // `units` is what the hold is actually applied from.
-            quantity: Number(rmRackUnits[rack.rowId])
-              * (Number(selectedRmReceipt.weightPerContainer) || 0),
-          }))
-      : undefined;
-
+    // Lot-hold only: no rack items ever — the hold is the whole lot.
     setRmSubmitting(true);
     const result = await submitHoldAction({
       receiptId: rmReceiptId,
       action,
       reason: rmReason.trim(),
       submittedBy: user?.id || user?.username,
-      holdItems,
     });
     setRmSubmitting(false);
 
@@ -286,8 +259,6 @@ const HoldsTab = () => {
       setRmReceiptId('');
       setRmReason('');
       setRmError('');
-      setRmScope('lot');
-      setRmRackUnits({});
       addToast('Hold request submitted successfully.', 'success');
     } else {
       const msg = typeof result.error === 'object' ? JSON.stringify(result.error) : (result.error || 'Failed to submit.');
@@ -444,38 +415,20 @@ const HoldsTab = () => {
               </div>
             )}
 
-            {/* Scope. Only offered when placing a hold and only when we know
-                which racks the containers are on — a release always clears
-                everything, and a lot with no per-rack counts can only be held
-                whole. */}
-            {selectedRmReceipt && !isReceiptHeld(selectedRmReceipt) && rmRacks.length > 0 && (
+            {/* Lot-hold only: the hold always covers every container of the
+                lot, on every rack. The racks are listed as context so QA can
+                see where the material sits — and route a few suspect drums to
+                the QUARANTINE rack by transfer instead of freezing the lot. */}
+            {selectedRmReceipt && !isReceiptHeld(selectedRmReceipt) && (
               <div style={{ marginTop: '12px' }}>
-                <span style={{ fontWeight: 600, fontSize: '13px' }}>What is on hold?</span>
-                <div style={{ display: 'flex', gap: '16px', margin: '8px 0' }}>
-                  <label style={{ display: 'flex', gap: '6px', alignItems: 'center', cursor: 'pointer' }}>
-                    <input
-                      type="radio"
-                      checked={rmScope === 'lot'}
-                      onChange={() => setRmScope('lot')}
-                    />
-                    <span>The whole lot</span>
-                  </label>
-                  <label style={{ display: 'flex', gap: '6px', alignItems: 'center', cursor: 'pointer' }}>
-                    <input
-                      type="radio"
-                      checked={rmScope === 'racks'}
-                      onChange={() => setRmScope('racks')}
-                    />
-                    <span>Only some, on certain racks</span>
-                  </label>
-                </div>
                 <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                  {rmScope === 'lot'
-                    ? 'Every container of this lot, on every rack — including any that arrived on another truck. Use this when the lot itself is suspect.'
-                    : 'Use this when the lot is fine but some containers are not — water damage, a dropped drum. Every container wears the same sticker, so name the rack and how many, not which ones.'}
+                  A hold covers every container of this lot, on every rack —
+                  including any that arrived on another truck. If only a few
+                  containers are suspect (water damage, a dropped drum),
+                  transfer those to the QUARANTINE rack instead and leave the
+                  lot free.
                 </div>
-
-                {rmScope === 'racks' && (
+                {rmRacks.length > 0 && (
                   <div style={{ marginTop: '10px', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '10px 12px' }}>
                     {rmRacks.map(rack => (
                       <div
@@ -486,25 +439,8 @@ const HoldsTab = () => {
                         <span style={{ color: '#6b7280', fontSize: '13px', flex: 1 }}>
                           {rack.units} {rack.unitLabel}{rack.units === 1 ? '' : 's'} here
                         </span>
-                        <input
-                          type="number"
-                          min="0"
-                          max={rack.units}
-                          step="1"
-                          value={rmRackUnits[rack.rowId] ?? ''}
-                          placeholder="0"
-                          onChange={(e) => {
-                            const n = Math.max(0, Math.min(Number(e.target.value), rack.units));
-                            setRmRackUnits(prev => ({ ...prev, [rack.rowId]: n }));
-                          }}
-                          style={{ width: '80px', padding: '4px 8px' }}
-                        />
-                        <span style={{ color: '#6b7280', fontSize: '12px' }}>on hold</span>
                       </div>
                     ))}
-                    <div style={{ marginTop: '8px', fontSize: '13px', fontWeight: 600 }}>
-                      {rmHeldTotal} of {rmRacks.reduce((s, r) => s + r.units, 0)} quarantined
-                    </div>
                   </div>
                 )}
               </div>

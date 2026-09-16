@@ -434,59 +434,41 @@ class TestHoldsActuallyHold:
         self._hold(db_session, placed, action="release")
         assert self._available(db_session) == 20000.0
 
-    # ── partial: the lot is fine, these eight drums are not ──────────────────
+    # ── lot-hold only (2026-09-16): per-rack partial holds were REMOVED ──────
+    # A hold is the whole lot; suspect drums that shouldn't freeze the lot are
+    # physically transferred to the QUARANTINE rack instead. Racks named on the
+    # hold form are context, never granularity.
 
     def _rack_items(self, receipt, row_id, units):
         return [{"receipt_id": receipt.id, "location_id": row_id,
                  "quantity": units * 500.0, "units": units}]
 
-    def test_holding_eight_of_forty_leaves_thirty_two_available(self, db_session, placed):
+    def test_a_hold_with_racks_named_still_holds_the_whole_lot(self, db_session, placed):
+        """The racks on the form say WHERE QA saw the problem, not how much of
+        the lot is suspect — 8 wet drums quarantine all 40 until they are moved
+        to the QUARANTINE rack and the lot is released."""
         self._hold(db_session, placed, items=self._rack_items(placed, ROW_1, 8),
                    reason="Water damage")
-        assert self._available(db_session) == 16000.0
+        assert placed.hold is True
+        assert self._available(db_session) == 0.0
+        lot = db_session.get(MaterialLot, placed.material_lot_id)
+        assert lot.is_held is True
 
-    def test_the_placement_records_which_rack_and_how_many(self, db_session, placed):
+    def test_a_second_hold_appends_its_reason(self, db_session, placed):
+        """Two problems, one lot, both on record — the removed per-rack model
+        silently overwrote the first hold's reason (and its count)."""
+        self._hold(db_session, placed, reason="Positive swab")
+        self._hold(db_session, placed, reason="Dented drums on ROW 3")
+        lot = db_session.get(MaterialLot, placed.material_lot_id)
+        assert lot.is_held is True
+        assert "Positive swab" in lot.hold_reason
+        assert "Dented drums on ROW 3" in lot.hold_reason
+
+    def test_any_hold_hides_the_lot_from_staging(self, db_session, placed):
         self._hold(db_session, placed, items=self._rack_items(placed, ROW_1, 8))
-        placement = lps.placements_for_lot(db_session, placed.material_lot_id)[0]
-        assert placement.full_units == 40
-        assert placement.held_units == 8
-
-    def test_staging_can_take_the_free_ones_but_not_the_held_ones(self, db_session, placed):
-        self._hold(db_session, placed, items=self._rack_items(placed, ROW_1, 8))
-
-        # 32 free: taking all of them is fine.
-        staging_service._stage_free_rack(db_session, placed, 16000.0, None)
-        assert _by_row(db_session, placed.material_lot_id) == {ROW_1: 8}
-
-        # The 9th drum does not exist as far as staging is concerned.
-        with pytest.raises(Exception) as excinfo:
-            staging_service._stage_free_rack(db_session, placed, 500.0, None)
-        assert "on hold" in str(excinfo.value)
-
-    def test_the_refusal_says_how_many_are_on_hold(self, db_session, placed):
-        """"There is not enough" and "it is quarantined" are different problems
-        and only one of them is the asker's to solve."""
-        self._hold(db_session, placed, items=self._rack_items(placed, ROW_1, 35))
-        with pytest.raises(Exception) as excinfo:
-            staging_service._stage_free_rack(db_session, placed, 10000.0, None)
-        assert "35 on hold" in str(excinfo.value)
-
-    def test_a_partial_hold_does_not_hide_the_whole_lot_from_staging(
-        self, db_session, placed
-    ):
-        """Eight wet drums must not make the other thirty-two unstageable.
-
-        `suggest_lots_for_staging` filters on `Receipt.hold`, which is a
-        whole-receipt flag. A partial hold lives on the placements instead, so
-        the lot stays offerable and availability reports what is actually free.
-        """
-        self._hold(db_session, placed, items=self._rack_items(placed, ROW_1, 8))
-        assert placed.hold is False
-
-        suggestions = staging_service.suggest_lots_for_staging(
+        assert staging_service.suggest_lots_for_staging(
             db_session, PRODUCT, 1000.0, WH
-        )
-        assert [s["receipt_id"] for s in suggestions] == [placed.id]
+        ) == []
 
     def test_a_whole_lot_hold_does_hide_it_from_staging(self, db_session, placed):
         self._hold(db_session, placed)
@@ -495,37 +477,19 @@ class TestHoldsActuallyHold:
             db_session, PRODUCT, 1000.0, WH
         ) == []
 
-    def test_you_cannot_hold_more_than_is_on_the_rack(self, db_session, placed):
-        self._hold(db_session, placed, items=self._rack_items(placed, ROW_1, 999))
+    def test_release_sweeps_legacy_per_rack_holds(self, db_session, placed):
+        """Rows written under the removed per-rack model must not stay
+        quarantined with no visible hold against them: release clears the lot
+        switch AND zeroes any legacy held_units."""
         placement = lps.placements_for_lot(db_session, placed.material_lot_id)[0]
-        assert placement.held_units == 40
-
-    def test_a_partially_held_lot_can_be_released(self, db_session, placed):
-        """The bug a partial hold created: it could not be undone.
-
-        `validate_and_build_hold_dict` gated on `receipt.hold`, and a partial
-        hold deliberately leaves that False so the un-held containers stay
-        stageable. So the screen offered Release and the server answered
-        "Cannot release a lot that is not on hold" — a quarantine with no way
-        out except editing the database.
-        """
-        self._hold(db_session, placed, items=self._rack_items(placed, ROW_1, 8))
-        assert placed.hold is False
-        assert hold_service.is_receipt_held(db_session, placed) is True
-
+        placement.held_units = 8  # legacy leftover from the removed model
+        self._hold(db_session, placed)
         self._hold(db_session, placed, action="release")
+
         placement = lps.placements_for_lot(db_session, placed.material_lot_id)[0]
         assert placement.held_units == 0
         assert hold_service.is_receipt_held(db_session, placed) is False
-
-    def test_the_projection_carries_the_hold(self, db_session, placed):
-        """So every reader of the allocation JSON can see a quarantine without
-        querying the lot — which is how the Holds screen knows to offer Release."""
-        self._hold(db_session, placed, items=self._rack_items(placed, ROW_1, 8))
-        db_session.refresh(placed)
-        entry = placed.raw_material_row_allocations[0]
-        assert entry["units"] == 40
-        assert entry["heldUnits"] == 8
+        assert self._available(db_session) == 20000.0
 
     def test_a_whole_lot_hold_projects_every_container_as_held(self, db_session, placed):
         """`is_held` lives on the LOT and the placements know nothing about it,
@@ -536,23 +500,27 @@ class TestHoldsActuallyHold:
         entry = placed.raw_material_row_allocations[0]
         assert entry["heldUnits"] == entry["units"] == 40
 
-    def test_a_rack_scoped_release_clears_only_that_rack(self, db_session, seed):
+    def test_release_with_racks_named_still_releases_the_lot(self, db_session, seed):
+        """Rack-scoped releases died with the per-rack model — under lot-hold
+        only, any approved release frees the lot everywhere. (The old rack-
+        scoped release was also the A2 bug: it dropped the whole-lot flag
+        while claiming to release one rack.)"""
         receipt = _approve(db_session, _receipt(db_session, units=50, allocs=[
             {"rowId": ROW_1, "pallets": 3, "units": 30},
             {"rowId": ROW_2, "pallets": 2, "units": 20},
         ]))
-        self._hold(db_session, receipt, items=[
-            {"receipt_id": receipt.id, "location_id": ROW_1, "quantity": 0, "units": 10},
-            {"receipt_id": receipt.id, "location_id": ROW_2, "quantity": 0, "units": 5},
-        ])
+        self._hold(db_session, receipt)
         self._hold(db_session, receipt, action="release", items=[
             {"receipt_id": receipt.id, "location_id": ROW_1, "quantity": 0},
         ])
+        lot = db_session.get(MaterialLot, receipt.material_lot_id)
+        assert lot.is_held is False
         held = {
             p.storage_row_id: p.held_units
             for p in lps.placements_for_lot(db_session, receipt.material_lot_id)
         }
-        assert held == {ROW_1: 0, ROW_2: 5}
+        assert held == {ROW_1: 0, ROW_2: 0}
+        assert hold_service.is_receipt_held(db_session, receipt) is False
 
 
 class TestWhatTheStagingScreenIsTold:
@@ -581,16 +549,12 @@ class TestWhatTheStagingScreenIsTold:
         assert [r["storage_row_name"] for r in suggestion["racks"]] == ["A-01", "A-02"]
         assert [r["available_units"] for r in suggestion["racks"]] == [30, 20]
 
-    def test_quarantined_containers_are_shown_but_not_offered(self, db_session, placed):
-        hold = InventoryHoldAction(
-            id="hold-stage-1", receipt_id=placed.id, action="hold",
-            reason="Water damage", status="pending", submitted_by="u-submit",
-            hold_items=[{"receipt_id": placed.id, "location_id": ROW_1,
-                         "quantity": 0, "units": 8}],
-        )
-        db_session.add(hold)
-        db_session.flush()
-        hold_service.approve_hold_action(db_session, hold, _Approver())
+    def test_legacy_per_rack_held_units_are_shown_but_not_offered(self, db_session, placed):
+        """Rows written under the removed per-rack model (2026-09-16) may still
+        carry held_units until their release sweeps them. The screen keeps
+        showing them honestly: on the rack, not offerable."""
+        placement = lps.placements_for_lot(db_session, placed.material_lot_id)[0]
+        placement.held_units = 8  # legacy leftover, no lot-level hold
         db_session.flush()
 
         suggestion = staging_service.suggest_lots_for_staging(
