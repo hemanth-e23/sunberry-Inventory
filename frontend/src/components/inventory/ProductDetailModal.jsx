@@ -136,6 +136,30 @@ const ProductDetailModal = ({
     if (entries.length) lotCurrentRows[r.materialLotId] = entries;
   });
 
+  // ONE ROW PER LOT (2026-09-17). The table is titled "Lots", but it used to
+  // render one row per RECEIPT — so a lot with three deliveries appeared three
+  // times, each row pairing that delivery's remaining lbs with the WHOLE
+  // lot's rack picture. The numbers could never agree read row-by-row.
+  // Grouped, every column describes the same thing: the lot. Deliveries fold
+  // into a count, and quantity Σ vs racks must now match by construction.
+  const displayGroups = [];
+  {
+    const byLot = {};
+    detailReceipts.forEach((r) => {
+      if (r.materialLotId) {
+        if (byLot[r.materialLotId]) {
+          byLot[r.materialLotId].receipts.push(r);
+          return;
+        }
+        const group = { key: r.materialLotId, receipts: [r] };
+        byLot[r.materialLotId] = group;
+        displayGroups.push(group);
+      } else {
+        displayGroups.push({ key: r.id, receipts: [r] });
+      }
+    });
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal panel" onClick={e => e.stopPropagation()}>
@@ -161,7 +185,7 @@ const ProductDetailModal = ({
             <h4 style={{ margin: 0 }}>Lots</h4>
             {modalExpiryFilter !== "all" && (
               <span style={{ fontSize: '14px', color: '#666' }}>
-                Showing {detailReceipts.length} of {allProductReceipts.length} lots
+                Showing {displayGroups.length} lots ({detailReceipts.length} of {allProductReceipts.length} deliveries)
               </span>
             )}
           </div>
@@ -259,7 +283,45 @@ const ProductDetailModal = ({
                 </tr>
               </thead>
               <tbody>
-                {detailReceipts.map(r => {
+                {displayGroups.map(group => {
+                  // The first delivery stands in for lot-constant fields
+                  // (vendor, unit, expiration); sums cover the rest.
+                  const r = group.receipts[0];
+                  const deliveries = group.receipts.length;
+                  const totalQty = group.receipts.reduce(
+                    (s, x) => s + (Number(x.quantity) || 0), 0);
+                  const totalReceived = group.receipts.reduce(
+                    (s, x) => s + (Number(x.containerCount) || 0), 0);
+                  // Drums remaining, each delivery priced at ITS OWN weight
+                  // (the 14×200 + 12×210 rule) — null when any delivery
+                  // can't answer.
+                  let drumsRemaining = 0;
+                  let drumsKnown = true;
+                  group.receipts.forEach((x) => {
+                    const wpc = Number(x.weightPerContainer) || 0;
+                    if (wpc > 0) {
+                      drumsRemaining += (Number(x.quantity) || 0) / wpc;
+                    } else if (Number(x.quantity) > 0) {
+                      drumsKnown = false;
+                    }
+                  });
+                  drumsRemaining = Math.round(drumsRemaining * 100) / 100;
+                  const weightSet = Array.from(new Set(
+                    group.receipts
+                      .map((x) => Number(x.weightPerContainer) || 0)
+                      .filter((w) => w > 0),
+                  ));
+                  const anyHold = group.receipts.some((x) => x.hold);
+                  const totalHeld = group.receipts.reduce(
+                    (s, x) => s + (Number(x.heldQuantity || x.held_quantity) || 0), 0);
+                  const statuses = Array.from(new Set(
+                    group.receipts.map((x) => x.status).filter(Boolean)));
+                  const latestReceiptDate = group.receipts
+                    .map((x) => x.approvedAt || x.submittedAt || x.receiptDate)
+                    .filter(Boolean)
+                    .sort()
+                    .pop() || null;
+
                   const locations = getReceiptLocations(r);
                   const rowDetail = locations[0]?.detail || '';
                   const locationLabel =
@@ -323,46 +385,59 @@ const ProductDetailModal = ({
                   }
 
                   return (
-                    <tr key={r.id}>
-                      <td className="hide-mobile">{r.lotNo || '—'}</td>
+                    <tr key={group.key}>
+                      <td className="hide-mobile">
+                        {r.lotNo || '—'}
+                        {deliveries > 1 && (
+                          <div style={{ fontSize: '0.72rem', color: '#666' }}>
+                            {deliveries} deliveries
+                          </div>
+                        )}
+                      </td>
                       <td className="hide-mobile">
                         {vendorNameById?.[r.vendorId] || <span className="muted">—</span>}
                       </td>
                       <td className="hide-tablet">{locationLabel}</td>
                       <td className="hide-tablet">{rowDisplay}</td>
                       <td>
-                        {Number(r.quantity || 0).toLocaleString()} {r.quantityUnits || ''}
-                        {r.containerCount && r.containerUnit && r.weightPerContainer && r.weightUnit && (
+                        {totalQty.toLocaleString()} {r.quantityUnits || ''}
+                        {totalReceived > 0 && drumsKnown && (
                           <div style={{ fontSize: '0.75rem', color: '#666' }}>
                             {(() => {
-                              const wpc = Number(r.weightPerContainer);
-                              const currentContainers = wpc > 0
-                                ? Math.round((Number(r.quantity || 0) / wpc) * 100) / 100
-                                : null;
-                              if (currentContainers != null && currentContainers !== Number(r.containerCount)) {
-                                return `(~${currentContainers} ${r.containerUnit} remaining (${r.containerCount} received) × ${r.weightPerContainer} ${r.weightUnit})`;
+                              const unit = r.containerUnit || 'drums';
+                              const weightNote = weightSet.length === 1
+                                ? ` × ${weightSet[0]} ${r.weightUnit || 'lbs'}`
+                                : '';
+                              if (drumsRemaining !== totalReceived) {
+                                return `(~${drumsRemaining} ${unit} remaining (${totalReceived} received)${weightNote})`;
                               }
-                              return `(${r.containerCount} ${r.containerUnit} × ${r.weightPerContainer} ${r.weightUnit})`;
+                              return `(${totalReceived} ${unit}${weightNote})`;
                             })()}
                           </div>
                         )}
                       </td>
-                      <td className="capitalize">{r.status}</td>
+                      <td className="capitalize">{statuses.join(', ')}</td>
                       <td className="hide-mobile">
                         {(() => {
-                          const heldQty = Number(r.heldQuantity || r.held_quantity || 0);
                           const holdLoc = r.holdLocation || r.hold_location || null;
-                          if (heldQty > 0) {
+                          if (totalHeld > 0) {
                             const locLabel = holdLoc ? ` (${holdLoc})` : '';
-                            return <span className="chip chip-hold">{heldQty.toLocaleString()} on Hold{locLabel}</span>;
-                          } else if (r.hold) {
+                            return <span className="chip chip-hold">{totalHeld.toLocaleString()} on Hold{locLabel}</span>;
+                          } else if (anyHold) {
                             return <span className="chip chip-hold">Hold</span>;
                           } else {
                             return <span className="chip chip-clear">Clear</span>;
                           }
                         })()}
                       </td>
-                      <td className="hide-mobile">{formatDate(r.approvedAt) || formatDate(r.submittedAt) || formatDate(r.receiptDate)}</td>
+                      <td className="hide-mobile">
+                        {formatDate(latestReceiptDate) || '—'}
+                        {deliveries > 1 && (
+                          <div style={{ fontSize: '0.72rem', color: '#666' }}>
+                            latest of {deliveries}
+                          </div>
+                        )}
+                      </td>
                       <td className="hide-mobile">{formatDateKey(r.expiration) || formatDateKey(r.expirationDate) || '—'}</td>
                     </tr>
                   );
