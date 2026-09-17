@@ -847,6 +847,7 @@ def consume_receipt_quantity(db: Session, receipt, amount: float) -> None:
         receipt.status = ReceiptStatus.DEPLETED
     excess = float(amount) - take
     if excess <= 1e-9 or not receipt.material_lot_id:
+        _sweep_rack_excess(db, receipt)
         return
     siblings = (
         db.query(Receipt)
@@ -872,6 +873,72 @@ def consume_receipt_quantity(db: Session, receipt, amount: float) -> None:
             "consume_receipt_quantity: lot %s had no open receipts left to "
             "absorb %.3f — paper under-states consumption",
             receipt.material_lot_id, excess,
+        )
+
+    _sweep_rack_excess(db, receipt)
+
+
+def _sweep_rack_excess(db: Session, receipt) -> None:
+    """Post-consumption invariant (2026-09-17): the racks may never claim
+    more units than the paper says still exist.
+
+    Consumption recorded without a staging pull — production sync/notify, or
+    fulfil-then-mark-used — used to cut only the paper: the card said 5 drums
+    remain while the rack ledger kept saying ROW 4 (18), thirteen of them
+    long inside a batch. After every paper consumption, any units the racks
+    still claim beyond the lot's remaining paper come off here,
+    fullest-first, as CONSUMED events. Lots whose pulls went through the
+    proper staging path already have their racks freed, so the sweep finds
+    nothing and does nothing.
+    """
+    import math as _math
+
+    if not receipt.material_lot_id:
+        return
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    if lot is None:
+        return
+    on_hand = lps.units_on_hand(db, lot.id)
+    racked = int(on_hand.get("full_units") or 0) + int(on_hand.get("open_units") or 0)
+    if racked <= 0:
+        return
+
+    paper_units = 0.0
+    lot_receipts = (
+        db.query(Receipt)
+        .filter(
+            Receipt.material_lot_id == lot.id,
+            Receipt.status.in_((ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED)),
+        )
+        .all()
+    )
+    for r in lot_receipts:
+        qty = float(r.quantity or 0)
+        if qty <= 0:
+            continue
+        w = float(r.weight_per_container or 0) or float(lot.weight_per_unit or 0)
+        paper_units += (qty / w) if w > 0 else qty
+
+    excess_units = racked - int(_math.ceil(paper_units - 1e-6))
+    if excess_units <= 0:
+        return
+    try:
+        lps.take_units(
+            db, lot,
+            units=excess_units,
+            event_type=lps.EVENT_CONSUMED,
+            ref_type="consumption-sweep",
+            ref_id=receipt.id,
+            reason="Production consumption recorded without a staging pull",
+        )
+        logger.info(
+            "consumption sweep: lot %s racks claimed %d unit(s) beyond paper — removed",
+            lot.lot_code, excess_units,
+        )
+    except Exception as exc:  # noqa: BLE001 — consumption already happened physically
+        logger.warning(
+            "consumption sweep skipped for lot %s (%d excess unit(s)): %s",
+            lot.lot_code, excess_units, exc,
         )
 
 

@@ -188,3 +188,55 @@ class TestNotifySafety:
         assert result["status"] == "unmatched_lot"
         db_session.refresh(receipt)
         assert float(receipt.quantity) == 10 * WEIGHT
+
+
+class TestRackSweep:
+    """Post-consumption invariant (2026-09-17): racks may never claim more
+    units than the paper says still exist."""
+
+    def test_consumption_without_a_pull_sweeps_the_rack(self, db_session, cons_seed):
+        """The ROW 4 (18) case: paper consumption with no staging pull used to
+        leave the rack ledger stale forever."""
+        from app.models import LotPlacement, LotPlacementEvent
+
+        receipt = _gated_receipt(db_session, units=10, lot_number="SWEEP-1")
+        staging_request_service.consume_receipt_quantity(db_session, receipt, 3 * WEIGHT)
+        db_session.commit()
+
+        placement = (
+            db_session.query(LotPlacement)
+            .filter(LotPlacement.material_lot_id == receipt.material_lot_id)
+            .one()
+        )
+        assert placement.full_units == 7, "rack follows the paper down"
+        sweep = (
+            db_session.query(LotPlacementEvent)
+            .filter(
+                LotPlacementEvent.material_lot_id == receipt.material_lot_id,
+                LotPlacementEvent.ref_type == "consumption-sweep",
+            )
+            .all()
+        )
+        assert sum(e.full_units_delta for e in sweep) == -3
+
+    def test_properly_staged_lots_are_not_double_deducted(self, db_session, cons_seed):
+        """A pull already freed the rack; consuming the staged material must
+        not take the drums off a second time."""
+        from app.models import LotPlacement
+        from app.services import staging_service
+
+        receipt = _gated_receipt(db_session, units=10, lot_number="SWEEP-2")
+        # Proper pull: 4 drums leave the rack for staging.
+        staging_service._stage_free_rack(db_session, receipt, 4 * WEIGHT, None,
+                                         source_row_id=ROW_1)
+        db_session.flush()
+        # Production consumes those 4 staged drums (paper 10 → 8... → 6).
+        staging_request_service.consume_receipt_quantity(db_session, receipt, 4 * WEIGHT)
+        db_session.commit()
+
+        placement = (
+            db_session.query(LotPlacement)
+            .filter(LotPlacement.material_lot_id == receipt.material_lot_id)
+            .one()
+        )
+        assert placement.full_units == 6, "rack already freed at pull — no sweep"

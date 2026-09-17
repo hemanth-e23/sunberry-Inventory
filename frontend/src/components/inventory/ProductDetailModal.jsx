@@ -121,6 +121,21 @@ const ProductDetailModal = ({
 
   const allProductReceipts = receipts.filter(r => r.productId === productId);
 
+  // WHERE THE LOT'S CONTAINERS ARE *NOW* (2026-09-17). The projection JSON is
+  // rewritten from the placement ledger on every mutation, so its entries are
+  // the live per-rack truth. `project_lot` writes the whole lot's picture on
+  // the lot's NEWEST receipt and blanks older ones — so collect per LOT here
+  // and show the same live answer on every receipt row of that lot.
+  const lotCurrentRows = {};
+  allProductReceipts.forEach((r) => {
+    if (!r.materialLotId) return;
+    const entries = (r.rawMaterialRowAllocations || []).filter(
+      (a) => a && a.rowName
+        && (Number(a.units) > 0 || Number(a.openUnits) > 0),
+    );
+    if (entries.length) lotCurrentRows[r.materialLotId] = entries;
+  });
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal panel" onClick={e => e.stopPropagation()}>
@@ -251,23 +266,35 @@ const ProductDetailModal = ({
                     ledgerLocations(r)?.join(', ') || locations[0]?.label || '—';
 
                   let rowDisplay = '—';
-                  // WHERE THIS DELIVERY WENT, from the ledger.
-                  //
-                  // Not from the allocation JSON: that is a projection of the
-                  // LOT, so `project_lot` puts the whole picture on the newest
-                  // receipt and blanks the older ones. Reading it here showed
-                  // ROW 11 twice — once live, once frozen at the pallet count
-                  // its receipt was created with.
-                  //
-                  // The ledger stamps every put-away with the receipt that
-                  // caused it, so eight drums of one lot arriving on two days
-                  // can still be told apart: "ROW 10, that Tuesday".
-                  //
-                  // It is where it WENT, not where it is — a later rack-to-rack
-                  // move writes its own events and leaves these alone. Beside a
-                  // receipt date, that is the honest reading.
+                  // WHERE THE CONTAINERS ARE NOW, from the live projection of
+                  // the placement ledger (2026-09-17). This column used to
+                  // show the intake put-away — "where it WENT" — which read
+                  // "ROW 4 (18 drums)" forever while 13 of them were long
+                  // inside a batch and the rest had moved to the Aisle.
+                  // Current place and count is the question the reader is
+                  // actually asking; "(N received)" in the quantity column
+                  // already carries the history.
+                  const current = r.materialLotId
+                    ? lotCurrentRows[r.materialLotId]
+                    : null;
                   const putAway = receivedRows[r.id];
-                  if (putAway?.length) {
+                  if (current?.length) {
+                    rowDisplay = current
+                      .map((x) => {
+                        const units = Number(x.units) || 0;
+                        const opens = Number(x.openUnits) || 0;
+                        const unit = x.unitLabel
+                          || rowUnitLookup[x.rowId]
+                          || 'unit';
+                        const openNote = opens > 0 ? ` +${opens} open` : '';
+                        return `${x.rowName} (${units} ${unit}${units === 1 ? '' : 's'}${openNote})`;
+                      })
+                      .join(', ');
+                  } else if (r.materialLotId && (putAway?.length || rowDetail)) {
+                    // A counted lot with zero on any rack: consumed or pulled
+                    // to production. Honest, and distinct from "unknown".
+                    rowDisplay = 'none on racks';
+                  } else if (putAway?.length) {
                     // "(68)" alone leaves the reader to guess the unit beside a
                     // quantity given in lbs. The room names it: Apple Barn
                     // shelves drums, so 68 there is 68 drums.
