@@ -435,7 +435,19 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                 const lastDash = lic.lastIndexOf('-');
                 return lastDash >= 0 ? lic.slice(0, lastDash) : null;
               };
-              const coveredElsewhere = new Set(fr.covered_sequences || []);
+              // Coverage has to be read per lot. A session that ran through
+              // midnight holds two lots, but `covered_sequences` was only ever
+              // computed for the request's own lot_number, so the second lot
+              // got none — a single pallet at sequence 195 flagged 194 gaps
+              // that were really in stock from earlier sessions.
+              // `covered_sequences_by_prefix` asks once per lot; fall back to
+              // the flat list so this still renders against an older backend.
+              const coveredByPrefix = fr.covered_sequences_by_prefix || null;
+              const flatCovered = new Set(fr.covered_sequences || []);
+              const coveredFor = (prefix) =>
+                coveredByPrefix
+                  ? new Set(coveredByPrefix[prefix] || [])
+                  : flatCovered;
               const groups = new Map(); // prefix -> { seqs:Set, items:[] }
               for (const pl of licences) {
                 const prefix = prefixOf(pl.licence_number);
@@ -453,10 +465,11 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
               for (const prefix of sortedPrefixes) {
                 const g = groups.get(prefix);
                 const maxSeq = g.seqs.size ? Math.max(...g.seqs) : 0;
+                const covered = coveredFor(prefix);
                 merged.push(...g.items);
                 if (maxSeq >= 1) {
                   for (let s = 1; s <= maxSeq; s += 1) {
-                    if (!g.seqs.has(s) && !coveredElsewhere.has(s)) {
+                    if (!g.seqs.has(s) && !covered.has(s)) {
                       merged.push({
                         kind: 'missing',
                         prefix,

@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 from pydantic import Field
 from app.schemas.base import BaseSchema
@@ -105,7 +105,14 @@ class ForkliftRequest(ForkliftRequestBase):
     # Sequences for this lot+product that already exist on OTHER forklift sessions
     # (live statuses only). Used by the approval UI to avoid flagging pallets
     # covered by another driver's session as missing.
+    #
+    # `covered_sequences` only ever covers the request's own lot_number, which is
+    # wrong for a session that crossed midnight and holds two lots — the second
+    # lot got no coverage and every sequence below its highest was flagged.
+    # `covered_sequences_by_prefix` is keyed by "{LOT}-{PRODUCT_CODE}" and is what
+    # the UI reads; the flat list stays so a cached older bundle keeps working.
     covered_sequences: List[int] = []
+    covered_sequences_by_prefix: Dict[str, List[int]] = {}
 
 class ForkliftRequestUpdate(BaseSchema):
     shift_id: Optional[str] = None

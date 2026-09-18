@@ -38,20 +38,14 @@ _COVERED_PALLET_STATUSES = (
 )
 
 
-def _compute_covered_sequences(db: Session, fr: ForkliftRequest) -> list[int]:
-    """Return sorted sequence numbers from OTHER sessions covering this fr's
-    lot_number + product_code. Used by the approval UI to avoid flagging
-    pallets covered by another driver's session as missing.
-
-    Lot numbers are globally unique per product, so we don't need to scope by
-    warehouse or time window.
-    """
-    if not fr.lot_number or not fr.product_id:
+def _sequences_covered_for_lot(db: Session, fr: ForkliftRequest, lot: str) -> list[int]:
+    """Sequences for `lot` + this request's product that live on OTHER sessions."""
+    if not lot or not fr.product_id:
         return []
     rows = (
         db.query(PalletLicence.sequence)
         .filter(
-            PalletLicence.lot_number == fr.lot_number,
+            PalletLicence.lot_number == lot,
             PalletLicence.product_id == fr.product_id,
             PalletLicence.forklift_request_id != fr.id,
             PalletLicence.status.in_(_COVERED_PALLET_STATUSES),
@@ -63,10 +57,50 @@ def _compute_covered_sequences(db: Session, fr: ForkliftRequest) -> list[int]:
     return sorted({int(seq) for (seq,) in rows if seq is not None})
 
 
+def _compute_covered_sequences(db: Session, fr: ForkliftRequest) -> list[int]:
+    """Coverage for the request's own lot_number only.
+
+    Superseded by _compute_covered_sequences_by_prefix, and kept so a browser
+    still running the previous bundle behaves exactly as it did before. Remove
+    once the frontend has been deployed for long enough that no cached client
+    reads it.
+    """
+    return _sequences_covered_for_lot(db, fr, fr.lot_number)
+
+
+def _compute_covered_sequences_by_prefix(db: Session, fr: ForkliftRequest) -> dict:
+    """Coverage keyed by licence prefix (lot + product code).
+
+    A session spans two lots whenever production runs through midnight, but
+    ForkliftRequest.lot_number holds only one of them. Asking for coverage by
+    that single field meant the secondary lot was never looked up at all, so
+    every sequence below its highest one was reported missing: one pallet at
+    sequence 195 produced 194 phantom gaps on a 27-pallet session, while the
+    183 real pallets sat in stock from two earlier sessions.
+
+    Keying by prefix asks the question once per lot, and keeps one lot's
+    coverage from being applied to another's sequence numbers.
+    """
+    prefixes = set()
+    for pl in (fr.pallet_licences or []):
+        lic = pl.licence_number or ""
+        cut = lic.rfind("-")
+        if cut > 0 and pl.sequence is not None:
+            prefixes.add(lic[:cut])
+
+    out: dict = {}
+    for prefix in prefixes:
+        cut = prefix.rfind("-")
+        lot = prefix[:cut] if cut > 0 else prefix
+        out[prefix] = _sequences_covered_for_lot(db, fr, lot)
+    return out
+
+
 def _attach_covered_sequences(db: Session, frs: list[ForkliftRequest]) -> None:
-    """Mutate each ForkliftRequest in-place so pydantic picks up covered_sequences."""
+    """Mutate each ForkliftRequest in-place so pydantic picks up the coverage fields."""
     for fr in frs:
         fr.covered_sequences = _compute_covered_sequences(db, fr)
+        fr.covered_sequences_by_prefix = _compute_covered_sequences_by_prefix(db, fr)
 
 
 router = APIRouter()
@@ -204,6 +238,7 @@ def get_forklift_request(
     if not fr:
         raise HTTPException(status_code=404, detail="Forklift request not found")
     fr.covered_sequences = _compute_covered_sequences(db, fr)
+    fr.covered_sequences_by_prefix = _compute_covered_sequences_by_prefix(db, fr)
     return fr
 
 

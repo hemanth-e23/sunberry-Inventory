@@ -737,11 +737,19 @@ def mark_not_produced(
     if not licence_numbers:
         return {"status": "marked", "count": 0}
 
+    # Any lot already on this session is fair game, not just fr.lot_number. A
+    # session that ran through midnight holds two lots while the column holds
+    # one, so comparing against the column alone rejected every gap in the
+    # secondary lot — the supervisor was shown a Skip button that could never
+    # work for half the session.
+    session_lots = {fr.lot_number} if fr.lot_number else set()
+    session_lots |= {pl.lot_number for pl in (fr.pallet_licences or []) if pl.lot_number}
+
     inserted = 0
     skipped: list = []
     for lic_num in licence_numbers:
         lot_number, _product_code, seq = parse_licence_number(lic_num)
-        if seq is None or lot_number != fr.lot_number:
+        if seq is None or lot_number not in session_lots:
             skipped.append({"licence_number": lic_num, "reason": "invalid_or_wrong_lot"})
             continue
         existing = db.query(PalletLicence).filter(
