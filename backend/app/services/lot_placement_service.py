@@ -196,18 +196,15 @@ def find_or_create_lot(
 
     now = datetime.now(timezone.utc)
     if existing:
-        if (
-            weight_per_unit is not None
-            and existing.weight_per_unit is not None
-            and abs(float(existing.weight_per_unit) - float(weight_per_unit)) > 0.001
-        ):
-            # Do not overwrite. Every pound already derived from this lot used
-            # the old figure; silently changing it would restate history.
-            existing.needs_review = True
-            existing.review_reason = (
-                f"Arrived at {weight_per_unit} {weight_unit or ''} per unit but the lot "
-                f"is recorded as {existing.weight_per_unit} {existing.weight_unit or ''}."
-            )
+        # A DIFFERENT weight on a later arrival is normal business, not a
+        # review case (2026-09-18): one prod vendor lot has genuinely arrived
+        # at 474, 502 and 559 lbs/drum across deliveries. Every conversion
+        # prices at the RECEIPT's own weight (`receipt_units_for_quantity`),
+        # so the lot-level figure is only a first-seen fallback — kept, never
+        # overwritten, and a conflict no longer flags the lot or blocks its
+        # stickers (a sticker names the lot, not a weight). The old flag
+        # stopped the print line mid-receiving for every varying delivery.
+        #
         # A packing fact, so a later arrival may simply know it when the first
         # did not. Filled in when missing; never overwritten, because a pallet
         # already received was counted under the old figure.

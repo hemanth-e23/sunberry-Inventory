@@ -540,13 +540,17 @@ class TestMissingWeightIsRefused:
             vendor_lot_number="CONFLICT", bbd=BBD, unit_label="drum",
             weight_per_unit=550.0, weight_unit="lbs", warehouse_id=WH,
         )
-        assert lot.needs_review is True
+        # 2026-09-18: differing arrival weights are NORMAL (per-receipt
+        # pricing) — the lot keeps its first-seen figure and is never
+        # flagged, so the print line is never stopped mid-receiving.
+        assert lot.needs_review is False
         again = lps_.find_or_create_lot(
             db_session, product_id=ING_PRODUCT, vendor_id=None,
             vendor_lot_number="CONFLICT", bbd=BBD, unit_label="drum",
             weight_per_unit=500.0, weight_unit="lbs", warehouse_id=WH,
         )
-        assert again.needs_review is True
+        assert again.needs_review is False
+        assert again.weight_per_unit == 500.0
 
 
 class TestUnknownLotsStaySeparate:

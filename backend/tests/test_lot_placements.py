@@ -169,24 +169,32 @@ class TestLotIdentity:
         assert again.bbd_current == LATER_BBD
         assert again.bbd_original == BBD
 
-    def test_conflicting_weight_flags_review_and_keeps_the_original(self, db_session, lot_seed):
-        """Silently adopting the new figure would restate every pound already
-        derived from this lot."""
+    def test_conflicting_weight_keeps_the_original_and_does_not_flag(self, db_session, lot_seed):
+        """A later delivery weighing differently is NORMAL (2026-09-18): one
+        prod vendor lot arrived at 474/502/559 lbs/drum. Conversions price at
+        each RECEIPT's own weight, so the lot figure is only a first-seen
+        fallback — kept, never overwritten, and no longer a review case that
+        stops the print line mid-receiving."""
         lot = _lot(db_session, weight=500.0)
         again = _lot(db_session, weight=550.0)
 
         assert again.id == lot.id
         assert again.weight_per_unit == 500.0
-        assert again.needs_review is True
-        assert "550" in again.review_reason
+        assert again.needs_review is False
+        assert again.review_reason is None
+        assert lps.can_print_labels(again)[0] is True
 
-    def test_no_sticker_prints_for_a_lot_under_review(self, db_session, lot_seed):
-        lot = _lot(db_session, weight=500.0)
-        assert lps.can_print_labels(lot)[0] is True
-        _lot(db_session, weight=550.0)
+    def test_no_sticker_prints_while_the_weight_is_missing(self, db_session, lot_seed):
+        """The MISSING-weight flag is still real: pounds derive from it, so a
+        weightless lot reads as zero stock — no sticker until it is filled."""
+        lot = _lot(db_session, weight=None)
         allowed, reason = lps.can_print_labels(lot)
         assert allowed is False
         assert reason
+
+        again = _lot(db_session, weight=500.0)
+        assert again.id == lot.id
+        assert lps.can_print_labels(again)[0] is True
 
     def test_missing_weight_is_filled_in_rather_than_flagged(self, db_session, lot_seed):
         lot = _lot(db_session, weight=None)
