@@ -4,7 +4,7 @@ import { useLocationContext as useLocation } from './LocationContext';
 import { useReceipt, mapReceipt } from './ReceiptContext';
 import { useAuth } from '../AuthContext';
 import apiClient from '../../api/client';
-import { CATEGORY_TYPES, RECEIPT_STATUS, TRANSFER_STATUS } from '../../constants';
+import { CATEGORY_TYPES, RECEIPT_STATUS, TRANSFER_STATUS, FORKLIFT_REQUEST_STATUS } from '../../constants';
 import {
   EPSILON,
   roundTo,
@@ -22,6 +22,15 @@ import {
 // the scanned-counts panel on every pending receipt after any approval.
 
 // ─── Context ──────────────────────────────────────────────────────────────────
+
+// The approvals page is the only consumer of forkliftRequests and it filters to
+// SUBMITTED immediately, but this fetch asked for every request ever recorded —
+// each carrying its whole pallet_licences collection, which the endpoint
+// joinedloads. That response kept growing until the tunnel dropped it
+// mid-transfer (ERR_QUIC_PROTOCOL_ERROR at ~369 kB), and the catch turned the
+// failure into an empty array: "0 requests awaiting approval" while submitted
+// sessions sat there. Ask the server for the only status this app uses.
+const FORKLIFT_LIST_PARAMS = { params: { status_filter: FORKLIFT_REQUEST_STATUS.SUBMITTED } };
 
 const InventoryContext = createContext(null);
 
@@ -180,7 +189,7 @@ export const InventoryProvider = ({ children }) => {
 
     const doFetchForkliftRequests = async () => {
       try {
-        const response = await apiClient.get('/scanner/requests');
+        const response = await apiClient.get('/scanner/requests', FORKLIFT_LIST_PARAMS);
         setForkliftRequests(response.data || []);
       } catch (error) {
         console.error('Error fetching forklift requests:', error);
@@ -807,7 +816,7 @@ export const InventoryProvider = ({ children }) => {
 
   const fetchForkliftRequests = async () => {
     try {
-      const response = await apiClient.get('/scanner/requests');
+      const response = await apiClient.get('/scanner/requests', FORKLIFT_LIST_PARAMS);
       setForkliftRequests(response.data || []);
       return response.data || [];
     } catch (error) {
