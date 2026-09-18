@@ -59,18 +59,25 @@ export const useScanQueueCore = ({ onItemResult } = {}) => {
     };
   }, []);
 
-  const drain = useCallback(() => drainScanQueue({
+  const runDrain = useCallback((force) => drainScanQueue({
+    force,
     onItemResult: (item, response, error) => onItemResultRef.current?.(item, response, error),
   }), []);
 
-  // Drain on mount, whenever the browser claims we are back, and on focus.
-  useEffect(() => { drain(); }, [drain, navigatorOnline]);
+  // The background poll, which the transport back-off is allowed to throttle.
+  const drain = useCallback(() => runDrain(false), [runDrain]);
+  // Anything a person did. Never throttled: when someone presses Sync now, or
+  // opens the app, or scans, they get an attempt right then.
+  const syncNow = useCallback(() => runDrain(true), [runDrain]);
+
+  // Try on mount, whenever the browser claims we are back, and on focus.
+  useEffect(() => { syncNow(); }, [syncNow, navigatorOnline]);
   useEffect(() => {
     if (typeof document === 'undefined') return undefined;
-    const onVis = () => { if (!document.hidden) drain(); };
+    const onVis = () => { if (!document.hidden) syncNow(); };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
-  }, [drain]);
+  }, [syncNow]);
 
   // Periodic poll — this is the one that actually recovers a gun whose `online`
   // event never fired, which is exactly why it must not be gated on
@@ -93,14 +100,14 @@ export const useScanQueueCore = ({ onItemResult } = {}) => {
   const send = useCallback(({ requestId, payload, endpoint, idempotencyKey }) => {
     const item = enqueueScan({ requestId, payload, endpoint, idempotencyKey });
     // Try immediately so the common case (online) feels synchronous.
-    drain();
+    syncNow();
     return item;
-  }, [drain]);
+  }, [syncNow]);
 
   const retry = useCallback(() => {
     retryFailedScans();
-    return drain();
-  }, [drain]);
+    return syncNow();
+  }, [syncNow]);
 
   return {
     online,
@@ -111,7 +118,9 @@ export const useScanQueueCore = ({ onItemResult } = {}) => {
     syncing: conn.syncing,
     lastSyncError: conn.lastError,
     lastSyncAt: conn.lastAttemptAt,
+    retryDelayMs: conn.retryDelayMs,
     drain,
+    syncNow,
     send,
     retry,
     dropFailed: removeScan,
@@ -153,6 +162,7 @@ export const useScanQueue = ({ onSynced, onFailed } = {}) => {
     syncing: core.syncing,
     lastSyncError: core.lastSyncError,
     lastSyncAt: core.lastSyncAt,
+    retryDelayMs: core.retryDelayMs,
     countsForRequest,
     // `endpoint` is forwarded now; flows no longer need a private copy of this
     // hook just to reach a non-default path.
@@ -160,6 +170,6 @@ export const useScanQueue = ({ onSynced, onFailed } = {}) => {
     retryFailed: core.retry,
     dropFailed: core.dropFailed,
     clearRequest: core.clearRequest,
-    drainNow: core.drain,
+    drainNow: core.syncNow,
   };
 };

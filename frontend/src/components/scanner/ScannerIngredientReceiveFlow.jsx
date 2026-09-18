@@ -109,8 +109,9 @@ const useContainerScanQueue = (onSettled) => {
     queue: core.queue,
     syncing: core.syncing,
     lastSyncError: core.lastSyncError,
+    // `drain` here is what the Sync now button calls, so it must force.
     send,
-    drain: core.drain,
+    drain: core.syncNow,
     retry: core.retry,
   };
 };

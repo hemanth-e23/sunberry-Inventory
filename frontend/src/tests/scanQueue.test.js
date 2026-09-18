@@ -78,16 +78,23 @@ describe('drainScanQueue', () => {
     for (const licence of ['A', 'B', 'C']) queueScan(licence);
     apiClient.post.mockRejectedValue(transportError());
 
-    for (let i = 0; i < 20; i += 1) await drainScanQueue(); // a shift off-network
+    // A shift off-network. Each pass is forced so the back-off does not mask
+    // what is being tested here: that nothing is ever dropped.
+    for (let i = 0; i < 20; i += 1) await drainScanQueue({ force: true });
     expect(listScans()).toHaveLength(3);
     expect(listScans().every((i) => i.state === 'pending')).toBe(true);
 
     apiClient.post.mockResolvedValue({ data: { status: 'ok' } });
+
+    // No one touches the gun — the background poll alone brings it back, once
+    // the back-off window has passed.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61000);
     const result = await drainScanQueue();
 
     expect(result.sent).toHaveLength(3);
     expect(result.reachable).toBe(true);
     expect(listScans()).toHaveLength(0);
+    vi.restoreAllMocks();
   });
 
   it('parks a scan the server keeps rejecting so it stops being invisible', async () => {
@@ -138,6 +145,31 @@ describe('drainScanQueue', () => {
     expect(recovered.sent).toHaveLength(1);
     expect(listScans()).toHaveLength(0);
     vi.restoreAllMocks();
+  });
+
+  it('slows the background poll when nothing answers, but never a forced sync', async () => {
+    queueScan('A');
+    apiClient.post.mockRejectedValue(transportError());
+
+    await drainScanQueue();                 // first pass: attempts once
+    expect(apiClient.post).toHaveBeenCalledTimes(1);
+
+    const backedOff = await drainScanQueue(); // background poll, too soon
+    expect(backedOff.backedOff).toBe(true);
+    expect(apiClient.post).toHaveBeenCalledTimes(1);
+
+    // The driver pressing "Sync now" is never made to wait.
+    await drainScanQueue({ force: true });
+    expect(apiClient.post).toHaveBeenCalledTimes(2);
+
+    // And one good response puts the poll straight back to full speed.
+    apiClient.post.mockResolvedValue({ data: { status: 'ok' } });
+    await drainScanQueue({ force: true });
+    expect(listScans()).toHaveLength(0);
+
+    queueScan('B');
+    await drainScanQueue();
+    expect(apiClient.post).toHaveBeenCalledTimes(4);
   });
 
   it('survives a UI callback that throws mid-pass', async () => {

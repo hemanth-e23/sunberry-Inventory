@@ -51,6 +51,14 @@ const DRAIN_STUCK_MS = 90000;
 // the network for a whole shift must not poison its own queue.
 const MAX_SERVER_ERROR_ATTEMPTS = 8;
 
+// Back-off for the BACKGROUND poll only, indexed by consecutive passes that
+// could not reach the server at all. A gun that cannot resolve the API host was
+// hammering it every 8s — over a thousand attempts in an afternoon, which is
+// both pointless and a good way to get an IP rate-limited by the edge. Anything
+// a human does (Sync now, opening the app, a fresh scan) still tries instantly:
+// this throttles waiting, never acting.
+const TRANSPORT_BACKOFF_MS = [8000, 8000, 16000, 30000, 60000];
+
 const isBrowser = () => typeof window !== 'undefined';
 
 const safeRandomId = () => {
@@ -111,6 +119,7 @@ let connectivity = {
   syncing: false,
   lastAttemptAt: null,
   lastError: null,
+  retryDelayMs: 0,
 };
 
 export const getConnectivity = () => connectivity;
@@ -208,6 +217,8 @@ const safeCallback = (cb, ...cbArgs) => {
 
 let drainInFlight = false;
 let drainStartedAt = 0;
+let consecutiveUnreachable = 0;
+let nextPollAllowedAt = 0;
 
 /**
  * Try to flush every pending item. Returns a summary:
@@ -216,9 +227,23 @@ let drainStartedAt = 0;
  *
  * Deliberately NOT gated on navigator.onLine — the attempt itself is the
  * connectivity check, and it fails in milliseconds when there is no network.
+ *
+ * `force` bypasses the transport back-off. Pass it for anything a person did.
  */
-export const drainScanQueue = async ({ onItemResult } = {}) => {
+export const drainScanQueue = async ({ onItemResult, force = false } = {}) => {
   const pendingCount = () => readAll().filter((i) => i.state === 'pending').length;
+
+  if (!force && Date.now() < nextPollAllowedAt) {
+    return {
+      sent: [],
+      failed: [],
+      skipped: 0,
+      remaining: pendingCount(),
+      reachable: connectivity.reachable,
+      lastError: connectivity.lastError,
+      backedOff: true,
+    };
+  }
 
   if (drainInFlight && Date.now() - drainStartedAt < DRAIN_STUCK_MS) {
     return {
@@ -315,11 +340,28 @@ export const drainScanQueue = async ({ onItemResult } = {}) => {
     }
   } finally {
     drainInFlight = false;
+    if (reachable === false) {
+      // Nothing answered. Slow the background poll down, step by step.
+      const step = TRANSPORT_BACKOFF_MS[
+        Math.min(consecutiveUnreachable, TRANSPORT_BACKOFF_MS.length - 1)
+      ];
+      consecutiveUnreachable += 1;
+      nextPollAllowedAt = Date.now() + step;
+    } else if (reachable === true) {
+      // The server spoke to us — back to full speed immediately.
+      consecutiveUnreachable = 0;
+      nextPollAllowedAt = 0;
+    }
     setConnectivity({
       syncing: false,
       reachable,
       lastAttemptAt: new Date().toISOString(),
       lastError,
+      retryDelayMs: reachable === false
+        ? TRANSPORT_BACKOFF_MS[
+          Math.min(consecutiveUnreachable - 1, TRANSPORT_BACKOFF_MS.length - 1)
+        ]
+        : 0,
     });
   }
 
@@ -346,6 +388,10 @@ export const clearScanQueue = () => writeAll([]);
 export const __resetScanQueueForTests = () => {
   drainInFlight = false;
   drainStartedAt = 0;
-  connectivity = { reachable: null, syncing: false, lastAttemptAt: null, lastError: null };
+  consecutiveUnreachable = 0;
+  nextPollAllowedAt = 0;
+  connectivity = {
+    reachable: null, syncing: false, lastAttemptAt: null, lastError: null, retryDelayMs: 0,
+  };
   writeAll([]);
 };
