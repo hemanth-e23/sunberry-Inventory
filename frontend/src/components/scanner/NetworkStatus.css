@@ -102,6 +102,34 @@
   color: #92400e;
 }
 
+.network-status__muted {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.network-status__reason {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 11px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.network-status__list-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
 .network-status__failed-list {
   margin-top: 10px;
   border-top: 1px solid #e5e7eb;

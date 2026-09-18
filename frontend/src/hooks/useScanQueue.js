@@ -1,39 +1,56 @@
 // React hook over scanQueue.js. Adds:
-//   - online/offline state derived from navigator.onLine + events
+//   - connectivity state derived from real send outcomes (see below)
 //   - automatic drain on online + tab visibility + interval
 //   - state-snapshot of the queue exposed for UI badges
+//
+// The drain is NEVER gated on navigator.onLine. On a scanner gun that flag is
+// unreliable — WebViews, captive portals and sleep/wake can leave it stuck
+// false long after the wifi is back. It used to gate both the auto-drain and
+// the "Sync now" button, so a stuck flag meant a queue that could not be
+// flushed by any means: scans piled up all shift and the driver had no way to
+// push them through. Now the POST itself is the connectivity test, and what it
+// reports is what the header chip shows.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   drainScanQueue,
   enqueueScan,
+  getConnectivity,
   listScans,
   removeScan,
   removeScansForRequest,
   retryFailedScans,
+  subscribeToConnectivity,
   subscribeToScanQueue,
 } from '../utils/scanQueue';
 
 const POLL_MS = 8000;
 
-export const useScanQueue = ({ onSynced, onFailed } = {}) => {
-  const [online, setOnline] = useState(
+/**
+ * Shared queue engine. Every scanner flow uses this — one storage key, one
+ * retry policy, one drain loop, one definition of "are we connected".
+ *
+ * onItemResult(item, response | null, error | null) fires per settled item.
+ */
+export const useScanQueueCore = ({ onItemResult } = {}) => {
+  const [navigatorOnline, setNavigatorOnline] = useState(
     typeof navigator !== 'undefined' ? navigator.onLine : true,
   );
   const [queue, setQueue] = useState(() => listScans());
-  const onSyncedRef = useRef(onSynced);
-  const onFailedRef = useRef(onFailed);
+  const [conn, setConn] = useState(() => getConnectivity());
+  const onItemResultRef = useRef(onItemResult);
 
-  useEffect(() => { onSyncedRef.current = onSynced; }, [onSynced]);
-  useEffect(() => { onFailedRef.current = onFailed; }, [onFailed]);
+  useEffect(() => { onItemResultRef.current = onItemResult; }, [onItemResult]);
 
-  // Subscribe to queue changes (cross-tab + same-tab)
+  // Subscribe to queue changes (cross-tab + same-tab) and to send outcomes
   useEffect(() => subscribeToScanQueue((next) => setQueue(next)), []);
+  useEffect(() => subscribeToConnectivity((next) => setConn(next)), []);
 
-  // Online/offline events
+  // navigator.onLine is still worth listening to: when it flips true that is a
+  // good moment to try. It just never gets to VETO a send.
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
-    const goOnline = () => setOnline(true);
-    const goOffline = () => setOnline(false);
+    const goOnline = () => setNavigatorOnline(true);
+    const goOffline = () => setNavigatorOnline(false);
     window.addEventListener('online', goOnline);
     window.addEventListener('offline', goOffline);
     return () => {
@@ -42,18 +59,12 @@ export const useScanQueue = ({ onSynced, onFailed } = {}) => {
     };
   }, []);
 
-  const drain = useCallback(async () => {
-    if (!online) return;
-    await drainScanQueue({
-      onItemResult: (item, response, error) => {
-        if (response) onSyncedRef.current?.(item, response);
-        if (error) onFailedRef.current?.(item, error);
-      },
-    });
-  }, [online]);
+  const drain = useCallback(() => drainScanQueue({
+    onItemResult: (item, response, error) => onItemResultRef.current?.(item, response, error),
+  }), []);
 
-  // Drain whenever online flips true OR tab regains focus
-  useEffect(() => { drain(); }, [drain, online]);
+  // Drain on mount, whenever the browser claims we are back, and on focus.
+  useEffect(() => { drain(); }, [drain, navigatorOnline]);
   useEffect(() => {
     if (typeof document === 'undefined') return undefined;
     const onVis = () => { if (!document.hidden) drain(); };
@@ -61,15 +72,26 @@ export const useScanQueue = ({ onSynced, onFailed } = {}) => {
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [drain]);
 
-  // Periodic poll — covers cases where online event didn't fire (some
-  // captive portals re-route silently) or where a 5xx wants a retry.
+  // Periodic poll — this is the one that actually recovers a gun whose `online`
+  // event never fired, which is exactly why it must not be gated on
+  // navigator.onLine the way it used to be.
   useEffect(() => {
     const t = setInterval(drain, POLL_MS);
     return () => clearInterval(t);
   }, [drain]);
 
-  const enqueue = useCallback(({ requestId, payload, idempotencyKey }) => {
-    const item = enqueueScan({ requestId, payload, idempotencyKey });
+  const pendingCount = queue.filter((it) => it.state === 'pending').length;
+  const failedCount = queue.filter((it) => it.state === 'failed').length;
+
+  // What the operator is shown. Measured reachability wins whenever we have it
+  // and there is queued work keeping it fresh (a pass runs every 8s); with an
+  // empty queue nothing is being measured, so fall back to the browser's claim.
+  const online = (pendingCount > 0 && conn.reachable !== null)
+    ? conn.reachable
+    : navigatorOnline;
+
+  const send = useCallback(({ requestId, payload, endpoint, idempotencyKey }) => {
+    const item = enqueueScan({ requestId, payload, endpoint, idempotencyKey });
     // Try immediately so the common case (online) feels synchronous.
     drain();
     return item;
@@ -77,17 +99,39 @@ export const useScanQueue = ({ onSynced, onFailed } = {}) => {
 
   const retry = useCallback(() => {
     retryFailedScans();
-    drain();
+    return drain();
   }, [drain]);
 
-  const dropFailed = useCallback((id) => removeScan(id), []);
+  return {
+    online,
+    navigatorOnline,
+    queue,
+    pendingCount,
+    failedCount,
+    syncing: conn.syncing,
+    lastSyncError: conn.lastError,
+    lastSyncAt: conn.lastAttemptAt,
+    drain,
+    send,
+    retry,
+    dropFailed: removeScan,
+    clearRequest: removeScansForRequest,
+  };
+};
 
-  // Drop every queued item for a session — used when a line is submitted so its
-  // synced/leftover entries don't linger and gate the other line.
-  const clearRequest = useCallback((requestId) => removeScansForRequest(requestId), []);
+export const useScanQueue = ({ onSynced, onFailed } = {}) => {
+  const onSyncedRef = useRef(onSynced);
+  const onFailedRef = useRef(onFailed);
+  useEffect(() => { onSyncedRef.current = onSynced; }, [onSynced]);
+  useEffect(() => { onFailedRef.current = onFailed; }, [onFailed]);
 
-  const pendingCount = queue.filter((it) => it.state === 'pending').length;
-  const failedCount = queue.filter((it) => it.state === 'failed').length;
+  const onItemResult = useCallback((item, response, error) => {
+    if (response) onSyncedRef.current?.(item, response);
+    if (error) onFailedRef.current?.(item, error);
+  }, []);
+
+  const core = useScanQueueCore({ onItemResult });
+  const { queue } = core;
 
   // Per-session counts so each line's submit is gated only by its own scans.
   const countsForRequest = useCallback((requestId) => {
@@ -102,15 +146,20 @@ export const useScanQueue = ({ onSynced, onFailed } = {}) => {
   }, [queue]);
 
   return {
-    online,
+    online: core.online,
     queue,
-    pendingCount,
-    failedCount,
+    pendingCount: core.pendingCount,
+    failedCount: core.failedCount,
+    syncing: core.syncing,
+    lastSyncError: core.lastSyncError,
+    lastSyncAt: core.lastSyncAt,
     countsForRequest,
-    enqueueScan: enqueue,
-    retryFailed: retry,
-    dropFailed,
-    clearRequest,
-    drainNow: drain,
+    // `endpoint` is forwarded now; flows no longer need a private copy of this
+    // hook just to reach a non-default path.
+    enqueueScan: core.send,
+    retryFailed: core.retry,
+    dropFailed: core.dropFailed,
+    clearRequest: core.clearRequest,
+    drainNow: core.drain,
   };
 };

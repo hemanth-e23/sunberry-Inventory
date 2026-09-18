@@ -13,13 +13,43 @@
 //                    retried (e.g., 4xx returned by server, like a closed
 //                    forklift session)
 //
-// Network errors (no response, 5xx, 408, 429) are retryable: item stays
-// `pending` and the next drain pass will try again.
+// Three kinds of outcome, and they are NOT the same thing:
+//
+//   transport error (no response at all — offline, DNS, timeout, CORS)
+//       The server was never reached. The item stays `pending` and the pass
+//       stops: nothing behind it can go through either, so trying is waste.
+//
+//   server error (5xx / 408 / 429)
+//       The server answered, it just could not take THIS item. The item stays
+//       `pending` but the pass SKIPS IT AND KEEPS GOING. This matters: one
+//       poisoned scan used to freeze every scan queued behind it — the loop
+//       broke on the head item every pass, so a driver could put 26 pallets in
+//       the queue that would never go, no matter how good the wifi got. After
+//       MAX_SERVER_ERROR_ATTEMPTS such attempts the item is parked as `failed`
+//       so it becomes visible instead of silently pending forever.
+//
+//   terminal error (other 4xx — closed session, validation)
+//       Parked as `failed` immediately for the operator to resolve.
+//
+// Connectivity is derived from those outcomes, not from navigator.onLine. On a
+// scanner gun navigator.onLine lies (WebView, captive portal, sleep/wake), and
+// the queue must never be gated on a flag that can get stuck false — that is
+// what made "Sync now" do nothing at all.
 
 import apiClient from '../api/client';
 
 const STORAGE_KEY = 'sunberry-scan-queue-v1';
 const EVENT_NAME = 'sunberry-scan-queue:change';
+const CONNECTIVITY_EVENT = 'sunberry-scan-queue:connectivity';
+
+// A drain that somehow never settles must not lock the queue for the rest of
+// the shift. After this long, a fresh drain is allowed to start anyway.
+const DRAIN_STUCK_MS = 90000;
+
+// How many times a server error (5xx/408/429) may hold an item pending before
+// it is parked as failed. Transport errors never count toward this — a gun off
+// the network for a whole shift must not poison its own queue.
+const MAX_SERVER_ERROR_ATTEMPTS = 8;
 
 const isBrowser = () => typeof window !== 'undefined';
 
@@ -67,6 +97,36 @@ export const subscribeToScanQueue = (cb) => {
   };
 };
 
+// ─── Connectivity, measured rather than assumed ──────────────────────────────
+//
+//   reachable   true  — the server answered our last attempt (even with a 4xx)
+//               false — the last attempt never reached it
+//               null  — nothing has been attempted yet; caller should fall back
+//                       to navigator.onLine
+//   syncing     a drain pass is running right now
+//   lastError   why the last attempt failed, for the operator to read
+
+let connectivity = {
+  reachable: null,
+  syncing: false,
+  lastAttemptAt: null,
+  lastError: null,
+};
+
+export const getConnectivity = () => connectivity;
+
+const setConnectivity = (patch) => {
+  connectivity = { ...connectivity, ...patch };
+  if (isBrowser()) window.dispatchEvent(new CustomEvent(CONNECTIVITY_EVENT));
+};
+
+export const subscribeToConnectivity = (cb) => {
+  if (!isBrowser()) return () => {};
+  const onChange = () => cb(connectivity);
+  window.addEventListener(CONNECTIVITY_EVENT, onChange);
+  return () => window.removeEventListener(CONNECTIVITY_EVENT, onChange);
+};
+
 /**
  * Enqueue a scan request. Returns the queue item (with idempotency_key).
  * The caller can use idempotency_key as a stable handle to find the entry
@@ -93,6 +153,8 @@ export const enqueueScan = ({ requestId, payload, endpoint, idempotencyKey }) =>
     payload,
     addedAt: new Date().toISOString(),
     attempts: 0,
+    serverErrors: 0,
+    lastAttemptAt: null,
     lastError: null,
     state: 'pending', // pending | failed
   };
@@ -114,42 +176,87 @@ export const updateScan = (id, patch) => {
 
 export const retryFailedScans = () => {
   const items = readAll().map((it) => (
-    it.state === 'failed' ? { ...it, state: 'pending', lastError: null } : it
+    it.state === 'failed'
+      ? { ...it, state: 'pending', lastError: null, serverErrors: 0 }
+      : it
   ));
   writeAll(items);
 };
 
-const isRetryableError = (err) => {
-  if (!err) return true;
-  if (!err.response) return true; // network / CORS / aborted
-  const s = err.response.status;
-  if (s >= 500) return true;
-  if (s === 408 || s === 429) return true;
-  return false;
+/** No response at all: offline, DNS, timeout, CORS. The server was not reached. */
+const isTransportError = (err) => !err || !err.response;
+
+/** Server answered but wants us to try again later. */
+const isServerError = (err) => {
+  const s = err?.response?.status;
+  return s >= 500 || s === 408 || s === 429;
+};
+
+const errorText = (err) => (
+  err?.response?.data?.detail || err?.message || 'Unknown error'
+);
+
+// A callback from the UI must never be able to abort the drain — a throw in a
+// React state updater used to take the rest of the queue down with it.
+const safeCallback = (cb, ...cbArgs) => {
+  try {
+    cb?.(...cbArgs);
+  } catch {
+    /* the queue's job is to flush; UI bookkeeping failures are not fatal */
+  }
 };
 
 let drainInFlight = false;
+let drainStartedAt = 0;
 
 /**
- * Try to flush every pending item in order. Returns a summary:
- *   { sent: [{item, response}], failed: [{item, error}], remaining: number }
+ * Try to flush every pending item. Returns a summary:
+ *   { sent, failed, skipped, remaining, reachable, lastError }
  * onItemResult is called per item with (item, result | null, error | null).
+ *
+ * Deliberately NOT gated on navigator.onLine — the attempt itself is the
+ * connectivity check, and it fails in milliseconds when there is no network.
  */
 export const drainScanQueue = async ({ onItemResult } = {}) => {
-  if (drainInFlight) return { sent: [], failed: [], remaining: readAll().filter(i => i.state === 'pending').length };
+  const pendingCount = () => readAll().filter((i) => i.state === 'pending').length;
+
+  if (drainInFlight && Date.now() - drainStartedAt < DRAIN_STUCK_MS) {
+    return {
+      sent: [],
+      failed: [],
+      skipped: 0,
+      remaining: pendingCount(),
+      reachable: connectivity.reachable,
+      lastError: connectivity.lastError,
+      alreadyRunning: true,
+    };
+  }
+
   drainInFlight = true;
+  drainStartedAt = Date.now();
+  setConnectivity({ syncing: true });
 
   const sent = [];
   const failed = [];
+  // Items tried in THIS pass. A skipped item stays pending, so without this the
+  // loop would pick it up again immediately and spin forever.
+  const attempted = new Set();
+  let skipped = 0;
+  let reachable = connectivity.reachable;
+  let lastError = null;
 
   try {
     while (true) {
       const items = readAll();
-      const next = items.find((it) => it.state === 'pending');
+      const next = items.find((it) => it.state === 'pending' && !attempted.has(it.id));
       if (!next) break;
+      attempted.add(next.id);
 
       // Mark attempts in storage so retries are auditable
-      updateScan(next.id, { attempts: (next.attempts || 0) + 1 });
+      updateScan(next.id, {
+        attempts: (next.attempts || 0) + 1,
+        lastAttemptAt: new Date().toISOString(),
+      });
 
       try {
         // Items enqueued before `endpoint` existed have it null/undefined and
@@ -158,33 +265,72 @@ export const drainScanQueue = async ({ onItemResult } = {}) => {
           next.endpoint || `/scanner/requests/${next.requestId}/scan`,
           { ...next.payload, idempotency_key: next.idempotency_key },
         );
+        reachable = true;
+        lastError = null;
         sent.push({ item: next, response: resp.data });
         removeScan(next.id);
-        onItemResult?.(next, resp.data, null);
+        safeCallback(onItemResult, next, resp.data, null);
+        continue;
       } catch (err) {
-        if (isRetryableError(err)) {
-          // Stop draining — likely offline. Leave the item pending; the
-          // auto-drain on next online tick will pick it back up.
-          updateScan(next.id, { lastError: err.message || 'Network error' });
-          onItemResult?.(next, null, err);
+        lastError = errorText(err);
+
+        if (isTransportError(err)) {
+          // Server never answered — everything behind this item would fail the
+          // same way. Stop the pass; the item stays pending for the next one.
+          reachable = false;
+          updateScan(next.id, { lastError });
+          safeCallback(onItemResult, next, null, err);
           break;
         }
+
+        // From here on the server DID answer, so the network itself is fine.
+        reachable = true;
+
+        if (isServerError(err)) {
+          const serverErrors = (next.serverErrors || 0) + 1;
+          if (serverErrors >= MAX_SERVER_ERROR_ATTEMPTS) {
+            // Stop retrying quietly — park it where the operator can see it.
+            updateScan(next.id, {
+              state: 'failed',
+              serverErrors,
+              lastError: `${lastError} (gave up after ${serverErrors} tries)`,
+            });
+            failed.push({ item: next, error: err });
+          } else {
+            // Keep it pending, but move on to the rest of the queue. One bad
+            // scan must not hold up the 25 good ones behind it.
+            updateScan(next.id, { serverErrors, lastError });
+            skipped += 1;
+          }
+          safeCallback(onItemResult, next, null, err);
+          continue;
+        }
+
         // Terminal error — server rejected (e.g., session closed, validation).
         // Park the item as failed so the operator can decide what to do.
-        updateScan(next.id, {
-          state: 'failed',
-          lastError: err.response?.data?.detail || err.message || 'Server error',
-        });
+        updateScan(next.id, { state: 'failed', lastError });
         failed.push({ item: next, error: err });
-        onItemResult?.(next, null, err);
+        safeCallback(onItemResult, next, null, err);
       }
     }
   } finally {
     drainInFlight = false;
+    setConnectivity({
+      syncing: false,
+      reachable,
+      lastAttemptAt: new Date().toISOString(),
+      lastError,
+    });
   }
 
-  const remaining = readAll().filter((i) => i.state === 'pending').length;
-  return { sent, failed, remaining };
+  return {
+    sent,
+    failed,
+    skipped,
+    remaining: pendingCount(),
+    reachable,
+    lastError,
+  };
 };
 
 /** Drop items belonging to a request id (e.g., when the session is closed). */
@@ -195,3 +341,11 @@ export const removeScansForRequest = (requestId) => {
 
 /** Wipe everything — for tests or admin use. */
 export const clearScanQueue = () => writeAll([]);
+
+/** Reset module-level state between tests. */
+export const __resetScanQueueForTests = () => {
+  drainInFlight = false;
+  drainStartedAt = 0;
+  connectivity = { reachable: null, syncing: false, lastAttemptAt: null, lastError: null };
+  writeAll([]);
+};

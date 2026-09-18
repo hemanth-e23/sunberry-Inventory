@@ -176,6 +176,8 @@ const ScannerReceiptFlow = () => {
     online,
     pendingCount,
     failedCount,
+    syncing,
+    lastSyncError,
     countsForRequest,
     enqueueScan,
     retryFailed,
@@ -605,6 +607,8 @@ const ScannerReceiptFlow = () => {
       online={online}
       pendingCount={pendingCount}
       failedCount={failedCount}
+      syncing={syncing}
+      lastSyncError={lastSyncError}
       onRetry={retryFailed}
       onDropFailed={dropFailed}
       onForceSync={drainNow}

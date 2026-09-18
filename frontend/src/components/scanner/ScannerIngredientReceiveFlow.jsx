@@ -8,10 +8,8 @@ import {
 import ScannerLayout from './ScannerLayout';
 import NetworkStatus from './NetworkStatus';
 import ScanFeedback from './ScanFeedback';
-import {
-  drainScanQueue, enqueueScan, listScans, removeScan, retryFailedScans,
-  subscribeToScanQueue,
-} from '../../utils/scanQueue';
+import { removeScan } from '../../utils/scanQueue';
+import { useScanQueueCore } from '../../hooks/useScanQueue';
 import { decodeContainerPayload } from '../../utils/labelPayload';
 import { playErrorTone, playSuccessTone } from '../../utils/scannerFeedback';
 import { formatDate } from '../../utils/dateUtils';
@@ -39,8 +37,6 @@ import './ScannerIngredientReceiveFlow.css';
 // client-side, before it ever reaches the wire (§18.2 R-3 / §6.4). There is
 // deliberately no fall back to a last-known or default row.
 // ─────────────────────────────────────────────────────────────────────────────
-
-const POLL_MS = 8000;
 
 // How many recent scans stay on screen. The gun shows the tail of the session,
 // not the whole truck — the full list is the desk's job.
@@ -83,63 +79,40 @@ const isTerminal = (err) => {
 };
 
 // ─── Offline scan queue ──────────────────────────────────────────────────────
-// Uses scanQueue.js directly rather than the useScanQueue hook: the hook's
-// `enqueue` wrapper does not forward the `endpoint` field, and the endpoint is
-// exactly what lets container scans share the ONE queue (one storage key, one
-// retry policy, one drain loop) with pallet scans.
+// A thin adapter over the shared engine in hooks/useScanQueue.js — one storage
+// key, one retry policy, one drain loop, one definition of "are we connected",
+// shared with pallet and lot scans. This file used to carry its own copy of that
+// loop (the shared hook did not forward `endpoint`), and the copy went stale: it
+// kept the `if (!online) return` gate on navigator.onLine that could strand a
+// whole shift of scans on a gun whose online event never fired.
 const useContainerScanQueue = (onSettled) => {
-  const [online, setOnline] = useState(
-    typeof navigator !== 'undefined' ? navigator.onLine : true,
-  );
-  const [queue, setQueue] = useState(() => listScans());
   const settledRef = useRef(onSettled);
-
   useEffect(() => { settledRef.current = onSettled; }, [onSettled]);
-  useEffect(() => subscribeToScanQueue(setQueue), []);
 
-  useEffect(() => {
-    const goOnline = () => setOnline(true);
-    const goOffline = () => setOnline(false);
-    window.addEventListener('online', goOnline);
-    window.addEventListener('offline', goOffline);
-    return () => {
-      window.removeEventListener('online', goOnline);
-      window.removeEventListener('offline', goOffline);
-    };
+  const onItemResult = useCallback((item, response, error) => {
+    settledRef.current?.(item, response, error);
   }, []);
 
-  const drain = useCallback(async () => {
-    if (!online) return;
-    await drainScanQueue({
-      onItemResult: (item, response, error) => settledRef.current?.(item, response, error),
-    });
-  }, [online]);
-
-  useEffect(() => { drain(); }, [drain]);
-
-  useEffect(() => {
-    const timer = setInterval(drain, POLL_MS);
-    return () => clearInterval(timer);
-  }, [drain]);
-
-  useEffect(() => {
-    const onVisible = () => { if (!document.hidden) drain(); };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [drain]);
+  const core = useScanQueueCore({ onItemResult });
+  const { send: coreSend } = core;
 
   // Every scan — including a confirmed move — goes through the queue, so every
   // scan carries the idempotency_key the queue mints and a replay is deduped
   // server-side instead of double-counting a drum.
-  const send = useCallback((requestId, endpoint, payload) => {
-    const item = enqueueScan({ requestId, payload, endpoint });
-    drain();
-    return item;
-  }, [drain]);
+  const send = useCallback(
+    (requestId, endpoint, payload) => coreSend({ requestId, endpoint, payload }),
+    [coreSend],
+  );
 
-  const retry = useCallback(() => { retryFailedScans(); drain(); }, [drain]);
-
-  return { online, queue, send, drain, retry };
+  return {
+    online: core.online,
+    queue: core.queue,
+    syncing: core.syncing,
+    lastSyncError: core.lastSyncError,
+    send,
+    drain: core.drain,
+    retry: core.retry,
+  };
 };
 
 /** `/ingredient-intakes/<id>/scan` → `<id>`; anything else → null. */
@@ -188,7 +161,9 @@ const IntakeListView = () => {
     }
   }, []);
 
-  const { online, queue, drain, retry } = useContainerScanQueue(onQueueSettled);
+  const {
+    online, queue, drain, retry, syncing, lastSyncError,
+  } = useContainerScanQueue(onQueueSettled);
 
   const queued = useMemo(
     () => queue.filter((it) => intakeIdFromEndpoint(it.endpoint)),
@@ -222,6 +197,8 @@ const IntakeListView = () => {
           online={online}
           pendingCount={pendingCount}
           failedCount={failedCount}
+          syncing={syncing}
+          lastSyncError={lastSyncError}
           onRetry={retry}
           onDropFailed={removeScan}
           onForceSync={drain}
@@ -452,7 +429,9 @@ const IntakeSessionView = ({ intakeId }) => {
     showSuccess(response.message || 'Received');
   }, [patchHistory, rowNameFor, showError, showInfo, showSuccess]);
 
-  const { online, queue, send, drain, retry } = useContainerScanQueue(onScanSettled);
+  const {
+    online, queue, send, drain, retry, syncing, lastSyncError,
+  } = useContainerScanQueue(onScanSettled);
 
   // ── Derived queue counts, scoped to this intake ────────────────────────────
   const myItems = useMemo(
@@ -735,6 +714,8 @@ const IntakeSessionView = ({ intakeId }) => {
       online={online}
       pendingCount={pendingItems.length}
       failedCount={failedCount}
+      syncing={syncing}
+      lastSyncError={lastSyncError}
       onRetry={retry}
       onDropFailed={removeScan}
       onForceSync={drain}

@@ -7,10 +7,8 @@ import ScannerLayout from './ScannerLayout';
 import NetworkStatus from './NetworkStatus';
 import ScanFeedback from './ScanFeedback';
 import { playErrorTone, playSuccessTone } from '../../utils/scannerFeedback';
-import {
-  drainScanQueue, enqueueScan, listScans, removeScan, retryFailedScans,
-  subscribeToScanQueue,
-} from '../../utils/scanQueue';
+import { removeScan } from '../../utils/scanQueue';
+import { useScanQueueCore } from '../../hooks/useScanQueue';
 import { decodeLotPayload } from '../../utils/labelPayload';
 import {
   apiErrorMessage, getReceivingSession, listReceivingSessions,
@@ -67,7 +65,6 @@ import './ScannerIngredientReceiveFlow.css';
  * is a lost scan.
  */
 
-const POLL_MS = 15000;
 const HISTORY_LIMIT = 40;
 
 const errorText = (err, fallback) => apiErrorMessage(err, fallback);
@@ -80,64 +77,43 @@ const isTerminal = (err) => {
 };
 
 // ─── Offline scan queue ──────────────────────────────────────────────────────
-// Uses scanQueue.js directly rather than the useScanQueue hook: the hook's
-// `enqueue` wrapper does not forward the `endpoint` field, and the endpoint is
-// exactly what lets lot scans share the ONE queue (one storage key, one retry
-// policy, one drain loop) with pallet and container scans.
+// A thin adapter over the shared engine in hooks/useScanQueue.js — one storage
+// key, one retry policy, one drain loop, one definition of "are we connected",
+// shared with pallet and container scans. This file used to carry its own copy
+// of that loop (the shared hook did not forward `endpoint`), and the copy went
+// stale: it kept the `if (!online) return` gate on navigator.onLine that could
+// strand a whole shift of scans on a gun whose online event never fired.
 const useLotScanQueue = (onSettled) => {
-  const [online, setOnline] = useState(
-    typeof navigator !== 'undefined' ? navigator.onLine : true,
-  );
-  const [queue, setQueue] = useState(() => listScans());
   const settledRef = useRef(onSettled);
-
   useEffect(() => { settledRef.current = onSettled; }, [onSettled]);
-  useEffect(() => subscribeToScanQueue(setQueue), []);
 
-  useEffect(() => {
-    const goOnline = () => setOnline(true);
-    const goOffline = () => setOnline(false);
-    window.addEventListener('online', goOnline);
-    window.addEventListener('offline', goOffline);
-    return () => {
-      window.removeEventListener('online', goOnline);
-      window.removeEventListener('offline', goOffline);
-    };
+  const onItemResult = useCallback((item, response, error) => {
+    settledRef.current?.(item, response, error);
   }, []);
 
-  const drain = useCallback(async () => {
-    if (!online) return;
-    await drainScanQueue({
-      onItemResult: (item, response, error) => settledRef.current?.(item, response, error),
-    });
-  }, [online]);
-
-  useEffect(() => { drain(); }, [drain]);
-
-  useEffect(() => {
-    const timer = setInterval(drain, POLL_MS);
-    return () => clearInterval(timer);
-  }, [drain]);
-
-  useEffect(() => {
-    const onVisible = () => { if (!document.hidden) drain(); };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [drain]);
+  const core = useScanQueueCore({ onItemResult });
+  const { send: coreSend } = core;
 
   // `idempotencyKey` reuses a key from an earlier attempt. The "rack is full"
   // confirm re-sends the same scan with the driver's answer on it; carrying the
   // original key keeps that a replay rather than a second drum, in the case
   // where the first attempt actually landed and only its response was lost.
-  const send = useCallback((requestId, endpoint, payload, idempotencyKey) => {
-    const item = enqueueScan({ requestId, payload, endpoint, idempotencyKey });
-    drain();
-    return item;
-  }, [drain]);
+  const send = useCallback(
+    (requestId, endpoint, payload, idempotencyKey) => coreSend({
+      requestId, endpoint, payload, idempotencyKey,
+    }),
+    [coreSend],
+  );
 
-  const retry = useCallback(() => { retryFailedScans(); drain(); }, [drain]);
-
-  return { online, queue, send, drain, retry };
+  return {
+    online: core.online,
+    queue: core.queue,
+    syncing: core.syncing,
+    lastSyncError: core.lastSyncError,
+    send,
+    drain: core.drain,
+    retry: core.retry,
+  };
 };
 
 // ─── Entry list ──────────────────────────────────────────────────────────────
@@ -154,7 +130,7 @@ const SessionListView = () => {
     if (!receiptIdFromEndpoint(item.endpoint)) return; // another flow's scan
   }, []);
 
-  const { online, queue, drain, retry } = useLotScanQueue(onQueueSettled);
+  const { online, queue, drain, retry, syncing, lastSyncError } = useLotScanQueue(onQueueSettled);
 
   const mine = useMemo(
     () => queue.filter((it) => receiptIdFromEndpoint(it.endpoint)),
@@ -183,6 +159,8 @@ const SessionListView = () => {
           online={online}
           pendingCount={pendingCount}
           failedCount={failedCount}
+          syncing={syncing}
+          lastSyncError={lastSyncError}
           onRetry={retry}
           onForceSync={drain}
         />
@@ -402,7 +380,9 @@ const SessionView = ({ receiptId }) => {
     showSuccess(response.message || 'Received');
   }, [patchHistory, rowNameFor, showError, showInfo, showSuccess]);
 
-  const { online, queue, send, drain, retry } = useLotScanQueue(onScanSettled);
+  const {
+    online, queue, send, drain, retry, syncing, lastSyncError,
+  } = useLotScanQueue(onScanSettled);
 
   // ── Derived queue counts, scoped to this session ───────────────────────────
   const myItems = useMemo(
@@ -748,6 +728,8 @@ const SessionView = ({ receiptId }) => {
       online={online}
       pendingCount={pendingItems.length}
       failedCount={failedCount}
+      syncing={syncing}
+      lastSyncError={lastSyncError}
       onRetry={retry}
       onForceSync={drain}
     />
