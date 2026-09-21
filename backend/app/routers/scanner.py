@@ -5,6 +5,7 @@ Route handlers are thin — all business logic lives in services/scanner_service
 """
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
@@ -47,7 +48,13 @@ def _sequences_covered_for_lot(db: Session, fr: ForkliftRequest, lot: str) -> li
         .filter(
             PalletLicence.lot_number == lot,
             PalletLicence.product_id == fr.product_id,
-            PalletLicence.forklift_request_id != fr.id,
+            # NULL-safe: a pallet created through Log Receipt has no session at
+            # all, and `NULL != 'fr-...'` is NULL in SQL, not true. Those rows
+            # were dropped from coverage entirely, so a hand-logged receipt made
+            # its own pallets permanently "missing" on every later session that
+            # touched the same lot — while sitting plainly in stock.
+            or_(PalletLicence.forklift_request_id.is_(None),
+                PalletLicence.forklift_request_id != fr.id),
             PalletLicence.status.in_(_COVERED_PALLET_STATUSES),
             PalletLicence.sequence.isnot(None),
         )

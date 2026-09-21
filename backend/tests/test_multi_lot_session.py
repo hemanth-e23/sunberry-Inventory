@@ -25,7 +25,7 @@ import pytest
 
 from app.models import (
     Category, CategoryGroup, Product, Location, SubLocation,
-    StorageArea, StorageRow, ForkliftRequest, PalletLicence, User,
+    StorageArea, StorageRow, ForkliftRequest, PalletLicence, User, Receipt,
 )
 from app.utils.auth import get_password_hash, create_access_token
 
@@ -181,3 +181,56 @@ def test_flat_covered_sequences_still_returned_for_cached_clients(
     """Backend deploys before gh-pages, so the old field must keep its old meaning."""
     r = client.get("/api/scanner/requests/fr-rollover", headers=auth_headers)
     assert r.json()["covered_sequences"] == []   # header lot MP26126L1 has no coverage
+
+
+@pytest.fixture
+def logged_receipt_pallets(db_session, rollover_session):
+    """Three pallets created by Log Receipt: on a receipt, on no session.
+
+    receipts.py:295 builds pallet licences straight from a receipt's placement
+    plan -- no forklift_request_id, no scanned_by, no scanned_at. Reported from
+    production: MP26126L2-PON16C-008/009/010, created within one millisecond,
+    in stock in AC121 and AI21, flagged missing on three separate sessions at
+    once while the Add button answered "already received and in stock".
+    """
+    db_session.add(Receipt(
+        id="rcpt-logged", product_id="prod-gt", category_id="cat-fg",
+        lot_number="MP26126L1", quantity=420, unit="cases", status="approved",
+    ))
+    for s in (30, 31, 32):
+        db_session.add(PalletLicence(
+            id=f"pl-logged-{s}", licence_number=f"MP26126L1-GRT128-{s:03d}",
+            forklift_request_id=None,          # the whole point
+            receipt_id="rcpt-logged",
+            product_id="prod-gt", lot_number="MP26126L1",
+            sequence=s, cases=140, status="in_stock",
+            storage_row_id="row-1", storage_area_id="area-1",
+        ))
+    # A pallet above them on the session, so 30-32 fall inside its 1..max walk.
+    db_session.add(PalletLicence(
+        id="pl-new-33", licence_number="MP26126L1-GRT128-033",
+        forklift_request_id="fr-rollover", product_id="prod-gt",
+        lot_number="MP26126L1", sequence=33, cases=50, status="pending",
+        storage_row_id="row-1", storage_area_id="area-1",
+    ))
+    db_session.commit()
+    return db_session
+
+
+@pytest.mark.integration
+def test_logged_receipt_pallets_count_as_covered(client, auth_headers, logged_receipt_pallets):
+    """`forklift_request_id != fr.id` is NULL-blind: NULL != 'fr-x' is NULL, not
+    true, so a pallet belonging to no session was dropped from coverage and
+    reported missing on every session that touched the lot."""
+    r = client.get("/api/scanner/requests/fr-rollover", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    covered = set(r.json()["covered_sequences_by_prefix"].get("MP26126L1-GRT128", []))
+    assert {30, 31, 32} <= covered, f"logged-receipt pallets not covered: {sorted(covered)}"
+
+
+@pytest.mark.integration
+def test_session_pallets_are_still_not_self_covering(client, auth_headers, logged_receipt_pallets):
+    """The NULL branch must not accidentally cover this session's own pallets."""
+    r = client.get("/api/scanner/requests/fr-rollover", headers=auth_headers)
+    covered = set(r.json()["covered_sequences_by_prefix"].get("MP26126L1-GRT128", []))
+    assert 33 not in covered, "a session's own pallet counted as covered elsewhere"

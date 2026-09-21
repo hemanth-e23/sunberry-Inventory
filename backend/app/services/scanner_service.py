@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Tuple
 
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from app.models import (
     User, Product, StorageArea, StorageRow,
@@ -920,7 +920,12 @@ def _unresolved_missing_for_fr(db: Session, fr: ForkliftRequest) -> list:
                 .filter(
                     PalletLicence.lot_number == lot_for_prefix,
                     PalletLicence.product_id == fr.product_id,
-                    PalletLicence.forklift_request_id != fr.id,
+                    # NULL-safe — see the note in routers/scanner.py. Pallets
+                    # created by Log Receipt carry no forklift_request_id, and
+                    # `NULL != 'fr-...'` is NULL, so this gate refused to approve
+                    # sessions over pallets that were already received.
+                    or_(PalletLicence.forklift_request_id.is_(None),
+                        PalletLicence.forklift_request_id != fr.id),
                     PalletLicence.status.in_(_COVERED_PALLET_STATUSES_FOR_GAPS),
                     PalletLicence.sequence.isnot(None),
                 )
