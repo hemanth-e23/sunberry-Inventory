@@ -113,6 +113,7 @@ export const formatInputValue = (value, decimals = 4) => {
 export const unitOptions = [
   { value: "barrels", label: "Barrels" },
   { value: "bags", label: "Bags" },
+  { value: "boxes", label: "Boxes" },
   { value: "drums", label: "Drums" },
   { value: "totes", label: "Totes" },
   { value: "pails", label: "Pails" },
@@ -150,7 +151,17 @@ export const unitOptions = [
  * be labelled container-by-container at the dock, and there it is REQUIRED: a
  * blank would print five hundred stickers instead of ten.
  */
-export const PALLETISED_UNITS = new Set(["bags", "bottles", "cases", "pails"]);
+// Singular AND plural forms, matching the backend's constants.PALLETISED_UNITS
+// exactly — this list was missing box/boxes and every singular, so a box lot
+// silently skipped the per-pallet question and printed one sticker per box
+// (2026-09-29 audit, bags finding 7).
+export const PALLETISED_UNITS = new Set([
+  "bag", "bags",
+  "box", "boxes",
+  "bottle", "bottles",
+  "case", "cases",
+  "pail", "pails",
+]);
 
 /** Wrapped on a pallet — cannot be stickered one container at a time. */
 export const isPalletisedUnit = (unit) =>

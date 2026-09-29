@@ -10,6 +10,7 @@ import { useToast } from "../context/ToastContext";
 import { apiErrorMessage, printSessionLabels } from "../api/lotReceivingApi";
 import "./Shared.css";
 import "./ReceiptPage.css";
+import { singularUnit } from '../utils/rowSources';
 
 const ReceiptPage = () => {
   const {
@@ -244,7 +245,7 @@ const ReceiptPage = () => {
                 <span>
                   Stickers for this lot — one per wrapped pallet if it came
                   palletised, otherwise one for every{' '}
-                  {justLogged.unitLabel.replace(/s$/, '')}. They go on as it comes
+                  {singularUnit(justLogged.unitLabel)}. They go on as it comes
                   off the truck, then a forklift user scans a rack and scans each
                   one in.
                 </span>
@@ -290,7 +291,7 @@ const ReceiptPage = () => {
           busy={printing}
           lot={justLogged && {
             productName: justLogged.productName,
-            unitLabel: (justLogged.unitLabel || 'unit').replace(/s$/, ''),
+            unitLabel: singularUnit(justLogged.unitLabel || 'unit'),
             unitsPerPallet: justLogged.unitsPerPallet,
             totalUnits: justLogged.count,
           }}

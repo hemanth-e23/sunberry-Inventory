@@ -51,27 +51,191 @@ def open_reserved_quantity(
     return float(query.scalar() or 0.0)
 
 
+def open_reserved_for_receipts(
+    db: Session, receipt_ids, *, exclude_id: Optional[str] = None
+) -> float:
+    """Σ quantity of in-flight transfers across a SET of receipts — the lot
+    form of `open_reserved_quantity`. Two pending transfers of one lot booked
+    against different sibling receipts used to be invisible to each other."""
+    ids = [rid for rid in receipt_ids if rid]
+    if not ids:
+        return 0.0
+    query = db.query(func.coalesce(func.sum(InventoryTransfer.quantity), 0.0)).filter(
+        InventoryTransfer.receipt_id.in_(ids),
+        InventoryTransfer.status.in_(
+            (TransferStatus.PENDING, TransferStatus.FORKLIFT_SUBMITTED)
+        ),
+    )
+    if exclude_id:
+        query = query.filter(InventoryTransfer.id != exclude_id)
+    return float(query.scalar() or 0.0)
+
+
+def lot_scoped_availability(
+    db: Session, receipt: Receipt, *, exclude_transfer_id: Optional[str] = None
+) -> dict:
+    """Availability pool for an RM/packaging receipt, measured at LOT scope.
+
+    One physical lot can arrive as several receipts (two trucks, two receiving
+    sessions — DTFOAMP/040526 landed as 80 + 40 drums). The projection writes
+    the whole lot's rack picture onto ONE receipt and the forms route every
+    quantity to it, so measuring that single receipt refuses work the lot can
+    cover: 60 drums pending on the carrier + 40 more requested = 100 > the
+    carrier's 80, while 120 sat free on the racks (2026-09-29). Drums within a
+    counted lot are fungible — location and consumption are tracked per lot —
+    so the pool that means anything physically is the lot: Σ quantity − Σ held
+    − Σ open transfers across every approved receipt of it. A receipt with no
+    material lot keeps its own numbers.
+
+    Depleted siblings stay in the pool: their quantity is 0 but a transfer
+    still pending against one must keep counting as reserved.
+    """
+    pool = [receipt]
+    if receipt.material_lot_id:
+        pool = (
+            db.query(Receipt)
+            .filter(
+                Receipt.material_lot_id == receipt.material_lot_id,
+                Receipt.status.in_((ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED)),
+            )
+            .all()
+        )
+        if receipt.id not in {r.id for r in pool}:
+            pool.append(receipt)
+    total = sum(float(r.quantity or 0) for r in pool)
+    held = sum(float(r.held_quantity or 0) for r in pool)
+    reserved = open_reserved_for_receipts(
+        db, [r.id for r in pool], exclude_id=exclude_transfer_id
+    )
+    return {
+        "available": total - held - reserved,
+        "total": total,
+        "held": held,
+        "reserved": reserved,
+        "lot_label": receipt.lot_number or receipt.id,
+    }
+
+
+def lot_hold_blocks(db: Session, receipt: Receipt) -> bool:
+    """True when the receipt's material lot is under a QA hold. The per-receipt
+    `held_quantity` only lives on the receipt the hold was raised from, so a
+    sibling receipt of a held lot reads clean by that measure — the lot switch
+    is the one that covers every delivery."""
+    if not receipt.material_lot_id:
+        return False
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    return bool(lot is not None and lot.is_held)
+
+
+def spill_receipt_deduction(db: Session, receipt: Receipt, amount: float) -> None:
+    """Decrement paper quantity by `amount`, spilling any excess across the
+    lot's other open receipts (oldest first) instead of clamping at zero.
+
+    Same rule staging consumption already applies (audit S5): the racks are
+    deducted LOT-wide, so the paper must be too. A `max(0, …)` clamp on the
+    projection-carrier receipt left its siblings holding phantom quantity
+    forever — racks said 60, paper said 80 (2026-09-29 finding 1). Callers
+    deduct the racks themselves; this only settles the paper."""
+    take = min(float(receipt.quantity or 0), float(amount))
+    receipt.quantity = float(receipt.quantity or 0) - take
+    if receipt.quantity <= 0:
+        receipt.status = ReceiptStatus.DEPLETED
+    excess = float(amount) - take
+    if excess <= 1e-9 or not receipt.material_lot_id:
+        return
+    siblings = (
+        db.query(Receipt)
+        .filter(
+            Receipt.material_lot_id == receipt.material_lot_id,
+            Receipt.id != receipt.id,
+            Receipt.status == ReceiptStatus.APPROVED,
+            Receipt.quantity > 0,
+        )
+        .order_by(Receipt.submitted_at.asc())
+        .all()
+    )
+    for sib in siblings:
+        if excess <= 1e-9:
+            break
+        t = min(float(sib.quantity or 0), excess)
+        sib.quantity = float(sib.quantity) - t
+        if sib.quantity <= 0:
+            sib.status = ReceiptStatus.DEPLETED
+        excess -= t
+
+
+def _delivered_cap(receipt: Receipt) -> Optional[float]:
+    """What this receipt originally delivered, when the paperwork recorded it.
+    None means 'unknown — no cap'."""
+    count = float(receipt.container_count or 0)
+    per = float(receipt.weight_per_container or 0)
+    if count > 0 and per > 0:
+        return count * per
+    return None
+
+
+def spill_receipt_credit(db: Session, receipt: Receipt, amount: float) -> None:
+    """Credit paper quantity back, mirroring `spill_receipt_deduction`: fill
+    the named receipt up to what it originally delivered, spill the rest to
+    the lot's other receipts (oldest first), and put any remainder back on the
+    named receipt rather than losing it. A consumption that spilled across
+    siblings must un-spill the same way, or the correction re-inflates one
+    receipt past its delivery while a sibling stays short and DEPLETED
+    (2026-09-29 finding: un-consume was receipt-scoped though consume spilled)."""
+
+    def _credit(r: Receipt, amt: float, *, capped: bool) -> float:
+        if amt <= 1e-9:
+            return 0.0
+        cap = _delivered_cap(r) if capped else None
+        room = amt if cap is None else max(0.0, cap - float(r.quantity or 0))
+        t = min(amt, room)
+        if t <= 1e-9:
+            return 0.0
+        r.quantity = float(r.quantity or 0) + t
+        if r.status == ReceiptStatus.DEPLETED and r.quantity > 0:
+            # It was approved before it depleted — restore to APPROVED, not
+            # RECORDED, so it stays visible to availability queries.
+            r.status = ReceiptStatus.APPROVED
+        return t
+
+    remaining = float(amount)
+    remaining -= _credit(receipt, remaining, capped=True)
+    if remaining > 1e-9 and receipt.material_lot_id:
+        siblings = (
+            db.query(Receipt)
+            .filter(
+                Receipt.material_lot_id == receipt.material_lot_id,
+                Receipt.id != receipt.id,
+                Receipt.status.in_((ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED)),
+            )
+            .order_by(Receipt.submitted_at.asc())
+            .all()
+        )
+        for sib in siblings:
+            remaining -= _credit(sib, remaining, capped=True)
+            if remaining <= 1e-9:
+                break
+    if remaining > 1e-9:
+        # Caps unknown or all full — the lot total still must be right.
+        _credit(receipt, remaining, capped=False)
+
+
 def _require_unreserved_coverage(
     db: Session, transfer: InventoryTransfer, receipt: Receipt
 ) -> None:
     """Refuse approval when current stock minus holds minus OTHER in-flight
-    transfers no longer covers this one."""
-    others = open_reserved_quantity(db, transfer.receipt_id, exclude_id=transfer.id)
-    available = (
-        float(receipt.quantity or 0)
-        - float(receipt.held_quantity or 0)
-        - others
-    )
-    if float(transfer.quantity or 0) > available + 1e-6:
-        held = float(receipt.held_quantity or 0)
+    transfers no longer covers this one. Measured at LOT scope — the message
+    says "lot" and, since 2026-09-29, the number is one too."""
+    pool = lot_scoped_availability(db, receipt, exclude_transfer_id=transfer.id)
+    if float(transfer.quantity or 0) > pool["available"] + 1e-6:
         causes = []
-        if held > 0:
-            causes.append(f"{held:g} on hold")
-        if others > 0:
-            causes.append(f"{others:g} on other pending transfers")
+        if pool["held"] > 0:
+            causes.append(f"{pool['held']:g} on hold")
+        if pool["reserved"] > 0:
+            causes.append(f"{pool['reserved']:g} on other pending transfers")
         detail = (
-            f"Only {max(0.0, available):g} {receipt.unit or 'units'} of lot "
-            f"{receipt.lot_number or receipt.id} is available"
+            f"Only {max(0.0, pool['available']):g} {receipt.unit or 'units'} of lot "
+            f"{pool['lot_label']} is available"
         )
         if causes:
             detail += f" ({', '.join(causes)})"
@@ -261,7 +425,6 @@ def _apply_raw_material_internal_transfer(
             f"Material in {rooms} is not on a single rack, so there is nothing "
             f"to move it from. Pick the rack it is being taken from."
         )
-    source_pallets = parse_pallet_breakdown(transfer.source_breakdown)
     # The destination gets the SAME resolve-or-refuse the source got in the
     # 09-15 fix. `parse_breakdown` silently drops room-level ids, which let a
     # counted-lot transfer approve having credited NOTHING — the mirrored half
@@ -273,8 +436,6 @@ def _apply_raw_material_internal_transfer(
             f"The destination in {rooms} is not a single rack, so there is "
             f"nowhere to put the material. Pick the destination rack."
         )
-    dest_pallets = parse_pallet_breakdown(transfer.destination_breakdown)
-
     # One submit = one transfer = one destination rack (decision T10): the
     # index-zip below would otherwise send everything to the first row and
     # ignore the quantities on the rest.
@@ -447,6 +608,12 @@ def _update_receipt_allocation_json(
 ) -> None:
     """Mutate receipt.allocation by subtracting source rows and adding destination rows."""
     if not (receipt.allocation and transfer.source_breakdown and transfer.destination_breakdown):
+        return
+    # Lot-tracked material's truth is lot_placements and its JSON is the
+    # projection — this FG-style `allocation` plan, if such a receipt ever
+    # carried one, is stale, and rewriting it derives pallets as lbs ÷ 40
+    # (2026-09-29 audit, finding 8). Leave it alone.
+    if receipt.material_lot_id:
         return
     try:
         allocation_data = (
@@ -687,6 +854,17 @@ def approve_transfer(db: Session, transfer: InventoryTransfer, current_user) -> 
     # and approve; the create-time check alone let 73 drums be approved out of
     # a 69-drum receipt (each transfer individually under the total).
     if not finished:
+        # QA hold gate BEFORE the branch split. The counted paths refuse held
+        # lots one layer down (take_units/move_units), but the legacy
+        # (uncounted) ship-out branch had no check at all — held material
+        # shipped when the hold's held_quantity sat on a sibling receipt
+        # (2026-09-29 audit, hold GAP 4). Checking here covers both branches
+        # and answers with the reason instead of a developer-phrased conflict.
+        if lot_hold_blocks(db, receipt):
+            raise ValidationError(
+                f"Lot {receipt.lot_number or receipt.id} is on QA hold. "
+                "Release the hold before approving transfers of it."
+            )
         _require_unreserved_coverage(db, transfer, receipt)
 
     # --- Raw materials / packaging shipped out ---
@@ -699,7 +877,13 @@ def approve_transfer(db: Session, transfer: InventoryTransfer, current_user) -> 
 
     # --- Update receipt quantity / location ---
     if transfer.transfer_type == "shipped-out":
-        receipt.quantity = max(0, receipt.quantity - transfer.quantity)
+        if not finished and receipt.material_lot_id:
+            # The racks were just deducted LOT-wide (take_units); the paper
+            # must follow. Clamping on this one receipt left its siblings
+            # holding phantom quantity forever (2026-09-29 finding 1).
+            spill_receipt_deduction(db, receipt, float(transfer.quantity or 0))
+        else:
+            receipt.quantity = max(0, receipt.quantity - transfer.quantity)
     else:
         if transfer.to_location_id:
             receipt.location_id = transfer.to_location_id

@@ -16,7 +16,6 @@ import { formatDate, formatDateTime, formatTimeAgo, getDaysAgo } from '../../uti
 import { formatCalendarDate } from '../../utils/labelPayload';
 import { formatUserInitial, formatUserName } from '../../utils/userDisplay';
 import {
-  CONTAINER_TYPE,
   INTAKE_STATUS,
   ROLES,
   containerUnitLabel,
@@ -261,7 +260,14 @@ const IngredientIntakesTab = ({ userNameMap = {}, onPendingCountChange }) => {
                     <strong>{lot.product_name || 'Unknown product'}</strong>
                     {lot.product_sid ? <span className="muted"> · {lot.product_sid}</span> : null}
                     <div className="muted small">
-                      {lot.container_type === CONTAINER_TYPE.BAG ? 'Bags' : 'Barrels'}
+                      {(() => {
+                        // Never assert "Barrels" for a type we don't know —
+                        // a box/pail/tote lot read as "Barrels" on this card
+                        // (2026-09-29 audit). containerUnitLabel says
+                        // "containers" for anything unrecognised.
+                        const label = containerUnitLabel(lot.container_type);
+                        return label.charAt(0).toUpperCase() + label.slice(1);
+                      })()}
                       {lot.net_weight_per_container
                         ? ` · ${lot.net_weight_per_container} ${lot.weight_unit || ''} each`
                         : ''}

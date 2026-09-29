@@ -299,6 +299,17 @@ def count_row(
     if not lot:
         raise NotFoundError("Material lot", material_lot_id)
 
+    # A count is not a way around a QA hold. Every other negative path
+    # (take_units, move_units) refuses a held lot; without this, anyone with
+    # Counts access could write a quarantined rack down to zero with no
+    # approval and no name on a release (2026-09-29 audit, hold GAP 2).
+    if lot.is_held:
+        raise ValidationError(
+            f"Lot {lot.lot_code} is on QA hold. Release the hold before "
+            "recording a count for it — a count would change held stock with "
+            "nobody's name on the release."
+        )
+
     before = lps._lock_placement(db, material_lot_id, storage_row_id)
     before_units = int(before.full_units or 0) if before else 0
 

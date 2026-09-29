@@ -498,7 +498,8 @@ def lookup_lot_for_service(
     """
     from datetime import datetime, timezone as _tz
 
-    from app.models import MaterialLot, Product, Vendor
+    from app.enums import ReceiptStatus
+    from app.models import MaterialLot, Product, Receipt, Vendor
     from app.services import lot_placement_service as lps
     from app.services.lot_receiving_service import resolve_lot_code
 
@@ -517,12 +518,36 @@ def lookup_lot_for_service(
     expired = bool(bbd and bbd < datetime.now(_tz.utc))
 
     blocked = []
+    full_units = int(on_hand.get("full_units", 0) or 0)
+    held_units = int(on_hand.get("held_units", 0) or 0)
     if lot.is_held:
+        blocked.append("held")
+    elif full_units > 0 and held_units >= full_units:
+        # Every sealed unit is rack-quarantined (legacy per-rack holds):
+        # reporting the lot usable while nothing on it may be pulled sent
+        # production to a rack it could not touch (2026-09-29 audit, GAP 11).
         blocked.append("held")
     if expired:
         blocked.append("past_bbd")
     if lot.needs_review:
         blocked.append("needs_review")
+
+    # Per-container weight at RECEIPT precedence: the lot figure is frozen at
+    # the first delivery, and deliveries genuinely differ (474/502/559).
+    live_receipt = (
+        db.query(Receipt)
+        .filter(
+            Receipt.material_lot_id == lot.id,
+            Receipt.is_deleted == False,  # noqa: E712
+            Receipt.status == ReceiptStatus.APPROVED,
+            Receipt.quantity > 0,
+        )
+        .order_by(Receipt.receipt_date.desc(), Receipt.created_at.desc())
+        .first()
+    )
+    weight_per_unit = (
+        float(live_receipt.weight_per_container or 0) if live_receipt else 0.0
+    ) or lot.weight_per_unit
 
     return {
         "found": True,
@@ -539,15 +564,17 @@ def lookup_lot_for_service(
         "bbd_original": lot.bbd_original,
         "expired": expired,
         "unit_label": lot.unit_label,
-        "weight_per_unit": lot.weight_per_unit,
+        "weight_per_unit": weight_per_unit,
         "weight_unit": lot.weight_unit,
         "is_held": lot.is_held,
         "hold_reason": lot.hold_reason,
         "needs_review": lot.needs_review,
-        "full_units": on_hand.get("full_units", 0),
+        "full_units": full_units,
         "open_units": on_hand.get("open_units", 0),
         "open_remaining_qty": on_hand.get("open_remaining_qty", 0),
-        "held_units": on_hand.get("held_units", 0),
+        "held_units": held_units,
+        # What may actually be pulled — full units minus quarantined ones.
+        "available_full_units": max(0, full_units - held_units),
         "row_count": on_hand.get("row_count", 0),
         "usable": not blocked,
         "blocked_reasons": blocked,

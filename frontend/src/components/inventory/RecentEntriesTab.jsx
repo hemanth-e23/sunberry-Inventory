@@ -8,6 +8,7 @@ import { useToast } from "../../context/ToastContext";
 import { useAppData } from "../../context/AppDataContext";
 import LotLabelPrint from "../ingredient/LotLabelPrint";
 import PrintStickersDialog from "../ingredient/PrintStickersDialog";
+import { singularUnit } from '../../utils/rowSources';
 
 const parseDate = (value) => {
   if (!value) return null;
@@ -142,7 +143,7 @@ const RecentEntriesTab = ({
           // What one container IS, and how many ride a pallet. Together these
           // decide whether the print dialog can offer pallet stickers at all —
           // blank for barrels, 50 for bags.
-          unitLabel: (receipt.containerUnit || 'unit').replace(/s$/, ''),
+          unitLabel: singularUnit(receipt.containerUnit || 'unit'),
           unitsPerPallet: receipt.unitsPerPallet || null,
           canPrint:
             category?.type !== CATEGORY_TYPES.FINISHED &&

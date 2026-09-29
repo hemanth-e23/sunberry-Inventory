@@ -13,7 +13,7 @@ from app.schemas import (
 )
 from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
 from app.enums import AdjustmentStatus
-from app.services import adjustment_service
+from app.services import adjustment_service, transfer_service
 from app.constants import ROLE_WAREHOUSE
 
 router = APIRouter()
@@ -84,8 +84,31 @@ def create_adjustment(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found")
         if adjustment_data.quantity <= 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Quantity must be greater than zero")
-        if adjustment_data.quantity > receipt.quantity:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Adjustment quantity cannot exceed available quantity")
+        # A held lot refuses the write-off at SUBMIT time — the approve-time
+        # check already existed, but the person who can fix the form is here,
+        # not at the approval queue days later (2026-09-29 audit, GAP 6).
+        if adjustment_service._hold_blocks_deduction(db, receipt):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Lot {receipt.lot_number or receipt.id} is on hold. "
+                    "Release the hold before writing any of it off."
+                ),
+            )
+        # Cap at LOT scope, not this one receipt: a lot received on two trucks
+        # is two receipts and the form routes everything to the one carrying
+        # the projection — its own quantity refuses write-offs the lot covers
+        # (2026-09-29). Approval spills the deduction across siblings.
+        pool = transfer_service.lot_scoped_availability(db, receipt)
+        cap = pool["total"] - pool["held"]
+        if adjustment_data.quantity > cap + 1e-6:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Adjustment quantity ({adjustment_data.quantity:g}) exceeds "
+                    f"lot {pool['lot_label']}'s available {max(0.0, cap):g}"
+                ),
+            )
         # When the operator picks specific source rows, their quantities must
         # add up to the adjustment quantity — otherwise the deduction and the
         # per-row breakdown disagree and row availability drifts.

@@ -261,20 +261,40 @@ def create_transfer(
             detail="Quantity must be greater than zero"
         )
 
+    # A lot on QA hold refuses new transfers at SUBMIT time, where the person
+    # who filled the form is still at the screen — not days later at approval
+    # (2026-09-29 audit, hold GAP 6).
+    if transfer_service.lot_hold_blocks(db, receipt):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Lot {receipt.lot_number or receipt.id} is on QA hold. "
+                "Release the hold before moving it."
+            ),
+        )
+
     # Available excludes any quantity on QA hold — held inventory must not be
-    # transferred or shipped — AND anything already claimed by this receipt's
-    # other in-flight transfers. Pending transfers reserve their drums
-    # (decision T1, 2026-09-16): 20 pending out of 50 leaves 30 offerable,
-    # and the sum of transfers can never exceed the receipt.
-    reserved = transfer_service.open_reserved_quantity(db, receipt.id)
-    available = receipt.quantity - (receipt.held_quantity or 0) - reserved
+    # transferred or shipped — AND anything already claimed by in-flight
+    # transfers. Pending transfers reserve their drums (decision T1,
+    # 2026-09-16): 20 pending out of 50 leaves 30 offerable. The pool is the
+    # LOT, not this one receipt (2026-09-29): a lot received on two trucks is
+    # two receipts, the form routes everything to one of them, and drums
+    # within a counted lot are fungible — so the receipt's own quantity is the
+    # wrong denominator.
+    pool = transfer_service.lot_scoped_availability(db, receipt)
+    available = pool["available"]
     if transfer_data.quantity > available:
         detail = "Requested quantity exceeds available (on-hold inventory excluded)"
-        if reserved > 0:
+        causes = []
+        if pool["reserved"] > 0:
+            causes.append(f"{pool['reserved']:g} is already on other pending transfers")
+        if pool["held"] > 0:
+            causes.append(f"{pool['held']:g} is on hold")
+        if causes:
             detail = (
                 f"Requested {transfer_data.quantity:g} but only "
-                f"{max(0.0, available):g} of this lot is unreserved — "
-                f"{reserved:g} is already on other pending transfers."
+                f"{max(0.0, available):g} of lot {pool['lot_label']} is unreserved — "
+                + " and ".join(causes) + "."
             )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

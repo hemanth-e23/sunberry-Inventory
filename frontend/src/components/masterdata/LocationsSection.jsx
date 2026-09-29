@@ -17,9 +17,11 @@ const STORAGE_UNIT_OPTIONS = [
   { value: "box", label: "Boxes" },
 ];
 
-/** "drum" + 3 -> "drums". Crude on purpose: the unit words are a fixed list. */
-const pluralUnit = (unit, count) =>
-  count === 1 ? unit : `${unit}${unit.endsWith("s") ? "" : "s"}`;
+/** "drum" + 3 -> "drums", "box" + 2 -> "boxes" (a bare +s printed "boxs"). */
+const pluralUnit = (unit, count) => {
+  if (count === 1 || unit.endsWith("s")) return unit;
+  return /(x|z|ch|sh)$/.test(unit) ? `${unit}es` : `${unit}s`;
+};
 
 const LocationsSection = ({ onAssignFGArea }) => {
   const {

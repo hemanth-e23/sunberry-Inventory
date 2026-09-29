@@ -4,6 +4,7 @@ import { useAppData } from "../../context/AppDataContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { formatDateTime, formatTime, formatTimeAgo, getDaysAgo } from "../../utils/dateUtils";
+import { pluralizeUnit } from "../../utils/rowSources";
 
 const getPriorityLevel = (days) => {
   if (days === 0) return { level: 'low', label: 'New', color: '#10b981' };
@@ -35,7 +36,18 @@ const FulfilBadge = ({ requested, picked, short, over }) => {
   return null;
 };
 
-const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLookup, locationLookupMap, userNameMap }) => {
+// "1 drum", "3 drums", "2 boxes" — never a bare +s/-s (that mints "boxs"
+// and "boxe").
+const footprintLabel = (count, pluralUnit) => {
+  const unit = String(pluralUnit || 'pallets');
+  if (count === 1) {
+    if (/(xes|ches|shes|zes)$/.test(unit)) return unit.slice(0, -2);
+    return unit.replace(/s$/, '');
+  }
+  return unit;
+};
+
+const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLookup, rowUnitLookup, locationLookupMap, userNameMap }) => {
   const { user } = useAuth();
   const { approveTransfer, rejectTransfer, fetchTransferScanProgress, voidShipOutTransfer } = useAppData();
   const { confirm } = useConfirm();
@@ -97,10 +109,18 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
       const pallets = (item?.pallets === undefined || item?.pallets === null) ? null : Number(item.pallets);
       if (id.startsWith('row-')) {
         const rowId = id.replace('row-', '');
-        return { label: rowLookup[rowId] || rowId, cases: item?.quantity || 0, pallets };
+        // The footprint number counts whatever the ROOM's shelves count —
+        // hardcoding "pallets" here showed a 60-drum move as "60 pallets"
+        // to the person deciding whether to approve it (2026-09-29).
+        return {
+          label: rowLookup[rowId] || rowId,
+          cases: item?.quantity || 0,
+          pallets,
+          footprintUnit: rowUnitLookup?.[rowId] || 'pallets',
+        };
       }
       if (id === 'floor') {
-        return { label: 'Floor Staging', cases: item?.quantity || 0, pallets };
+        return { label: 'Floor Staging', cases: item?.quantity || 0, pallets, footprintUnit: 'pallets' };
       }
       // A bare id is a ROOM — the shape the form sends for material held at
       // room level rather than on a rack. It used to fall through to the raw
@@ -111,6 +131,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
         label: locationLookupMap?.[id] || id,
         cases: item?.quantity || 0,
         pallets,
+        footprintUnit: 'pallets',
       };
     });
   };
@@ -263,8 +284,33 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
             <dl className="summary-grid">
               <div>
                 <dt>Quantity</dt>
-                <dd>{transfer.quantity} {unit}</dd>
+                <dd>
+                  {transfer.quantity} {unit}
+                  {(() => {
+                    // The container count is what the approver reasons in
+                    // ("60 drums", not 28,440 lbs) — derived at THIS
+                    // receipt's own weight, shown only when the quantity is
+                    // a clean whole-container multiple.
+                    const wpc = Number(receipt?.weightPerContainer || 0);
+                    const cu = receipt?.containerUnit;
+                    if (!(wpc > 0) || !cu) return null;
+                    const count = Number(transfer.quantity || 0) / wpc;
+                    if (!(count > 0) || Math.abs(count - Math.round(count)) > 0.01) return null;
+                    const n = Math.round(count);
+                    return (
+                      <span style={{ color: '#0369a1', fontWeight: 700 }}>
+                        {' '}= {n} {footprintLabel(n, pluralizeUnit(cu))}
+                      </span>
+                    );
+                  })()}
+                </dd>
               </div>
+              {!isShipOut && receipt?.lotNo && (
+                <div>
+                  <dt>Lot</dt>
+                  <dd style={{ fontFamily: 'monospace', fontWeight: 600 }}>{receipt.lotNo}</dd>
+                </div>
+              )}
               {isShipOut && (transfer.orderNumber || transfer.order_number) && (
                 <div>
                   <dt>Order #</dt>
@@ -430,7 +476,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                     <div style={{ fontWeight: 600, color: '#6b7280', marginBottom: '4px' }}>From</div>
                     {sourceRows.length > 0 ? (
                       <ul style={{ margin: 0, paddingLeft: '18px' }}>
-                        {sourceRows.map((r, i) => <li key={i}>{r.label} — {r.cases} {unit}{r.pallets !== null ? `, ${r.pallets} pallet${r.pallets === 1 ? '' : 's'}` : ''}</li>)}
+                        {sourceRows.map((r, i) => <li key={i}>{r.label} — {r.cases} {unit}{r.pallets !== null ? `, ${r.pallets} ${footprintLabel(r.pallets, r.footprintUnit)}` : ''}</li>)}
                       </ul>
                     ) : (
                       <div>{locationLookupMap[transfer.fromLocation] || transfer.fromLocation || '—'}</div>
@@ -440,7 +486,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                     <div style={{ fontWeight: 600, color: '#6b7280', marginBottom: '4px' }}>To</div>
                     {destRows.length > 0 ? (
                       <ul style={{ margin: 0, paddingLeft: '18px' }}>
-                        {destRows.map((r, i) => <li key={i}>{r.label} — {r.cases} {unit}{r.pallets !== null ? `, ${r.pallets} pallet${r.pallets === 1 ? '' : 's'}` : ''}</li>)}
+                        {destRows.map((r, i) => <li key={i}>{r.label} — {r.cases} {unit}{r.pallets !== null ? `, ${r.pallets} ${footprintLabel(r.pallets, r.footprintUnit)}` : ''}</li>)}
                       </ul>
                     ) : (
                       <div>{locationLookupMap[transfer.toLocation] || transfer.toLocation || '—'}</div>

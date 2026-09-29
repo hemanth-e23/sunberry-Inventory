@@ -48,22 +48,16 @@ def validate_and_build_hold_dict(db: Session, hold_action_data) -> dict:
         }
 
     elif hold_action_data.hold_items and len(hold_action_data.hold_items) > 0:
-        # Partial hold mode — validate each receipt
-        receipt_ids = {item.receipt_id for item in hold_action_data.hold_items}
-        for receipt_id in receipt_ids:
-            receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-            if not receipt:
-                raise NotFoundError("Receipt", receipt_id)
-
-        first_receipt_id = hold_action_data.hold_items[0].receipt_id
-        return {
-            "receipt_id": first_receipt_id,
-            "action": hold_action_data.action,
-            "reason": hold_action_data.reason,
-            "hold_items": [item.dict() for item in hold_action_data.hold_items],
-            "total_quantity": hold_action_data.total_quantity,
-            "pallet_licence_ids": None,
-        }
+        # Per-rack partial holds were REMOVED (owner decision 2026-09-16:
+        # lot-hold only + quarantine rack). Approval would silently apply a
+        # FULL lot hold whatever quantities this payload names — a caller
+        # asking to hold 8 of 40 got all 40 held with no error (2026-09-29
+        # audit, GAP 10). Refuse loudly instead of half-obeying.
+        raise ValidationError(
+            "Per-rack partial holds were removed: a hold covers the whole "
+            "lot. Send receipt_id to hold the lot, or physically move the "
+            "affected containers to a quarantine rack first."
+        )
     else:
         # Full-lot hold mode
         if not hold_action_data.receipt_id:
@@ -109,7 +103,12 @@ def is_receipt_held(db: Session, receipt: Receipt) -> bool:
     """
     if receipt is None:
         return False
-    if receipt.hold:
+    # `receipt.hold` alone is NOT a QA hold: it doubles as the transient
+    # review lock every pending transfer sets (routers/transfers.py). Counting
+    # it here made the Holds screen offer "Release" on a lot nobody held, and
+    # approving that release swept the lot's real hold state (2026-09-29
+    # audit, GAP 5). A QA hold always carries held_quantity.
+    if receipt.hold and float(receipt.held_quantity or 0) > 0:
         return True
     if not receipt.material_lot_id:
         return False
@@ -148,6 +147,15 @@ def resolve_row_id(db: Session, location_id: str):
         return None
     if db.query(StorageRow.id).filter(StorageRow.id == location_id).first():
         return location_id
+
+    # The rest of the app prefixes row ids as `row-<id>` in breakdown payloads
+    # (rowSources.js, parse_breakdown). The marker loop below never strips a
+    # LEADING prefix — `row-sub-row-123`'s first candidate is the bare
+    # timestamp — so prefixed ids never resolved (2026-09-29 audit, GAP 9).
+    if location_id.startswith("row-"):
+        stripped = location_id[len("row-"):]
+        if db.query(StorageRow.id).filter(StorageRow.id == stripped).first():
+            return stripped
 
     marker = "-row-"
     index = location_id.find(marker)
@@ -274,13 +282,28 @@ def approve_hold_action(db: Session, hold_action: InventoryHoldAction, current_u
         if not receipt:
             raise NotFoundError("Receipt", hold_action.receipt_id)
 
+        # A lot hold covers EVERY receipt of the lot, not just the one the
+        # request named. One lot can be several receipts (two trucks), and the
+        # bookkeeping used to touch only hold_action.receipt_id — the sibling
+        # then reported its full quantity freely transferable, and a hold
+        # raised via receipt A but released via receipt B stranded A at
+        # available = 0 forever (2026-09-29 audit, finding 12 / GAP 5).
+        family = [receipt]
+        if receipt.material_lot_id:
+            family = (
+                db.query(Receipt)
+                .filter(Receipt.material_lot_id == receipt.material_lot_id)
+                .all()
+            ) or [receipt]
+
         if hold_action.action == "hold":
             # Lot-hold only (2026-09-16): a hold is the WHOLE lot, so the
             # whole receipt is held too — no partial arithmetic. Suspect
             # drums that shouldn't freeze the lot go to the QUARANTINE rack
             # by physical transfer instead.
-            receipt.hold = True
-            receipt.held_quantity = receipt.quantity
+            for r in family:
+                r.hold = True
+                r.held_quantity = r.quantity
 
             # Resolve hold location name from hold_items
             if hold_action.hold_items and len(hold_action.hold_items) > 0:
@@ -296,9 +319,10 @@ def approve_hold_action(db: Session, hold_action: InventoryHoldAction, current_u
                     receipt.hold_location = ", ".join(location_names)
 
         elif hold_action.action == "release":
-            receipt.hold = False
-            receipt.held_quantity = 0
-            receipt.hold_location = None
+            for r in family:
+                r.hold = False
+                r.held_quantity = 0
+                r.hold_location = None
 
         # THE part that makes the hold real for lot-tracked material.
         #

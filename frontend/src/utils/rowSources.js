@@ -49,6 +49,23 @@ const containerInfoFromReceipt = (receipt) => {
   return { weightPerContainer: null, containerUnit: null };
 };
 
+// 'drum' -> 'drums', 'box' -> 'boxes'. The blind +'s' printed "boxs" on rack
+// cards; already-plural labels pass through (2026-09-29 audit).
+export const pluralizeUnit = (label) => {
+  const word = String(label || '');
+  if (!word || word.endsWith('s')) return word;
+  if (/(x|z|ch|sh)$/.test(word)) return `${word}es`;
+  return `${word}s`;
+};
+
+// 'drums' -> 'drum', 'boxes' -> 'box'. A bare s-strip minted 'boxe', which
+// failed the palletised-unit check downstream (2026-09-29 audit).
+export const singularUnit = (label) => {
+  const word = String(label || '');
+  if (/(xes|ches|shes|zes)$/.test(word)) return word.slice(0, -2);
+  return word.replace(/s$/, '');
+};
+
 const makeEntry = (overrides) => {
   // Per-entry display unit: barrels (or whatever container the receipt
   // came in) when we have the container info, otherwise the storage unit.
@@ -69,8 +86,7 @@ const makeEntry = (overrides) => {
   const room = overrides.room || null;
   let footprintUnit = 'pallets';
   if (room?.storageUnit) {
-    const label = String(room.storageUnit);
-    footprintUnit = label.endsWith('s') ? label : `${label}s`;
+    footprintUnit = pluralizeUnit(room.storageUnit);
   }
   const { room: _room, ...rest } = overrides;
   return { ...rest, displayUnit, displayFactor, footprintUnit };
@@ -119,6 +135,18 @@ export const buildEntriesForProduct = ({
       for (const a of allocs) {
         const info = findRowInfo(a.rowId, storageAreas, subLocationMap, locations);
         const label = info ? `${info.label} / ${info.row.name}` : `Row ${a.rowId}`;
+        // Quarantined units are NOT available. The projection writes
+        // `heldUnits` beside `cases` (all of them for a whole-lot hold), and
+        // this builder used to ignore it — the transfer/adjustment forms
+        // offered every held drum and the refusal only came at approval
+        // (2026-09-29 audit, hold GAP 3).
+        const heldUnits = Number(a.heldUnits) || 0;
+        const grossWeight = Number(a.cases) || 0;
+        const allocUnits = Number(a.units) || 0;
+        const perUnit = (weightPerContainer && weightPerContainer > 0)
+          ? weightPerContainer
+          : (allocUnits > 0 ? grossWeight / allocUnits : 0);
+        const heldWeight = Math.min(grossWeight, heldUnits * perUnit);
         entries.push(makeEntry({
           key: `${receipt.id}::row-${a.rowId}`,
           receiptId: receipt.id,
@@ -131,7 +159,8 @@ export const buildEntriesForProduct = ({
           sourceId: `row-${a.rowId}`,
           lotNumber: lot,
           locationLabel: label,
-          available: Number(a.cases) || 0,
+          available: Math.max(0, grossWeight - heldWeight),
+          heldUnits,
           rowPallets: Number(a.pallets) || 0,
           unit,
           weightPerContainer,
@@ -279,26 +308,11 @@ export const buildEntriesForProduct = ({
   return entries;
 };
 
-/**
- * Pick the most popular display unit across entries — used as the unit of
- * the global "Quantity to Adjust" / "Quantity to Move" field at the top.
- * Falls back to the storage unit when entries are mixed.
- */
-export const dominantDisplayUnit = (entries = []) => {
-  if (entries.length === 0) return null;
-  const tallies = new Map();
-  for (const e of entries) {
-    const key = `${e.displayUnit}|${e.displayFactor}`;
-    const slot = tallies.get(key) || { unit: e.displayUnit, factor: e.displayFactor, count: 0 };
-    slot.count += 1;
-    tallies.set(key, slot);
-  }
-  let best = null;
-  for (const slot of tallies.values()) {
-    if (!best || slot.count > best.count) best = slot;
-  }
-  return best;
-};
+// `dominantDisplayUnit` was removed (2026-09-29): it picked ONE per-drum
+// weight for a whole product, but weights are per-receipt (474/502/559 on one
+// vendor lot is policy) — a factor with no receipt attached has no defensible
+// use, and validating against it made mixed-weight products unsubmittable.
+// Totals are now derived per entry at each receipt's own displayFactor.
 
 
 /**
@@ -333,8 +347,7 @@ export const rowCapacityInfo = (sub, row) => {
 
   let unit = 'pallets';
   if (typed) {
-    const label = String(sub.storageUnit);
-    unit = label.endsWith('s') ? label : `${label}s`;
+    unit = pluralizeUnit(sub.storageUnit);
   }
 
   return {

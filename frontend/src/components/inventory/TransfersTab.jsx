@@ -6,7 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct, dominantDisplayUnit, rowCapacityInfo } from '../../utils/rowSources';
+import { buildEntriesForProduct, rowCapacityInfo } from '../../utils/rowSources';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
@@ -269,18 +269,12 @@ const TransfersTab = () => {
     });
   }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap]);
 
-  const rmGlobal = useMemo(() => dominantDisplayUnit(rmEntries), [rmEntries]);
-  // RM/packaging form — never default to "cases" (those are finished goods).
-  const rmGlobalUnit = rmGlobal?.unit || 'units';
-  const rmGlobalFactor = rmGlobal?.factor || 1;
   const rmEntriesAvailStorage = rmEntries.reduce((s, e) => s + e.available, 0);
 
   // ─── RM: submit ──────────────────────────────────────────────────────────────
   const handleRmSubmit = async (event) => {
     event.preventDefault();
     if (!rmForm.productId) { setRmError('Select a product.'); return; }
-    const requestedGlobal = Number(rmForm.quantity);
-    if (!requestedGlobal || requestedGlobal <= 0) { setRmError('Enter a valid total quantity.'); return; }
     if (rmForm.transferType !== 'shipped-out' && !rmForm.toLocation) { setRmError('Select a destination location.'); return; }
     if (rmForm.transferType !== 'shipped-out' && !rmForm.toSubLocation) {
       setRmError('Choose a destination sub location.');
@@ -292,22 +286,20 @@ const TransfersTab = () => {
     }
     if (rmForm.transferType === 'shipped-out' && !rmForm.orderNumber.trim()) { setRmError('Order number is required.'); return; }
 
-    const requestedStorage = requestedGlobal * rmGlobalFactor;
+    // The total to move is DERIVED from the per-lot picks, each converted at
+    // its own receipt's weight. The old top-level quantity gate multiplied by
+    // ONE product-wide blanket factor, so a product whose lots weigh 485 and
+    // 452 lbs/drum could never satisfy it — 21 × 485 ≠ 21 × 452, and the form
+    // was unsubmittable for the lot the worker actually picked (2026-09-29).
     const picks = rmEntries
       .map(entry => {
         const displayQty = Number(rmEntrySelections[entry.key] || 0);
         return { entry, displayQty, storageQty: displayQty * entry.displayFactor };
       })
       .filter(p => p.storageQty > 0);
-    const pickedStorage = picks.reduce((s, p) => s + p.storageQty, 0);
 
     if (picks.length === 0) {
-      setRmError('Pick which lot/location(s) the transfer comes from in the breakdown.');
-      return;
-    }
-    if (Math.abs(pickedStorage - requestedStorage) > 0.01) {
-      const summaryUnit = rmEntries[0]?.unit || 'units';
-      setRmError(`Total selection (${pickedStorage.toLocaleString()} ${summaryUnit}) must equal ${requestedStorage.toLocaleString()}.`);
+      setRmError('Enter how much to move from each lot/location in the breakdown.');
       return;
     }
     const perReceipt = new Map();
@@ -316,7 +308,11 @@ const TransfersTab = () => {
     }
     for (const p of picks) {
       const receiptSum = perReceipt.get(p.entry.receiptId) || 0;
-      if (receiptSum > p.entry.receiptTotal + 0.01) {
+      // Counted lots skip the per-receipt paper cap: `available` is the
+      // lot-wide rack truth while `receiptTotal` is one delivery's share
+      // (a lot received on two trucks is two receipts), and the server now
+      // checks availability at lot scope.
+      if (!p.entry.isCounted && receiptSum > p.entry.receiptTotal + 0.01) {
         setRmError(`Lot ${p.entry.lotNumber}: total picked ${receiptSum.toLocaleString()} > ${p.entry.receiptTotal.toLocaleString()} on the lot.`);
         return;
       }
@@ -353,18 +349,27 @@ const TransfersTab = () => {
     const failures = [];
     for (const [receiptId, items] of groups.entries()) {
       const groupQty = items.reduce((s, it) => s + it.storageQty, 0);
-      // Source breakdown carries the explicit pallets-out per row.
+      // Source breakdown carries the explicit pallets-out per row — for
+      // UNCOUNTED lots only. A counted lot's footprint is derived from the
+      // container count server-side and any figure sent here is discarded;
+      // sending one anyway was a loaded gun for any future reader of the
+      // payload (2026-09-29 audit, bags finding 2).
       const sourceBreakdown = items.map(({ entry, displayQty, storageQty }) => {
         const e = { id: entry.sourceId, quantity: storageQty };
-        if (entry.rowId) e.pallets = resolvePalletsOut(entry, displayQty);
+        if (entry.rowId && !entry.isCounted) e.pallets = resolvePalletsOut(entry, displayQty);
         return e;
       });
+      const groupCounted = items.every(it => it.entry.isCounted);
       const groupOut = items.reduce((s, it) => s + resolvePalletsOut(it.entry, it.displayQty), 0);
       const groupDestPallets = !hasDestRow
         ? 0
         : (totalOut > 0 ? Math.round(effDestTotal * groupOut / totalOut) : effDestTotal);
       const destinationBreakdown = hasDestRow
-        ? [{ id: `row-${rmForm.toRowId}`, quantity: groupQty, pallets: groupDestPallets }]
+        ? [{
+            id: `row-${rmForm.toRowId}`,
+            quantity: groupQty,
+            ...(groupCounted ? {} : { pallets: groupDestPallets }),
+          }]
         : undefined;
       const result = await submitTransfer({
         receiptId,
@@ -580,35 +585,33 @@ const TransfersTab = () => {
               <div className="alert info">No on-hand inventory found for this product.</div>
             )}
 
-            {rmForm.productId && rmEntries.length > 0 && (
-              <label>
-                <span>Quantity to Move ({rmGlobalUnit}) <span className="required">*</span></span>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={rmForm.quantity}
-                  onChange={(e) => setRmForm(prev => ({ ...prev, quantity: e.target.value }))}
-                  placeholder={`Total ${rmGlobalUnit} to move`}
-                />
-                <span className="muted small">
-                  {rmEntriesAvailStorage.toLocaleString()} {rmEntries[0]?.unit || 'units'} on hand across {rmEntries.length} location{rmEntries.length === 1 ? '' : 's'}.
-                </span>
-              </label>
-            )}
-
-            {rmForm.productId && rmEntries.length > 0 && Number(rmForm.quantity || 0) > 0 && (() => {
-              const requestedStorage = Number(rmForm.quantity || 0) * rmGlobalFactor;
+            {rmForm.productId && rmEntries.length > 0 && (() => {
+              // The total is DERIVED from the picks (each at its own
+              // receipt's weight) — no top field to reconcile against a
+              // blanket per-drum factor that mixed-weight products can
+              // never satisfy (2026-09-29).
               const pickedStorage = rmEntries.reduce((s, e) => s + (Number(rmEntrySelections[e.key] || 0) * e.displayFactor), 0);
               const summaryUnit = rmEntries[0]?.unit || 'units';
+              const pickedUnits = rmEntries.reduce((s, e) => s + Number(rmEntrySelections[e.key] || 0), 0);
+              const unitLabels = new Set(
+                rmEntries
+                  .filter(e => Number(rmEntrySelections[e.key] || 0) > 0)
+                  .map(e => e.displayUnit)
+              );
+              const containerNote = unitLabels.size === 1 && [...unitLabels][0] !== summaryUnit
+                ? ` (${pickedUnits.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${[...unitLabels][0]})`
+                : '';
               return (
                 <div className="panel" style={{ marginTop: 8 }}>
                   <div className="panel-header horizontal">
                     <strong>Source Breakdown</strong>
-                    <span className="muted small">{pickedStorage.toLocaleString()} / {requestedStorage.toLocaleString()} {summaryUnit}</span>
+                    <span className="muted small">
+                      Moving {pickedStorage.toLocaleString()} {summaryUnit}{containerNote}
+                      {' · '}{rmEntriesAvailStorage.toLocaleString()} {summaryUnit} on hand
+                    </span>
                   </div>
                   <p className="muted small" style={{ margin: '4px 0 8px' }}>
-                    Type how much to move from each lot/location (each shown in its own unit). Total must equal the quantity above.
+                    Type how much to move from each lot/location (each shown in its own unit). The total above follows your picks.
                   </p>
                   <div className="form-grid">
                     {rmEntries.map(entry => {
@@ -624,6 +627,11 @@ const TransfersTab = () => {
                               Lot {entry.lotNumber} · {entry.locationLabel}
                               {' — '}{availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} avail
                               {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
+                              {Number(entry.heldUnits) > 0 && (
+                                <span style={{ color: 'var(--color-danger, #b91c1c)', fontWeight: 600 }}>
+                                  {' '}· {entry.heldUnits} on hold
+                                </span>
+                              )}
                             </span>
                             <input
                               type="number"
@@ -704,6 +712,13 @@ const TransfersTab = () => {
                 (s, e) => s + resolvePalletsOut(e, rmEntrySelections[e.key]), 0,
               );
               const destPalletDisplay = rmDestPallets !== '' ? rmDestPallets : String(totalOut || '');
+              // NO footprint input when every picked lot is counted — the
+              // destination footprint is derived from the container count and
+              // the service discards any figure typed here. Same rule the
+              // source side already applies (an input whose value is silently
+              // discarded is worse than no input).
+              const picked = rmEntries.filter(e => Number(rmEntrySelections[e.key] || 0) > 0);
+              const allCounted = picked.length > 0 && picked.every(e => e.isCounted);
               return (
                 <div className="two-col">
                   <label>
@@ -718,17 +733,19 @@ const TransfersTab = () => {
                       ))}
                     </select>
                   </label>
-                  <label>
-                    <span>{destFootprintUnit === 'pallets' ? 'Pallets' : destFootprintUnit.replace(/^./, ch => ch.toUpperCase())} placed in this row</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={destPalletDisplay}
-                      onChange={(e) => setRmDestPallets(e.target.value)}
-                      placeholder="0"
-                    />
-                  </label>
+                  {!allCounted && (
+                    <label>
+                      <span>{destFootprintUnit === 'pallets' ? 'Pallets' : destFootprintUnit.replace(/^./, ch => ch.toUpperCase())} placed in this row</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={destPalletDisplay}
+                        onChange={(e) => setRmDestPallets(e.target.value)}
+                        placeholder="0"
+                      />
+                    </label>
+                  )}
                 </div>
               );
             })()}

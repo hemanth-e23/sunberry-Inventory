@@ -31,6 +31,7 @@ from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from app.enums import ReceiptStatus
 from app.exceptions import NotFoundError, ValidationError
 from app.models import (
     InventoryTransfer,
@@ -79,15 +80,43 @@ def _pending_events(db: Session, item_ids: List[str]):
     )
 
 
+def _pinned_receipt(db: Session, lot_id: str):
+    """The receipt this lot's staging paperwork books against: the newest LIVE
+    receipt (approved, quantity left), falling back to the newest overall.
+    Matches the projection-carrier rule in `project_lot`, so the receipt the
+    gun consumes is the one the forms can still see."""
+    base = (
+        db.query(Receipt)
+        .filter(Receipt.material_lot_id == lot_id, Receipt.is_deleted == False)  # noqa: E712
+        .order_by(Receipt.receipt_date.desc(), Receipt.created_at.desc())
+    )
+    live = base.filter(
+        Receipt.status == ReceiptStatus.APPROVED, Receipt.quantity > 0
+    ).first()
+    return live or base.first()
+
+
+def _per_unit_weight(db: Session, lot, receipt=None) -> float:
+    """Per-container weight for pricing: the RECEIPT's own figure first, the
+    lot's first-delivery figure only as a fallback. One vendor lot genuinely
+    arrives at 474/502/559 lbs/drum across deliveries (policy, 2026-09-18) and
+    `lot.weight_per_unit` is frozen at the first one."""
+    if receipt is None:
+        receipt = _pinned_receipt(db, lot.id) if lot else None
+    per = float(getattr(receipt, "weight_per_container", 0) or 0) if receipt else 0.0
+    return per or float(lot.weight_per_unit or 0)
+
+
 def _event_quantity(db: Session, event: LotPlacementEvent, _lot_cache: dict) -> float:
     """Weight one pull event represents: sealed units × weight + open qty."""
-    lot = _lot_cache.get(event.material_lot_id)
-    if lot is None:
+    cached = _lot_cache.get(event.material_lot_id)
+    if cached is None:
         lot = db.query(MaterialLot).filter(
             MaterialLot.id == event.material_lot_id
         ).first()
-        _lot_cache[event.material_lot_id] = lot
-    per_unit = float(lot.weight_per_unit or 0) if lot else 0.0
+        cached = (lot, _per_unit_weight(db, lot) if lot else 0.0)
+        _lot_cache[event.material_lot_id] = cached
+    _lot, per_unit = cached
     units = -int(event.full_units_delta or 0)
     open_qty = -float(event.qty_delta or 0)
     return max(0.0, units * per_unit) + max(0.0, open_qty)
@@ -219,6 +248,11 @@ def _scan_payload(
         "ingredient_name": item.ingredient_name if item else None,
         "lot_code": lot.lot_code if lot else None,
         "vendor_lot": lot.vendor_lot_number if lot else None,
+        # Lets the gun seed its per-scan multiplier from the lot's own
+        # packing — pulling a wrapped 50-bag pallet booked 1 bag unless the
+        # worker remembered to key 50 by hand (2026-09-29 audit, finding 12).
+        "units_per_pallet": int(lot.units_per_pallet or 0) if lot else 0,
+        "unit_label": lot.unit_label if lot else None,
         "units": units,
         "quantity": round(quantity, 3),
         "item_pending_qty": round(pending.get(item.id, 0.0), 3) if item else 0.0,
@@ -317,12 +351,16 @@ def scan(db: Session, request_id: str, body, user_id: Optional[str]) -> dict:
                 )
 
     # Apply — placements are the rack truth, so the rack empties NOW.
+    # Locked: the free-units check below and the apply_delta are two steps,
+    # and two guns on one rack could both pass the unlocked check and pull
+    # into the held count between them (2026-09-29 audit, hold GAP 8).
     placement = (
         db.query(LotPlacement)
         .filter(
             LotPlacement.material_lot_id == lot.id,
             LotPlacement.storage_row_id == body.storage_row_id,
         )
+        .with_for_update()
         .first()
     )
     if body.pull_open:
@@ -377,7 +415,11 @@ def scan(db: Session, request_id: str, body, user_id: Optional[str]) -> dict:
         idempotency_key=body.idempotency_key,
     )
     db.flush()
-    qty = int(body.units) * float(lot.weight_per_unit or 0)
+    # Priced at the RECEIPT's per-container weight, not the lot's first-
+    # delivery figure — one vendor lot genuinely arrives at different drum
+    # weights, and lot-priced pulls booked phantom lbs into staging
+    # (2026-09-29 audit, weight finding 6).
+    qty = int(body.units) * _per_unit_weight(db, lot)
     return _scan_payload(
         db, sr, status="ok", item=item, lot=lot,
         units=int(body.units), quantity=qty,
@@ -511,19 +553,18 @@ def submit(
         lot_cache[lot_id] = lot
         if not lot:
             continue
-        receipt = (
-            db.query(Receipt)
-            .filter(Receipt.material_lot_id == lot_id, Receipt.is_deleted == False)  # noqa: E712
-            .order_by(Receipt.receipt_date.desc(), Receipt.created_at.desc())
-            .first()
-        )
+        receipt = _pinned_receipt(db, lot_id)
         if not receipt:
             raise ValidationError(
                 f"Lot {lot.lot_code} has no receipt on file — it cannot be staged "
                 "until receiving paperwork exists."
             )
 
-        qty = entry["units"] * float(lot.weight_per_unit or 0) + entry["open_qty"]
+        # Priced at the pinned RECEIPT's per-container weight (lot figure only
+        # as fallback): the lot's weight is frozen at the first delivery and
+        # deliveries genuinely differ, so lot-priced pulls booked phantom lbs
+        # into staging (2026-09-29 audit, weight finding 6).
+        qty = entry["units"] * _per_unit_weight(db, lot, receipt) + entry["open_qty"]
         if qty <= 0:
             continue
         original_row = max(entry["rows"], key=entry["rows"].get) if entry["rows"] else None

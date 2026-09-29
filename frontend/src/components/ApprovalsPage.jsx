@@ -8,6 +8,7 @@ import apiClient from "../api/client";
 import "./Shared.css";
 import "./ApprovalsPage.css";
 import { RECEIPT_STATUS, TRANSFER_STATUS, ADJUSTMENT_STATUS, HOLD_STATUS, FORKLIFT_REQUEST_STATUS, INTAKE_STATUS } from '../constants';
+import { rowCapacityInfo } from "../utils/rowSources";
 import { listIntakes } from "../api/ingredientContainerApi";
 
 import ReceiptsTab from "./approvals/ReceiptsTab";
@@ -135,6 +136,35 @@ const ApprovalsPage = () => {
     }
     return map;
   }, [locations, subLocationMap, subLocationsUnifiedMap, storageAreas, rowNameCache]);
+
+  // {rowId: footprint unit} — what each rack's footprint numbers COUNT
+  // ("drums" in a drum room, "pallets" elsewhere). The approvals card used
+  // to hardcode "pallets", so a 60-drum move read "60 pallets" to the
+  // approver (2026-09-29). Walks the same trees rowLookup does.
+  const rowUnitLookup = useMemo(() => {
+    const map = {};
+    const walkSubs = (subLocs) => {
+      (subLocs || []).forEach((subLoc) => {
+        (subLoc.rows || []).forEach((row) => {
+          if (row.id) map[row.id] = rowCapacityInfo(subLoc, row).unit;
+        });
+      });
+    };
+    if (locations && Array.isArray(locations)) {
+      locations.forEach((location) => walkSubs(location.subLocations));
+    }
+    if (subLocationMap && typeof subLocationMap === 'object') {
+      Object.values(subLocationMap).forEach((subLocs) => {
+        if (Array.isArray(subLocs)) walkSubs(subLocs);
+      });
+    }
+    if (subLocationsUnifiedMap && typeof subLocationsUnifiedMap === 'object') {
+      Object.values(subLocationsUnifiedMap).forEach((subLocs) => {
+        if (Array.isArray(subLocs)) walkSubs(subLocs);
+      });
+    }
+    return map;
+  }, [locations, subLocationMap, subLocationsUnifiedMap]);
 
   const fetchRowName = useCallback(async (rowId) => {
     if (!rowId || rowNameCache[rowId]) return rowNameCache[rowId];
@@ -447,6 +477,7 @@ const ApprovalsPage = () => {
               receiptLookup={receiptLookup}
               productLookup={productLookup}
               rowLookup={rowLookup}
+              rowUnitLookup={rowUnitLookup}
               locationLookupMap={locationLookupMap}
               userNameMap={userNameMap}
             />

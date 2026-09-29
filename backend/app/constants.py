@@ -70,3 +70,15 @@ PALLETISED_UNITS = frozenset({
 def is_palletised_unit(unit_label) -> bool:
     """Does this container share one sticker with the rest of its pallet?"""
     return str(unit_label or "").strip().lower() in PALLETISED_UNITS
+
+
+def pluralize_unit(label) -> str:
+    """'drum' -> 'drums', 'box' -> 'boxes'. The blind +'s' every screen used
+    printed 'boxs' on rack cards (2026-09-29 audit); already-plural labels
+    pass through unchanged."""
+    word = str(label or "")
+    if not word or word.endswith("s"):
+        return word
+    if word.endswith(("x", "z", "ch", "sh")):
+        return word + "es"
+    return word + "s"

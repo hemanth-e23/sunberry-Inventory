@@ -99,7 +99,11 @@ const HoldsTab = () => {
    */
   const isReceiptHeld = (receipt) => {
     if (!receipt) return false;
-    if (receipt.hold) return true;
+    // `hold` alone is NOT a QA hold: it doubles as the transient review lock
+    // every pending transfer sets. Counting it here offered "Release" on a
+    // lot nobody held, and approving that release swept the lot's real hold
+    // state (2026-09-29 audit, GAP 5). A QA hold carries heldQuantity.
+    if (receipt.hold && Number(receipt.heldQuantity || 0) > 0) return true;
     return (receipt.rawMaterialRowAllocations || [])
       .some((a) => Number(a?.heldUnits) > 0);
   };
@@ -141,7 +145,9 @@ const HoldsTab = () => {
     const vendor = vendors?.find((v) => v.id === receipt.vendorId)?.name;
     const held = (receipt.rawMaterialRowAllocations || [])
       .reduce((sum, a) => sum + (Number(a?.heldUnits) || 0), 0);
-    const holdLabel = receipt.hold
+    // Same QA-hold-vs-transient-lock distinction as isReceiptHeld: a pending
+    // transfer must not stamp [ON HOLD] on the picker.
+    const holdLabel = (receipt.hold && Number(receipt.heldQuantity || 0) > 0)
       ? ' [ON HOLD]'
       : held > 0 ? ` [${held} ON HOLD]` : '';
     return `${String(product?.name || 'Unknown')} · Lot ${String(receipt.lotNo || '-')}`

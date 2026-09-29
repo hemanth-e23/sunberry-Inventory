@@ -194,7 +194,13 @@ def _compute_available_quantity(db: Session, receipt: Receipt) -> float:
             # is real stock a worker can carry, and staging pulls them
             # opened-first so a partial never strands on a rack.
             open_qty = sum(float(p.open_remaining_qty or 0) for p in placements)
-            pickable = free_units * float(lot.weight_per_unit or 0) + open_qty
+            # Receipt's own per-container weight first — the lot figure is
+            # frozen at the first delivery and deliveries genuinely differ.
+            per_unit = (
+                float(receipt.weight_per_container or 0)
+                or float(lot.weight_per_unit or 0)
+            )
+            pickable = free_units * per_unit + open_qty
             # The staging subtraction is already reflected in the placements —
             # staging takes the units off the rack — so it must not be applied
             # twice here.
@@ -245,6 +251,32 @@ def suggest_lots_for_staging(
         receipts.append(rescued)
     # Keep FEFO across the combined list.
     receipts.sort(key=lambda r: (r.expiration_date is None, r.expiration_date or 0))
+
+    # ONE suggestion per lot (2026-09-29 finding 9). Availability for a
+    # counted lot is read from the racks, so every sibling receipt of a
+    # multi-receipt lot reported the SAME lot-wide number — a 120-drum lot
+    # received on two trucks was listed twice offering 240 drums. Keep the
+    # newest live receipt per lot (the projection carrier); legacy receipts
+    # without a lot pass through untouched.
+    def _carrier_rank(r):
+        live = r.status == ReceiptStatus.APPROVED and float(r.quantity or 0) > 0
+        return (
+            live,
+            r.receipt_date.timestamp() if r.receipt_date else 0,
+            r.created_at.timestamp() if r.created_at else 0,
+        )
+
+    best_by_lot: dict = {}
+    for r in receipts:
+        if not r.material_lot_id:
+            continue
+        cur = best_by_lot.get(r.material_lot_id)
+        if cur is None or _carrier_rank(r) > _carrier_rank(cur):
+            best_by_lot[r.material_lot_id] = r
+    receipts = [
+        r for r in receipts
+        if not r.material_lot_id or best_by_lot[r.material_lot_id].id == r.id
+    ]
 
     suggestions = []
     for receipt in receipts:
@@ -634,6 +666,7 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
                     db, lot,
                     quantity=float(request.quantity),
                     to_row_id=request.to_storage_row_id,
+                    per_unit_weight=float(receipt.weight_per_container or 0),
                     ref_type="staging",
                     ref_id=staging_item.id,
                     reason="Returned from staging",

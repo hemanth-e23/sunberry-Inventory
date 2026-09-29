@@ -50,7 +50,7 @@ from app.enums import (
     ReceiptStatus,
 )
 from app.exceptions import ConflictError, NotFoundError, ValidationError
-from app.constants import CATEGORY_FINISHED, is_palletised_unit
+from app.constants import CATEGORY_FINISHED, is_palletised_unit, pluralize_unit
 from app.models import (
     Category,
     IngredientIntake,
@@ -85,7 +85,7 @@ def unit_word(lot: Optional[MaterialLot], count: int = 2) -> str:
     label = (lot.unit_label if lot else None) or "unit"
     if count == 1:
         return label
-    return label if label.endswith("s") else f"{label}s"
+    return pluralize_unit(label)
 
 
 # ─── lot resolution ───────────────────────────────────────────────────────────
@@ -414,7 +414,13 @@ def _unit_label_for(db: Session, receipt: Receipt) -> str:
     """
     raw = (receipt.container_unit or "").strip().lower()
     if raw:
-        # "barrels" -> "barrel". The label is singular everywhere else.
+        # "barrels" -> "barrel", "boxes" -> "box". The label is singular
+        # everywhere else. Blind s-stripping produced "boxe", which failed
+        # `is_palletised_unit` and silently dropped the lot's units_per_pallet
+        # — one sticker per box and 1-per-scan on the gun (2026-09-29 audit,
+        # bags finding 8; the exact trap constants.py warns about).
+        if raw.endswith(("xes", "ches", "shes", "zes")) and len(raw) > 3:
+            return raw[:-2]
         return raw[:-1] if raw.endswith("s") and len(raw) > 1 else raw
 
     if receipt.storage_row_id:
@@ -564,6 +570,16 @@ def scan_unit(
     # told, because the usual cause is picking up the wrong sticker stack.
     session_lot_mismatch = bool(receipt.material_lot_id) and receipt.material_lot_id != lot.id
 
+    # The per-scan multiplier belongs to the SESSION's lot, not necessarily to
+    # the one just scanned. A bag session at "each scan = 50" that reads one
+    # drum sticker from the same truck must book ONE drum, not fifty
+    # (2026-09-29 audit, bags finding 4). On a cross-lot scan the scanned
+    # lot's own packing decides the multiplier.
+    if session_lot_mismatch:
+        own_per_scan = int(lot.units_per_pallet or 1)
+        if int(units) != own_per_scan:
+            units = own_per_scan
+
     row = db.query(StorageRow).filter(StorageRow.id == storage_row_id).first()
     if not row:
         return _scan_payload(
@@ -581,7 +597,7 @@ def scan_unit(
     # 2. Capacity is a PROMPT, never a gate. Over-filling a rack is accepted at
     #    the point of work and surfaced later as a walk-list; refusing here would
     #    strand a driver holding a drum with nowhere the system will accept.
-    warning, warning_detail = _row_capacity_warning(db, row)
+    warning, warning_detail = _row_capacity_warning(db, row, incoming=int(units))
     if warning and not allow_overfill:
         return _scan_payload(
             db, receipt, lot, row,
@@ -611,7 +627,10 @@ def scan_unit(
 
     message = f"Received @ {row.name}"
     if session_lot_mismatch:
-        message = f"Received @ {row.name} — note this is lot {lot.lot_code}, not the one on this receipt."
+        message = (
+            f"Received {int(units)} {unit_word(lot, int(units))} @ {row.name} — "
+            f"note this is lot {lot.lot_code}, not the one on this receipt."
+        )
 
     return _scan_payload(
         db, receipt, lot, row,
@@ -718,6 +737,19 @@ def undo_last_scan(db: Session, *, receipt_id: str, user_id: Optional[str] = Non
     lot = db.query(MaterialLot).filter(MaterialLot.id == last.material_lot_id).first()
     row = db.query(StorageRow).filter(StorageRow.id == last.storage_row_id).first()
 
+    # A hold placed after receiving freezes the lot: undo is a negative delta
+    # like any other and must not walk drums off a quarantined rack
+    # (2026-09-29 audit, hold GAP 7).
+    if lot is not None and lot.is_held:
+        return _scan_payload(
+            db, receipt, lot, row,
+            status="lot_held",
+            message=(
+                f"Lot {lot.lot_code} is on QA hold — the scan cannot be "
+                "undone until the hold is released."
+            ),
+        )
+
     lps.apply_delta(
         db, lot, last.storage_row_id,
         event_type=lps.EVENT_ADJUSTED,
@@ -767,13 +799,19 @@ def _last_undoable_scan(db: Session, receipt_id: str):
     return stack[-1] if stack else None
 
 
-def _row_capacity_warning(db: Session, row: StorageRow):
-    """(code, detail) when the rack is at or over its stated capacity, else (None, None).
+def _row_capacity_warning(db: Session, row: StorageRow, incoming: int = 1):
+    """(code, detail) when adding `incoming` units would leave the rack over
+    its stated capacity, else (None, None).
 
     Reads the ROOM's `unit_capacity`, not `StorageRow.pallet_capacity`. The two
     are different physical facts and ingredient rows deliberately carry
     pallet_capacity 0, which means "no opinion" — treating that as "capacity
     zero" would warn on every single scan.
+
+    `incoming` matters for palletised material: at 50 bags a scan, checking
+    only what is already on the rack fired the prompt one full pallet late —
+    a rack at 40 of 60 took 50 more without a word (2026-09-29 audit, bags
+    finding 5). Still a prompt, never a gate.
     """
     from app.models import SubLocation
 
@@ -790,11 +828,13 @@ def _row_capacity_warning(db: Session, row: StorageRow):
         .filter(LotPlacement.storage_row_id == row.id)
         .scalar()
     )
-    if int(on_hand or 0) < int(sub.unit_capacity):
+    after = int(on_hand or 0) + max(1, int(incoming or 1))
+    if after <= int(sub.unit_capacity):
         return (None, None)
     return (
         "row_full",
-        f"{row.name} holds {int(on_hand or 0)} of {sub.unit_capacity} {sub.storage_unit}s.",
+        f"{row.name} would hold {after} of {sub.unit_capacity} "
+        f"{pluralize_unit(sub.storage_unit)} after this scan.",
     )
 
 
@@ -1164,6 +1204,12 @@ def start_receiving(
         container_unit=line.container_type,
         weight_per_container=weight_per_unit,
         weight_unit=weight_unit,
+        # The order path never wrote this, so every order-received bag/box
+        # lot's receipt read as non-palletised: the approvals card dropped
+        # its pallet line and the pallet-scope tag option vanished
+        # (2026-09-29 audit, bags finding 6). The lot gets the same figure
+        # via ensure_lot_for_receipt below.
+        units_per_pallet=units_per_pallet,
         vendor_id=vendor_id,
         bol=overrides.get("bol", order.bol),
         purchase_order=order.purchase_order,

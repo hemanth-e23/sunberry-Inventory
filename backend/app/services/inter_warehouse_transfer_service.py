@@ -260,11 +260,18 @@ def _free_storage_occupancy(db: Session, receipt: Receipt, quantity_shipped: flo
             if not row_id or alloc_pallets <= 0:
                 continue
             pallets_to_free = alloc_pallets * proportion
+            # Content freed from the alloc's OWN content figure, never
+            # footprint × cases_per_pallet: for a drum lot the "pallets"
+            # field is a drum count, and 20 drums × 40 freed 800 phantom
+            # "lbs" (2026-09-29 audit — the closest surviving analogue of
+            # the original 20→80 grader-room bug). Content and footprint
+            # are tracked independently (2026-06-15 refactor).
+            cases_to_free = float(alloc.get("cases", 0) or 0) * proportion
             row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
             if row and pallets_to_free > 0:
                 row.occupied_pallets = max(0, (row.occupied_pallets or 0) - pallets_to_free)
-                if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                    row.occupied_cases = max(0, (row.occupied_cases or 0) - pallets_to_free * receipt.cases_per_pallet)
+                if cases_to_free > 0:
+                    row.occupied_cases = max(0, (row.occupied_cases or 0) - cases_to_free)
                 if row.occupied_pallets <= 0:
                     row.product_id = None
     elif receipt.storage_row_id and receipt.pallets:
@@ -275,8 +282,10 @@ def _free_storage_occupancy(db: Session, receipt: Receipt, quantity_shipped: flo
             row = db.query(StorageRow).filter(StorageRow.id == receipt.storage_row_id).first()
             if row and pallets_to_free > 0:
                 row.occupied_pallets = max(0, (row.occupied_pallets or 0) - pallets_to_free)
-                if receipt.cases_per_pallet and receipt.cases_per_pallet > 0:
-                    row.occupied_cases = max(0, (row.occupied_cases or 0) - pallets_to_free * receipt.cases_per_pallet)
+                # The single row held this receipt's whole content, so the
+                # shipped weight IS the content to free (same rule as above —
+                # never pallets × cases_per_pallet).
+                row.occupied_cases = max(0, (row.occupied_cases or 0) - float(quantity_shipped))
                 if row.occupied_pallets <= 0:
                     row.product_id = None
     elif receipt.allocation:

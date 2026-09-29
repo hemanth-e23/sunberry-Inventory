@@ -7,6 +7,7 @@ import ScannerLayout from './ScannerLayout';
 import NetworkStatus from './NetworkStatus';
 import ScanFeedback from './ScanFeedback';
 import { playErrorTone, playSuccessTone } from '../../utils/scannerFeedback';
+import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 import { removeScan } from '../../utils/scanQueue';
 import { useScanQueueCore } from '../../hooks/useScanQueue';
 import { decodeLotPayload } from '../../utils/labelPayload';
@@ -865,7 +866,7 @@ const SessionView = ({ receiptId }) => {
                 onClick={() => setPerScan(1)}
               >
                 <strong>1</strong>
-                <span>single {unit.replace(/s$/, '')}</span>
+                <span>single {singularUnit(unit)}</span>
               </button>
             </div>
           </div>
@@ -1079,7 +1080,7 @@ const SessionView = ({ receiptId }) => {
                       <strong>{r.name}</strong>
                       <span>
                         {r.path || ''}
-                        {r.storage_unit ? ` · ${r.unit_capacity || 0} ${r.storage_unit}s` : ''}
+                        {r.storage_unit ? ` · ${r.unit_capacity || 0} ${pluralizeUnit(r.storage_unit)}` : ''}
                       </span>
                     </button>
                   ))}

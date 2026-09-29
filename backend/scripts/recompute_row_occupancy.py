@@ -73,18 +73,25 @@ def compute(db):
 
     # Raw material / packaging: placements, with weight derived from the count.
     lots = {lot.id: lot for lot in db.query(MaterialLot).all()}
-    for placement in db.query(LotPlacement).all():
+    rm_placements = db.query(LotPlacement).all()
+    room_units = lps._room_unit_by_row(
+        db, [p.storage_row_id for p in rm_placements]
+    )
+    for placement in rm_placements:
         entry = totals.get(placement.storage_row_id)
         lot = lots.get(placement.material_lot_id)
         if entry is None or lot is None:
             continue
         units = int(placement.full_units or 0) + int(placement.open_units or 0)
         # Borrow the projection's own footprint rule rather than restating it.
-        # It is the count for drums and ceil(units / units_per_pallet) for bags,
-        # and this script must not hold a second opinion: it presents itself as
-        # a rebuild from truth, so any disagreement with `_project_rows` would
-        # be written to the racks as a correction and stay there.
-        entry[0] += lps._pallet_footprint(lot, units)
+        # Room-aware (`row_footprint`): container count in a typed room,
+        # pallet slots in an untyped one. This script must not hold a second
+        # opinion: it presents itself as a rebuild from truth, so any
+        # disagreement with `_project_rows` would be written to the racks as
+        # a correction and stay there.
+        entry[0] += lps.row_footprint(
+            lot, units, room_storage_unit=room_units.get(placement.storage_row_id)
+        )
         entry[1] += lps.derived_weight(lot, placement)
 
     return {rid: (round(p, 3), round(c, 3)) for rid, (p, c) in totals.items()}

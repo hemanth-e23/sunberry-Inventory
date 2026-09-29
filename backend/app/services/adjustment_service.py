@@ -9,7 +9,11 @@ from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE
 from app.services import lot_placement_service as lps
 from app.services.ship_out_service import _release_row_capacity
-from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
+from app.services.transfer_service import (
+    _rebuild_receipt_allocation_from_licences,
+    lot_scoped_availability,
+    spill_receipt_deduction,
+)
 from app.services.row_allocation import (
     parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, deduct_rm_total,
     resolve_breakdown,
@@ -88,21 +92,28 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
                         f"Lot {receipt.lot_number or receipt.id} is on hold. "
                         "Release the hold before writing any of it off."
                     )
-                # Re-validate against CURRENT stock. The submit-time check can
-                # be days stale (staging consumed the lot meanwhile), and the
-                # old max(0, …) clamp silently swallowed the difference.
+                # Re-validate against CURRENT stock, at LOT scope (2026-09-29):
+                # the submit-time check can be days stale (staging consumed
+                # the lot meanwhile), and a multi-receipt lot's write-off can
+                # legitimately exceed the one receipt the form routed to.
                 qty = float(adjustment.quantity or 0)
-                available = float(receipt.quantity or 0) - float(receipt.held_quantity or 0)
+                pool = lot_scoped_availability(db, receipt)
+                available = pool["total"] - pool["held"]
                 if qty > available + 1e-6:
                     raise ValidationError(
                         f"Only {available:g} {receipt.unit or 'units'} remain on "
-                        f"lot {receipt.lot_number or receipt.id} but this "
+                        f"lot {pool['lot_label']} but this "
                         f"adjustment asks for {qty:g}. Stock changed since it "
                         "was submitted — edit the adjustment first."
                     )
             adjustment.original_quantity = receipt.quantity
             if adjustment.adjustment_type in DEDUCTION_TYPES:
-                receipt.quantity = max(0, receipt.quantity - adjustment.quantity)
+                if receipt.material_lot_id:
+                    # Paper follows the racks lot-wide: spill any excess to
+                    # sibling receipts instead of clamping (finding 1's twin).
+                    spill_receipt_deduction(db, receipt, qty)
+                else:
+                    receipt.quantity = max(0, receipt.quantity - adjustment.quantity)
                 # When the operator picked specific rows on the form, deduct
                 # from those rows so on-hand-by-row stays accurate.
                 _apply_row_breakdown(db, receipt, adjustment)

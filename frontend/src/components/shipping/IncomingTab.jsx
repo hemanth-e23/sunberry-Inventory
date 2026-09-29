@@ -14,6 +14,7 @@ import {
 } from '../../api/lotReceivingApi';
 import LotLabelPrint from '../ingredient/LotLabelPrint';
 import '../OutgoingDashboard.css';
+import { singularUnit } from '../../utils/rowSources';
 
 /**
  * Incoming orders — corporate plans, the plant receives.
@@ -70,7 +71,7 @@ const OPEN_STATUSES = ['draft', 'in_transit', 'receiving'];
 const PALLETISED_UNITS = new Set(['bag', 'box', 'bottle', 'case', 'pail']);
 
 const asksPerPallet = (unit) =>
-  PALLETISED_UNITS.has(String(unit || '').toLowerCase().replace(/s$/, ''));
+  PALLETISED_UNITS.has(singularUnit(String(unit || '').toLowerCase()));
 
 /** Move a YYYY-MM-DD key by N days without touching a timezone. */
 const shiftDateKey = (key, days) => {

@@ -595,13 +595,11 @@ def assign_storage(
             cases_to_add = (total_content * pallets_to_add / total_pallets) if total_pallets > 0 else 0
             storage_row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
             if storage_row:
+                # Capacity is a soft hint, never a gate (owner policy): the
+                # old hard 400 here compared drum counts against the row's
+                # stale pallet-era figure and stranded receipts with nowhere
+                # the system would accept (2026-09-29 audit, finding 17).
                 current_occupied = storage_row.occupied_pallets or 0
-                capacity = storage_row.pallet_capacity or 0
-                if capacity > 0 and (current_occupied + pallets_to_add) > capacity:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Adding {pallets_to_add} pallets to row {storage_row.name} would exceed capacity ({capacity}). Currently occupied: {current_occupied}"
-                    )
                 storage_row.occupied_pallets = current_occupied + pallets_to_add
                 storage_row.occupied_cases = (storage_row.occupied_cases or 0) + cases_to_add
                 if not storage_row.product_id:
@@ -619,13 +617,8 @@ def assign_storage(
         storage_row = db.query(StorageRow).filter(StorageRow.id == data.storage_row_id).first()
         if storage_row:
             pallets_to_add = float(data.pallets)
+            # Soft hint, never a gate — same policy as above.
             current_occupied = storage_row.occupied_pallets or 0
-            capacity = storage_row.pallet_capacity or 0
-            if capacity > 0 and (current_occupied + pallets_to_add) > capacity:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Adding {pallets_to_add} pallets would exceed row capacity ({capacity}). Currently occupied: {current_occupied}"
-                )
             storage_row.occupied_pallets = current_occupied + pallets_to_add
             # Content = the actual transferred content placed here (not pallets × cpp).
             storage_row.occupied_cases = (storage_row.occupied_cases or 0) + float(receipt.quantity or 0)

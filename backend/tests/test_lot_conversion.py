@@ -626,7 +626,8 @@ class TestPalletisedMaterial:
     gun with no multiplier.
     """
 
-    def _bags(self, db, *, count=500, per_pallet=50, lot_number="SUGAR-88"):
+    def _bags(self, db, *, count=500, per_pallet=50, lot_number="SUGAR-88",
+              row_id=ROW_1):
         receipt = Receipt(
             id=f"rcpt-bag-{uuid.uuid4().hex[:8]}", product_id=PRODUCT,
             category_id="cat-conv-raw", vendor_id=VENDOR, lot_number=lot_number,
@@ -635,22 +636,44 @@ class TestPalletisedMaterial:
             weight_per_container=25.0, weight_unit="lbs",
             units_per_pallet=per_pallet, warehouse_id=WH,
             status=ReceiptStatus.RECORDED, submitted_by="u-submit",
-            raw_material_row_allocations=[{"rowId": ROW_1, "units": count}],
+            raw_material_row_allocations=[{"rowId": row_id, "units": count}],
         )
         db.add(receipt)
         db.flush()
         return _approve(db, receipt)
+
+    def _untyped_row(self, db, row_id="row-conv-untyped"):
+        """A rack in a PALLET room (no storage_unit) — footprint there is
+        pallet slots, not containers."""
+        if db.get(StorageRow, row_id) is None:
+            db.add(SubLocation(id=f"sub-{row_id}", name="Pallet Hall",
+                               location_id="loc-conv"))
+            db.add(StorageRow(id=row_id, name="P-01",
+                              sub_location_id=f"sub-{row_id}",
+                              storage_area_id="area-conv", pallet_capacity=0))
+            db.flush()
+        return row_id
 
     def test_the_lot_learns_how_many_ride_a_pallet(self, db_session, seed):
         receipt = self._bags(db_session)
         lot = db_session.get(MaterialLot, receipt.material_lot_id)
         assert lot.units_per_pallet == 50
 
-    def test_the_rack_reports_pallets_not_bags(self, db_session, seed):
-        """500 bags are ten wrapped pallets. A rack saying 500 is telling the
-        warehouse something untrue about its own shelf."""
+    def test_a_typed_room_reports_containers(self, db_session, seed):
+        """ONE footprint rule (2026-09-29, root cause R3): a typed room's
+        shelves count the room's own unit, so `occupied_pallets` there is the
+        CONTAINER count — the same number the gun's capacity check and master
+        data's live_units report. The old room-blind ceil put "10" on a rack
+        those readers called 500."""
         self._bags(db_session)
-        assert db_session.get(StorageRow, ROW_1).occupied_pallets == 10
+        assert db_session.get(StorageRow, ROW_1).occupied_pallets == 500
+
+    def test_an_untyped_room_reports_pallets_not_bags(self, db_session, seed):
+        """500 bags are ten wrapped pallets. In a PALLET room a rack saying
+        500 is telling the warehouse something untrue about its own shelf."""
+        row_id = self._untyped_row(db_session)
+        self._bags(db_session, row_id=row_id)
+        assert db_session.get(StorageRow, row_id).occupied_pallets == 10
 
     def test_barrels_are_untouched(self, db_session, seed):
         """One barrel is one sticker, one scan, one slot — every branch
@@ -664,16 +687,18 @@ class TestPalletisedMaterial:
     def test_a_part_pallet_still_occupies_a_whole_one(self, db_session, seed):
         """Twenty-five bags of a fifty-bag pallet is one part-used pallet on the
         shelf, not half of one."""
-        self._bags(db_session, count=25)
-        assert db_session.get(StorageRow, ROW_1).occupied_pallets == 1
+        row_id = self._untyped_row(db_session)
+        self._bags(db_session, count=25, row_id=row_id)
+        assert db_session.get(StorageRow, row_id).occupied_pallets == 1
 
     def test_two_lots_do_not_share_a_wrap(self, db_session, seed):
         """Ceilings are summed PER LOT. Two lots of 25 bags are two part-used
         pallets, because different lots are not wrapped together — so the total
         is 2, not ceil(50/50) = 1."""
-        self._bags(db_session, count=25, lot_number="SUGAR-88")
-        self._bags(db_session, count=25, lot_number="SALT-1")
-        assert db_session.get(StorageRow, ROW_1).occupied_pallets == 2
+        row_id = self._untyped_row(db_session)
+        self._bags(db_session, count=25, lot_number="SUGAR-88", row_id=row_id)
+        self._bags(db_session, count=25, lot_number="SALT-1", row_id=row_id)
+        assert db_session.get(StorageRow, row_id).occupied_pallets == 2
 
     def test_both_stickers_are_the_same_sticker(self, db_session, seed):
         """A bag does not become different material by coming off a pallet, so

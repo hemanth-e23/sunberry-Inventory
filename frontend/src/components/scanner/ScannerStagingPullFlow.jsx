@@ -7,6 +7,7 @@ import ScannerLayout from './ScannerLayout';
 import NetworkStatus from './NetworkStatus';
 import ScanFeedback from './ScanFeedback';
 import { playErrorTone, playSuccessTone } from '../../utils/scannerFeedback';
+import { pluralizeUnit } from '../../utils/rowSources';
 import { removeScan } from '../../utils/scanQueue';
 import { useScanQueueCore } from '../../hooks/useScanQueue';
 import { decodeLotPayload, formatCalendarDate } from '../../utils/labelPayload';
@@ -243,6 +244,9 @@ const RequestView = ({ requestId }) => {
   const [rowQuery, setRowQuery] = useState('');
   // HOW MANY UNITS ONE SCAN MEANS. Default 1 — one drum per trigger-pull.
   const [perScan, setPerScan] = useState(1);
+  // True once the worker sets the multiplier by hand — an explicit choice
+  // must never be overridden by the lot-packing auto-seed below.
+  const perScanTouched = useRef(false);
   // Armed for exactly ONE scan, then auto-resets: pulling a part-used drum is
   // the exception, and a toggle that stays on would book every following full
   // drum as an open one.
@@ -354,13 +358,24 @@ const RequestView = ({ requestId }) => {
       lotCode: response.lot_code || undefined,
       units: response.units ?? undefined,
     });
+    // Seed the multiplier from the lot's own packing. Receiving prefills 50
+    // for a 50-per-pallet lot; this flow started at 1, so pulling a wrapped
+    // pallet booked ONE bag unless the worker remembered to key 50 by hand
+    // (2026-09-29 audit, bags finding 12). Only while untouched and still at
+    // the default, and never retroactively - the toast names what this scan
+    // actually booked.
+    const upp = Number(response.units_per_pallet || 0);
+    if (upp > 1 && !perScanTouched.current && perScan === 1 && !item.payload?.pull_open) {
+      setPerScan(upp);
+      showInfo(`This lot packs ${upp} per pallet - each scan now pulls ${upp}. This scan pulled ${response.units ?? 1}.`);
+    }
     if (response.warning) {
       playSuccessTone();
       showInfo(response.warning);
       return;
     }
     showSuccess(response.message || 'Pulled');
-  }, [applyCounts, patchHistory, rowNameFor, showError, showInfo, showSuccess]);
+  }, [applyCounts, patchHistory, rowNameFor, showError, showInfo, showSuccess, perScan]);
 
   const {
     online, queue, send, drain, retry, syncing, lastSyncError,
@@ -836,7 +851,7 @@ const RequestView = ({ requestId }) => {
             <button
               type="button"
               className="spf-units-btn"
-              onClick={() => setPerScan((v) => Math.max(1, v - 1))}
+              onClick={() => { perScanTouched.current = true; setPerScan((v) => Math.max(1, v - 1)); }}
               aria-label="Fewer units per scan"
             >
               −
@@ -848,6 +863,7 @@ const RequestView = ({ requestId }) => {
               value={perScan}
               onChange={(e) => {
                 const n = parseInt(e.target.value, 10);
+                perScanTouched.current = true;
                 setPerScan(Number.isFinite(n) && n > 0 ? n : 1);
               }}
               aria-label="Units per scan"
@@ -855,7 +871,7 @@ const RequestView = ({ requestId }) => {
             <button
               type="button"
               className="spf-units-btn"
-              onClick={() => setPerScan((v) => v + 1)}
+              onClick={() => { perScanTouched.current = true; setPerScan((v) => v + 1); }}
               aria-label="More units per scan"
             >
               +
@@ -1066,7 +1082,7 @@ const RequestView = ({ requestId }) => {
                       <strong>{r.name}</strong>
                       <span>
                         {r.path || ''}
-                        {r.storage_unit ? ` · ${r.unit_capacity || 0} ${r.storage_unit}s` : ''}
+                        {r.storage_unit ? ` · ${r.unit_capacity || 0} ${pluralizeUnit(r.storage_unit)}` : ''}
                       </span>
                     </button>
                   ))}

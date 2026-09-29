@@ -6,6 +6,18 @@ import { getDashboardPath } from '../App';
 import apiClient from '../api/client';
 import { formatDateTime } from '../utils/dateUtils';
 import './Shared.css';
+
+// `pallets_staged` stores the CONTAINER count for counted lots (drums/bags
+// pulled) and a pallet count only for legacy ones — labelling it "Pallets"
+// showed "Pallets Staged: 50.00" for one pallet of bags (2026-09-29 audit).
+const stagedFootprintLabel = (item) => {
+  const cu = item?.receipt?.container_unit;
+  if (!cu) return 'Pallets staged';
+  const word = String(cu);
+  const plural = word.endsWith('s') ? word : (/(x|z|ch|sh)$/.test(word) ? `${word}es` : `${word}s`);
+  return `${plural.charAt(0).toUpperCase()}${plural.slice(1)} staged`;
+};
+
 import './StagingOverview.css';
 
 const StagingOverview = () => {
@@ -391,7 +403,7 @@ const StagingOverview = () => {
                 <p><strong>Available:</strong> {available.toLocaleString()} {unit}</p>
                 {selectedItem.pallets_staged && (
                   <p style={{ fontSize: '0.875rem', color: '#666' }}>
-                    <strong>Pallets Staged:</strong> {selectedItem.pallets_staged.toFixed(2)} 
+                    <strong>{stagedFootprintLabel(selectedItem)}:</strong> {selectedItem.pallets_staged.toFixed(2)} 
                     {selectedItem.pallets_used > 0 && ` (Used: ${selectedItem.pallets_used.toFixed(2)})`}
                   </p>
                 )}
@@ -443,7 +455,7 @@ const StagingOverview = () => {
                 <p><strong>Available:</strong> {available.toLocaleString()} {unit}</p>
                 {selectedItem.pallets_staged && (
                   <p style={{ fontSize: '0.875rem', color: '#666' }}>
-                    <strong>Pallets Staged:</strong> {selectedItem.pallets_staged.toFixed(2)}
+                    <strong>{stagedFootprintLabel(selectedItem)}:</strong> {selectedItem.pallets_staged.toFixed(2)}
                     {selectedItem.pallets_used > 0 && ` (Used: ${selectedItem.pallets_used.toFixed(2)})`}
                     {selectedItem.pallets_returned > 0 && ` (Returned: ${selectedItem.pallets_returned.toFixed(2)})`}
                   </p>

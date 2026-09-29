@@ -35,7 +35,8 @@ from typing import Dict, List, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.constants import is_palletised_unit
+from app.constants import is_palletised_unit, pluralize_unit
+from app.enums import ReceiptStatus
 from app.exceptions import ConflictError, NotFoundError, ValidationError
 from app.utils.calendar_dates import calendar_day, calendar_day_compact
 from app.models import (
@@ -821,7 +822,7 @@ def received_into_by_receipt(db: Session, product_id: str) -> Dict[str, list]:
                 "storage_row_id": row.id,
                 "storage_row_name": row.name,
                 "units": int(event.full_units_delta),
-                "unit_label": raw_unit if raw_unit.endswith("s") else f"{raw_unit}s",
+                "unit_label": pluralize_unit(raw_unit),
                 # A lot-counted receipt carries no location of its own — its
                 # placement lives here, in the ledger — so the room travels with
                 # the rack. Without it the Location column has nothing to read
@@ -1055,6 +1056,7 @@ def return_units(
     to_row_id: str,
     full_units: Optional[int] = None,
     weighed_partial_qty: Optional[float] = None,
+    per_unit_weight: Optional[float] = None,
     actor_id: Optional[str] = None,
     ref_type: Optional[str] = None,
     ref_id: Optional[str] = None,
@@ -1070,15 +1072,18 @@ def return_units(
     whose content is the weighed number the worker wrote on the drum.
 
     Callers may state the split (`full_units` + `weighed_partial_qty`, checked
-    against `quantity`), or send only `quantity` and let the split be derived
-    from `weight_per_unit`.
+    against `quantity`), or send only `quantity` and let the split be derived.
+    The derivation uses `per_unit_weight` — the RECEIPT's own figure, which
+    callers with a receipt in scope must pass — because `lot.weight_per_unit`
+    is frozen at the first delivery: splitting 21 returned 452-lb drums at 485
+    re-shelved 19 sealed drums plus a phantom open one (2026-09-29 audit).
     """
     if not to_row_id:
         raise ValidationError(
             f"Returning {lot.unit_label or 'unit'}s needs a rack to put them on."
         )
 
-    per_unit = float(lot.weight_per_unit or 0)
+    per_unit = float(per_unit_weight or 0) or float(lot.weight_per_unit or 0)
     if full_units is None and weighed_partial_qty is None:
         full_units = int(float(quantity) / per_unit) if per_unit > 0 else 0
         weighed_partial_qty = max(0.0, float(quantity) - full_units * per_unit)
@@ -1161,12 +1166,25 @@ def project_lot(db: Session, lot: MaterialLot) -> None:
         return
 
     # One lot can span several receipts (the same vendor lot on many trucks).
-    # The placement is the truth for the LOT, so the newest receipt carries the
-    # full projected picture and older ones are emptied — otherwise the same
-    # drums would be counted once per receipt by anything summing the JSON.
-    primary = receipts[-1]
+    # The placement is the truth for the LOT, so ONE receipt carries the full
+    # projected picture and the others are emptied — otherwise the same drums
+    # would be counted once per receipt by anything summing the JSON.
+    #
+    # The carrier must be a LIVE receipt (approved, quantity left): the forms
+    # filter on approved + quantity > 0, so a projection sitting on a depleted
+    # receipt made the whole lot vanish from the transfer/adjustment screens
+    # while drums stood on the racks — and since consumption drains the newest
+    # receipt first, "newest" and "depleted first" were the same receipt
+    # (2026-09-29 finding 2). Newest live receipt wins; newest overall only
+    # when the lot has no live receipt left.
+    live = [
+        r for r in receipts
+        if r.status == ReceiptStatus.APPROVED and float(r.quantity or 0) > 0
+    ]
+    primary = (live or receipts)[-1]
     rows_by_id = _rows_by_id(db, [p.storage_row_id for p in placements])
     areas_by_id = _areas_by_id(db, [r.storage_area_id for r in rows_by_id.values()])
+    room_units = _room_unit_by_row(db, list(rows_by_id))
 
     entries = []
     for placement in placements:
@@ -1185,11 +1203,15 @@ def project_lot(db: Session, lot: MaterialLot) -> None:
             # Content in the receipt's storage unit — for an ingredient that is
             # weight, which is exactly what `cases` means in this JSON.
             "cases": round(derived_weight(lot, placement), 3),
-            # Physical footprint. Units are what we actually know; pallets are
-            # not tracked in the lot model, so report the unit count rather than
-            # inventing a pallet estimate from a cases-per-pallet ratio that has
-            # no meaning for drums.
-            "pallets": units,
+            # Physical footprint by THE shared rule (`row_footprint`): the
+            # container count in a typed room, pallet slots (via
+            # units_per_pallet) in an untyped one. This used to be the raw
+            # unit count unconditionally, which disagreed 50× with
+            # StorageRow.occupied_pallets for bag lots and rendered
+            # "ROW 3 (100 pallets)" for two pallets of bags (2026-09-29).
+            "pallets": row_footprint(
+                lot, units, room_storage_unit=room_units.get(placement.storage_row_id)
+            ),
             # Additive keys — ignored by existing readers, and the honest figure
             # for anything that learns to read them.
             "units": units,
@@ -1212,9 +1234,9 @@ def project_lot(db: Session, lot: MaterialLot) -> None:
         })
 
     primary.raw_material_row_allocations = entries
-    for older in receipts[:-1]:
-        if older.raw_material_row_allocations:
-            older.raw_material_row_allocations = []
+    for other in receipts:
+        if other.id != primary.id and other.raw_material_row_allocations:
+            other.raw_material_row_allocations = []
 
     _project_rows(db, lot, by_row)
     db.flush()
@@ -1238,30 +1260,60 @@ def _areas_by_id(db: Session, area_ids) -> Dict[str, StorageArea]:
     }
 
 
-def _pallet_footprint(lot: Optional[MaterialLot], units: int) -> int:
-    """How many rack pallet-slots `units` of this lot take up.
+def row_footprint(
+    lot: Optional[MaterialLot], units: int, *, room_storage_unit: Optional[str] = None
+) -> int:
+    """THE footprint rule: what `units` containers of this lot occupy on a
+    rack, in the ROOM's own shelf unit (2026-09-29 audit, root cause R3 —
+    three disagreeing rules put "2 of 400 bags" on a rack card while the gun
+    said 100 of 400, and "100 pallets" on a lot holding two).
 
-    For barrels and totes the container IS the thing on the shelf, so the
-    footprint is the count — one drum, one slot. That was the only case when
-    this was written, and drum rooms carry `pallet_capacity = 0` ("no opinion"),
-    so nobody noticed it was the only case.
+    A typed room (`sub_location.storage_unit` set — drum/bag/tote rooms)
+    counts CONTAINERS on its shelves, so the footprint is the count, whatever
+    the packing. An untyped room counts PALLET SLOTS: palletised material
+    takes ceil(units / units_per_pallet); per-container material (drums —
+    `units_per_pallet` is forbidden for them) takes one slot each, the best
+    claim available without a packing figure.
 
-    For bags and boxes it is wrong by a factor of fifty. Five hundred bags are
-    ten wrapped pallets, and a rack holding ten pallets that reports 500 against
-    a capacity of 100 is telling the warehouse something untrue about its own
-    shelf.
-
-    Rounded UP and computed PER LOT, never per row: two lots of twenty-five bags
-    are two part-used pallets, not one, because different lots do not share a
-    wrap. Summing ceilings is therefore the honest total even though it exceeds
-    ceil(sum).
+    Rounded UP and computed PER LOT, never per row: two lots of twenty-five
+    bags are two part-used pallets, not one, because different lots do not
+    share a wrap. Summing ceilings is therefore the honest total even though
+    it exceeds ceil(sum).
     """
     if units <= 0:
         return 0
+    if room_storage_unit:
+        return int(units)
     per = int(getattr(lot, "units_per_pallet", None) or 0)
     if per > 1:
         return int(math.ceil(units / per))
     return int(units)
+
+
+def _pallet_footprint(lot: Optional[MaterialLot], units: int) -> int:
+    """Room-blind legacy alias — assumes an untyped (pallet) room. Prefer
+    `row_footprint` with the room's storage unit."""
+    return row_footprint(lot, units)
+
+
+def _room_unit_by_row(db: Session, row_ids) -> Dict[str, Optional[str]]:
+    """{row_id: sub_location.storage_unit or None} for footprint decisions."""
+    from app.models import SubLocation
+
+    ids = [r for r in set(row_ids) if r]
+    if not ids:
+        return {}
+    rows = db.query(StorageRow).filter(StorageRow.id.in_(ids)).all()
+    sub_ids = {r.sub_location_id for r in rows if r.sub_location_id}
+    subs = (
+        {s.id: s for s in db.query(SubLocation).filter(SubLocation.id.in_(sub_ids)).all()}
+        if sub_ids else {}
+    )
+    out: Dict[str, Optional[str]] = {}
+    for r in rows:
+        sub = subs.get(r.sub_location_id) if r.sub_location_id else None
+        out[r.id] = (sub.storage_unit or None) if sub else None
+    return out
 
 
 def _project_rows(db: Session, lot: MaterialLot, by_row: Dict[str, LotPlacement]) -> None:
@@ -1286,13 +1338,16 @@ def _project_rows(db: Session, lot: MaterialLot, by_row: Dict[str, LotPlacement]
         for other in db.query(MaterialLot).filter(MaterialLot.id.in_(missing)).all():
             lots[other.id] = other
 
+    room_units = _room_unit_by_row(db, row_ids)
     footprints: Dict[str, int] = {rid: 0 for rid in row_ids}
     weight_totals: Dict[str, float] = {rid: 0.0 for rid in row_ids}
     for placement in placements:
         rid = placement.storage_row_id
         units = int(placement.full_units or 0) + int(placement.open_units or 0)
         p_lot = lots.get(placement.material_lot_id)
-        footprints[rid] = footprints.get(rid, 0) + _pallet_footprint(p_lot, units)
+        footprints[rid] = footprints.get(rid, 0) + row_footprint(
+            p_lot, units, room_storage_unit=room_units.get(rid)
+        )
         if p_lot:
             weight_totals[rid] = weight_totals.get(rid, 0.0) + derived_weight(p_lot, placement)
 

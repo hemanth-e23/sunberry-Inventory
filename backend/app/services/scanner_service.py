@@ -1395,6 +1395,15 @@ def create_internal_transfer(
         ).first()
         if not pl:
             raise NotFoundError("Pallet licence", f"{lic_id} not found or not in stock")
+        # Held pallets are frozen in place — every other pallet path refuses
+        # them, and this was the one door left open: an internal gun transfer
+        # moved held pallets to another rack with no check anywhere
+        # (2026-09-29 audit, hold GAP 12).
+        if pl.is_held:
+            raise ValidationError(
+                f"Pallet {pl.licence_number or lic_id} is on hold and cannot "
+                "be moved until the hold is released."
+            )
         row = db.query(StorageRow).filter(StorageRow.id == to_row_id, StorageRow.is_active == True).first()
         if not row:
             raise NotFoundError("Storage row", to_row_id)

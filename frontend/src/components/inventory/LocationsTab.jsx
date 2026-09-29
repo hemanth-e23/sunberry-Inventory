@@ -82,8 +82,8 @@ const buildTree = ({ locationsTree, storageAreas, receipts, productsById }) => {
           // room, pallet slots elsewhere. Showing a drum rack's occupancy
           // against its leftover pallet figure reads as permanently full.
           (() => {
-            const { capacity, occupied } = rowCapacityInfo(sub, row);
-            return capacity ? { occupiedPallets: occupied, total: capacity } : null;
+            const { capacity, occupied, unit } = rowCapacityInfo(sub, row);
+            return capacity ? { occupiedPallets: occupied, total: capacity, unit } : null;
           })(),
           row.productId || null,
           Number(row.occupiedCases || 0),
@@ -420,7 +420,7 @@ const CapacityBar = ({ capacity }) => {
   const color = pct > 80 ? '#ef4444' : pct > 60 ? '#f59e0b' : '#22c55e';
   return (
     <span className="loc-tree-cap">
-      <span className="muted small">{capacity.occupiedPallets}/{capacity.total} pallets</span>
+      <span className="muted small">{capacity.occupiedPallets}/{capacity.total} {capacity.unit || 'pallets'}</span>
       <span className="loc-tree-cap-bar">
         <span className="loc-tree-cap-fill" style={{ width: `${pct}%`, background: color }} />
       </span>

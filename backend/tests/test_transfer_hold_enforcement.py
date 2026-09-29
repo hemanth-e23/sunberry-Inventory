@@ -28,7 +28,8 @@ def test_create_transfer_fully_held_rejected(client, auth_headers, seed_data, db
         headers=auth_headers,
     )
     assert resp.status_code == 400
-    assert "on-hold" in resp.json()["detail"].lower()
+    # Message names the held amount now ("… 1000 is on hold"), lot-scoped.
+    assert "on hold" in resp.json()["detail"].lower().replace("on-hold", "on hold")
 
 
 @pytest.mark.integration

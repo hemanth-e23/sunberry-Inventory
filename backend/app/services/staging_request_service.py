@@ -556,6 +556,7 @@ def _recredit_rack_on_return(
         to_row_id=row_id,
         full_units=full_units,
         weighed_partial_qty=weighed_partial_qty,
+        per_unit_weight=float(receipt.weight_per_container or 0),
         ref_type="staging",
         ref_id=staging_item.id,
         reason="Returned from staging",
@@ -1260,11 +1261,21 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                 if reduce_qty <= 0:
                     continue
                 si.quantity_used -= reduce_qty
-                receipt.quantity = (receipt.quantity or 0) + reduce_qty
-                if receipt.status == ReceiptStatus.DEPLETED:
-                    # It was approved before it depleted — restore to APPROVED,
-                    # not RECORDED, so it stays visible to availability queries.
-                    receipt.status = ReceiptStatus.APPROVED
+                qty_before_credit = float(receipt.quantity or 0)
+                if receipt.material_lot_id:
+                    # The consume spilled across the lot's receipts, so the
+                    # credit must un-spill the same way — crediting this one
+                    # receipt re-inflated it past its delivery while a sibling
+                    # stayed short and DEPLETED (2026-09-29 audit).
+                    from app.services.transfer_service import spill_receipt_credit
+                    spill_receipt_credit(db, receipt, reduce_qty)
+                else:
+                    receipt.quantity = (receipt.quantity or 0) + reduce_qty
+                    if receipt.status == ReceiptStatus.DEPLETED:
+                        # It was approved before it depleted — restore to
+                        # APPROVED, not RECORDED, so it stays visible to
+                        # availability queries.
+                        receipt.status = ReceiptStatus.APPROVED
                 adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
                 db.add(InventoryAdjustment(
                     id=adj_id,
@@ -1274,7 +1285,7 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                     quantity=-reduce_qty,
                     reason=f"Sync correction: was over-marked, restored to match Production ({batches_completed} completed batch(es))",
                     status=AdjustmentStatus.APPROVED,
-                    original_quantity=receipt.quantity - reduce_qty,
+                    original_quantity=qty_before_credit,
                     new_quantity=receipt.quantity,
                     submitted_by=None,
                     approved_by=None,

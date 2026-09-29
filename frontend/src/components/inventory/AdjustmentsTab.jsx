@@ -6,7 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct, dominantDisplayUnit } from '../../utils/rowSources';
+import { buildEntriesForProduct } from '../../utils/rowSources';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
@@ -138,12 +138,6 @@ const AdjustmentsTab = () => {
     return suggestedPalletsOut(entry, displayQty);
   };
 
-  // Top-of-form unit: most common display unit across entries (barrels if
-  // most lots came in barrels; lbs/cases if mostly stored that way).
-  const rmGlobal = useMemo(() => dominantDisplayUnit(rmEntries), [rmEntries]);
-  // RM/packaging form — never default to "cases" (those are finished goods).
-  const rmGlobalUnit = rmGlobal?.unit || 'units';
-  const rmGlobalFactor = rmGlobal?.factor || 1;
   const rmEntriesAvailStorage = rmEntries.reduce((s, e) => s + e.available, 0);
 
   // ─── FG: load pallets ────────────────────────────────────────────────────────
@@ -210,14 +204,13 @@ const AdjustmentsTab = () => {
   const handleRmSubmit = async (e) => {
     e.preventDefault();
     if (!rmForm.productId) { setRmError('Select a product.'); return; }
-    const requestedGlobal = Number(rmForm.quantity);
-    if (!requestedGlobal || requestedGlobal <= 0) { setRmError('Enter a valid total quantity to adjust.'); return; }
     if (!rmForm.reason.trim()) { setRmError('Reason is required.'); return; }
 
-    // Convert global qty into storage units (lbs/cases). Per-entry inputs
-    // are in each entry's own display unit; convert each to storage too.
-    const requestedStorage = requestedGlobal * rmGlobalFactor;
-
+    // The total to adjust is DERIVED from the per-lot picks, each converted
+    // at its own receipt's weight. The old top-level quantity gate multiplied
+    // by ONE product-wide blanket factor, so a product whose lots weigh 485
+    // and 452 lbs/drum could never satisfy it — the "must equal" error with
+    // no possible input (2026-09-29).
     const picks = rmEntries
       .map(entry => {
         const displayQty = Number(rmEntrySelections[entry.key] || 0);
@@ -225,16 +218,9 @@ const AdjustmentsTab = () => {
         return { entry, displayQty, storageQty };
       })
       .filter(p => p.storageQty > 0);
-    const pickedStorage = picks.reduce((s, p) => s + p.storageQty, 0);
 
     if (picks.length === 0) {
-      setRmError('Pick which lot/location(s) the adjustment comes from in the breakdown below.');
-      return;
-    }
-    if (Math.abs(pickedStorage - requestedStorage) > 0.01) {
-      setRmError(
-        `Total selection (${pickedStorage.toLocaleString()} ${rmGlobal?.unit === 'cases' || rmGlobal?.unit === 'lbs' ? rmGlobal.unit : 'storage units'}) must equal ${requestedStorage.toLocaleString()}.`,
-      );
+      setRmError('Enter how much to remove from each lot/location in the breakdown below.');
       return;
     }
     // Per-receipt cap: sum of picks against a receipt mustn't exceed receipt total
@@ -244,7 +230,10 @@ const AdjustmentsTab = () => {
     }
     for (const p of picks) {
       const receiptSum = perReceipt.get(p.entry.receiptId) || 0;
-      if (receiptSum > p.entry.receiptTotal + 0.01) {
+      // Counted lots skip the per-receipt paper cap: `available` is lot-wide
+      // rack truth while `receiptTotal` is one delivery's share, and the
+      // server validates (and spills) at lot scope now.
+      if (!p.entry.isCounted && receiptSum > p.entry.receiptTotal + 0.01) {
         setRmError(`Lot ${p.entry.lotNumber}: total picked ${receiptSum.toLocaleString()} > ${p.entry.receiptTotal.toLocaleString()} on the lot.`);
         return;
       }
@@ -271,9 +260,12 @@ const AdjustmentsTab = () => {
     setRmError('');
     const failures = [];
     for (const [receiptId, items] of groups.entries()) {
+      // Pallets-out only for UNCOUNTED lots — a counted lot's footprint is
+      // derived from the container count server-side and any figure here is
+      // discarded (2026-09-29 audit, bags finding 2).
       const sourceBreakdown = items.map(({ entry, displayQty, storageQty }) => {
         const e = { id: entry.sourceId, quantity: storageQty };
-        if (entry.rowId) e.pallets = resolvePalletsOut(entry, displayQty);
+        if (entry.rowId && !entry.isCounted) e.pallets = resolvePalletsOut(entry, displayQty);
         return e;
       });
       const groupQty = items.reduce((s, it) => s + it.storageQty, 0);
@@ -495,35 +487,33 @@ const AdjustmentsTab = () => {
               <div className="alert info">No on-hand inventory found for this product.</div>
             )}
 
-            {rmForm.productId && rmEntries.length > 0 && (
-              <label>
-                <span>Quantity to Adjust ({rmGlobalUnit}) <span className="required">*</span></span>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={rmForm.quantity}
-                  onChange={e => setRmForm(prev => ({ ...prev, quantity: e.target.value }))}
-                  placeholder={`Total ${rmGlobalUnit} to remove`}
-                />
-                <span className="muted small">
-                  {rmEntriesAvailStorage.toLocaleString()} {rmEntries[0]?.unit || 'units'} on hand across {rmEntries.length} location{rmEntries.length === 1 ? '' : 's'}.
-                </span>
-              </label>
-            )}
-
-            {rmForm.productId && rmEntries.length > 0 && Number(rmForm.quantity || 0) > 0 && (() => {
-              const requestedStorage = Number(rmForm.quantity || 0) * rmGlobalFactor;
+            {rmForm.productId && rmEntries.length > 0 && (() => {
+              // The total is DERIVED from the picks (each at its own
+              // receipt's weight) — no top field to reconcile against a
+              // blanket per-drum factor that mixed-weight products can never
+              // satisfy (2026-09-29).
               const pickedStorage = rmEntries.reduce((s, e) => s + (Number(rmEntrySelections[e.key] || 0) * e.displayFactor), 0);
               const summaryUnit = rmEntries[0]?.unit || 'units';
+              const pickedUnits = rmEntries.reduce((s, e) => s + Number(rmEntrySelections[e.key] || 0), 0);
+              const unitLabels = new Set(
+                rmEntries
+                  .filter(e => Number(rmEntrySelections[e.key] || 0) > 0)
+                  .map(e => e.displayUnit)
+              );
+              const containerNote = unitLabels.size === 1 && [...unitLabels][0] !== summaryUnit
+                ? ` (${pickedUnits.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${[...unitLabels][0]})`
+                : '';
               return (
                 <div className="panel" style={{ marginTop: 8 }}>
                   <div className="panel-header horizontal">
                     <strong>Source Breakdown</strong>
-                    <span className="muted small">{pickedStorage.toLocaleString()} / {requestedStorage.toLocaleString()} {summaryUnit}</span>
+                    <span className="muted small">
+                      Removing {pickedStorage.toLocaleString()} {summaryUnit}{containerNote}
+                      {' · '}{rmEntriesAvailStorage.toLocaleString()} {summaryUnit} on hand
+                    </span>
                   </div>
                   <p className="muted small" style={{ margin: '4px 0 8px' }}>
-                    Type how much to remove from each lot/location (each shown in its own unit). Total must equal the quantity above.
+                    Type how much to remove from each lot/location (each shown in its own unit). The total above follows your picks.
                   </p>
                   <div className="form-grid">
                     {rmEntries.map(entry => {
@@ -539,6 +529,11 @@ const AdjustmentsTab = () => {
                               Lot {entry.lotNumber} · {entry.locationLabel}
                               {' — '}{availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} avail
                               {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
+                              {Number(entry.heldUnits) > 0 && (
+                                <span style={{ color: 'var(--color-danger, #b91c1c)', fontWeight: 600 }}>
+                                  {' '}· {entry.heldUnits} on hold
+                                </span>
+                              )}
                             </span>
                             <input
                               type="number"
