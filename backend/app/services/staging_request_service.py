@@ -26,6 +26,7 @@ from app.services.row_allocation import deduct_rm_total
 from app.services import lot_placement_service as lps
 
 import logging
+from app.utils.calendar_dates import calendar_day
 logger = logging.getLogger(__name__)
 
 PRODUCTION_API_URL = settings.PRODUCTION_API_URL or ""
@@ -414,7 +415,7 @@ def get_staging_details(db: Session, request_id: str, item_id: str) -> dict:
             "staging_item_id": si.id,
             "receipt_id": si.receipt_id,
             "lot_number": lot_number,
-            "expiration_date": expiration_date,
+            "expiration_date": calendar_day(expiration_date),
             "location_name": loc_name,
             "sub_location_name": sub_loc_name,
             "quantity_staged": si.quantity_staged,
@@ -477,11 +478,17 @@ def mark_request_item_used(
     adjustment = InventoryAdjustment(
         id=adj_id,
         receipt_id=receipt.id,
+        warehouse_id=receipt.warehouse_id,
         product_id=receipt.product_id,
-        adjustment_type="stock-correction",
+        # Production use, same type the production sync writes. It was
+        # "stock-correction", which the reports file under Other Adjustments.
+        # Already approved and deducted inline below, so it never goes through
+        # approve_adjustment (where production-consumption is not a deduction).
+        adjustment_type="production-consumption",
         quantity=quantity,
         reason=f"Used from staging for production (request {request_id})",
         status=AdjustmentStatus.APPROVED,
+        approved_at=datetime.now(timezone.utc),
         original_quantity=receipt.quantity,
         new_quantity=receipt.quantity - quantity,
         submitted_by=None,
@@ -610,6 +617,7 @@ def return_request_item(
     return_transfer = InventoryTransfer(
         id=return_transfer_id,
         receipt_id=staging_item.receipt_id,
+        warehouse_id=receipt.warehouse_id,
         from_location_id=transfer.to_location_id if transfer else receipt.location_id,
         from_sub_location_id=transfer.to_sub_location_id if transfer else receipt.sub_location_id,
         to_location_id=to_location_id,
@@ -722,6 +730,7 @@ def undo_staging(
         return_transfer = InventoryTransfer(
             id=return_transfer_id,
             receipt_id=si.receipt_id,
+            warehouse_id=receipt.warehouse_id,
             from_location_id=transfer.to_location_id if transfer else receipt.location_id,
             from_sub_location_id=transfer.to_sub_location_id if transfer else receipt.sub_location_id,
             to_location_id=to_location_id,
@@ -849,6 +858,8 @@ def consume_receipt_quantity(db: Session, receipt, amount: float) -> None:
     excess = float(amount) - take
     if excess <= 1e-9 or not receipt.material_lot_id:
         _sweep_rack_excess(db, receipt)
+        from app.services.transfer_service import reproject_receipt_lot
+        reproject_receipt_lot(db, receipt)
         return
     siblings = (
         db.query(Receipt)
@@ -877,6 +888,10 @@ def consume_receipt_quantity(db: Session, receipt, amount: float) -> None:
         )
 
     _sweep_rack_excess(db, receipt)
+    # The carrier of the rack projection may have just depleted; move the
+    # picture onto a live receipt so the forms keep offering the lot.
+    from app.services.transfer_service import reproject_receipt_lot
+    reproject_receipt_lot(db, receipt)
 
 
 def _sweep_rack_excess(db: Session, receipt) -> None:
@@ -1042,11 +1057,13 @@ def notify_ingredient_used(
                 adjustment = InventoryAdjustment(
                     id=adj_id,
                     receipt_id=receipt.id,
+                    warehouse_id=receipt.warehouse_id,
                     product_id=receipt.product_id,
                     adjustment_type="production-consumption",
                     quantity=use_qty,
                     reason=f"Used in production scan (batch {production_batch_uid}, lot {lot_barcode or 'N/A'})",
                     status=AdjustmentStatus.APPROVED,
+                    approved_at=datetime.now(timezone.utc),
                     original_quantity=receipt.quantity,
                     new_quantity=max(0, receipt.quantity - use_qty),
                     submitted_by=None,
@@ -1229,8 +1246,11 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                 db.add(InventoryAdjustment(
                     id=f"adj-overage-{uuid.uuid4().hex[:10]}",
                     receipt_id=anchor.id,
+                    warehouse_id=anchor.warehouse_id,
                     product_id=anchor.product_id,
-                    adjustment_type="stock-correction",
+                    # Production use that still needs approval: used-in-production
+                    # deducts on approval, like the desk write-off.
+                    adjustment_type="used-in-production",
                     quantity=overage,
                     reason=(
                         f"PRODUCTION OVERAGE — used {overage:g} more than was "
@@ -1280,11 +1300,13 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                 db.add(InventoryAdjustment(
                     id=adj_id,
                     receipt_id=receipt.id,
+                    warehouse_id=receipt.warehouse_id,
                     product_id=receipt.product_id,
                     adjustment_type="stock-correction",
                     quantity=-reduce_qty,
                     reason=f"Sync correction: was over-marked, restored to match Production ({batches_completed} completed batch(es))",
                     status=AdjustmentStatus.APPROVED,
+                    approved_at=datetime.now(timezone.utc),
                     original_quantity=qty_before_credit,
                     new_quantity=receipt.quantity,
                     submitted_by=None,
@@ -1300,11 +1322,13 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
             db.add(InventoryAdjustment(
                 id=adj_id,
                 receipt_id=receipt.id,
+                warehouse_id=receipt.warehouse_id,
                 product_id=receipt.product_id,
                 adjustment_type="production-consumption",
                 quantity=use_qty,
                 reason=f"Synced from Production — {batches_completed} completed batch(es)",
                 status=AdjustmentStatus.APPROVED,
+                approved_at=datetime.now(timezone.utc),
                 original_quantity=receipt.quantity,
                 new_quantity=max(0, receipt.quantity - use_qty),
                 submitted_by=None,

@@ -87,6 +87,12 @@ const LotTraceReport = () => {
                     {receipt.approved_at && <span className="trail-time">{formatDateTime(receipt.approved_at)}</span>}
                   </span>
                 )}
+                {receipt.deliveries > 1 && (
+                  <span className="trail-item">
+                    <span className="trail-icon">🚚</span>
+                    <strong>{receipt.deliveries}</strong> deliveries of this lot, shown as one timeline
+                  </span>
+                )}
                 {receipt.purchase_order && (
                   <span className="trail-item trail-po">
                     <span className="trail-icon">📋</span>
@@ -136,21 +142,29 @@ const LotTraceReport = () => {
                       {/* Row 1: event name + qty + date */}
                       <div className="timeline-event-header">
                         <strong className={`timeline-event-name ${dotClass}`}>{event.event}</strong>
-                        {event.qty > 0 && (
-                          <span className={`timeline-qty-badge ${isReceived ? "tqb--in" : "tqb--out"}`}>
-                            {isReceived ? "+" : "-"}{formatNumber(event.qty)} {receipt.unit}
+                        {event.qty > 0 && event.direction !== "none" && (
+                          // Direction comes from the server: a rack move or a
+                          // staging pull is not stock leaving, so it gets no
+                          // minus sign (one truck's timeline summed to -4,518).
+                          <span className={`timeline-qty-badge ${
+                            (event.direction || (isReceived ? "in" : "out")) === "in" ? "tqb--in"
+                              : event.direction === "move" ? "tqb--move" : "tqb--out"}`}>
+                            {(event.direction || (isReceived ? "in" : "out")) === "in" ? "+"
+                              : event.direction === "move" ? "moved " : "-"}{formatNumber(event.qty)} {receipt.unit}
                           </span>
                         )}
                         <span className="timeline-date">{formatDateTime(event.date)}</span>
                       </div>
 
                       {/* Row 2: location movement with row details */}
-                      {(event.from_location || event.to_location) && (
+                      {(event.from_location || event.to_location || (event.from_rows || []).length > 0) && (
                         <div className="timeline-location-block">
-                          {event.from_location && (
+                          {(event.from_location || (event.from_rows || []).length > 0) && (
                             <div className="timeline-loc-side">
                               <span className="loc-direction-label">From</span>
-                              <span className="loc-chip loc-chip--from">{event.from_location}</span>
+                              {event.from_location && (
+                                <span className="loc-chip loc-chip--from">{event.from_location}</span>
+                              )}
                               {(event.from_rows || []).length > 0 && (
                                 <div className="loc-rows">
                                   {event.from_rows.map((r, i) => (
@@ -163,7 +177,7 @@ const LotTraceReport = () => {
                               )}
                             </div>
                           )}
-                          {event.from_location && event.to_location && (
+                          {(event.from_location || (event.from_rows || []).length > 0) && event.to_location && (
                             <span className="loc-arrow">→</span>
                           )}
                           {event.to_location && (

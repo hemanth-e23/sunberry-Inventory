@@ -45,8 +45,17 @@ from app.models import (
     Vendor,
 )
 from app.schemas.lot_receiving import (
+    CheckInRequest,
     CloseOrderRequest,
+    LocateTruckResponse,
     ReleaseOrderRequest,
+    TruckActionResponse,
+    TruckFinishRequest,
+    TruckRecountRequest,
+    TruckRemoveRequest,
+    TruckScanRequest,
+    TruckScanResponse,
+    TruckSummary,
     IncomingOrderCreate,
     IncomingOrderOut,
     LotLabelSheet,
@@ -60,6 +69,7 @@ from app.services import lot_placement_service as lps
 from app.services import lot_receiving_service as lrs
 from app.utils.auth import (
     get_current_active_user,
+    require_approval_access,
     resolve_warehouse_for_write,
     warehouse_filter,
 )
@@ -82,6 +92,7 @@ def _serialize_order(db: Session, order: IngredientIntake) -> dict:
         if order.vendor_id else None
     )
     lines = []
+    totals: dict = {}
     for line in (order.lots or []):
         product = db.query(Product).filter(Product.id == line.product_id).first()
         lot = (
@@ -114,6 +125,10 @@ def _serialize_order(db: Session, order: IngredientIntake) -> dict:
             "lot_code": lot.lot_code if lot else None,
             "receipt_id": line.receipt_id,
         })
+        unit = (lot.unit_label if lot else None) or line.container_type or "unit"
+        bucket = totals.setdefault(unit, {"unit": unit, "expected": 0, "scanned": 0})
+        bucket["expected"] += lines[-1]["expected_count"]
+        bucket["scanned"] += lines[-1]["received_count"]
 
     return {
         "id": order.id,
@@ -138,6 +153,8 @@ def _serialize_order(db: Session, order: IngredientIntake) -> dict:
         "closed_at": order.closed_at,
         "created_at": order.created_at,
         "lines": lines,
+        "totals_by_unit": list(totals.values()),
+        "forklift_submitted_at": order.forklift_submitted_at,
     }
 
 
@@ -359,6 +376,160 @@ def start_receiving(
     return summary
 
 
+@router.post("/orders/{order_id}/check-in", response_model=TruckSummary)
+def check_in(
+    order_id: str,
+    payload: CheckInRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_receiver),
+):
+    """Check the whole truck in against the driver's BOL and open it for the gun.
+
+    Warehouse role and up, like start-receiving: this mints lot identity and
+    writes weight-per-unit. Lines that turn out to be the same lot are merged.
+    """
+    order = lrs.check_in_truck(
+        db,
+        _get_order(db, order_id, current_user),
+        lines=[l.model_dump() for l in payload.lines],
+        user_id=str(current_user.id),
+        bol=payload.bol,
+    )
+    summary = lrs.truck_summary(db, order)
+    db.commit()
+    return summary
+
+
+# ─── trucks: one gun session per incoming order ──────────────────────────────
+#
+# Same auth shape as the per-receipt session below: scan / remove / recount /
+# finish are open to any active user because the forklift does them; approve
+# goes through require_approval_access. Every scan-path answer is a 200 with a
+# `status` — read the module docstring before adding a raise.
+
+@router.get("/trucks", response_model=List[TruckSummary])
+def list_trucks(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    return lrs.open_trucks(db, warehouse_id=warehouse_filter(current_user))
+
+
+@router.get("/trucks/locate", response_model=LocateTruckResponse)
+def locate_truck(
+    code: str = Query(..., min_length=1, max_length=120),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """A drum scanned on the truck list -> which open truck it is on."""
+    return lrs.locate_truck(db, code, warehouse_id=warehouse_filter(current_user))
+
+
+@router.get("/trucks/{order_id}", response_model=TruckSummary)
+def get_truck(
+    order_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    return lrs.truck_summary(db, _get_order(db, order_id, current_user))
+
+
+@router.post("/trucks/{order_id}/scan", response_model=TruckScanResponse)
+def truck_scan(
+    order_id: str,
+    payload: TruckScanRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    result = lrs.truck_scan(
+        db,
+        order=_get_order(db, order_id, current_user),
+        lot_code=payload.lot_code,
+        storage_row_id=payload.storage_row_id,
+        user_id=str(current_user.id),
+        idempotency_key=payload.idempotency_key,
+        allow_overfill=payload.allow_overfill,
+        confirm_over=payload.confirm_over,
+        single=payload.single,
+    )
+    db.commit()
+    return result
+
+
+@router.post("/trucks/{order_id}/remove", response_model=TruckScanResponse)
+def truck_remove(
+    order_id: str,
+    payload: TruckRemoveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    result = lrs.truck_remove(
+        db,
+        order=_get_order(db, order_id, current_user),
+        line_id=payload.line_id,
+        storage_row_id=payload.storage_row_id,
+        user_id=str(current_user.id),
+        idempotency_key=payload.idempotency_key,
+        single=payload.single,
+    )
+    db.commit()
+    return result
+
+
+@router.post("/trucks/{order_id}/recount", response_model=TruckActionResponse)
+def truck_recount(
+    order_id: str,
+    payload: TruckRecountRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    result = lrs.truck_recount(
+        db,
+        order=_get_order(db, order_id, current_user),
+        storage_row_id=payload.storage_row_id,
+        counts=[c.model_dump() for c in payload.counts],
+        user_id=str(current_user.id),
+    )
+    db.commit()
+    return result
+
+
+@router.post("/trucks/{order_id}/finish", response_model=TruckActionResponse)
+def truck_finish(
+    order_id: str,
+    payload: TruckFinishRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    result = lrs.truck_finish(
+        db,
+        order=_get_order(db, order_id, current_user),
+        user_id=str(current_user.id),
+        confirmed=payload.confirmed,
+        short_reason=payload.short_reason,
+        short_note=payload.short_note,
+    )
+    if result.get("status") == "submitted":
+        db.commit()
+    else:
+        db.rollback()
+    return result
+
+
+@router.post("/trucks/{order_id}/approve", response_model=TruckActionResponse)
+def truck_approve(
+    order_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Approve every line of the truck in one transaction, then close it."""
+    order = _get_order(db, order_id, current_user)
+    require_approval_access(current_user, order)
+    result = lrs.truck_approve(db, order=order, current_user=current_user)
+    db.commit()
+    return result
+
+
 # ─── the receiving session ────────────────────────────────────────────────────
 
 def _get_receipt(db: Session, receipt_id: str, current_user: User = None) -> Receipt:
@@ -376,6 +547,10 @@ def _get_receipt(db: Session, receipt_id: str, current_user: User = None) -> Rec
 
 @router.get("/sessions", response_model=List[ReceivingSummary])
 def list_sessions(
+    walk_in_only: bool = Query(
+        False,
+        description="Only receipts with no incoming order — order lines are received a truck at a time",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -384,7 +559,9 @@ def list_sessions(
     A worker does not care whether corporate raised an order or somebody logged a
     walk-in off the driver's BOL — they care that there is material to scan in.
     """
-    return lrs.open_sessions(db, warehouse_id=warehouse_filter(current_user))
+    return lrs.open_sessions(
+        db, warehouse_id=warehouse_filter(current_user), walk_in_only=walk_in_only
+    )
 
 
 @router.get("/sessions/{receipt_id}", response_model=ReceivingSummary)

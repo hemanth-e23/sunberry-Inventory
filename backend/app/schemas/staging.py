@@ -1,6 +1,6 @@
 from typing import Optional, List
 from datetime import datetime
-from app.schemas.base import BaseSchema
+from app.schemas.base import BaseSchema, CalendarDate
 
 
 class StagingItemBase(BaseSchema):
@@ -49,7 +49,7 @@ class StagingLotSuggestion(BaseSchema):
     sub_location_id: Optional[str] = None
     sub_location_name: Optional[str] = None
     storage_row_name: Optional[str] = None
-    expiration_date: Optional[datetime] = None
+    expiration_date: CalendarDate = None
     available_quantity: float
     unit: Optional[str] = "cases"
     container_count: Optional[float] = None

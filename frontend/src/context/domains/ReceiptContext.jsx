@@ -90,6 +90,10 @@ export const mapReceipt = (rec, products, categories = []) => {
     // Present once the material has a lot identity — the approvals card keys the
     // paperwork-vs-scanned check on it.
     materialLotId: rec.material_lot_id || null,
+    // The truck (incoming order) this receipt is a line of. The approvals page
+    // groups a truck's lines into one card by it.
+    incomingOrderId: rec.incoming_order_id || null,
+    incomingOrderNumber: rec.incoming_order_number || null,
     fullPallets: rec.full_pallets || 0,
     partialCases: rec.partial_cases || 0,
     casesPerPallet: rec.cases_per_pallet || null,

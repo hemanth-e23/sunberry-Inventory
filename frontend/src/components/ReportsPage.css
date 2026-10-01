@@ -1033,6 +1033,12 @@
   color: var(--error-700);
 }
 
+/* A move (rack to rack, staging pull or return): not stock leaving. */
+.tqb--move {
+  background: var(--color-surface-muted, #f3f4f6);
+  color: var(--color-text-muted, #4b5563);
+}
+
 /* Location from → to block */
 .timeline-location-block {
   display: flex;

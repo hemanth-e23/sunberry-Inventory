@@ -99,15 +99,23 @@ def create_adjustment(
         # is two receipts and the form routes everything to the one carrying
         # the projection — its own quantity refuses write-offs the lot covers
         # (2026-09-29). Approval spills the deduction across siblings.
+        # Net of pending transfers: those drums are spoken for, and the hold
+        # gate above no longer treats a transfer's review lock as a hold.
         pool = transfer_service.lot_scoped_availability(db, receipt)
-        cap = pool["total"] - pool["held"]
+        cap = pool["available"]
         if adjustment_data.quantity > cap + 1e-6:
+            q = lambda v: transfer_service.describe_qty(receipt, v)  # noqa: E731
+            detail = (
+                f"Adjustment quantity {q(adjustment_data.quantity)} exceeds "
+                f"lot {pool['lot_label']}'s available {q(max(0.0, cap))}"
+            )
+            if pool["reserved"] > 0:
+                detail += f" — {q(pool['reserved'])} is on pending transfers"
+            if pool.get("staged", 0) > 0:
+                detail += f" — {q(pool['staged'])} is out in staging"
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Adjustment quantity ({adjustment_data.quantity:g}) exceeds "
-                    f"lot {pool['lot_label']}'s available {max(0.0, cap):g}"
-                ),
+                detail=detail,
             )
         # When the operator picks specific source rows, their quantities must
         # add up to the adjustment quantity — otherwise the deduction and the

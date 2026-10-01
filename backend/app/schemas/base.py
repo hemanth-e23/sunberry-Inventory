@@ -55,5 +55,16 @@ _serialize_calendar_date = calendar_day
 # A calendar field on a RESPONSE: always `YYYY-MM-DD`, never an offset instant.
 CalendarDateOut = Annotated[
     Optional[datetime],
+    # Accept a bare `YYYY-MM-DD` too: builders now hand over plain days.
+    BeforeValidator(_coerce_calendar_date),
+    PlainSerializer(_serialize_calendar_date, return_type=Optional[str]),
+]
+
+# Both directions, for schemas used as request AND response (ReceiptBase and
+# friends). Before this, `expiration_date` went out as an offset instant and
+# every screen showed the best-by one day early in Central time (2026-10-01).
+CalendarDate = Annotated[
+    Optional[datetime],
+    BeforeValidator(_coerce_calendar_date),
     PlainSerializer(_serialize_calendar_date, return_type=Optional[str]),
 ]

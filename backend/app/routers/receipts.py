@@ -68,7 +68,38 @@ def get_receipts(
         query = query.filter(Receipt.submitted_by == submitted_by)
 
     receipts = query.offset(skip).limit(limit).all()
+    _attach_incoming_orders(db, receipts)
     return receipts
+
+
+def _attach_incoming_orders(db: Session, receipts) -> None:
+    """Tag each receipt with the truck it is a line of — ONE query for the page.
+
+    The link is `IntakeLot.receipt_id`; the receipt itself carries nothing
+    (its `note` says "Received against incoming order IN-…", but approvers edit
+    notes, so that is not something to parse).
+    """
+    from app.models import IngredientIntake, IntakeLot
+
+    ids = [r.id for r in receipts]
+    links = {}
+    for start in range(0, len(ids), 1000):
+        chunk = ids[start:start + 1000]
+        rows = (
+            db.query(IntakeLot.receipt_id, IngredientIntake.id, IngredientIntake.intake_number)
+            .join(IngredientIntake, IngredientIntake.id == IntakeLot.intake_id)
+            .filter(
+                IntakeLot.receipt_id.in_(chunk),
+                IngredientIntake.is_incoming_order == True,  # noqa: E712
+            )
+            .all()
+        )
+        links.update({r[0]: (r[1], r[2]) for r in rows})
+    for receipt in receipts:
+        order_id, number = links.get(receipt.id, (None, None))
+        receipt.incoming_order_id = order_id
+        receipt.incoming_order_number = number
+
 
 @router.get("/pending-approvals", response_model=List[ReceiptSchema])
 def get_pending_approvals(

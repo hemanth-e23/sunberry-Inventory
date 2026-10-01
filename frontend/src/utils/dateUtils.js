@@ -36,8 +36,17 @@ export const formatTime = (value) => {
   return date.toLocaleTimeString('en-US', opts);
 };
 
+// A bare `YYYY-MM-DD` is a CALENDAR DAY (best-by, scheduled date), never a
+// moment. `new Date('2027-03-01')` parses as midnight UTC, which Central time
+// renders as 2/28 — every best-by on the approval card, lot card, staging
+// dialog and lot trace read one day early (2026-10-01 browser test). Days are
+// read lexically; only real timestamps go through the timezone.
+const BARE_DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
 export const formatDate = (value) => {
   if (!value) return "—";
+  const day = BARE_DAY.exec(String(value).trim());
+  if (day) return `${Number(day[2])}/${Number(day[3])}/${day[1]}`;
   const date = new Date(ensureUtc(value));
   if (Number.isNaN(date.getTime())) return value;
   const opts = APP_TIMEZONE ? { timeZone: APP_TIMEZONE } : undefined;
@@ -95,6 +104,7 @@ export const getDaysAgo = (dateValue) => {
 // en-CA locale natively produces YYYY-MM-DD format
 export const toDateKey = (value) => {
   if (!value) return "";
+  if (BARE_DAY.test(String(value).trim())) return String(value).trim();
   const date = new Date(ensureUtc(value));
   if (Number.isNaN(date.getTime())) return "";
   const opts = APP_TIMEZONE ? { timeZone: APP_TIMEZONE } : undefined;

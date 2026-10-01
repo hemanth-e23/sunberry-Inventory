@@ -9,11 +9,11 @@ import ScanFeedback from './ScanFeedback';
 import { playErrorTone, playSuccessTone } from '../../utils/scannerFeedback';
 import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 import { removeScan } from '../../utils/scanQueue';
-import { useScanQueueCore } from '../../hooks/useScanQueue';
+import { isTerminal, useLotScanQueue } from '../../hooks/useLotScanQueue';
 import { decodeLotPayload } from '../../utils/labelPayload';
 import {
-  apiErrorMessage, getReceivingSession, listReceivingSessions,
-  lotScanEndpoint, receiptIdFromEndpoint, resolveRow, submitReceivingSession,
+  apiErrorMessage, getReceivingSession,
+  lotScanEndpoint, resolveRow, submitReceivingSession,
   undoLastScan,
 } from '../../api/lotReceivingApi';
 import { listIngredientRows } from '../../api/ingredientIntakeApi';
@@ -69,156 +69,6 @@ import './ScannerIngredientReceiveFlow.css';
 const HISTORY_LIMIT = 40;
 
 const errorText = (err, fallback) => apiErrorMessage(err, fallback);
-
-/** Terminal = the queue will never retry it. Mirrors scanQueue's own policy. */
-const isTerminal = (err) => {
-  const status = err?.response?.status;
-  if (!status) return false;
-  return status < 500 && status !== 408 && status !== 429;
-};
-
-// ─── Offline scan queue ──────────────────────────────────────────────────────
-// A thin adapter over the shared engine in hooks/useScanQueue.js — one storage
-// key, one retry policy, one drain loop, one definition of "are we connected",
-// shared with pallet and container scans. This file used to carry its own copy
-// of that loop (the shared hook did not forward `endpoint`), and the copy went
-// stale: it kept the `if (!online) return` gate on navigator.onLine that could
-// strand a whole shift of scans on a gun whose online event never fired.
-const useLotScanQueue = (onSettled) => {
-  const settledRef = useRef(onSettled);
-  useEffect(() => { settledRef.current = onSettled; }, [onSettled]);
-
-  const onItemResult = useCallback((item, response, error) => {
-    settledRef.current?.(item, response, error);
-  }, []);
-
-  const core = useScanQueueCore({ onItemResult });
-  const { send: coreSend } = core;
-
-  // `idempotencyKey` reuses a key from an earlier attempt. The "rack is full"
-  // confirm re-sends the same scan with the driver's answer on it; carrying the
-  // original key keeps that a replay rather than a second drum, in the case
-  // where the first attempt actually landed and only its response was lost.
-  const send = useCallback(
-    (requestId, endpoint, payload, idempotencyKey) => coreSend({
-      requestId, endpoint, payload, idempotencyKey,
-    }),
-    [coreSend],
-  );
-
-  return {
-    online: core.online,
-    queue: core.queue,
-    syncing: core.syncing,
-    lastSyncError: core.lastSyncError,
-    // `drain` here is what the Sync now button calls, so it must force.
-    send,
-    drain: core.syncNow,
-    retry: core.retry,
-  };
-};
-
-// ─── Entry list ──────────────────────────────────────────────────────────────
-
-const SessionListView = () => {
-  const navigate = useNavigate();
-  const [sessions, setSessions] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  // The list screen keeps draining, so backing out of a session mid-truck does
-  // not strand queued scans.
-  const onQueueSettled = useCallback((item) => {
-    if (!receiptIdFromEndpoint(item.endpoint)) return; // another flow's scan
-  }, []);
-
-  const { online, queue, drain, retry, syncing, lastSyncError } = useLotScanQueue(onQueueSettled);
-
-  const mine = useMemo(
-    () => queue.filter((it) => receiptIdFromEndpoint(it.endpoint)),
-    [queue],
-  );
-  const pendingCount = mine.filter((it) => it.state === 'pending').length;
-  const failedCount = mine.filter((it) => it.state === 'failed').length;
-
-  const load = useCallback(() => {
-    setLoading(true);
-    return listReceivingSessions()
-      .then((data) => { setSessions(Array.isArray(data) ? data : []); setError(''); })
-      .catch((err) => setError(errorText(err, 'Could not load receiving')))
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  return (
-    <ScannerLayout
-      title="Receiving"
-      showBack
-      onBack={() => navigate('/forklift')}
-      headerExtra={(
-        <NetworkStatus
-          online={online}
-          pendingCount={pendingCount}
-          failedCount={failedCount}
-          syncing={syncing}
-          lastSyncError={lastSyncError}
-          onRetry={retry}
-          onForceSync={drain}
-        />
-      )}
-    >
-      <div className="sir-list">
-        {loading && <p className="sir-muted">Loading…</p>}
-        {error && <div className="sir-error"><AlertTriangle size={16} /> {error}</div>}
-
-        {!loading && !error && sessions.length === 0 && (
-          <p className="sir-muted">
-            Nothing to receive. Corporate raises an incoming order, or the office
-            logs a receipt from the driver&apos;s paperwork — either way it shows
-            up here once the stickers are printed.
-          </p>
-        )}
-
-        {sessions.map((session) => {
-          const remaining = Math.max(0, session.expected_count - session.scanned_count);
-          return (
-            <button
-              key={session.receipt_id}
-              type="button"
-              className="sir-card"
-              onClick={() => navigate(`/forklift/lot-receiving/${session.receipt_id}`)}
-            >
-              <div className="sir-card-head">
-                {/* The PRODUCT leads. A lot code is what the sticker says, but a
-                    driver walking to a truck is looking for mango, not L0000003. */}
-                <span className="sir-card-number">
-                  {session.product_name || session.lot_code}
-                </span>
-                <span className="sir-card-status">
-                  {session.source === 'incoming_order'
-                    ? session.order_number
-                    : 'Walk-in'}
-                </span>
-              </div>
-              <div className="sir-card-meta">
-                {session.vendor_lot ? `Lot ${session.vendor_lot}` : 'Lot unknown'}
-                {/* Vendor's number, then ours. Labelled, because unlabelled and
-                    adjacent the second one reads as a correction of the first. */}
-                {' · sticker '}{session.lot_code}
-                <br />
-                <strong>
-                  {session.scanned_count} of {session.expected_count} {session.count_unit}
-                </strong>
-                {remaining > 0 ? ` · ${remaining} to go` : ' · all in'}
-              </div>
-            </button>
-          );
-        })}
-      </div>
-    </ScannerLayout>
-  );
-};
 
 // ─── Session ─────────────────────────────────────────────────────────────────
 
@@ -1110,9 +960,14 @@ const SessionView = ({ receiptId }) => {
   );
 };
 
+/**
+ * One per-receipt session. Only walk-in receipts (logged off a BOL with no
+ * incoming order) open here now; an incoming order is received a TRUCK at a
+ * time in ScannerTruckReceiveFlow, which also owns the list screen.
+ */
 const ScannerLotReceiveFlow = () => {
   const { receiptId } = useParams();
-  return receiptId ? <SessionView receiptId={receiptId} /> : <SessionListView />;
+  return <SessionView receiptId={receiptId} />;
 };
 
 export default ScannerLotReceiveFlow;

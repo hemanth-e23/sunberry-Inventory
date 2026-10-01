@@ -82,3 +82,18 @@ def pluralize_unit(label) -> str:
     if word.endswith(("x", "z", "ch", "sh")):
         return word + "es"
     return word + "s"
+
+
+# ── Truck receiving flags (ReceivingFlag.kind) ───────────────────────────────
+# What the office sees on a truck's approval card. See models/ingredient.py.
+RECEIVING_FLAG_NOT_ON_TRUCK = "not_on_truck"
+RECEIVING_FLAG_OTHER_TRUCK = "other_truck"
+RECEIVING_FLAG_OVER_PAPERWORK = "over_paperwork"
+RECEIVING_FLAG_LOT_HELD = "lot_held"
+RECEIVING_FLAG_RACK_FULL = "rack_full"
+RECEIVING_FLAG_RECOUNT_OK = "recount_ok"
+RECEIVING_FLAG_RECOUNT_CORRECTED = "recount_corrected"
+RECEIVING_FLAG_SHORT = "short"
+
+# Why a truck was finished short. The gun offers exactly these; "other" needs text.
+TRUCK_SHORT_REASONS = ("truck_short", "damaged", "refused", "other")

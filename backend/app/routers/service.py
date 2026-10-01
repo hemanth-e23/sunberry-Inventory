@@ -21,6 +21,7 @@ from app.services import staging_request_service
 from app.services.availability import on_hand_for_product
 
 import logging
+from app.utils.calendar_dates import calendar_day
 logger = logging.getLogger(__name__)
 
 
@@ -652,7 +653,7 @@ def lookup_container(
         "product_name": product.name if product else None,
         "product_sid": getattr(product, "sid", None) if product else None,
         "vendor_lot": container.vendor_lot,
-        "bbd": container.bbd,
+        "bbd": calendar_day(container.bbd),
         "brix": lot.brix if lot else None,
         "net_weight": container.net_weight,
         "remaining_qty": container.remaining_qty,
@@ -704,7 +705,7 @@ def staged_containers_for_request(
                 "serial": c.serial,
                 "inventory_product_id": c.product_id,
                 "vendor_lot": c.vendor_lot,
-                "bbd": c.bbd,
+                "bbd": calendar_day(c.bbd),
                 "remaining_qty": c.remaining_qty,
                 "qty_unit": c.qty_unit,
                 "status": c.status,

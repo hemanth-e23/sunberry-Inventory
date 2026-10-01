@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { RECEIPT_STATUS } from '../../constants';
-import { rowCapacityInfo } from '../../utils/rowSources';
+import { rowCapacityInfo, describeContainers } from '../../utils/rowSources';
 
 // ─── Tree builder ─────────────────────────────────────────────────────────────
 // Single hierarchical view: Location → (Sub-location | FG Area) → Row → Product
@@ -15,9 +15,13 @@ const newProductBucket = (productId, name, unit) => ({
   unit: unit || 'units',
   displayUnit: null,
   displayFactor: 1,
+  // Containers from the live rack projection (lot-tracked material only).
+  fullUnits: 0,
+  openUnits: 0,
+  openQty: 0,
 });
 
-const addProductToNode = (node, receipt, qty, productsById) => {
+const addProductToNode = (node, receipt, qty, productsById, alloc = null) => {
   if (qty <= 0) return;
   const product = productsById[receipt.productId];
   const key = receipt.productId;
@@ -27,6 +31,11 @@ const addProductToNode = (node, receipt, qty, productsById) => {
     receipt.quantityUnits,
   );
   bucket.qty += qty;
+  if (alloc) {
+    bucket.fullUnits += Number(alloc.fullUnits) || 0;
+    bucket.openUnits += Number(alloc.openUnits) || 0;
+    bucket.openQty += Number(alloc.openQty) || 0;
+  }
   if (receipt.lotNo) bucket.lots.add(receipt.lotNo);
   if (receipt.hold) bucket.holdCount += 1;
   if (receipt.weightPerContainer && receipt.containerUnit && !bucket.displayUnit) {
@@ -152,7 +161,7 @@ const buildTree = ({ locationsTree, storageAreas, receipts, productsById }) => {
       for (const a of allocs) {
         const rowNode = rowById[a.rowId];
         if (rowNode) {
-          addProductToNode(rowNode, receipt, Number(a.cases) || 0, productsById);
+          addProductToNode(rowNode, receipt, Number(a.cases) || 0, productsById, a);
           placed = true;
         }
       }
@@ -405,7 +414,11 @@ const ProductLine = ({ product, depth }) => {
         {product.lots.length} lot{product.lots.length !== 1 ? 's' : ''}
       </span>
       <span className="loc-tree-product-qty">
-        {displayQty.toLocaleString(undefined, { maximumFractionDigits: 2 })} {displayUnit}
+        {describeContainers({
+          displayFactor: product.displayFactor, displayUnit, unit: product.unit,
+          fullUnits: product.fullUnits, openUnits: product.openUnits, openQty: product.openQty,
+        }, product.qty)
+          ?? `${displayQty.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${displayUnit}`}
         {product.displayUnit && (
           <span className="muted small"> ({Math.round(product.qty).toLocaleString()} {product.unit})</span>
         )}

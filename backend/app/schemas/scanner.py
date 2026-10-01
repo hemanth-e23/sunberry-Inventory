@@ -1,7 +1,7 @@
 from typing import Optional, List, Dict
 from datetime import datetime
 from pydantic import Field
-from app.schemas.base import BaseSchema
+from app.schemas.base import BaseSchema, CalendarDate
 
 
 class ScanPalletRequest(BaseSchema):
@@ -50,7 +50,7 @@ class PalletLicence(PalletLicenceBase):
     storage_area_name: Optional[str] = None
     storage_row_name: Optional[str] = None
     location: Optional[str] = None
-    expiration_date: Optional[datetime] = None
+    expiration_date: CalendarDate = None
 
 class PalletLicenceUpdate(BaseSchema):
     cases: Optional[int] = None
@@ -67,7 +67,7 @@ class ForkliftRequestBase(BaseSchema):
     product_id: str
     lot_number: str
     production_date: Optional[datetime] = None
-    expiration_date: Optional[datetime] = None
+    expiration_date: CalendarDate = None
     shift_id: Optional[str] = None
     line_id: Optional[str] = None
     cases_per_pallet: int

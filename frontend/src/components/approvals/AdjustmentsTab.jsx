@@ -19,6 +19,8 @@ const getAdjustmentTypeLabel = (type) => {
     'donation': 'Donation',
     'trash-disposal': 'Trash Disposal',
     'quality-rejection': 'Quality Rejection',
+    'used-in-production': 'Used in Production',
+    'production-consumption': 'Production Consumption',
     'shipped-out': 'Shipped Out',
   };
   return labels[type] || type;

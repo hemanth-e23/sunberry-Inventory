@@ -1,3 +1,4 @@
+import { TRANSFER_STATUS } from '../constants';
 // Build the per-(lot × physical place) breakdown for raw-material /
 // packaging adjustment, transfer, and ship-out forms.
 //
@@ -88,8 +89,29 @@ const makeEntry = (overrides) => {
   if (room?.storageUnit) {
     footprintUnit = pluralizeUnit(room.storageUnit);
   }
+  // When the room counts its shelves in the SAME container the content is
+  // measured in (a drum room holding drums), the footprint freed IS the
+  // number of containers moved — one drum, one slot. Asking "drums emptied
+  // from this row" right after "how many drums" is a question with only one
+  // answer, so the forms derive it instead of showing a second box (2026-10-01).
+  const footprintIsContent = footprintUnit !== 'pallets'
+    && pluralizeUnit(displayUnit).toLowerCase() === footprintUnit.toLowerCase();
   const { room: _room, ...rest } = overrides;
-  return { ...rest, displayUnit, displayFactor, footprintUnit };
+  return { ...rest, displayUnit, displayFactor, footprintUnit, footprintIsContent };
+};
+
+// Footprint freed by moving `displayQty` (in the entry's display unit) off its
+// row, for a room where one container is one slot. A partial container left
+// behind still occupies its slot, so only whole containers that leave count —
+// unless the row is being emptied, which frees every slot it had.
+export const containersFreed = (entry, displayQty) => {
+  const qty = Number(displayQty || 0);
+  if (!(qty > 0)) return 0;
+  const availDisp = Number(entry.available || 0) / (entry.displayFactor || 1);
+  if (qty >= availDisp - 0.01) {
+    return Math.ceil(availDisp - 1e-9);
+  }
+  return Math.floor(qty + 1e-9);
 };
 
 const locationLabelForReceipt = (receipt, locations, subLocationMap) => {
@@ -107,15 +129,46 @@ const locationLabelForReceipt = (receipt, locations, subLocationMap) => {
  * sourceId for source_breakdown payload, display unit + factor for the
  * barrels/lbs/cases UX.
  */
+// Transfer statuses that hold drums back — same set the server subtracts in
+// `open_reserved_for_receipts`.
+const RESERVING_STATUSES = new Set([TRANSFER_STATUS.PENDING, TRANSFER_STATUS.FORKLIFT_SUBMITTED]);
+
+/**
+ * Weight already promised to in-flight transfers, per (lot, rack).
+ *
+ * The server caps a transfer or write-off net of pending transfers, but the
+ * forms offered the full rack: "20 drum avail" with 14 already pending, then a
+ * refusal (2026-10-01). Keyed by LOT — any receipt of a lot reserves from the
+ * same drums — and by the rack each pending transfer takes from.
+ */
+const reservedByLotRow = (pendingTransfers, allReceipts) => {
+  const lotOf = new Map(allReceipts.map((r) => [r.id, r.materialLotId || r.id]));
+  const out = new Map();
+  for (const t of pendingTransfers || []) {
+    if (!RESERVING_STATUSES.has(t.status)) continue;
+    const lot = lotOf.get(t.receiptId) || t.receiptId;
+    for (const b of t.sourceBreakdown || []) {
+      const rowId = String(b?.id || '').replace(/^row-/, '');
+      if (!rowId) continue;
+      const key = `${lot}::${rowId}`;
+      out.set(key, (out.get(key) || 0) + (Number(b.quantity) || 0));
+    }
+  }
+  return out;
+};
+
 export const buildEntriesForProduct = ({
   productId,
   approvedReceipts = [],
   storageAreas = [],
   locations = [],
   subLocationMap = {},
+  pendingTransfers = [],
+  allReceipts = null,
 }) => {
   if (!productId) return [];
 
+  const reserved = reservedByLotRow(pendingTransfers, allReceipts || approvedReceipts);
   const entries = [];
   const matching = approvedReceipts.filter(
     (r) => r.productId === productId && Number(r.quantity || 0) > 0,
@@ -147,6 +200,10 @@ export const buildEntriesForProduct = ({
           ? weightPerContainer
           : (allocUnits > 0 ? grossWeight / allocUnits : 0);
         const heldWeight = Math.min(grossWeight, heldUnits * perUnit);
+        const reservedWeight = Math.min(
+          Math.max(0, grossWeight - heldWeight),
+          reserved.get(`${receipt.materialLotId || receipt.id}::${a.rowId}`) || 0,
+        );
         entries.push(makeEntry({
           key: `${receipt.id}::row-${a.rowId}`,
           receiptId: receipt.id,
@@ -159,8 +216,12 @@ export const buildEntriesForProduct = ({
           sourceId: `row-${a.rowId}`,
           lotNumber: lot,
           locationLabel: label,
-          available: Math.max(0, grossWeight - heldWeight),
+          available: Math.max(0, grossWeight - heldWeight - reservedWeight),
           heldUnits,
+          reservedWeight,
+          fullUnits: Number(a.fullUnits) || 0,
+          openUnits: Number(a.openUnits) || 0,
+          openQty: Number(a.openQty) || 0,
           rowPallets: Number(a.pallets) || 0,
           unit,
           weightPerContainer,
@@ -203,7 +264,8 @@ export const buildEntriesForProduct = ({
         sourceId: `row-${receipt.storageRowId}`,
         lotNumber: lot,
         locationLabel: label,
-        available: total,
+        available: Math.max(0, total - (reserved.get(`${receipt.id}::${receipt.storageRowId}`) || 0)),
+        reservedWeight: reserved.get(`${receipt.id}::${receipt.storageRowId}`) || 0,
         rowPallets: Number(receipt.pallets) || 0,
         unit,
         weightPerContainer,
@@ -384,4 +446,34 @@ export const buildRowUnitLookup = (locationsTree = []) => {
     });
   });
   return map;
+};
+
+
+/**
+ * "6 full + 1 open (224 lbs)" — how many CONTAINERS are free on a rack.
+ *
+ * Dividing pounds by the per-drum weight printed "6.45 drums" for six sealed
+ * drums and one 224 lb open one, while the rack header said 7 and the hold
+ * form said 4: the same rack counted three ways (2026-10-01). An open drum is
+ * one container with some weight left in it, never 0.45 of a drum.
+ *
+ * `available` is in the storage unit (lbs); `openQty` is the open drums'
+ * remaining weight. Reservations and holds come off sealed drums first.
+ * Returns null when the entry has no container split (legacy material), so
+ * callers keep their old wording.
+ */
+export const describeContainers = (entry, available = entry.available) => {
+  const factor = Number(entry.displayFactor) || 0;
+  const full = Number(entry.fullUnits) || 0;
+  const open = Number(entry.openUnits) || 0;
+  if (!(factor > 1) || (full + open) === 0) return null;
+  const unit = pluralizeUnit(singularUnit(entry.displayUnit || 'unit'));
+  const openQty = Number(entry.openQty) || 0;
+  const avail = Math.max(0, Number(available) || 0);
+  const openFree = open > 0 && avail >= openQty - 0.01 ? open : 0;
+  const fullFree = Math.max(0, Math.round((avail - (openFree ? openQty : 0)) / factor));
+  const fmt = (n) => Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const storage = entry.unit || 'lbs';
+  if (!openFree) return `${fullFree} ${fullFree === 1 ? singularUnit(unit) : unit}`;
+  return `${fullFree} full + ${openFree} open (${fmt(openQty)} ${storage})`;
 };

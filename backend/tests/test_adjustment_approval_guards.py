@@ -140,10 +140,21 @@ class TestStaleQuantity:
 class TestHeldStock:
     def test_held_receipt_cannot_be_written_off(self, db_session, adjg_seed):
         receipt = _counted_receipt(db_session, units=20)
+        # A QA hold carries held_quantity (hold_service sets both).
         receipt.hold = True
+        receipt.held_quantity = receipt.quantity
         adjustment = _adjustment(db_session, receipt, qty=1000)
         with pytest.raises(ValidationError, match="on hold"):
             adjustment_service.approve_adjustment(db_session, adjustment, _Approver())
+
+    def test_transfer_review_lock_is_not_a_hold(self, db_session, adjg_seed):
+        """A pending transfer sets receipt.hold with no held_quantity. That
+        lock refused 'Used in Production' as 'is on hold' while the Holds
+        screen called the lot available (2026-10-01)."""
+        receipt = _counted_receipt(db_session, units=20)
+        receipt.hold = True
+        receipt.held_quantity = 0
+        assert adjustment_service._hold_blocks_deduction(db_session, receipt) is False
 
     def test_held_lot_cannot_be_written_off(self, db_session, adjg_seed):
         receipt = _counted_receipt(db_session, units=20)

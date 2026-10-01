@@ -787,3 +787,24 @@
   font-weight: 700;
   color: var(--color-text);
 }
+
+/* Truck check-in: one fieldset per lot line (2026-10) */
+.og-checkin-line {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.og-checkin-line legend {
+  font-weight: 800;
+  font-size: 0.9rem;
+  padding: 0 4px;
+}
+.og-checkin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}

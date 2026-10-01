@@ -6,9 +6,7 @@ import { useAuth } from '../AuthContext';
 import apiClient from '../../api/client';
 import { CATEGORY_TYPES, RECEIPT_STATUS, TRANSFER_STATUS, FORKLIFT_REQUEST_STATUS } from '../../constants';
 import {
-  EPSILON,
   roundTo,
-  numberFrom,
   calculateFinishedGoodsAllocation,
   cloneStorageAreas,
   releaseFinishedGoodsAllocation,
@@ -40,6 +38,37 @@ export const useInventory = () => {
   return ctx;
 };
 
+// One mapping for the initial load and for refreshTransfers.
+const mapTransfer = (t) => ({
+  id: t.id,
+  receiptId: t.receipt_id,
+  transferType: t.transfer_type,
+  fromLocation: t.from_location_id,
+  fromSubLocation: t.from_sub_location_id,
+  toLocation: t.to_location_id,
+  toSubLocation: t.to_sub_location_id,
+  quantity: t.quantity,
+  reason: t.reason,
+  orderNumber: t.order_number,
+  status: t.status,
+  submittedAt: t.submitted_at,
+  submittedBy: t.requested_by,
+  approvedBy: t.approved_by,
+  approvedAt: t.approved_at,
+  sourceBreakdown: t.source_breakdown || [],
+  destinationBreakdown: t.destination_breakdown || [],
+  palletLicenceIds: t.pallet_licence_ids || [],
+  palletLicenceDetails: t.pallet_licence_details || [],
+  lines: t.lines || null,
+  swaps: t.swaps || [],
+  forkliftSubmittedAt: t.forklift_submitted_at,
+  forkliftNotes: t.forklift_notes,
+  voidedAt: t.voided_at,
+  voidedBy: t.voided_by,
+  voidedReason: t.voided_reason,
+  editHistory: [],
+});
+
 export const InventoryProvider = ({ children }) => {
   const { isAuthenticated, loading: authLoading, selectedWarehouse } = useAuth();
   const { products, categories } = useFoundation();
@@ -50,6 +79,18 @@ export const InventoryProvider = ({ children }) => {
   const { receipts, setReceipts } = useReceipt();
 
   const [inventoryTransfers, setInventoryTransfers] = useState([]);
+
+  // Re-read transfers on demand. The forms subtract pending transfers from what
+  // they offer; a transfer someone else submitted after this page loaded was
+  // invisible until a reload (2026-10-01).
+  const refreshTransfers = useCallback(async () => {
+    try {
+      const response = await apiClient.get('/inventory/transfers');
+      setInventoryTransfers((response.data || []).map(mapTransfer));
+    } catch (error) {
+      console.error('Error refreshing transfers:', error);
+    }
+  }, []);
   const [inventoryHoldActions, setInventoryHoldActions] = useState([]);
   const [inventoryAdjustments, setInventoryAdjustments] = useState([]);
   const [cycleCounts, setCycleCounts] = useState([]);
@@ -90,35 +131,7 @@ export const InventoryProvider = ({ children }) => {
 
         apiClient.get('/inventory/transfers').then((transfersResponse) => {
           if (cancelled) return;
-          const transfers = transfersResponse.data.map((t) => ({
-            id: t.id,
-            receiptId: t.receipt_id,
-            transferType: t.transfer_type,
-            fromLocation: t.from_location_id,
-            fromSubLocation: t.from_sub_location_id,
-            toLocation: t.to_location_id,
-            toSubLocation: t.to_sub_location_id,
-            quantity: t.quantity,
-            reason: t.reason,
-            orderNumber: t.order_number,
-            status: t.status,
-            submittedAt: t.submitted_at,
-            submittedBy: t.requested_by,
-            approvedBy: t.approved_by,
-            approvedAt: t.approved_at,
-            sourceBreakdown: t.source_breakdown || [],
-            destinationBreakdown: t.destination_breakdown || [],
-            palletLicenceIds: t.pallet_licence_ids || [],
-            palletLicenceDetails: t.pallet_licence_details || [],
-            lines: t.lines || null,
-            swaps: t.swaps || [],
-            forkliftSubmittedAt: t.forklift_submitted_at,
-            forkliftNotes: t.forklift_notes,
-            voidedAt: t.voided_at,
-            voidedBy: t.voided_by,
-            voidedReason: t.voided_reason,
-            editHistory: [],
-          }));
+          const transfers = transfersResponse.data.map(mapTransfer);
           setInventoryTransfers(transfers);
         }).catch((error) => console.error('Error fetching transfers:', error)),
 
@@ -220,14 +233,12 @@ export const InventoryProvider = ({ children }) => {
         };
       }
 
-      const currentQuantity = numberFrom(receipt.quantity, 0);
-      if (quantityValue > currentQuantity + EPSILON) {
-        return {
-          success: false,
-          error: 'quantity_exceeds_available',
-          message: 'You cannot move more than the available quantity on the lot.',
-        };
-      }
+      // No client-side quantity cap. `receipt.quantity` is ONE delivery's
+      // paper share; a lot received on two trucks routes every pick to the
+      // receipt carrying the rack projection, whose own quantity can be far
+      // below what the racks hold — 8 drums off a rack showing 89 refused as
+      // "more than the available quantity" (2026-10-01). The server checks at
+      // lot scope (net of holds and pending transfers) and says why.
 
       const payload = {
         receipt_id: transfer.receiptId,
@@ -1109,6 +1120,7 @@ export const InventoryProvider = ({ children }) => {
 
   const value = {
     inventoryTransfers,
+    refreshTransfers,
     inventoryHoldActions,
     inventoryAdjustments,
     cycleCounts,

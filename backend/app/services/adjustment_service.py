@@ -98,7 +98,9 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
                 # legitimately exceed the one receipt the form routed to.
                 qty = float(adjustment.quantity or 0)
                 pool = lot_scoped_availability(db, receipt)
-                available = pool["total"] - pool["held"]
+                # Net of open transfers too — the hold gate above no longer
+                # doubles as the "transfer under review" guard.
+                available = pool["available"]
                 if qty > available + 1e-6:
                     raise ValidationError(
                         f"Only {available:g} {receipt.unit or 'units'} remain on "
@@ -129,11 +131,18 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
 
 
 def _hold_blocks_deduction(db: Session, receipt: Receipt) -> bool:
-    """Whether a QA hold (or a transfer under review) stands between this
-    receipt and a write-off. Counted lots are also protected one layer down —
-    `take_units` refuses a held lot — but the refusal must not depend on which
-    bookkeeping layer the receipt lives in."""
-    if receipt.hold:
+    """Whether a QA hold stands between this receipt and a write-off. Counted
+    lots are also protected one layer down — `take_units` refuses a held lot —
+    but the refusal must not depend on which bookkeeping layer the receipt
+    lives in.
+
+    `receipt.hold` alone is NOT a QA hold: every pending transfer sets it as a
+    review lock. Reading it bare refused "Used in Production" on AMP/NAVA/
+    300524/01L1 with "is on hold" while the Holds screen (which already
+    applies this rule) offered to PLACE a hold on the same lot (2026-10-01).
+    Drums claimed by a pending transfer are kept out by the availability cap
+    instead, which subtracts them."""
+    if receipt.hold and float(receipt.held_quantity or 0) > 0:
         return True
     if receipt.material_lot_id:
         lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()

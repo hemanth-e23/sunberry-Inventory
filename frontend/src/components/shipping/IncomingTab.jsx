@@ -10,8 +10,9 @@ import { formatCalendarDate } from '../../utils/labelPayload';
 import { formatDateKey, getTodayDateKey } from '../../utils/dateUtils';
 import {
   apiErrorMessage, cancelIncomingOrder, closeIncomingOrder, createIncomingOrder,
-  listIncomingOrders, printSessionLabels, releaseIncomingOrder, startReceiving,
+  checkInTruck, listIncomingOrders, printSessionLabels, releaseIncomingOrder,
 } from '../../api/lotReceivingApi';
+import { formatUnitTotals } from '../../utils/truckReceiving';
 import LotLabelPrint from '../ingredient/LotLabelPrint';
 import '../OutgoingDashboard.css';
 import { singularUnit } from '../../utils/rowSources';
@@ -36,10 +37,11 @@ import { singularUnit } from '../../utils/rowSources';
  * plan, exactly like a scheduled ship-out, where creation deliberately reserves
  * nothing and correctness is enforced at scan time.
  *
- * ── What "Start receiving" does, and what it deliberately does not ─────────
+ * ── What "Check in truck" does, and what it deliberately does not ──────────
  *
- * It opens ONE line: creates the receipt, resolves the lot, and hands back
- * stickers to print. It puts NOTHING in stock. A desktop button that says "yes,
+ * It opens the WHOLE truck (2026-10): every line gets its receipt and lot, lines
+ * that turn out to be the same lot are merged, and the stickers for all of them
+ * come back as one print run. It puts NOTHING in stock. A desktop button that says "yes,
  * all 80 arrived" is precisely the guess this model exists to remove — the units
  * are counted on the gun, against a physical rack, one at a time.
  *
@@ -363,13 +365,13 @@ const IncomingTab = () => {
   };
 
   /**
-   * Open a line against the driver's paperwork.
+   * Check the whole truck in against the driver's paperwork.
    *
-   * Prefilled from corporate's order, because corporate fills 99% of it. What is
-   * editable is the part the worker can actually see on the truck.
+   * One form for every line not yet started, prefilled from corporate's order
+   * because corporate fills 99% of it. What is editable is the part the worker
+   * can actually see on the truck.
    */
-  const openStart = (order, line) => setStartForm({
-    order,
+  const lineDraft = (order, line) => ({
     line,
     vendor_id: line.vendor_id || order.vendor_id || '',
     vendor_lot: line.vendor_lot || '',
@@ -383,88 +385,109 @@ const IncomingTab = () => {
         ? ''
         : String(line.units_per_pallet),
     expected_count: String(line.expected_count ?? ''),
-    bol: order.bol || '',
   });
 
-  const submitStart = async () => {
-    const { order, line } = startForm;
-    // All three are hard requirements at the SERVER too. Checked here so the
+  const openCheckIn = (order) => setStartForm({
+    order,
+    bol: order.bol || '',
+    lines: (order.lines || []).filter((l) => !l.receipt_id).map((l) => lineDraft(order, l)),
+  });
+
+  const patchDraft = (index, patch) => setStartForm((prev) => ({
+    ...prev,
+    lines: prev.lines.map((d, i) => (i === index ? { ...d, ...patch } : d)),
+  }));
+
+  // NEVER SEND WHAT WAS NOT ASKED. Hiding the per-pallet input does not empty
+  // it, so a drum line given a figure before that rule existed would otherwise
+  // carry it invisibly onto the lot and print pallet stickers.
+  const perPalletOf = (draft) => (
+    asksPerPallet(draft.line.unit_label) ? Number(draft.units_per_pallet) || 0 : 0
+  );
+
+  const submitCheckIn = async () => {
+    const { order } = startForm;
+    // All of these are hard requirements at the SERVER too. Checked here so the
     // worker is told at the form instead of at the printer, standing next to a
     // pallet with nothing to stick on it.
-    if (!startForm.vendor_id) {
-      addToast(
-        'Pick the vendor from the BOL — it is part of what tells this lot apart '
-        + 'from another supplier\'s lot with the same number.',
-        'error',
-      );
-      return;
-    }
-    if (!startForm.vendor_lot.trim()) {
-      addToast(
-        'The vendor lot number is needed — every drum of this lot carries the '
-        + 'same sticker, so one reading "UNKNOWN" makes them impossible to tell apart.',
-        'error',
-      );
-      return;
-    }
-    if (!startForm.bbd) {
-      addToast('The best-by date is needed — it is printed on every sticker.', 'error');
-      return;
-    }
-    if (!Number(startForm.weight_per_unit)) {
-      // Pounds are derived from this number, and a missing one reads as zero
-      // stock to production.
-      addToast(
-        `Weight per ${line.unit_label || 'unit'} is needed — every pound is worked out from it.`,
-        'error',
-      );
-      return;
+    for (const draft of startForm.lines) {
+      const name = draft.line.product_name;
+      if (!draft.vendor_id) {
+        addToast(
+          `${name}: pick the vendor from the BOL — it is part of what tells this lot `
+          + 'apart from another supplier\'s lot with the same number.',
+          'error',
+        );
+        return;
+      }
+      if (!draft.vendor_lot.trim()) {
+        addToast(
+          `${name}: the vendor lot number is needed — every drum of this lot carries `
+          + 'the same sticker, so one reading "UNKNOWN" makes them impossible to tell apart.',
+          'error',
+        );
+        return;
+      }
+      if (!draft.bbd) {
+        addToast(`${name}: the best-by date is needed — it is printed on every sticker.`, 'error');
+        return;
+      }
+      if (!Number(draft.weight_per_unit)) {
+        addToast(
+          `${name}: weight per ${draft.line.unit_label || 'unit'} is needed — every pound is worked out from it.`,
+          'error',
+        );
+        return;
+      }
     }
     setBusy(true);
-    // NEVER SEND WHAT WAS NOT ASKED. Hiding the input does not empty it: the
-    // form prefills from `line.units_per_pallet`, so a drum line that was given
-    // a figure before this rule existed still carried it here invisibly — and
-    // it would be written to the freshly minted lot, print pallet stickers, and
-    // arm the gun's multiplier, with nothing on screen to explain any of it.
-    const per = asksPerPallet(line.unit_label)
-      ? Number(startForm.units_per_pallet) || 0
-      : 0;
     try {
-      const summary = await startReceiving(order.id, {
-        line_id: line.id,
-        vendor_id: startForm.vendor_id || null,
-        vendor_lot: startForm.vendor_lot || null,
-        bbd: startForm.bbd || null,
-        weight_per_unit: Number(startForm.weight_per_unit),
-        weight_unit: 'lbs',
-        units_per_pallet: per || null,
-        expected_count: Number(startForm.expected_count) || null,
+      const truck = await checkInTruck(order.id, {
         bol: startForm.bol || null,
+        lines: startForm.lines.map((draft) => ({
+          line_id: draft.line.id,
+          vendor_id: draft.vendor_id || null,
+          vendor_lot: draft.vendor_lot || null,
+          bbd: draft.bbd || null,
+          weight_per_unit: Number(draft.weight_per_unit),
+          weight_unit: 'lbs',
+          units_per_pallet: perPalletOf(draft) || null,
+          expected_count: draft.expected_count === '' ? null : Number(draft.expected_count),
+        })),
       });
-      // Printing is NOT receiving. This hands the worker the stickers; the
-      // material becomes stock when a forklift user scans it into a rack.
-      // PALLETISED MATERIAL GETS PALLET STICKERS, one per pallet — nobody is
-      // going to destack a wrapped pallet at the dock to label every bag. The
-      // sticker is identical either way; only the middle band differs, and the
-      // gun's multiplier turns one scan into a whole pallet.
-      const palletised = per > 1;
-      const count = palletised
-        ? Math.ceil(summary.expected_count / per)
-        : summary.expected_count;
-      const printed = await printSessionLabels(summary.receipt_id, count, {
-        scope: palletised ? 'pallet' : 'unit',
-      });
-      setSheet(printed);
+
+      // Printing is NOT receiving. One print run for the whole truck: every
+      // line that was just opened. PALLETISED MATERIAL GETS PALLET STICKERS,
+      // one per pallet — nobody destacks a wrapped pallet at the dock — and the
+      // gun turns one scan of it into a whole pallet.
+      const opened = new Set(startForm.lines.map((d) => d.line.id));
+      const labels = [];
+      let stickers = 0;
+      for (const line of truck.lines) {
+        if (!line.receipt_id || line.expected_count < 1) continue;
+        // A merged line keeps the FIRST line's id, so match on what was opened
+        // or on a line this form never saw (it cannot have been printed yet).
+        if (!opened.has(line.line_id)) continue;
+        const per = asksPerPallet(line.unit_label) ? Number(line.units_per_pallet) || 0 : 0;
+        const count = per > 1 ? Math.ceil(line.expected_count / per) : line.expected_count;
+        const printed = await printSessionLabels(line.receipt_id, count, {
+          scope: per > 1 ? 'pallet' : 'unit',
+        });
+        labels.push(...(printed.labels || []));
+        stickers += count;
+      }
+      if (labels.length) setSheet({ lot_code: order.order_number, count: labels.length, labels });
       setStartForm(null);
+      const merged = startForm.lines.length - truck.lines.filter((l) => opened.has(l.line_id)).length;
       addToast(
-        palletised
-          ? `${count} pallet stickers — one per pallet, then scan each in on the gun`
-          : `${count} stickers for ${summary.lot_code} — scan them in on the gun`,
+        `${order.order_number} checked in — ${stickers} stickers for ${truck.lines.length} lots`
+        + (merged > 0 ? ` (${merged} duplicate line${merged > 1 ? 's' : ''} merged)` : '')
+        + '. Scan them in on the gun.',
         'success',
       );
       await load();
     } catch (error) {
-      addToast(apiErrorMessage(error, 'Could not start receiving'), 'error');
+      addToast(apiErrorMessage(error, 'Could not check this truck in'), 'error');
     } finally {
       setBusy(false);
     }
@@ -526,6 +549,23 @@ const IncomingTab = () => {
       lines: rows.length,
       units: rows.reduce((sum, l) => sum + (Number(l.expected_count) || 0), 0),
     };
+  }, [form]);
+
+  // A truck has ONE line per lot — every drum of a lot wears the same sticker,
+  // so the gun could not tell two lines for it apart. The server merges them;
+  // this says so while the form is still open. Same rule as the server's key:
+  // product + lot number with spaces removed, upper-cased + best-by day.
+  const duplicateOf = useMemo(() => {
+    const seen = new Map();
+    const dupes = {};
+    (form?.lines || []).forEach((l, i) => {
+      const lot = String(l.vendor_lot || '').replace(/\s+/g, '').toUpperCase();
+      if (!l.product_id || !lot) return;
+      const key = `${l.product_id}|${lot}|${l.bbd || ''}`;
+      if (seen.has(key)) dupes[i] = seen.get(key);
+      else seen.set(key, i);
+    });
+    return dupes;
   }, [form]);
 
   const visible = useMemo(
@@ -617,17 +657,6 @@ const IncomingTab = () => {
                     )}
                   </span>
                   <span className="og-line-count">
-                    {isOpen && canReceive && order.status !== 'draft' && !line.receipt_id && (
-                      <button
-                        type="button"
-                        className="og-btn og-btn-primary"
-                        style={{ marginRight: 8 }}
-                        onClick={() => openStart(order, line)}
-                        disabled={busy}
-                      >
-                        Start receiving
-                      </button>
-                    )}
                     {isOpen && canReceive && line.receipt_id && (
                       <button
                         type="button"
@@ -690,8 +719,12 @@ const IncomingTab = () => {
           {/* The total lives HERE and nowhere else. It used to appear twice —
               once per line and once in this column — which reads as two
               different figures that happen to agree. */}
+          {/* One figure PER KIND of material — adding drums to bottles gave
+              "0 of 14152", a number that meant nothing. */}
           <div className="og-count">
-            <b>{received}</b> of {expected}
+            {order.totals_by_unit?.length
+              ? formatUnitTotals(order.totals_by_unit)
+              : <><b>{received}</b> of {expected}</>}
           </div>
           {short > 0 && (
             <div className="og-sub" style={{ color: '#b45309', fontWeight: 600 }}>
@@ -702,6 +735,23 @@ const IncomingTab = () => {
             <div className="og-sub" style={{ color: '#b45309', fontWeight: 600 }}>
               {difference} over
             </div>
+          )}
+
+          {isOpen && canReceive && order.status !== 'draft'
+            && (order.lines || []).some((l) => !l.receipt_id) && (
+            <div className="og-card-actions">
+              <button
+                type="button"
+                className="og-btn og-btn-primary"
+                onClick={() => openCheckIn(order)}
+                disabled={busy}
+              >
+                <Truck size={14} /> Check in truck
+              </button>
+            </div>
+          )}
+          {order.forklift_submitted_at && isOpen && (
+            <div className="og-sub" style={{ fontWeight: 600 }}>Scanned — waiting for approval</div>
           )}
 
           {isOpen && canCreate && (
@@ -998,125 +1048,17 @@ const IncomingTab = () => {
       <Modal
         isOpen={!!startForm}
         onClose={() => setStartForm(null)}
-        title="Start receiving"
-        size="md"
+        title={startForm ? `Check in ${startForm.order.order_number}` : 'Check in truck'}
+        size="lg"
       >
         {startForm && (
-          <div className="og-modal-form">
+          <div className="og-modal-form" style={{ maxWidth: 'none' }}>
             <p className="og-sub">
-              <strong>{startForm.line.product_name}</strong> — check these against
-              the driver&apos;s paperwork and correct anything that is wrong.
-              Nothing goes into stock here; this prints the stickers so a forklift
-              user can scan the {startForm.line.unit_label || 'unit'}s in.
+              Check every line against the driver&apos;s paperwork and correct
+              anything that is wrong. Nothing goes into stock here — this opens the
+              truck on the gun and prints the stickers for all of it. Two lines
+              that turn out to be the same lot are merged.
             </p>
-            {/* Corporate may raise an order before knowing the supplier, and
-                the order creates no lot so nothing collides. The lot is minted
-                by THIS button, and the person pressing it is holding the BOL —
-                so the vendor is pinned down here. Unlike a missing lot number
-                or best-by, a missing vendor never announces itself: it just
-                merges two suppliers' "LOT001" into one lot. */}
-            <label>
-              <span>
-                Vendor{' '}
-                <span className="og-prefill">required — tells this lot from another supplier&apos;s</span>
-              </span>
-              <select
-                value={startForm.vendor_id}
-                onChange={(e) => setStartForm({ ...startForm, vendor_id: e.target.value })}
-              >
-                <option value="">Select vendor</option>
-                {(vendors || []).map((v) => (
-                  <option key={v.id} value={v.id}>{v.name}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>
-                Vendor lot{' '}
-                <span className="og-prefill">required — printed on every sticker</span>
-              </span>
-              <input
-                value={startForm.vendor_lot}
-                onChange={(e) => setStartForm({ ...startForm, vendor_lot: e.target.value })}
-              />
-            </label>
-            <label>
-              <span>
-                BBD{' '}
-                <span className="og-prefill">required — printed on every sticker</span>
-              </span>
-              <input
-                type="date"
-                value={startForm.bbd}
-                onChange={(e) => setStartForm({ ...startForm, bbd: e.target.value })}
-              />
-            </label>
-            <label>
-              <span>
-                Weight per {startForm.line.unit_label || 'unit'}{' '}
-                <span className="og-prefill">in LBS — every pound is derived from this</span>
-              </span>
-              {/* text + inputMode, never type="number": a number input edits itself
-                    when the wheel passes over it, so scrolling the form silently
-                    changes a figure somebody typed. */}
-              <input
-                type="text"
-                inputMode="decimal"
-                value={startForm.weight_per_unit}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === '' || /^\d*\.?\d*$/.test(v)) {
-                    setStartForm({ ...startForm, weight_per_unit: v });
-                  }
-                }}
-                placeholder="500"
-                autoFocus
-              />
-            </label>
-            {/* Correctable here because vendors are not consistent: the order
-                said 50 to a pallet and the truck brought 40. This is the gun's
-                multiplier, so a wrong number books the wrong count 10 times. */}
-            {/* Shown whenever the material is wrapped, NOT only when the order
-                already set a figure. That gate was self-defeating: the field
-                stayed hidden because the count was empty, so the number could
-                never be entered anywhere. Drums never reach here — they are
-                stickered one at a time, so one scan is one drum. */}
-            {asksPerPallet(startForm.line.unit_label) && (
-              <label>
-                <span>
-                  Per pallet{' '}
-                  <span className="og-prefill">
-                    how many {startForm.line.unit_label || 'unit'}s are wrapped
-                    on one pallet
-                  </span>
-                </span>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={startForm.units_per_pallet}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (v === '' || /^\d+$/.test(v)) {
-                      setStartForm({ ...startForm, units_per_pallet: v });
-                    }
-                  }}
-                />
-              </label>
-            )}
-            <label>
-              <span>How many arrived</span>
-              <input
-                type="text"
-                inputMode="numeric"
-                value={startForm.expected_count}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === '' || /^\d+$/.test(v)) {
-                    setStartForm({ ...startForm, expected_count: v });
-                  }
-                }}
-              />
-            </label>
             <label>
               <span>BOL</span>
               <input
@@ -1124,6 +1066,93 @@ const IncomingTab = () => {
                 onChange={(e) => setStartForm({ ...startForm, bol: e.target.value })}
               />
             </label>
+
+            {startForm.lines.map((draft, index) => {
+              const unit = draft.line.unit_label || 'unit';
+              return (
+                <fieldset key={draft.line.id} className="og-checkin-line">
+                  <legend>{draft.line.product_name}</legend>
+                  {/* The vendor is pinned down HERE, by somebody holding the BOL.
+                      Unlike a missing lot number or best-by, a missing vendor
+                      never announces itself: it just merges two suppliers'
+                      "LOT001" into one lot. */}
+                  <label>
+                    <span>
+                      Vendor{' '}
+                      <span className="og-prefill">required — tells this lot from another supplier&apos;s</span>
+                    </span>
+                    <select
+                      value={draft.vendor_id}
+                      onChange={(e) => patchDraft(index, { vendor_id: e.target.value })}
+                    >
+                      <option value="">Select vendor</option>
+                      {(vendors || []).map((v) => (
+                        <option key={v.id} value={v.id}>{v.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="og-checkin-grid">
+                    <label>
+                      <span>Vendor lot <span className="og-prefill">required</span></span>
+                      <input
+                        value={draft.vendor_lot}
+                        onChange={(e) => patchDraft(index, { vendor_lot: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>BBD <span className="og-prefill">required</span></span>
+                      <input
+                        type="date"
+                        value={draft.bbd}
+                        onChange={(e) => patchDraft(index, { bbd: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>Lbs per {unit}</span>
+                      {/* text + inputMode, never type="number": a number input
+                          edits itself when the wheel passes over it. */}
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={draft.weight_per_unit}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === '' || /^\d*\.?\d*$/.test(v)) patchDraft(index, { weight_per_unit: v });
+                        }}
+                        placeholder="500"
+                      />
+                    </label>
+                    {asksPerPallet(unit) && (
+                      <label>
+                        <span>{unit}s per pallet</span>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={draft.units_per_pallet}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (v === '' || /^\d+$/.test(v)) patchDraft(index, { units_per_pallet: v });
+                          }}
+                        />
+                      </label>
+                    )}
+                    <label>
+                      <span>How many on the BOL</span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={draft.expected_count}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === '' || /^\d+$/.test(v)) patchDraft(index, { expected_count: v });
+                        }}
+                      />
+                    </label>
+                  </div>
+                </fieldset>
+              );
+            })}
+
             <div className="og-modal-actions">
               <button type="button" className="og-btn og-btn-ghost" onClick={() => setStartForm(null)}>
                 Cancel
@@ -1131,15 +1160,16 @@ const IncomingTab = () => {
               <button
                 type="button"
                 className="og-btn og-btn-primary"
-                onClick={submitStart}
+                onClick={submitCheckIn}
                 disabled={busy}
               >
                 {busy ? 'Working…' : (() => {
-                  const per = Number(startForm.units_per_pallet) || 0;
-                  const n = Number(startForm.expected_count) || 0;
-                  return per > 1
-                    ? `Print ${Math.ceil(n / per)} pallet stickers`
-                    : `Print ${n} stickers`;
+                  const n = startForm.lines.reduce((sum, d) => {
+                    const per = perPalletOf(d);
+                    const count = Number(d.expected_count) || 0;
+                    return sum + (per > 1 ? Math.ceil(count / per) : count);
+                  }, 0);
+                  return `Check in & print ${n} stickers`;
                 })()}
               </button>
             </div>
@@ -1257,6 +1287,12 @@ const IncomingTab = () => {
                   borderBottom: index < form.lines.length - 1 ? '1px solid #e5e7eb' : 'none',
                 }}
               >
+                {duplicateOf[index] != null && (
+                  <div className="og-sub" style={{ color: '#b45309', fontWeight: 600 }}>
+                    <AlertTriangle size={13} /> Same lot as line {duplicateOf[index] + 1} —
+                    the two will be saved as one line with the counts added.
+                  </div>
+                )}
                 {form.lines.length > 1 && (
                   <button
                     type="button"

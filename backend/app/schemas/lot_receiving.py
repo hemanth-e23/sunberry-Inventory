@@ -117,6 +117,11 @@ class IncomingOrderOut(BaseSchema):
     closed_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     lines: List[IncomingOrderLineOut] = []
+    # Per unit — "18 of 40 drums", "0 of 12,672 units". The single
+    # expected/received above adds drums and bottles together, which is a
+    # number that means nothing once a truck carries two kinds of material.
+    totals_by_unit: List["TruckUnitTotal"] = []
+    forklift_submitted_at: Optional[datetime] = None
 
 
 class StartReceivingRequest(BaseSchema):
@@ -280,3 +285,195 @@ class ReceivingSummary(BaseSchema):
     # best-by, or a flagged review.
     blocked_reason: Optional[str] = None
     label_printed_at: Optional[datetime] = None
+
+
+# ─── truck receiving (2026-10) ────────────────────────────────────────────────
+# One gun session per incoming order. See the truck section of
+# services/lot_receiving_service.py for the rules.
+
+class TruckUnitTotal(BaseSchema):
+    unit: str
+    expected: int = 0
+    scanned: int = 0
+
+
+IncomingOrderOut.model_rebuild()
+
+
+class CheckInLine(BaseSchema):
+    line_id: str
+    vendor_id: Optional[str] = None
+    _blank_vendor = field_validator("vendor_id", mode="before")(_blank_to_none)
+    vendor_lot: Optional[str] = Field(None, max_length=100)
+    bbd: CalendarDateTime = None
+    weight_per_unit: Optional[float] = Field(None, ge=0)
+    weight_unit: Optional[str] = Field("lbs", max_length=10)
+    units_per_pallet: Optional[int] = Field(None, ge=1, le=500)
+    expected_count: Optional[int] = Field(None, ge=0)
+
+
+class CheckInRequest(BaseSchema):
+    """The desk checks the whole truck against the driver's BOL in one go."""
+    bol: Optional[str] = Field(None, max_length=100)
+    lines: List[CheckInLine] = []
+
+
+class TruckRowCount(BaseSchema):
+    storage_row_id: str
+    storage_row_name: Optional[str] = None
+    count: int = 0
+
+
+class TruckLine(BaseSchema):
+    line_id: str
+    receipt_id: Optional[str] = None
+    receipt_status: Optional[str] = None
+    product_id: Optional[str] = None
+    product_name: str = ""
+    material_lot_id: Optional[str] = None
+    lot_code: Optional[str] = None
+    vendor_lot: Optional[str] = None
+    bbd: CalendarDateOut = None
+    unit_label: Optional[str] = None
+    count_unit: str = "units"
+    units_per_pallet: Optional[int] = None
+    expected_count: int = 0
+    scanned_count: int = 0
+    difference: int = 0
+    is_held: bool = False
+    rows: List[TruckRowCount] = []
+
+
+class PendingRecount(BaseSchema):
+    line_id: str
+    storage_row_id: str
+    storage_row_name: Optional[str] = None
+    product_name: Optional[str] = None
+    lot_code: Optional[str] = None
+    vendor_lot: Optional[str] = None
+    count_unit: Optional[str] = None
+    scanned: int = 0
+
+
+class ReceivingFlagOut(BaseSchema):
+    id: str
+    kind: str
+    line_id: Optional[str] = None
+    lot_code: Optional[str] = None
+    vendor_lot: Optional[str] = None
+    product_name: Optional[str] = None
+    storage_row_id: Optional[str] = None
+    storage_row_name: Optional[str] = None
+    expected: Optional[int] = None
+    actual: Optional[int] = None
+    detail: Optional[str] = None
+    actor_name: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class TruckSummary(BaseSchema):
+    order_id: str
+    order_number: Optional[str] = None
+    status: str
+    vendor_id: Optional[str] = None
+    vendor_name: Optional[str] = None
+    origin_name: Optional[str] = None
+    bol: Optional[str] = None
+    purchase_order: Optional[str] = None
+    expected_date: CalendarDateOut = None
+    warehouse_id: Optional[str] = None
+    checked_in: bool = False
+    forklift_submitted_at: Optional[datetime] = None
+    forklift_submitted_by_name: Optional[str] = None
+    short_reason: Optional[str] = None
+    scanned_by: List[str] = []
+    lines: List[TruckLine] = []
+    totals: List[TruckUnitTotal] = []
+    pending_recounts: List[PendingRecount] = []
+    flags: List[ReceivingFlagOut] = []
+
+
+class TruckScanRequest(BaseSchema):
+    lot_code: str = Field(..., min_length=1, max_length=120)
+    storage_row_id: str = Field(..., min_length=1, max_length=50)
+    idempotency_key: Optional[str] = Field(None, min_length=8, max_length=64)
+    allow_overfill: bool = False
+    # "Yes, there really is another one" — over the paperwork, or a lot that
+    # is not on this truck at all.
+    confirm_over: bool = False
+    # A loose bag carrying its own sticker, on a lot that is otherwise a pallet
+    # per scan.
+    single: bool = False
+
+
+class TruckScanResponse(BaseSchema):
+    """ONE shape for every outcome, always HTTP 200. `status`:
+
+    'ok' | 'needs_confirm_over' | 'needs_confirm' (rack full) | 'unknown_lot' |
+    'unknown_row' | 'truck_closed' | 'removed' | 'nothing_to_remove'
+    """
+    status: str
+    message: str
+    order_id: str
+    line_id: Optional[str] = None
+    lot_code: Optional[str] = None
+    product_name: Optional[str] = None
+    row_id: Optional[str] = None
+    row_name: Optional[str] = None
+    units: int = 0
+    line_scanned_count: int = 0
+    line_expected_count: int = 0
+    row_line_count: int = 0
+    count_unit: str = "units"
+    warning: Optional[str] = None
+    warning_detail: Optional[str] = None
+    flag: Optional[str] = None
+    scan_id: Optional[str] = None
+    truck: TruckSummary
+
+
+class TruckRemoveRequest(BaseSchema):
+    line_id: str
+    storage_row_id: str
+    idempotency_key: Optional[str] = Field(None, min_length=8, max_length=64)
+    single: bool = False
+
+
+class RecountItem(BaseSchema):
+    line_id: str
+    actual: int = Field(..., ge=0, le=100000)
+
+
+class TruckRecountRequest(BaseSchema):
+    storage_row_id: str
+    counts: List[RecountItem]
+
+
+class TruckFinishRequest(BaseSchema):
+    confirmed: bool = False
+    short_reason: Optional[str] = None
+    short_note: Optional[str] = Field(None, max_length=500)
+
+
+class TruckActionResponse(BaseSchema):
+    """recount / finish / approve. `status` is the discriminator; `lines` is
+    the per-line difference for needs_confirm / needs_reason."""
+    status: str
+    message: str = ""
+    lines: List[TruckLine] = []
+    approved_receipts: Optional[int] = None
+    truck: TruckSummary
+
+
+class TruckLocation(BaseSchema):
+    order_id: str
+    order_number: Optional[str] = None
+    vendor_name: Optional[str] = None
+    bol: Optional[str] = None
+
+
+class LocateTruckResponse(BaseSchema):
+    status: str
+    message: str = ""
+    lot_code: Optional[str] = None
+    trucks: List[TruckLocation] = []

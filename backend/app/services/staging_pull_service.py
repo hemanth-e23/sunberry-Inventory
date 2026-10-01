@@ -51,6 +51,7 @@ from app.services.staging_request_service import (
     _parse_staging_item_ids,
     _update_parent_request_status,
 )
+from app.utils.calendar_dates import calendar_day
 
 REF_TYPE_PULL = "staging_pull"
 REF_TYPE_PULL_UNDO = "staging_pull_undo"
@@ -130,6 +131,27 @@ def _pending_by_item(db: Session, item_ids: List[str]) -> Dict[str, float]:
     return out
 
 
+
+def on_cart_quantity_for_lot(db: Session, material_lot_id: str) -> float:
+    """Weight pulled off this lot's racks onto a cart and not yet submitted.
+
+    Between scan and submit the drums are on no rack and in no StagingItem,
+    yet still on the receipt's paper — availability and the reconciliation
+    check must count them somewhere or the lot looks over-stocked."""
+    if not material_lot_id:
+        return 0.0
+    events = (
+        db.query(LotPlacementEvent)
+        .filter(
+            LotPlacementEvent.ref_type == REF_TYPE_PULL,
+            LotPlacementEvent.material_lot_id == material_lot_id,
+            LotPlacementEvent.reason_code.is_(None),
+        )
+        .all()
+    )
+    cache: dict = {}
+    return sum(_event_quantity(db, ev, cache) for ev in events)
+
 # ─── list / detail ────────────────────────────────────────────────────────────
 
 def open_requests(db: Session) -> list:
@@ -193,10 +215,7 @@ def request_detail(db: Session, request_id: str) -> dict:
                 suggestion = {
                     "receipt_id": s.get("receipt_id"),
                     "lot_number": s.get("lot_number"),
-                    "expiration_date": (
-                        s["expiration_date"].isoformat()
-                        if s.get("expiration_date") else None
-                    ),
+                    "expiration_date": calendar_day(s.get("expiration_date")),
                     "available_quantity": s.get("available_quantity"),
                     "is_counted": s.get("is_counted"),
                     "unit_label": s.get("unit_label"),
@@ -573,6 +592,7 @@ def submit(
         transfer = InventoryTransfer(
             id=_mint_id("transfer"),
             receipt_id=receipt.id,
+            warehouse_id=receipt.warehouse_id,
             from_location_id=receipt.location_id,
             from_sub_location_id=receipt.sub_location_id,
             to_location_id=staging_location_id,

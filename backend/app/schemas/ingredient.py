@@ -14,7 +14,7 @@ See INGREDIENT-SERIALIZATION-SPEC.md. Two conventions worth stating up front:
 from datetime import datetime
 from typing import List, Optional
 
-from app.schemas.base import BaseSchema
+from app.schemas.base import BaseSchema, CalendarDate
 
 
 # ─── Intake lot lines ─────────────────────────────────────────────────────────
@@ -25,7 +25,7 @@ class IntakeLotBase(BaseSchema):
     container_type: str
     vendor_lot: Optional[str] = None
     lot_unknown: bool = False
-    bbd: Optional[datetime] = None
+    bbd: CalendarDate = None
     expected_count: int = 0
     brix: Optional[float] = None
     net_weight_per_container: Optional[float] = None
@@ -160,7 +160,7 @@ class ContainerLabel(BaseSchema):
     # SAY so — printing an em-dash makes it indistinguishable from a lot line
     # nobody has filled in yet.
     lot_unknown: bool = False
-    bbd: Optional[datetime] = None
+    bbd: CalendarDate = None
     net_weight: Optional[float] = None
     weight_unit: Optional[str] = None
     receipt_date: Optional[datetime] = None
@@ -194,7 +194,7 @@ class Container(BaseSchema):
     net_weight: Optional[float] = None
     qty_unit: Optional[str] = None
     vendor_lot: Optional[str] = None
-    bbd: Optional[datetime] = None
+    bbd: CalendarDate = None
     storage_row_id: Optional[str] = None
     storage_row_name: Optional[str] = None
     location_path: Optional[str] = None

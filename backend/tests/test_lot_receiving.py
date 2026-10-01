@@ -300,7 +300,9 @@ class TestLabels:
         extended = datetime(2027, 9, 1, tzinfo=timezone.utc)
         lot.bbd_current = extended
         db_session.flush()
-        assert lrs.label_sheet_for_lot(db_session, lot, 1)["labels"][0]["bbd"] == extended
+        # A calendar day, never an instant: an instant at midnight UTC printed
+        # a day early in Central time.
+        assert lrs.label_sheet_for_lot(db_session, lot, 1)["labels"][0]["bbd"] == "2027-09-01"
 
     def test_no_sticker_prints_for_a_lot_under_review(self, db_session, recv_seed):
         """An identical sticker on the wrong material cannot be found later —

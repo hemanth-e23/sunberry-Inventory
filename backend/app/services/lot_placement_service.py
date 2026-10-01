@@ -1215,6 +1215,12 @@ def project_lot(db: Session, lot: MaterialLot) -> None:
             # Additive keys — ignored by existing readers, and the honest figure
             # for anything that learns to read them.
             "units": units,
+            # The split, so screens can say "6 full + 1 open (224 lbs)" instead
+            # of "6.45 drums" — an open drum is one container, not 0.45 of one
+            # (2026-10-01: three screens counted the same rack three ways).
+            "fullUnits": int(placement.full_units or 0),
+            "openUnits": int(placement.open_units or 0),
+            "openQty": round(float(placement.open_remaining_qty or 0), 3),
             "unitLabel": lot.unit_label,
             # QUARANTINE, projected so every reader of this JSON can see it
             # without asking the lot separately.

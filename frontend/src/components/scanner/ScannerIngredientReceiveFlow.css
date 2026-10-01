@@ -879,6 +879,11 @@
   cursor: pointer;
   box-shadow: none;
   transition: border-color 0.15s;
+  /* The global `button { overflow: hidden }` drops a flex item's automatic
+     min-height to 0, so inside the 45vh list every row shrank to a sliver and
+     clipped its rack name instead of the list scrolling. */
+  flex-shrink: 0;
+  overflow: visible;
 }
 
 .sir-dialog-row::before { display: none; }
@@ -953,3 +958,66 @@
 
 .sir-perscan-btn.is-on { border-color: #b45309; background: #fffbeb; }
 .sir-perscan-btn.is-on strong { color: #b45309; }
+
+/* ── Truck receiving (2026-10) ───────────────────────────────────────────── */
+
+.sir-truck-number { display: inline-flex; align-items: center; gap: 0.4rem; }
+
+.sir-truck-product {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.sir-truck-lasthit {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  background: #ecfdf5;
+  border: 2px solid #16a34a;
+  color: #14532d;
+}
+.sir-truck-lasthit strong { display: block; font-size: 1.35rem; font-weight: 800; }
+.sir-truck-lasthit span { font-size: 0.9rem; }
+
+.sir-truck-lines { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.sir-truck-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  background: white;
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  transition: border-color 0.2s, background 0.2s;
+}
+.sir-truck-line.is-done { background: #f0fdf4; border-color: #86efac; }
+.sir-truck-line.is-over { background: #fffbeb; border-color: #f59e0b; }
+.sir-truck-line.is-hit { border-color: #1a472a; box-shadow: 0 0 0 3px rgba(26, 71, 42, 0.18); }
+.sir-truck-line-main { display: flex; flex-direction: column; min-width: 0; }
+.sir-truck-line-main strong { font-size: 1rem; font-weight: 800; color: #111; }
+.sir-truck-line-main span { font-size: 0.8rem; color: #6b7280; overflow-wrap: anywhere; }
+.sir-truck-line-count { display: flex; flex-direction: column; align-items: flex-end; flex-shrink: 0; }
+.sir-truck-line-count strong { font-size: 1.6rem; font-weight: 800; line-height: 1; }
+.sir-truck-line-count span { font-size: 0.78rem; color: #6b7280; }
+
+.sir-truck-difflist { margin: 0.4rem 0 0; padding-left: 1.1rem; font-size: 0.9rem; }
+.sir-truck-reasons { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
+.sir-truck-question { font-size: 1.05rem; color: #111; }
+
+.sir-truck-recount {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.75rem;
+  border: 2px solid #e5e7eb;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+.sir-truck-recount span { font-size: 0.85rem; color: #4b5563; }
+.sir-truck-recount-q { font-size: 0.95rem !important; color: #111 !important; }

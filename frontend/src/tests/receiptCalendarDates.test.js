@@ -52,9 +52,9 @@ describe('a calendar day survives the round trip', () => {
   // Fixing the mapper alone is not enough: a bare key put back through the
   // timezone-aware formatter shifts again, which is why the render sites moved
   // to formatDateKey too.
-  it('formatDate shifts a bare key as well; formatDateKey does not', () => {
+  it('neither formatter shifts a bare key (2026-10-01)', () => {
     setAppTimezone(WAREHOUSE_TZ);
-    expect(formatDate('2026-12-02')).toBe('12/1/2026');
+    expect(formatDate('2026-12-02')).toBe('12/2/2026');
     expect(formatDateKey('2026-12-02')).toBe('12/2/2026');
   });
 

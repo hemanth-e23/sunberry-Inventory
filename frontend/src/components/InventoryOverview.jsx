@@ -431,11 +431,32 @@ const InventoryOverview = () => {
             return currentTime > latestTime ? current : latest;
           }, null);
 
-        const locationsData = lastApproval
-          ? getReceiptLocations(lastApproval)
-          : lastSubmission
-            ? getReceiptLocations(lastSubmission)
-            : [];
+        // Where the product IS: the receipt carrying the live rack picture.
+        // For a lot received on two trucks that is one receipt of the pair,
+        // usually not the last one approved — which has no rows of its own
+        // and showed "—" here (2026-10-01).
+        const carriers = productReceipts.filter(
+          (r) => r.status === RECEIPT_STATUS.APPROVED
+            && Number(r.quantity) > 0
+            && (r.rawMaterialRowAllocations || []).some((a) => Number(a?.cases) > 0),
+        );
+        const carrierLocations = [];
+        const seenLabels = new Set();
+        for (const r of carriers) {
+          for (const loc of getReceiptLocations(r)) {
+            const key = `${loc.label}|${loc.detail || ''}`;
+            if (seenLabels.has(key)) continue;
+            seenLabels.add(key);
+            carrierLocations.push(loc);
+          }
+        }
+        const locationsData = carrierLocations.length
+          ? carrierLocations
+          : lastApproval
+            ? getReceiptLocations(lastApproval)
+            : lastSubmission
+              ? getReceiptLocations(lastSubmission)
+              : [];
 
         const holdCount = productReceipts.filter((receipt) => receipt.hold).length;
 

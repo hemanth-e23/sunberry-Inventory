@@ -29,6 +29,7 @@ from app.schemas import (
 from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus, ShipOutScanReason, ShipOutLifecycle
 from app.services import transfer_service
+from app.services import lot_placement_service as lps
 from app.constants import (
     ROLE_FORKLIFT, ROLE_WAREHOUSE, APPROVAL_ROLES,
     TRANSFER_TYPE_SHIPPED_OUT,
@@ -284,21 +285,41 @@ def create_transfer(
     pool = transfer_service.lot_scoped_availability(db, receipt)
     available = pool["available"]
     if transfer_data.quantity > available:
-        detail = "Requested quantity exceeds available (on-hold inventory excluded)"
+        q = lambda v: transfer_service.describe_qty(receipt, v)  # noqa: E731
+        detail = (
+            f"Requested {q(transfer_data.quantity)} but only "
+            f"{q(max(0.0, available))} of lot {pool['lot_label']} is available"
+        )
         causes = []
         if pool["reserved"] > 0:
-            causes.append(f"{pool['reserved']:g} is already on other pending transfers")
+            causes.append(f"{q(pool['reserved'])} is already on other pending transfers")
         if pool["held"] > 0:
-            causes.append(f"{pool['held']:g} is on hold")
-        if causes:
-            detail = (
-                f"Requested {transfer_data.quantity:g} but only "
-                f"{max(0.0, available):g} of lot {pool['lot_label']} is unreserved — "
-                + " and ".join(causes) + "."
-            )
+            causes.append(f"{q(pool['held'])} is on hold")
+        if pool.get("staged", 0) > 0:
+            causes.append(f"{q(pool['staged'])} is out in staging")
+        detail += (" — " + " and ".join(causes) + ".") if causes else "."
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=detail,
+        )
+
+    # Same gate approval applies (transfer_service._apply_raw_material_internal_
+    # transfer): a rack-to-rack move of RM/packaging needs the lot counted onto
+    # racks. Without it here, legacy receipts (8CPB350398, ITCAMP/210625's
+    # old share) submitted fine and sat in the queue until a supervisor hit
+    # an approval that can never succeed (2026-10-01).
+    if (
+        transfer_data.transfer_type != "shipped-out"
+        and not transfer_service._is_finished_goods(db, receipt)
+        and not lps.is_counted_lot(db, receipt.material_lot_id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Lot {receipt.lot_number or receipt.id} is not counted on any "
+                "rack, so a transfer cannot move it. Count it onto its rack "
+                "(Inventory → Counts) first."
+            ),
         )
 
     # Validate order number for shipped-out transfers

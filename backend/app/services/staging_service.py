@@ -11,6 +11,7 @@ from app.enums import ReceiptStatus, AdjustmentStatus
 from app.exceptions import ValidationError, NotFoundError
 from app.services import lot_placement_service as lps
 from app.services.row_allocation import deduct_rm_total, deduct_rm_rows, add_rm_rows
+from app.utils.calendar_dates import calendar_day
 
 
 def _lot_row_footprint(receipt: Receipt) -> dict:
@@ -302,6 +303,12 @@ def suggest_lots_for_staging(
                 sub = db.query(SubLocation).filter(SubLocation.id == row.sub_location_id).first()
                 sub_location_name = sub.name if sub else None
 
+        # A lot-tracked lot is WHERE ITS RACKS SAY, not where the receipt was
+        # first put away: the suggestion read "ROW 3" after ROW 3 was emptied
+        # (2026-10-01). Fullest rack first, the order a picker walks them.
+        if detail.get("is_counted") and detail.get("racks"):
+            storage_row_name = ", ".join(r["storage_row_name"] for r in detail["racks"])
+
         unit = receipt.unit or "cases"
         if not unit or unit == "cases":
             product = db.query(Product).filter(Product.id == receipt.product_id).first()
@@ -316,7 +323,7 @@ def suggest_lots_for_staging(
             "sub_location_id": receipt.sub_location_id,
             "sub_location_name": sub_location_name,
             "storage_row_name": storage_row_name,
-            "expiration_date": receipt.expiration_date,
+            "expiration_date": calendar_day(receipt.expiration_date),
             "available_quantity": available_quantity,
             "unit": unit,
             "container_count": receipt.container_count,

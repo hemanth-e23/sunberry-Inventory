@@ -51,6 +51,7 @@ const ScannerShipOutFlowV2 = lazy(() => import('./components/scanner/ScannerShip
 // their own base path off the URL so links stay inside the caller's prefix.
 const ScannerIngredientReceiveFlow = lazy(() => import('./components/scanner/ScannerIngredientReceiveFlow'));
 const ScannerLotReceiveFlow = lazy(() => import('./components/scanner/ScannerLotReceiveFlow'));
+const ScannerTruckReceiveFlow = lazy(() => import('./components/scanner/ScannerTruckReceiveFlow'));
 const IngredientIntakesPage = lazy(() => import('./components/ingredient/IngredientIntakesPage'));
 const ContainersPage = lazy(() => import('./components/ingredient/ContainersPage'));
 const CutoverSweepPage = lazy(() => import('./components/ingredient/CutoverSweepPage'));
@@ -283,7 +284,14 @@ function AppRoutes() {
             which raised it. */}
         <Route path="/forklift/lot-receiving" element={
           <ProtectedRoute requiredRole="forklift">
-            <ScannerLotReceiveFlow />
+            <ScannerTruckReceiveFlow />
+          </ProtectedRoute>
+        } />
+        {/* One gun session per TRUCK (incoming order): scan a rack, then any
+            drum on the trailer; the server routes it to its own lot line. */}
+        <Route path="/forklift/lot-receiving/truck/:orderId" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerTruckReceiveFlow />
           </ProtectedRoute>
         } />
         <Route path="/forklift/lot-receiving/:receiptId" element={

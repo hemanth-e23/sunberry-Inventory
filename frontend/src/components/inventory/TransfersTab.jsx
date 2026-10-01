@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useRef } from 'react';
+import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { useAppData } from '../../context/AppDataContext';
 import { useAuth } from '../../context/AuthContext';
 import { useConfirm } from '../../context/ConfirmContext';
@@ -6,7 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct, rowCapacityInfo } from '../../utils/rowSources';
+import { buildEntriesForProduct, rowCapacityInfo, containersFreed, describeContainers } from '../../utils/rowSources';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
@@ -23,6 +23,8 @@ const TransfersTab = () => {
     storageAreas,
     inventoryTransfers,
     submitTransfer,
+    refreshReceipts,
+    refreshTransfers,
     fetchPalletLicences,
   } = useAppData();
 
@@ -146,6 +148,8 @@ const TransfersTab = () => {
   };
   // Effective pallets-out for a source entry: explicit override wins, else suggestion.
   const resolvePalletsOut = (entry, displayQty) => {
+    // Drum room holding drums: the footprint is the drum count, not a question.
+    if (entry.footprintIsContent) return containersFreed(entry, displayQty);
     const v = rmPalletSelections[entry.key];
     if (v !== undefined) return Math.max(0, Number(v) || 0);
     return suggestedPalletsOut(entry, displayQty);
@@ -257,6 +261,15 @@ const TransfersTab = () => {
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [approvedReceipts, categoryLookup, products]);
 
+  // Fresh numbers the moment a product is picked: receipts approved and
+  // transfers submitted elsewhere since this page loaded were invisible until
+  // a reload, so the form offered drums that were gone or promised (2026-10-01).
+  useEffect(() => {
+    if (!rmForm.productId) return;
+    refreshReceipts?.();
+    refreshTransfers?.();
+  }, [rmForm.productId, refreshReceipts, refreshTransfers]);
+
   // Product-wide breakdown: every place this product physically sits
   const rmEntries = useMemo(() => {
     if (!rmForm.productId) return [];
@@ -266,8 +279,10 @@ const TransfersTab = () => {
       storageAreas,
       locations,
       subLocationMap,
+      pendingTransfers: inventoryTransfers,
+      allReceipts: receipts,
     });
-  }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap]);
+  }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap, inventoryTransfers, receipts]);
 
   const rmEntriesAvailStorage = rmEntries.reduce((s, e) => s + e.available, 0);
 
@@ -293,7 +308,8 @@ const TransfersTab = () => {
     // was unsubmittable for the lot the worker actually picked (2026-09-29).
     const picks = rmEntries
       .map(entry => {
-        const displayQty = Number(rmEntrySelections[entry.key] || 0);
+        const blocked = rmForm.transferType !== 'shipped-out' && !entry.isCounted;
+        const displayQty = blocked ? 0 : Number(rmEntrySelections[entry.key] || 0);
         return { entry, displayQty, storageQty: displayQty * entry.displayFactor };
       })
       .filter(p => p.storageQty > 0);
@@ -620,16 +636,31 @@ const TransfersTab = () => {
                       const dispQty = rmEntrySelections[entry.key] ?? '';
                       const palletDisplay = rmPalletSelections[entry.key]
                         ?? (Number(dispQty || 0) > 0 ? String(suggestedPalletsOut(entry, dispQty)) : '');
+                      // Approval can only move a lot counted onto racks; an old
+                      // receipt nobody counted is refused there (and now at
+                      // submit). Say so here instead of letting it be typed.
+                      const notOnRackCount = rmForm.transferType !== 'shipped-out' && !entry.isCounted;
                       return (
                         <React.Fragment key={entry.key}>
                           <label>
                             <span>
                               Lot {entry.lotNumber} · {entry.locationLabel}
-                              {' — '}{availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} avail
+                              {' — '}{describeContainers(entry)
+                                ?? `${availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${entry.displayUnit}`} avail
                               {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
                               {Number(entry.heldUnits) > 0 && (
                                 <span style={{ color: 'var(--color-danger, #b91c1c)', fontWeight: 600 }}>
                                   {' '}· {entry.heldUnits} on hold
+                                </span>
+                              )}
+                              {Number(entry.reservedWeight) > 0 && (
+                                <span style={{ color: 'var(--color-text-muted, #6b7280)', fontWeight: 600 }}>
+                                  {' '}· {(entry.reservedWeight / (entry.displayFactor || 1)).toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} on pending transfers
+                                </span>
+                              )}
+                              {notOnRackCount && (
+                                <span style={{ color: 'var(--color-danger, #b91c1c)', fontWeight: 600 }}>
+                                  {' '}· not counted on a rack — count it in Counts before moving
                                 </span>
                               )}
                             </span>
@@ -638,7 +669,8 @@ const TransfersTab = () => {
                               min="0"
                               max={availDisp}
                               step="any"
-                              value={dispQty}
+                              disabled={notOnRackCount || availDisp <= 0}
+                              value={notOnRackCount || availDisp <= 0 ? '' : dispQty}
                               onChange={(e) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
                               placeholder="0"
                             />
@@ -652,7 +684,7 @@ const TransfersTab = () => {
                               boxes per rack were also what made this grid wrap
                               mid-pair so you could not tell which pallet box
                               belonged to which rack. */}
-                          {entry.rowId && !entry.isCounted && (
+                          {entry.rowId && !entry.isCounted && !entry.footprintIsContent && !notOnRackCount && (
                             <label>
                               <span>
                                 ↳ {entry.footprintUnit === 'pallets' ? 'Pallets' : entry.footprintUnit.replace(/^./, c => c.toUpperCase())} emptied from this row

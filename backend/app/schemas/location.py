@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, List
 from datetime import datetime
-from app.schemas.base import BaseSchema
+from app.schemas.base import BaseSchema, CalendarDate
 
 
 class LocationBase(BaseSchema):
@@ -45,7 +45,7 @@ class LiveRowLot(BaseSchema):
     open_units: int = 0
     weight: float = 0
     weight_unit: Optional[str] = None
-    bbd: Optional[datetime] = None
+    bbd: CalendarDate = None
     is_held: bool = False
 
 

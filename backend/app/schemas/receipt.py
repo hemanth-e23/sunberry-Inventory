@@ -1,7 +1,7 @@
 from typing import Optional, List
 from datetime import datetime
 from pydantic import Field
-from app.schemas.base import BaseSchema
+from app.schemas.base import BaseSchema, CalendarDate
 
 
 class ReceiptAllocationBase(BaseSchema):
@@ -38,7 +38,7 @@ class ReceiptBase(BaseSchema):
     units_per_pallet: Optional[int] = None
     receipt_date: Optional[datetime] = None
     production_date: Optional[datetime] = None
-    expiration_date: Optional[datetime] = None
+    expiration_date: CalendarDate = None
     cases_per_pallet: Optional[int] = None
     full_pallets: Optional[int] = None
     partial_cases: int = 0
@@ -144,3 +144,8 @@ class Receipt(ReceiptBase):
     generated_licence_first: Optional[str] = None
     generated_licence_last: Optional[str] = None
     generated_licence_count: Optional[int] = None
+    # The incoming order (truck) this receipt is a line of, when it is one.
+    # The approvals page groups a truck's receipts into one card by this.
+    # Filled by the list endpoint; None for walk-ins and finished goods.
+    incoming_order_id: Optional[str] = None
+    incoming_order_number: Optional[str] = None

@@ -65,6 +65,7 @@ from app.models import (
 )
 from app.services import lot_placement_service as lps
 from app.services.ingredient_row_service import resolve_row
+from app.utils.calendar_dates import calendar_day
 
 # Scans that belong to a receiving session, so undo and the per-session counters
 # can find them without walking the whole ledger.
@@ -922,7 +923,7 @@ def label_sheet_for_lot(
         "lot_unknown": bool(lot.lot_unknown),
         # bbd_CURRENT: an approved extension is the one case where stickers are
         # reprinted and reapplied, and the new date is the whole reason.
-        "bbd": lot.bbd_current,
+        "bbd": calendar_day(lot.bbd_current),
         "net_weight": lot.weight_per_unit,
         "weight_unit": lot.weight_unit,
         "unit_label": lot.unit_label,
@@ -966,6 +967,50 @@ def _next_order_number(db: Session) -> str:
     return f"IN-{int(seq):06d}"
 
 
+def line_lot_key(product_id, vendor_id, vendor_lot, bbd) -> Optional[tuple]:
+    """What makes two order lines the SAME lot, or None when it cannot be told.
+
+    The same four parts as `lps.build_lot_key`, with the same normalisation, so
+    "two lines are one lot here" agrees exactly with "two receipts mint one lot"
+    later. A line with no vendor lot number is never anybody's duplicate — an
+    unknown lot never merges with another unknown lot.
+    """
+    lot = lps.normalize_lot_number(vendor_lot)
+    if not lot:
+        return None
+    return (product_id, vendor_id or "", lot, calendar_day(bbd) or "")
+
+
+def merge_duplicate_lines(lines: list, *, default_vendor_id=None) -> list:
+    """Fold order lines describing the same lot into one, adding their counts.
+
+    A truck has ONE line per lot. Two lines for the same lot cannot be told
+    apart at the gun — every drum wears the same sticker — so a scan would have
+    no way to know which line it belongs to. Typing it twice is a data-entry
+    slip, and the honest correction is one line carrying the sum.
+    """
+    merged: list = []
+    by_key: dict = {}
+    for line in lines:
+        key = line_lot_key(
+            line.get("product_id"),
+            line.get("vendor_id") or default_vendor_id,
+            line.get("vendor_lot"),
+            line.get("bbd"),
+        )
+        if key is not None and key in by_key:
+            keeper = by_key[key]
+            keeper["expected_count"] = (
+                int(keeper.get("expected_count") or 0) + int(line.get("expected_count") or 0)
+            )
+            continue
+        copy = dict(line)
+        merged.append(copy)
+        if key is not None:
+            by_key[key] = copy
+    return merged
+
+
 def create_incoming_order(db: Session, payload: dict, *, user_id: str, warehouse_id: str):
     """Corporate plans a delivery into one destination site.
 
@@ -1001,7 +1046,7 @@ def create_incoming_order(db: Session, payload: dict, *, user_id: str, warehouse
     db.flush()
 
     total = 0
-    for line in lines:
+    for line in merge_duplicate_lines(lines, default_vendor_id=payload.get("vendor_id")):
         count = int(line.get("expected_count") or 0)
         total += count
         # Fall back to the product's own category. Without it every receipt
@@ -1140,8 +1185,14 @@ def start_receiving(
     *,
     user_id: str,
     overrides: dict = None,
+    lot: Optional[MaterialLot] = None,
 ) -> Receipt:
     """The plant opens a line and begins. Creates the receipt and the lot.
+
+    `lot` is passed only for a line the truck flow adds on the fly, for a drum
+    whose lot was not on the paperwork. That lot already exists — the sticker
+    was read off it — so its identity is reused as-is rather than re-derived
+    from the line, and the vendor gate below has nothing left to protect.
 
     The lot is resolved HERE, not when corporate wrote the order: corporate types
     a vendor lot off paperwork, and paperwork for a truck that never arrives
@@ -1181,7 +1232,7 @@ def start_receiving(
     # vendor announces nothing — `build_lot_key` just writes an empty segment,
     # and two suppliers' "LOT001" of the same product with the same best-by
     # quietly become one lot wearing one sticker.
-    if not vendor_id:
+    if not vendor_id and lot is None:
         raise ValidationError(
             "This delivery has no vendor. It is part of what tells this lot "
             "apart from another supplier's lot with the same number, so it has "
@@ -1219,6 +1270,9 @@ def start_receiving(
         receipt_date=datetime.now(timezone.utc),
         note=f"Received against incoming order {order.intake_number}",
     )
+    if lot is not None:
+        # ensure_lot_for_receipt returns an already-linked lot untouched.
+        receipt.material_lot_id = lot.id
     db.add(receipt)
     db.flush()
 
@@ -1248,7 +1302,13 @@ def start_receiving(
 
 # ─── the approval view ────────────────────────────────────────────────────────
 
-def open_sessions(db: Session, *, warehouse_id: Optional[str] = None, limit: int = 50) -> list:
+def open_sessions(
+    db: Session,
+    *,
+    warehouse_id: Optional[str] = None,
+    limit: int = 50,
+    walk_in_only: bool = False,
+) -> list:
     """Receiving sessions the gun can pick up — from BOTH paths, in one list.
 
     A worker at the gun does not care whether corporate raised an order or
@@ -1299,6 +1359,14 @@ def open_sessions(db: Session, *, warehouse_id: Optional[str] = None, limit: int
     )
     if warehouse_id:
         query = query.filter(Receipt.warehouse_id == warehouse_id)
+    if walk_in_only:
+        # Receipts that belong to an incoming order are received a TRUCK at a
+        # time (see the truck section below); only the order-less ones are
+        # still per-receipt sessions.
+        on_order = (
+            db.query(IntakeLot.id).filter(IntakeLot.receipt_id == Receipt.id).exists()
+        )
+        query = query.filter(~on_order)
 
     receipts = query.order_by(Receipt.receipt_date.desc()).limit(limit).all()
     return [receiving_summary(db, r) for r in receipts]
@@ -1347,7 +1415,7 @@ def receiving_summary(db: Session, receipt: Receipt) -> dict:
         "product_name": product.name if product else "",
         "lot_code": lot.lot_code if lot else None,
         "vendor_lot": lot.vendor_lot_number if lot else receipt.lot_number,
-        "bbd": (lot.bbd_current if lot else receipt.expiration_date),
+        "bbd": calendar_day(lot.bbd_current if lot else receipt.expiration_date),
         "unit_label": lot.unit_label if lot else None,
         "count_unit": unit_word(lot, 2),
         "expected_count": expected,
@@ -1381,3 +1449,995 @@ def resolve_scanned_row(db: Session, current_user, code: str) -> dict:
     which. The resolver refuses an ambiguous name instead of picking one.
     """
     return resolve_row(db, current_user, code)
+
+
+# ─── truck receiving (2026-10) ────────────────────────────────────────────────
+#
+# One gun session per incoming order — per TRUCK — instead of one per lot line.
+#
+# A trailer carries several lots mixed together. Receiving it a line at a time
+# made the worker pick a lot and then walk round the trailer hunting for that
+# lot's drums; a drum from any other lot was booked against the wrong receipt.
+#
+# Here the worker scans a rack, then ANY drum on the trailer, and the server
+# routes it to its own line by the lot on the sticker. Every line still keeps
+# its own receipt and lot underneath, so stock, holds, tracing and the approval
+# gate are untouched — only the entry point changes.
+#
+# Stickers are identical per lot, so two drums of one lot cannot be told apart
+# and a double scan is invisible at the moment it happens. The checks that
+# compensate, because the person on the gun will make every mistake there is:
+#   * more than the paperwork          -> stop and ask, then flag
+#   * a lot not on this truck          -> ask, accept, flag (on another truck too)
+#   * a held lot                       -> accept (it stays held), flag
+#   * a full rack                      -> ask, accept, flag
+#   * every rack touched is RECOUNTED  -> by eye, at the rack, before finishing;
+#                                         a disagreement corrects the count and
+#                                         is flagged
+#   * finishing short                  -> needs a reason from a fixed list
+# Nothing is refused at the dock: refusing strands a driver holding a drum the
+# system will not take. Everything lands on the approval card instead.
+
+from app.constants import (  # noqa: E402
+    RECEIVING_FLAG_LOT_HELD,
+    RECEIVING_FLAG_NOT_ON_TRUCK,
+    RECEIVING_FLAG_OTHER_TRUCK,
+    RECEIVING_FLAG_OVER_PAPERWORK,
+    RECEIVING_FLAG_RACK_FULL,
+    RECEIVING_FLAG_RECOUNT_CORRECTED,
+    RECEIVING_FLAG_RECOUNT_OK,
+    RECEIVING_FLAG_SHORT,
+    TRUCK_SHORT_REASONS,
+)
+from app.models import ReceivingFlag, User  # noqa: E402
+
+SHORT_REASON_LABELS = {
+    "truck_short": "Truck arrived short",
+    "damaged": "Damaged on arrival",
+    "refused": "Refused at the dock",
+    "other": "Other",
+}
+
+
+def _truck_open(order: IngredientIntake) -> bool:
+    return (
+        order.status in INCOMING_RECEIVABLE_STATUSES
+        and order.forklift_submitted_at is None
+        and not order.is_deleted
+    )
+
+
+def _lot_words(db: Session, lot: MaterialLot) -> str:
+    """'Banana Puree lot E2E-B1' — what is printed big on the drum, which is
+    what the worker reads. Our sticker code is a long machine string."""
+    product = db.query(Product).filter(Product.id == lot.product_id).first()
+    name = (product.name.title() if product and product.name else "").strip()
+    number = lot.vendor_lot_number or lot.lot_code
+    return f"{name} lot {number}".strip()
+
+
+def _per_scan_units(lot: MaterialLot, single: bool = False) -> int:
+    """What one sticker scan books. The SYSTEM decides, never the worker.
+
+    A palletised lot is stickered per pallet at check-in, so a scan is a whole
+    pallet; `single` is the one explicit escape for a loose bag that was given
+    its own sticker.
+    """
+    if single:
+        return 1
+    return max(1, int(lot.units_per_pallet or 1))
+
+
+def _line_receipt(db: Session, line: IntakeLot) -> Optional[Receipt]:
+    if not line.receipt_id:
+        return None
+    return db.query(Receipt).filter(Receipt.id == line.receipt_id).first()
+
+
+def _line_for_lot(order: IngredientIntake, lot: MaterialLot) -> Optional[IntakeLot]:
+    for line in order.lots or []:
+        if line.material_lot_id == lot.id and line.receipt_id:
+            return line
+    return None
+
+
+def _max_seq(db: Session, receipt_id: str, row_id: Optional[str] = None) -> int:
+    query = db.query(func.max(LotPlacementEvent.seq)).filter(
+        LotPlacementEvent.ref_type == REF_TYPE_RECEIVING,
+        LotPlacementEvent.ref_id == receipt_id,
+    )
+    if row_id:
+        query = query.filter(LotPlacementEvent.storage_row_id == row_id)
+    return int(query.scalar() or 0)
+
+
+def _add_flag(
+    db: Session,
+    order: IngredientIntake,
+    kind: str,
+    *,
+    line: Optional[IntakeLot] = None,
+    row_id: Optional[str] = None,
+    expected: Optional[int] = None,
+    actual: Optional[int] = None,
+    detail: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    event_seq: Optional[int] = None,
+) -> ReceivingFlag:
+    flag = ReceivingFlag(
+        id=_mint_id("rflag"),
+        order_id=order.id,
+        line_id=line.id if line else None,
+        receipt_id=line.receipt_id if line else None,
+        material_lot_id=line.material_lot_id if line else None,
+        storage_row_id=row_id,
+        kind=kind,
+        expected=expected,
+        actual=actual,
+        detail=detail,
+        actor_id=actor_id,
+        event_seq=event_seq,
+    )
+    db.add(flag)
+    db.flush()
+    return flag
+
+
+def _has_flag(db: Session, order_id: str, kind: str, line_id=None, row_id=None) -> bool:
+    query = db.query(ReceivingFlag.id).filter(
+        ReceivingFlag.order_id == order_id, ReceivingFlag.kind == kind
+    )
+    if line_id is not None:
+        query = query.filter(ReceivingFlag.line_id == line_id)
+    if row_id is not None:
+        query = query.filter(ReceivingFlag.storage_row_id == row_id)
+    return db.query(query.exists()).scalar()
+
+
+def _pending_recounts(db: Session, order: IngredientIntake, line_counts: dict) -> list:
+    """(rack, line) pairs holding scans nobody has counted by eye yet.
+
+    A recount flag records the ledger `seq` it covered. Any receiving event on
+    that line's receipt and rack with a higher seq — another drum, a removal —
+    re-opens the rack. A rack whose net count for the line is 0 has nothing to
+    count and is skipped.
+    """
+    receipt_ids = [l.receipt_id for l in order.lots or [] if l.receipt_id]
+    if not receipt_ids:
+        return []
+
+    latest = {
+        (r[0], r[1]): int(r[2] or 0)
+        for r in (
+            db.query(
+                LotPlacementEvent.ref_id,
+                LotPlacementEvent.storage_row_id,
+                func.max(LotPlacementEvent.seq),
+            )
+            .filter(
+                LotPlacementEvent.ref_type == REF_TYPE_RECEIVING,
+                LotPlacementEvent.ref_id.in_(receipt_ids),
+            )
+            .group_by(LotPlacementEvent.ref_id, LotPlacementEvent.storage_row_id)
+            .all()
+        )
+    }
+    counted = {
+        (r[0], r[1]): int(r[2] or 0)
+        for r in (
+            db.query(
+                ReceivingFlag.receipt_id,
+                ReceivingFlag.storage_row_id,
+                func.max(ReceivingFlag.event_seq),
+            )
+            .filter(
+                ReceivingFlag.order_id == order.id,
+                ReceivingFlag.kind.in_((RECEIVING_FLAG_RECOUNT_OK, RECEIVING_FLAG_RECOUNT_CORRECTED)),
+            )
+            .group_by(ReceivingFlag.receipt_id, ReceivingFlag.storage_row_id)
+            .all()
+        )
+    }
+
+    pending = []
+    for line in order.lots or []:
+        if not line.receipt_id:
+            continue
+        for row_id, count in (line_counts.get(line.id) or {}).items():
+            if count <= 0:
+                continue
+            if latest.get((line.receipt_id, row_id), 0) > counted.get((line.receipt_id, row_id), 0):
+                pending.append({"line_id": line.id, "storage_row_id": row_id, "scanned": count})
+    return pending
+
+
+def truck_summary(db: Session, order: IngredientIntake) -> dict:
+    """Everything the gun and the approval card show for one truck."""
+    vendor = (
+        db.query(Vendor).filter(Vendor.id == order.vendor_id).first()
+        if order.vendor_id else None
+    )
+
+    lines = []
+    line_counts: dict = {}
+    row_ids: set = set()
+    totals: dict = {}
+    for line in order.lots or []:
+        product = db.query(Product).filter(Product.id == line.product_id).first()
+        lot = (
+            db.query(MaterialLot).filter(MaterialLot.id == line.material_lot_id).first()
+            if line.material_lot_id else None
+        )
+        receipt = _line_receipt(db, line)
+        counts = session_counts(db, receipt) if receipt else {"by_row": {}, "total": 0}
+        by_row = {k: v for k, v in counts["by_row"].items() if v}
+        line_counts[line.id] = by_row
+        row_ids.update(by_row.keys())
+
+        expected = int(line.expected_count or 0)
+        scanned = int(counts["total"] or 0)
+        unit = (lot.unit_label if lot else None) or line.container_type or "unit"
+        bucket = totals.setdefault(unit, {"unit": unit, "expected": 0, "scanned": 0})
+        bucket["expected"] += expected
+        bucket["scanned"] += scanned
+
+        lines.append({
+            "line_id": line.id,
+            "receipt_id": line.receipt_id,
+            "receipt_status": receipt.status if receipt else None,
+            "product_id": line.product_id,
+            "product_name": product.name if product else "",
+            "material_lot_id": line.material_lot_id,
+            "lot_code": lot.lot_code if lot else None,
+            "vendor_lot": line.vendor_lot,
+            "bbd": calendar_day(line.bbd),
+            "unit_label": unit,
+            "count_unit": pluralize_unit(unit),
+            "units_per_pallet": lot.units_per_pallet if lot else line.units_per_pallet,
+            "expected_count": expected,
+            "scanned_count": scanned,
+            "difference": scanned - expected,
+            "is_held": bool(lot.is_held) if lot else False,
+            "rows": [{"storage_row_id": rid, "count": n} for rid, n in by_row.items()],
+        })
+
+    pending = _pending_recounts(db, order, line_counts)
+
+    flags = (
+        db.query(ReceivingFlag)
+        .filter(ReceivingFlag.order_id == order.id)
+        .order_by(ReceivingFlag.created_at)
+        .all()
+    )
+    row_ids.update(f.storage_row_id for f in flags if f.storage_row_id)
+    row_ids.update(p["storage_row_id"] for p in pending)
+    row_names = {
+        r.id: r.name
+        for r in (
+            db.query(StorageRow).filter(StorageRow.id.in_(row_ids)).all() if row_ids else []
+        )
+    }
+    by_line = {l["line_id"]: l for l in lines}
+    for line in lines:
+        for r in line["rows"]:
+            r["storage_row_name"] = row_names.get(r["storage_row_id"], r["storage_row_id"])
+    for p in pending:
+        line = by_line.get(p["line_id"]) or {}
+        p["storage_row_name"] = row_names.get(p["storage_row_id"], p["storage_row_id"])
+        p["product_name"] = line.get("product_name")
+        p["lot_code"] = line.get("lot_code")
+        p["vendor_lot"] = line.get("vendor_lot")
+        p["count_unit"] = line.get("count_unit")
+
+    receipt_ids = [l.receipt_id for l in order.lots or [] if l.receipt_id]
+    scanner_ids = (
+        [
+            r[0] for r in db.query(LotPlacementEvent.actor_id)
+            .filter(
+                LotPlacementEvent.ref_type == REF_TYPE_RECEIVING,
+                LotPlacementEvent.ref_id.in_(receipt_ids),
+                LotPlacementEvent.actor_id.isnot(None),
+            )
+            .distinct()
+            .all()
+        ]
+        if receipt_ids else []
+    )
+    actor_ids = set(scanner_ids) | {f.actor_id for f in flags if f.actor_id}
+    if order.forklift_submitted_by:
+        actor_ids.add(order.forklift_submitted_by)
+    names = {
+        u.id: (u.name or u.username)
+        for u in (db.query(User).filter(User.id.in_(actor_ids)).all() if actor_ids else [])
+    }
+
+    return {
+        "order_id": order.id,
+        "order_number": order.intake_number,
+        "status": order.status,
+        "vendor_id": order.vendor_id,
+        "vendor_name": vendor.name if vendor else None,
+        "origin_name": order.origin_name,
+        "bol": order.bol,
+        "purchase_order": order.purchase_order,
+        "expected_date": order.expected_date,
+        "warehouse_id": order.warehouse_id,
+        "checked_in": bool(order.lots) and all(l.receipt_id for l in order.lots),
+        "forklift_submitted_at": order.forklift_submitted_at,
+        "forklift_submitted_by_name": names.get(order.forklift_submitted_by),
+        "short_reason": order.short_reason,
+        "scanned_by": sorted({names.get(a, a) for a in scanner_ids}),
+        "lines": lines,
+        "totals": list(totals.values()),
+        "pending_recounts": pending,
+        "flags": [
+            {
+                "id": f.id,
+                "kind": f.kind,
+                "line_id": f.line_id,
+                "lot_code": (by_line.get(f.line_id) or {}).get("lot_code"),
+                "vendor_lot": (by_line.get(f.line_id) or {}).get("vendor_lot"),
+                "product_name": (by_line.get(f.line_id) or {}).get("product_name"),
+                "storage_row_id": f.storage_row_id,
+                "storage_row_name": row_names.get(f.storage_row_id),
+                "expected": f.expected,
+                "actual": f.actual,
+                "detail": f.detail,
+                "actor_name": names.get(f.actor_id),
+                "created_at": f.created_at,
+            }
+            for f in flags
+        ],
+    }
+
+
+def _truck_payload(
+    db: Session,
+    order: IngredientIntake,
+    *,
+    status: str,
+    message: str,
+    line: Optional[IntakeLot] = None,
+    lot: Optional[MaterialLot] = None,
+    row: Optional[StorageRow] = None,
+    units: int = 0,
+    warning: Optional[str] = None,
+    warning_detail: Optional[str] = None,
+    flag: Optional[str] = None,
+    scan_id: Optional[str] = None,
+) -> dict:
+    """The one shape every truck scan / remove answer uses. Always the whole
+    truck too, so the gun never has to stitch counts together itself."""
+    summary = truck_summary(db, order)
+    line_out = next(
+        (l for l in summary["lines"] if line is not None and l["line_id"] == line.id), None
+    )
+    row_count = 0
+    if line_out and row is not None:
+        row_count = next(
+            (r["count"] for r in line_out["rows"] if r["storage_row_id"] == row.id), 0
+        )
+    return {
+        "status": status,
+        "message": message,
+        "order_id": order.id,
+        "line_id": line.id if line else None,
+        "lot_code": lot.lot_code if lot else None,
+        "product_name": line_out["product_name"] if line_out else None,
+        "row_id": row.id if row else None,
+        "row_name": row.name if row else None,
+        "units": int(units or 0),
+        "line_scanned_count": line_out["scanned_count"] if line_out else 0,
+        "line_expected_count": line_out["expected_count"] if line_out else 0,
+        "row_line_count": row_count,
+        "count_unit": line_out["count_unit"] if line_out else unit_word(lot, 2),
+        "warning": warning,
+        "warning_detail": warning_detail,
+        "flag": flag,
+        "scan_id": scan_id,
+        "truck": summary,
+    }
+
+
+def _other_open_order_for_lot(db: Session, order: IngredientIntake, lot: MaterialLot):
+    return (
+        db.query(IngredientIntake)
+        .join(IntakeLot, IntakeLot.intake_id == IngredientIntake.id)
+        .filter(
+            IntakeLot.material_lot_id == lot.id,
+            IngredientIntake.id != order.id,
+            IngredientIntake.is_incoming_order == True,  # noqa: E712
+            IngredientIntake.is_deleted == False,  # noqa: E712
+            IngredientIntake.status.in_(INCOMING_RECEIVABLE_STATUSES),
+        )
+        .first()
+    )
+
+
+def _add_extra_line(db: Session, order: IngredientIntake, lot: MaterialLot, *, user_id: str):
+    """A drum whose lot is not on this truck's paperwork. Accepted — the drum is
+    physically here and has to go somewhere — as a new line with nothing
+    expected, so its count is visibly all-extra on the approval card."""
+    line = IntakeLot(
+        id=_mint_id("inline"),
+        intake=order,
+        product_id=lot.product_id,
+        category_id=_category_for_product(db, lot.product_id),
+        container_type=((lot.unit_label or "drum")[:10]),
+        vendor_id=lot.vendor_id,
+        vendor_lot=lot.vendor_lot_number,
+        lot_unknown=bool(lot.lot_unknown),
+        bbd=lot.bbd_original,
+        expected_count=0,
+        brix=lot.brix,
+        net_weight_per_container=lot.weight_per_unit,
+        weight_unit=lot.weight_unit,
+        units_per_pallet=lot.units_per_pallet,
+    )
+    db.add(line)
+    db.flush()
+    start_receiving(db, order, line, user_id=user_id, lot=lot)
+    return line
+
+
+def truck_scan(
+    db: Session,
+    *,
+    order: IngredientIntake,
+    lot_code: str,
+    storage_row_id: str,
+    user_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+    allow_overfill: bool = False,
+    confirm_over: bool = False,
+    single: bool = False,
+) -> dict:
+    """One sticker scan into one rack, on whichever line of the truck it is.
+
+    ALWAYS returns 200 — see the module docstring. Idempotent replay FIRST.
+    """
+    if idempotency_key:
+        prior = (
+            db.query(LotPlacementEvent)
+            .filter(LotPlacementEvent.idempotency_key == idempotency_key)
+            .first()
+        )
+        if prior:
+            line = db.query(IntakeLot).filter(IntakeLot.receipt_id == prior.ref_id).first()
+            lot = db.query(MaterialLot).filter(MaterialLot.id == prior.material_lot_id).first()
+            row = db.query(StorageRow).filter(StorageRow.id == prior.storage_row_id).first()
+            return _truck_payload(
+                db, order, status="ok", message="Already recorded.",
+                line=line, lot=lot, row=row, units=int(prior.full_units_delta or 0),
+                scan_id=prior.id,
+            )
+
+    if not _truck_open(order):
+        return _truck_payload(
+            db, order, status="truck_closed",
+            message=(
+                f"{order.intake_number} is finished and takes no more scans. "
+                "See the office before putting these away."
+            ),
+        )
+
+    lot = resolve_lot_code(db, lot_code)
+    if lot is None:
+        return _truck_payload(
+            db, order, status="unknown_lot",
+            message="That sticker is not one of ours. Check it and scan again.",
+        )
+
+    row = db.query(StorageRow).filter(StorageRow.id == storage_row_id).first()
+    if not row or row.is_active is False:
+        return _truck_payload(
+            db, order, status="unknown_row", lot=lot,
+            message=(
+                f"{row.name} is deactivated — pick an active rack." if row
+                else "That rack is not one we know. Scan the rack label again."
+            ),
+        )
+
+    units = _per_scan_units(lot, single)
+    word = unit_word(lot, units)
+    what = _lot_words(db, lot)
+    line = _line_for_lot(order, lot)
+
+    # Every prompt is asked BEFORE anything is written, so a "No" leaves the
+    # truck exactly as it was — including not adding an extra line for a lot
+    # the worker then decides is not theirs to put away.
+    other_order = None
+    if line is None:
+        other_order = _other_open_order_for_lot(db, order, lot)
+        if not confirm_over:
+            where = (
+                f"It is on {other_order.intake_number}, not this truck."
+                if other_order else "It is not on any truck we are expecting."
+            )
+            return _truck_payload(
+                db, order, status="needs_confirm_over", lot=lot, row=row, units=units,
+                message=f"{what} is not on {order.intake_number}'s paperwork. {where} Put it away anyway?",
+            )
+    else:
+        receipt = _line_receipt(db, line)
+        scanned = int(session_counts(db, receipt)["total"] or 0)
+        expected = int(line.expected_count or 0)
+        if scanned + units > expected and not confirm_over:
+            return _truck_payload(
+                db, order, status="needs_confirm_over", line=line, lot=lot, row=row, units=units,
+                message=(
+                    f"Paperwork says {expected} {unit_word(lot, expected)} of {what}; "
+                    f"this would make {scanned + units}. Is there really another {unit_word(lot, 1)}?"
+                ),
+            )
+
+    warning, warning_detail = _row_capacity_warning(db, row, incoming=units)
+    if warning and not allow_overfill:
+        return _truck_payload(
+            db, order, status="needs_confirm", line=line, lot=lot, row=row, units=units,
+            message=f"{row.name} is full by the system. Load into it anyway?",
+            warning=warning, warning_detail=warning_detail,
+        )
+
+    flag = None
+    if line is None:
+        line = _add_extra_line(db, order, lot, user_id=user_id)
+        flag = RECEIVING_FLAG_OTHER_TRUCK if other_order else RECEIVING_FLAG_NOT_ON_TRUCK
+        _add_flag(
+            db, order, flag, line=line, expected=0, actor_id=user_id,
+            detail=(
+                f"Lot {lot.lot_code} belongs to {other_order.intake_number}"
+                if other_order else f"Lot {lot.lot_code} was not on any expected truck"
+            ),
+        )
+    receipt = _line_receipt(db, line)
+
+    lps.apply_delta(
+        db, lot, row.id,
+        event_type=lps.EVENT_RECEIVED,
+        full_units_delta=units,
+        actor_id=user_id,
+        ref_type=REF_TYPE_RECEIVING,
+        ref_id=receipt.id,
+        idempotency_key=idempotency_key,
+    )
+    event = (
+        db.query(LotPlacementEvent)
+        .filter(LotPlacementEvent.idempotency_key == idempotency_key)
+        .first()
+        if idempotency_key else None
+    )
+
+    expected = int(line.expected_count or 0)
+    scanned = int(session_counts(db, receipt)["total"] or 0)
+    if expected > 0 and scanned > expected and not _has_flag(
+        db, order.id, RECEIVING_FLAG_OVER_PAPERWORK, line_id=line.id
+    ):
+        flag = flag or RECEIVING_FLAG_OVER_PAPERWORK
+        _add_flag(
+            db, order, RECEIVING_FLAG_OVER_PAPERWORK, line=line, expected=expected,
+            actual=scanned, actor_id=user_id,
+            detail="Worker confirmed more than the paperwork",
+        )
+    if warning and not _has_flag(db, order.id, RECEIVING_FLAG_RACK_FULL, line_id=line.id, row_id=row.id):
+        flag = flag or RECEIVING_FLAG_RACK_FULL
+        _add_flag(
+            db, order, RECEIVING_FLAG_RACK_FULL, line=line, row_id=row.id,
+            actor_id=user_id, detail=warning_detail,
+        )
+    if lot.is_held and not _has_flag(db, order.id, RECEIVING_FLAG_LOT_HELD, line_id=line.id):
+        flag = flag or RECEIVING_FLAG_LOT_HELD
+        _add_flag(
+            db, order, RECEIVING_FLAG_LOT_HELD, line=line, actor_id=user_id,
+            detail=lot.hold_reason or "Lot was on QA hold when it arrived",
+        )
+
+    message = f"{units} {word} of {what} → {row.name}" if units > 1 else f"{what} → {row.name}"
+    if lot.is_held:
+        message += " — this lot is ON HOLD, it stays held"
+    return _truck_payload(
+        db, order, status="ok", message=message,
+        line=line, lot=lot, row=row, units=units,
+        warning=warning if allow_overfill else None,
+        warning_detail=warning_detail if allow_overfill else None,
+        flag=flag, scan_id=event.id if event else None,
+    )
+
+
+def truck_remove(
+    db: Session,
+    *,
+    order: IngredientIntake,
+    line_id: str,
+    storage_row_id: str,
+    user_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+    single: bool = False,
+) -> dict:
+    """Take one scan's worth of a SPECIFIC lot back off a SPECIFIC rack.
+
+    The per-line undo it replaces popped "the last scan" — whatever lot that
+    was, with no idempotency key, so a retried request undid twice. Here the
+    worker names what they double-counted, and a replay is a no-op.
+
+    Allowed on a held lot: this corrects the truck's own miscount before it is
+    finished, it does not walk material off a quarantined rack.
+    """
+    if idempotency_key:
+        prior = (
+            db.query(LotPlacementEvent)
+            .filter(LotPlacementEvent.idempotency_key == idempotency_key)
+            .first()
+        )
+        if prior:
+            line = db.query(IntakeLot).filter(IntakeLot.receipt_id == prior.ref_id).first()
+            lot = db.query(MaterialLot).filter(MaterialLot.id == prior.material_lot_id).first()
+            row = db.query(StorageRow).filter(StorageRow.id == prior.storage_row_id).first()
+            return _truck_payload(
+                db, order, status="removed", message="Already removed.",
+                line=line, lot=lot, row=row, units=-int(prior.full_units_delta or 0),
+            )
+
+    if not _truck_open(order):
+        return _truck_payload(
+            db, order, status="truck_closed",
+            message=f"{order.intake_number} is finished. See the office to correct it.",
+        )
+
+    line = next((l for l in order.lots or [] if l.id == line_id), None)
+    receipt = _line_receipt(db, line) if line else None
+    if receipt is None:
+        return _truck_payload(db, order, status="nothing_to_remove", message="That line is not on this truck.")
+    lot = db.query(MaterialLot).filter(MaterialLot.id == line.material_lot_id).first()
+    row = db.query(StorageRow).filter(StorageRow.id == storage_row_id).first()
+
+    on_row = int(session_counts(db, receipt)["by_row"].get(storage_row_id, 0))
+    if on_row <= 0 or lot is None:
+        return _truck_payload(
+            db, order, status="nothing_to_remove", line=line, lot=lot, row=row,
+            message=f"Nothing of this lot was scanned into {row.name if row else 'that rack'}.",
+        )
+    units = min(on_row, _per_scan_units(lot, single))
+
+    lps.apply_delta(
+        db, lot, storage_row_id,
+        event_type=lps.EVENT_ADJUSTED,
+        full_units_delta=-units,
+        actor_id=user_id,
+        ref_type=REF_TYPE_RECEIVING,
+        ref_id=receipt.id,
+        reason="Removed a scan (truck receiving)",
+        reason_code="undo",
+        idempotency_key=idempotency_key,
+    )
+    return _truck_payload(
+        db, order, status="removed", line=line, lot=lot, row=row, units=units,
+        message=f"Took {units} {unit_word(lot, units)} of {_lot_words(db, lot)} back off {row.name if row else 'the rack'}.",
+    )
+
+
+def truck_recount(
+    db: Session,
+    *,
+    order: IngredientIntake,
+    storage_row_id: str,
+    counts: list,
+    user_id: Optional[str] = None,
+) -> dict:
+    """The worker counted a rack by eye. Where they disagree with the scans,
+    THE COUNT WINS — they are standing in front of it — and the difference is
+    booked and flagged so the office sees it.
+
+    This is the check that stands in for per-drum stickers: a double scan or a
+    missed one shows up as a rack that does not add up.
+
+    Naturally idempotent: a second identical recount finds scans == count and
+    writes a plain `recount_ok`.
+    """
+    if not _truck_open(order):
+        return {"status": "truck_closed", "message": f"{order.intake_number} is finished.", "truck": truck_summary(db, order)}
+
+    row = db.query(StorageRow).filter(StorageRow.id == storage_row_id).first()
+    if not row:
+        return {"status": "unknown_row", "message": "That rack is not one we know.", "truck": truck_summary(db, order)}
+
+    corrected = []
+    for item in counts or []:
+        line = next((l for l in order.lots or [] if l.id == item.get("line_id")), None)
+        receipt = _line_receipt(db, line) if line else None
+        if receipt is None:
+            continue
+        actual = max(0, int(item.get("actual") or 0))
+        scanned = int(session_counts(db, receipt)["by_row"].get(row.id, 0))
+        lot = db.query(MaterialLot).filter(MaterialLot.id == line.material_lot_id).first()
+        diff = actual - scanned
+        if diff != 0 and lot is not None:
+            lps.apply_delta(
+                db, lot, row.id,
+                event_type=lps.EVENT_ADJUSTED,
+                full_units_delta=diff,
+                actor_id=user_id,
+                ref_type=REF_TYPE_RECEIVING,
+                ref_id=receipt.id,
+                reason=f"Rack recount: scanned {scanned}, counted {actual}",
+                reason_code="recount",
+            )
+            corrected.append(
+                f"{_lot_words(db, lot)}: {scanned} → {actual}"
+            )
+        _add_flag(
+            db, order,
+            RECEIVING_FLAG_RECOUNT_CORRECTED if diff else RECEIVING_FLAG_RECOUNT_OK,
+            line=line, row_id=row.id, expected=scanned, actual=actual, actor_id=user_id,
+            event_seq=_max_seq(db, receipt.id, row.id),
+        )
+
+    return {
+        "status": "corrected" if corrected else "ok",
+        "message": (
+            f"{row.name} corrected — " + "; ".join(corrected) if corrected
+            else f"{row.name} counted — matches."
+        ),
+        "truck": truck_summary(db, order),
+    }
+
+
+def truck_finish(
+    db: Session,
+    *,
+    order: IngredientIntake,
+    user_id: Optional[str] = None,
+    confirmed: bool = False,
+    short_reason: Optional[str] = None,
+    short_note: Optional[str] = None,
+) -> dict:
+    """The worker says the whole truck is put away. Soft answers, in order:
+
+      already_submitted  nothing to do
+      needs_recount      a rack still has uncounted scans — count it first
+      needs_confirm      counts disagree with the paperwork, line by line
+      needs_reason       short, and no reason from the fixed list was given
+      submitted          stamped on the order AND every line receipt; the
+                         receipts' stamp is what the approval gate reads
+    """
+    summary = truck_summary(db, order)
+    if order.forklift_submitted_at:
+        return {"status": "already_submitted", "message": "This truck was already finished.", "truck": summary}
+    if not summary["checked_in"]:
+        return {
+            "status": "not_checked_in",
+            "message": "The office has not checked this truck in yet.",
+            "truck": summary,
+        }
+    if summary["pending_recounts"]:
+        return {
+            "status": "needs_recount",
+            "message": "Count these racks before finishing the truck.",
+            "truck": summary,
+        }
+
+    diffs = [l for l in summary["lines"] if l["difference"] != 0]
+    if diffs and not confirmed:
+        return {
+            "status": "needs_confirm",
+            "message": "The counts do not match the paperwork. Finish anyway?",
+            "lines": diffs,
+            "truck": summary,
+        }
+
+    shorts = [l for l in summary["lines"] if l["difference"] < 0]
+    reason_text = None
+    if shorts:
+        if short_reason not in TRUCK_SHORT_REASONS or (
+            short_reason == "other" and not (short_note or "").strip()
+        ):
+            return {
+                "status": "needs_reason",
+                "message": "This truck is short. Pick a reason.",
+                "lines": shorts,
+                "truck": summary,
+            }
+        reason_text = SHORT_REASON_LABELS[short_reason]
+        if (short_note or "").strip():
+            reason_text = f"{reason_text}: {short_note.strip()}"
+        by_id = {l.id: l for l in order.lots or []}
+        for l in shorts:
+            _add_flag(
+                db, order, RECEIVING_FLAG_SHORT, line=by_id.get(l["line_id"]),
+                expected=l["expected_count"], actual=l["scanned_count"],
+                detail=reason_text, actor_id=user_id,
+            )
+
+    now = datetime.now(timezone.utc)
+    order.forklift_submitted_at = now
+    order.forklift_submitted_by = user_id
+    order.short_reason = reason_text
+    for line in order.lots or []:
+        receipt = _line_receipt(db, line)
+        if receipt and not receipt.forklift_submitted_at:
+            receipt.forklift_submitted_at = now
+            receipt.forklift_submitted_by = user_id
+    db.flush()
+    return {
+        "status": "submitted",
+        "message": "Truck finished. The office checks it next.",
+        "truck": truck_summary(db, order),
+    }
+
+
+def truck_approve(db: Session, *, order: IngredientIntake, current_user) -> dict:
+    """Approve every line of the truck at once, then close the order.
+
+    One transaction: the router commits once, and any line the existing
+    per-receipt gate refuses raises before then, so a truck is never left
+    half-approved. Each line goes through `receipt_service.approve_receipt`
+    unchanged — the truck is a way in, not a second set of rules.
+    """
+    from app.services import receipt_service
+
+    if not order.forklift_submitted_at:
+        raise ValidationError(
+            f"{order.intake_number} is still being received — the forklift has not finished it."
+        )
+
+    approved = 0
+    for line in order.lots or []:
+        receipt = _line_receipt(db, line)
+        if receipt and receipt.status in (ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED):
+            receipt_service.approve_receipt(db, receipt, current_user)
+            approved += 1
+
+    if order.status in INCOMING_RECEIVABLE_STATUSES:
+        close_order(
+            db, order, user_id=str(current_user.id),
+            reason=order.short_reason or None,
+        )
+    db.flush()
+    return {"status": "approved", "approved_receipts": approved, "truck": truck_summary(db, order)}
+
+
+def open_trucks(db: Session, *, warehouse_id: Optional[str] = None) -> list:
+    """Trucks the gun can pick up: checked in (at least one line started), still
+    receivable, not finished at the gun."""
+    query = (
+        db.query(IngredientIntake)
+        .filter(
+            IngredientIntake.is_incoming_order == True,  # noqa: E712
+            IngredientIntake.is_deleted == False,  # noqa: E712
+            IngredientIntake.status.in_(INCOMING_RECEIVABLE_STATUSES),
+            IngredientIntake.forklift_submitted_at.is_(None),
+            db.query(IntakeLot.id)
+            .filter(IntakeLot.intake_id == IngredientIntake.id, IntakeLot.receipt_id.isnot(None))
+            .exists(),
+        )
+    )
+    if warehouse_id:
+        query = query.filter(IngredientIntake.warehouse_id == warehouse_id)
+    orders = query.order_by(IngredientIntake.expected_date.asc().nullslast()).limit(50).all()
+    return [truck_summary(db, o) for o in orders]
+
+
+def locate_truck(db: Session, code: str, *, warehouse_id: Optional[str] = None) -> dict:
+    """A drum scanned on the truck list -> the open truck(s) carrying its lot."""
+    lot = resolve_lot_code(db, code)
+    if lot is None:
+        return {"status": "unknown_lot", "message": "That sticker is not one of ours.", "trucks": []}
+    query = (
+        db.query(IngredientIntake)
+        .join(IntakeLot, IntakeLot.intake_id == IngredientIntake.id)
+        .filter(
+            IntakeLot.material_lot_id == lot.id,
+            IntakeLot.receipt_id.isnot(None),
+            IngredientIntake.is_incoming_order == True,  # noqa: E712
+            IngredientIntake.is_deleted == False,  # noqa: E712
+            IngredientIntake.status.in_(INCOMING_RECEIVABLE_STATUSES),
+            IngredientIntake.forklift_submitted_at.is_(None),
+        )
+    )
+    if warehouse_id:
+        query = query.filter(IngredientIntake.warehouse_id == warehouse_id)
+    orders = query.distinct().all()
+    vendors = {
+        v.id: v.name
+        for v in db.query(Vendor).filter(Vendor.id.in_({o.vendor_id for o in orders if o.vendor_id})).all()
+    } if orders else {}
+    return {
+        "status": "ok" if orders else "no_truck",
+        "message": (
+            "" if orders else f"Lot {lot.lot_code} is not on any truck being received."
+        ),
+        "lot_code": lot.lot_code,
+        "trucks": [
+            {
+                "order_id": o.id,
+                "order_number": o.intake_number,
+                "vendor_name": vendors.get(o.vendor_id),
+                "bol": o.bol,
+            }
+            for o in orders
+        ],
+    }
+
+
+def _set_line_expected(db: Session, line: IntakeLot, count: int) -> None:
+    """Change a line's paperwork count, keeping a started line's receipt in step."""
+    line.expected_count = int(count)
+    receipt = _line_receipt(db, line)
+    if receipt:
+        receipt.container_count = int(count)
+        if receipt.weight_per_container:
+            receipt.quantity = round(int(count) * float(receipt.weight_per_container), 3)
+        else:
+            receipt.quantity = int(count)
+
+
+def check_in_truck(
+    db: Session,
+    order: IngredientIntake,
+    *,
+    lines: list,
+    user_id: str,
+    bol: Optional[str] = None,
+) -> IngredientIntake:
+    """The desk checks the whole truck against the driver's BOL and opens it.
+
+    Corrections for every line come in one go; then lines that now describe the
+    same lot are merged (a truck has one line per lot — the gun could not tell
+    them apart), and every line not yet started is started. All in the caller's
+    one transaction.
+    """
+    if order.status not in INCOMING_RECEIVABLE_STATUSES:
+        raise ConflictError(
+            f"This order is {order.status} — only an in-transit order can be checked in"
+        )
+    if (bol or "").strip():
+        order.bol = bol.strip()
+
+    edits = {item["line_id"]: item for item in lines or [] if item.get("line_id")}
+    for line in order.lots or []:
+        item = edits.get(line.id)
+        if not item or line.receipt_id:
+            continue   # a started line's identity is fixed — it has a lot already
+        for field, attr in (
+            ("vendor_id", "vendor_id"),
+            ("vendor_lot", "vendor_lot"),
+            ("bbd", "bbd"),
+            ("weight_per_unit", "net_weight_per_container"),
+            ("weight_unit", "weight_unit"),
+            ("units_per_pallet", "units_per_pallet"),
+        ):
+            if item.get(field) is not None:
+                setattr(line, attr, item[field])
+        if item.get("expected_count") is not None:
+            line.expected_count = int(item["expected_count"])
+        line.lot_unknown = not bool(line.vendor_lot)
+
+    # Merge lines that are now the same lot. A started line wins (it already
+    # owns the lot and the receipt); otherwise the first one listed does.
+    keepers: dict = {}
+    for line in sorted(order.lots or [], key=lambda l: (l.receipt_id is None,)):
+        key = line_lot_key(
+            line.product_id, line.vendor_id or order.vendor_id, line.vendor_lot, line.bbd
+        )
+        if key is None:
+            continue
+        keeper = keepers.get(key)
+        if keeper is None:
+            keepers[key] = line
+            continue
+        if line.receipt_id:
+            continue   # two started lines on one lot predate this rule; leave them
+        _set_line_expected(
+            db, keeper, int(keeper.expected_count or 0) + int(line.expected_count or 0)
+        )
+        order.lots.remove(line)
+        db.delete(line)
+    db.flush()
+
+    for line in list(order.lots or []):
+        if not line.receipt_id:
+            start_receiving(db, order, line, user_id=user_id)
+
+    order.expected_count = sum(int(l.expected_count or 0) for l in order.lots or [])
+    db.flush()
+    return order

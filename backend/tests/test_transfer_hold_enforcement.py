@@ -39,14 +39,16 @@ def test_create_transfer_partial_hold_boundary(client, auth_headers, seed_data, 
 
     ok = client.post(
         "/api/inventory/transfers",
-        json={"receipt_id": "rec-h", "quantity": 600, "unit": "lbs"},
+        json={"receipt_id": "rec-h", "quantity": 600, "unit": "lbs",
+              "transfer_type": "shipped-out", "order_number": "SO-600"},
         headers=auth_headers,
     )
     assert ok.status_code == 200, ok.text
 
     too_much = client.post(
         "/api/inventory/transfers",
-        json={"receipt_id": "rec-h", "quantity": 601, "unit": "lbs"},
+        json={"receipt_id": "rec-h", "quantity": 601, "unit": "lbs",
+              "transfer_type": "shipped-out", "order_number": "SO-601"},
         headers=auth_headers,
     )
     assert too_much.status_code == 400
@@ -82,3 +84,18 @@ def test_approve_shipout_blocks_when_held_increased(
     # The refusal must NAME the hold as the cause — "not enough" and "it is
     # quarantined" are different problems (message wording is free to change).
     assert "hold" in approve.json()["detail"].lower()
+
+
+@pytest.mark.integration
+def test_rack_move_of_uncounted_lot_refused_at_submit(client, auth_headers, seed_data, db_session):
+    """Approval refuses a rack-to-rack move of a lot with no placements; the
+    submit must say so up front instead of queueing an unapprovable transfer
+    (2026-10-01: 8CPB350398 and ITCAMP/210625 stuck in Pending)."""
+    _make_receipt(db_session, quantity=1000, held_quantity=0)
+    resp = client.post(
+        "/api/inventory/transfers",
+        json={"receipt_id": "rec-h", "quantity": 100, "unit": "lbs"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+    assert "not counted on any rack" in resp.json()["detail"]

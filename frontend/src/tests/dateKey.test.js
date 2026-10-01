@@ -35,11 +35,13 @@ describe('formatDateKey', () => {
     expect(formatDateKey(null)).toBe('—');
   });
 
-  it('is what formatDate is NOT for — this is the bug it replaces', () => {
-    // formatDate is correct for instants and wrong for day keys. Kept as a
-    // regression witness: if this ever starts agreeing, the timezone-aware
-    // path changed and the two helpers are no longer distinguishable.
-    expect(formatDate('2026-08-21')).toBe('8/20/2026');
+  it('formatDate no longer shifts a bare day key either (2026-10-01)', () => {
+    // Most best-by render sites still called formatDate, so every screen
+    // showed the best-by a day early. A bare `YYYY-MM-DD` is never an
+    // instant, so formatDate now reads it lexically too; timestamps still
+    // go through the timezone.
+    expect(formatDate('2026-08-21')).toBe('8/21/2026');
     expect(formatDateKey('2026-08-21')).toBe('8/21/2026');
+    expect(formatDate('2026-08-21T00:00:00Z')).not.toBe('8/21/2026');
   });
 });

@@ -6,6 +6,9 @@ import { useConfirm } from "../../context/ConfirmContext";
 import { formatDateTime, formatTimeAgo, getDaysAgo, toDateKey, getTodayDateKey } from "../../utils/dateUtils";
 import { ROLES, CATEGORY_TYPES, RECEIPT_STATUS, isRawMaterialType, isWeighedMaterialType } from '../../constants';
 import ReceivingCheck from './ReceivingCheck';
+import TruckApprovalCard from './TruckApprovalCard';
+import { approveTruck } from '../../api/lotReceivingApi';
+import { groupReceiptsByTruck } from '../../utils/truckReceiving';
 
 const STATUS_PENDING = new Set([RECEIPT_STATUS.RECORDED, RECEIPT_STATUS.REVIEWED]);
 
@@ -88,6 +91,7 @@ const ReceiptsTab = ({
     rejectReceipt,
     sendBackReceipt,
     updateReceipt,
+    refreshReceipts,
   } = useAppData();
   const { addToast } = useToast();
   const { confirm } = useConfirm();
@@ -140,6 +144,38 @@ const ReceiptsTab = ({
       return true;
     });
   }, [backlogPending, searchQuery, categoryFilter, dateRangeFilter, productLookup]);
+
+  // A truck's lines are approved together, on one card (2026-10). A truck goes
+  // in "today" if ANY of its lines is from today: its lines are opened together
+  // at check-in, but a drum from a lot not on the paperwork adds a line when it
+  // is scanned, which can be the next day — and one truck must not show twice.
+  const truckSplit = useMemo(() => {
+    const today = groupReceiptsByTruck(filteredTodaysPending);
+    const backlog = groupReceiptsByTruck(filteredBacklogPending);
+    const todayOrders = new Map(today.trucks.map((t) => [t.orderId, t]));
+    const backlogTrucks = [];
+    backlog.trucks.forEach((t) => {
+      const sameTruck = todayOrders.get(t.orderId);
+      if (sameTruck) sameTruck.receipts.push(...t.receipts);
+      else backlogTrucks.push(t);
+    });
+    return {
+      todayTrucks: today.trucks,
+      todaySingles: today.singles,
+      backlogTrucks,
+      backlogSingles: backlog.singles,
+    };
+  }, [filteredTodaysPending, filteredBacklogPending]);
+
+  const renderTruck = (group) => (
+    <TruckApprovalCard
+      key={group.orderId}
+      orderId={group.orderId}
+      receiptIds={group.receipts.map((r) => r.id)}
+      onEdit={handleOpenReceipt}
+      onApproved={refreshReceipts}
+    />
+  );
 
   const selectedReceipt = useMemo(
     () => receiptLookup[selectedReceiptId] || null,
@@ -318,17 +354,31 @@ const ReceiptsTab = ({
 
   const approveAllToday = async () => {
     if (filteredTodaysPending.length === 0) return;
-    const confirmMessage = `Approve ${filteredTodaysPending.length} receipt${filteredTodaysPending.length > 1 ? "s" : ""} from today?`;
-    const ok = await confirm(confirmMessage);
+    const { todayTrucks, todaySingles } = truckSplit;
+    const parts = [];
+    if (todayTrucks.length) parts.push(`${todayTrucks.length} truck${todayTrucks.length > 1 ? "s" : ""}`);
+    if (todaySingles.length) parts.push(`${todaySingles.length} receipt${todaySingles.length > 1 ? "s" : ""}`);
+    const ok = await confirm(`Approve ${parts.join(" and ")} from today?`);
     if (!ok) return;
     try {
+      // A truck goes through its own endpoint — every line in one transaction —
+      // never line by line. A truck still being scanned is refused there and
+      // reported here rather than half-approved.
+      const truckResults = await Promise.all(todayTrucks.map((t) => (
+        approveTruck(t.orderId).then(() => null).catch(() => t.orderNumber || t.orderId)
+      )));
       const results = await Promise.all(
-        filteredTodaysPending.map((receipt) => approveReceipt(receipt.id, user?.id || user?.username))
+        todaySingles.map((receipt) => approveReceipt(receipt.id, user?.id || user?.username))
       );
+      const failedTrucks = truckResults.filter(Boolean);
       const failed = results.filter(r => !r.success);
+      if (failedTrucks.length > 0) {
+        addToast(`Not approved (still being scanned or refused): ${failedTrucks.join(", ")}`, 'error');
+      }
       if (failed.length > 0) {
         addToast(`Failed to approve ${failed.length} receipt(s). Please try again.`, 'error');
       }
+      if (todayTrucks.length) await refreshReceipts?.();
     } catch (error) {
       console.error('Error approving receipts:', error);
       addToast('Error approving receipts. Please try again.', 'error');
@@ -703,7 +753,8 @@ const ReceiptsTab = ({
             </div>
           ) : (
             <div className="card-grid">
-              {filteredTodaysPending.map(renderCard)}
+              {truckSplit.todayTrucks.map(renderTruck)}
+              {truckSplit.todaySingles.map(renderCard)}
             </div>
           )}
         </section>
@@ -723,7 +774,8 @@ const ReceiptsTab = ({
             </div>
           ) : (
             <div className="card-grid">
-              {filteredBacklogPending.map(renderBacklogCard)}
+              {truckSplit.backlogTrucks.map(renderTruck)}
+              {truckSplit.backlogSingles.map(renderBacklogCard)}
             </div>
           )}
         </section>

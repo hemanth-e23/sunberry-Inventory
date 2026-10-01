@@ -318,8 +318,13 @@ def container_qty_for_product(
     *,
     include_pending: bool = False,
     include_held: bool = False,
+    include_placements: bool = True,
 ) -> float:
     """Just the container contribution, as a bare float.
+
+    ``include_placements=False`` leaves out rack placements, for callers that
+    already count a lot-tracked lot through its receipts' paper quantity —
+    adding both counted every drum twice (Activity Ledger, 2026-10-01).
 
     For read sites whose legacy semantics differ from
     ``app/routers/service.py:232-255`` (different status set, no hold handling,
@@ -342,6 +347,8 @@ def container_qty_for_product(
         if is_held and not include_held:
             continue
         total += qty
+    if not include_placements:
+        return total
     # `include_pending` has no placement analogue — see _placements_by_bucket.
     for is_held, _unit, qty, _count, _units in _placements_by_bucket(
         db, product_id, warehouse_id

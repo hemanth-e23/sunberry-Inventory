@@ -128,7 +128,9 @@ def test_every_incident_class_is_surfaced(db_session, recon_seed):
 
     # 3 ─ an imbalance: paper says 10 drums, shrink the receipt to 6 on paper
     imbalanced = _gated_receipt(db_session, units=10)
-    imbalanced.container_count = 6
+    # Paper is what the receipt claims NOW (lbs ÷ lbs/drum), not the frozen
+    # as-delivered container_count.
+    imbalanced.quantity = 6 * 500.0
     db_session.commit()
 
     report = build_reconciliation_report(db_session, warehouse_id=WH)

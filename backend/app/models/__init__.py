@@ -64,7 +64,7 @@ from app.models.active_production import ActiveLineProduction
 # 11. Ingredient serialization (FK: warehouses, vendors, products, categories,
 #     storage_rows, users) — must follow location (storage_rows) and product.
 from app.models.ingredient import (
-    IngredientIntake, IntakeLot, Container, ContainerEvent,
+    IngredientIntake, IntakeLot, Container, ContainerEvent, ReceivingFlag,
 )
 
 __all__ = [
@@ -83,5 +83,5 @@ __all__ = [
     "Notification",
     "AuditLog",
     "ActiveLineProduction",
-    "IngredientIntake", "IntakeLot", "Container", "ContainerEvent",
+    "IngredientIntake", "IntakeLot", "Container", "ContainerEvent", "ReceivingFlag",
 ]

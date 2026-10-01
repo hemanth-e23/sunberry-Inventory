@@ -193,6 +193,13 @@ class IngredientIntake(Base):
     closed_at = Column(DateTime(timezone=True), nullable=True)
     closed_by = Column(String(50), ForeignKey("users.id"), nullable=True)
     close_reason = Column(Text)
+    # The worker says the whole TRUCK is finished at the gun (2026-10 truck
+    # receiving). Stamped together with every line receipt's own
+    # forklift_submitted_at, which is what the approval gate reads; this one is
+    # what takes the truck off the gun's list.
+    forklift_submitted_at = Column(DateTime(timezone=True), nullable=True)
+    forklift_submitted_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    # (`short_reason` above is reused for why a truck was finished short.)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -398,3 +405,44 @@ class ContainerEvent(Base):
         backref=backref("events", order_by="ContainerEvent.seq"),
     )
     actor = relationship("User", foreign_keys=[actor_id], backref="container_events")
+
+
+class ReceivingFlag(Base):
+    """Something the office should look at before approving a truck.
+
+    Truck receiving (2026-10) accepts every drum the worker scans — refusing at
+    the dock strands a driver holding a drum the system will not take — and
+    writes one of these instead, so the approver sees it on the truck card.
+
+    Kinds (`RECEIVING_FLAG_*` in constants.py):
+      not_on_truck      sticker's lot was not on this order at all
+      other_truck       sticker's lot belongs to a different open order
+      over_paperwork    more scanned than the paperwork says (worker confirmed)
+      lot_held          lot was on QA hold when it was scanned in
+      rack_full         worker loaded a rack past its capacity
+      recount_ok        worker counted a rack and agreed with the scans
+      recount_corrected worker counted a rack and the scans were wrong
+      short             truck finished short of the paperwork
+
+    `recount_*` also drive the gun: a (rack, line) with scans newer than its
+    last recount flag still needs counting before the truck can be finished.
+    Append-only — corrections are new rows, never edits.
+    """
+
+    __tablename__ = "receiving_flags"
+
+    id = Column(String(50), primary_key=True)
+    order_id = Column(String(50), ForeignKey("ingredient_intakes.id"), nullable=False, index=True)
+    line_id = Column(String(50), ForeignKey("intake_lots.id"), nullable=True)
+    receipt_id = Column(String(50), ForeignKey("receipts.id"), nullable=True, index=True)
+    material_lot_id = Column(String(50), ForeignKey("material_lots.id"), nullable=True)
+    storage_row_id = Column(String(50), ForeignKey("storage_rows.id"), nullable=True)
+    kind = Column(String(30), nullable=False)
+    expected = Column(Integer, nullable=True)
+    actual = Column(Integer, nullable=True)
+    detail = Column(Text, nullable=True)
+    # LotPlacementEvent.seq at the moment the flag was written. A recount covers
+    # every scan up to here; anything with a higher seq is uncounted.
+    event_seq = Column(BigInteger, nullable=True)
+    actor_id = Column(String(50), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

@@ -59,8 +59,14 @@ export const startReceiving = (orderId, payload) =>
 
 // ─── the receiving session ───────────────────────────────────────────────────
 
-/** Everything the gun can pick up, from BOTH paths, in one list. */
-export const listReceivingSessions = () => unwrap(apiClient.get('/lot-receiving/sessions'));
+/**
+ * Per-receipt sessions the gun can pick up. `walkInOnly` drops receipts that
+ * belong to an incoming order — those are received a TRUCK at a time now.
+ */
+export const listReceivingSessions = ({ walkInOnly = false } = {}) =>
+  unwrap(apiClient.get('/lot-receiving/sessions', {
+    params: walkInOnly ? { walk_in_only: true } : undefined,
+  }));
 
 /** Paperwork vs scanned, per row. Also what the gun resumes from. */
 export const getReceivingSession = (receiptId) =>
@@ -161,3 +167,46 @@ export const listUnlabelledLots = () => unwrap(apiClient.get('/lot-cutover/unlab
 
 /** Every lot physically holding stock — what a recount picks from. */
 export const listLotsOnHand = () => unwrap(apiClient.get('/lot-cutover/lots-on-hand'));
+
+// ─── trucks: one gun session per incoming order (2026-10) ───────────────────
+//
+// The worker scans a rack, then ANY drum on the trailer; the server routes it to
+// its own line by the lot on the sticker. Every scan-path answer is a 200 with a
+// `status` and the whole truck attached, so the gun redraws from server truth.
+
+/** The desk checks the whole truck in against the driver's BOL. */
+export const checkInTruck = (orderId, payload) =>
+  unwrap(apiClient.post(`/lot-receiving/orders/${orderId}/check-in`, payload));
+
+/** Trucks the gun can pick up: checked in and not finished. */
+export const listTrucks = () => unwrap(apiClient.get('/lot-receiving/trucks'));
+
+export const getTruck = (orderId) => unwrap(apiClient.get(`/lot-receiving/trucks/${orderId}`));
+
+/** A drum scanned on the truck list -> the open truck(s) carrying its lot. */
+export const locateTruck = (code) =>
+  unwrap(apiClient.get('/lot-receiving/trucks/locate', { params: { code } }));
+
+/** Queue endpoint for a truck scan — one definition for the queued and live paths. */
+export const truckScanEndpoint = (orderId) => `/lot-receiving/trucks/${orderId}/scan`;
+
+export const orderIdFromTruckEndpoint = (endpoint) => {
+  const match = /\/lot-receiving\/trucks\/([^/]+)\/scan$/.exec(endpoint || '');
+  return match ? match[1] : null;
+};
+
+/** One scan's worth of a SPECIFIC lot off a SPECIFIC rack. Idempotent by key. */
+export const truckRemove = (orderId, payload) =>
+  unwrap(apiClient.post(`/lot-receiving/trucks/${orderId}/remove`, payload));
+
+/** The worker counted a rack by eye; the count wins and differences are flagged. */
+export const truckRecount = (orderId, payload) =>
+  unwrap(apiClient.post(`/lot-receiving/trucks/${orderId}/recount`, payload));
+
+/** Finish the whole truck. Soft answers: needs_recount / needs_confirm / needs_reason. */
+export const truckFinish = (orderId, payload = {}) =>
+  unwrap(apiClient.post(`/lot-receiving/trucks/${orderId}/finish`, payload));
+
+/** Approve every line of a finished truck in one go, then close the order. */
+export const approveTruck = (orderId) =>
+  unwrap(apiClient.post(`/lot-receiving/trucks/${orderId}/approve`));

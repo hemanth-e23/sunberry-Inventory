@@ -22,6 +22,7 @@ from app.enums import (
 )
 from app.constants import CATEGORY_FINISHED
 from app.services.availability import container_qty_for_product
+from app.utils.calendar_dates import calendar_day
 
 # A ship-out order counts as a COMPLETED shipment for display reports once it's
 # an approved legacy ad-hoc order OR a scheduled order whose BOL was generated
@@ -47,6 +48,23 @@ SHIPPED_OUT_STOCK_REMOVED_STATUSES = [
     ShipOutLifecycle.COMPLETE.value,
 ]
 
+
+
+_AWARE_MIN = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _sort_dt(value):
+    """Sort key for timelines mixing aware datetimes, naive ones and None.
+    `x or datetime.min` compared a naive minimum with aware timestamps and
+    500'd the lot trace (the recall report) for any lot consumed through
+    staging, whose auto-made adjustment had no approved_at (2026-10-01)."""
+    if value is None:
+        return _AWARE_MIN
+    if not isinstance(value, datetime):
+        value = datetime(value.year, value.month, value.day)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
 
 def _ship_ts_col():
     """SQL expression for a ship-out's ship timestamp across both flows: legacy
@@ -282,8 +300,41 @@ def approved_adjustments_for_receipt(
     return list(found.values())
 
 
+
+_PRODUCTION_USE_TYPES = frozenset({"production-consumption", "used-in-production"})
+
+
+def _receiptless_placement_qty(db: Session, product_id: str) -> float:
+    """Weight on racks for lots of this product that have no receipt — the
+    cutover opening balances. Every other lot is counted through its paper."""
+    from app.models import LotPlacement, MaterialLot
+
+    has_receipt = db.query(Receipt.id).filter(
+        Receipt.material_lot_id == MaterialLot.id
+    ).exists()
+    rows = (
+        db.query(LotPlacement, MaterialLot)
+        .join(MaterialLot, MaterialLot.id == LotPlacement.material_lot_id)
+        .filter(MaterialLot.product_id == product_id, ~has_receipt)
+        .all()
+    )
+    return sum(
+        int(p.full_units or 0) * float(lot.weight_per_unit or 0)
+        + float(p.open_remaining_qty or 0)
+        for p, lot in rows
+    )
+
 def initial_receipt_qty(receipt: Receipt, db: Session) -> float:
     """Estimate the original quantity when the receipt was first created."""
+    # A receipt that recorded what arrived (drums × lbs per drum) says so
+    # directly. Rebuilding it from the adjustments booked to THIS receipt is
+    # wrong for a multi-truck lot: consumption spills across the trucks, so
+    # one read as having delivered 5,800 lb and the other 4,240 when each
+    # brought 5,020 (2026-10-01 e2e).
+    count = float(receipt.container_count or 0)
+    per = float(receipt.weight_per_container or 0)
+    if count > 0 and per > 0:
+        return count * per
     shipped = _shipped_cases_for_receipt(db, receipt.id, approved_after=None)
     adjs = approved_adjustments_for_receipt(db, receipt)
     # Inter-warehouse transfers where this receipt was the source
@@ -361,7 +412,7 @@ def build_point_in_time_snapshot(
             "vendor_name": vendor_name(db, r.vendor_id),
             "receipt_date": r.receipt_date,
             "production_date": r.production_date,
-            "expiration_date": r.expiration_date,
+            "expiration_date": calendar_day(r.expiration_date),
             "quantity": round(qty, 2),
             "unit": r.unit or "cases",
         })
@@ -470,11 +521,14 @@ def build_activity_ledger(
         p_receipts = [r for r in range_receipts if r.product_id == pid]
         received = sum(initial_receipt_qty(r, db) for r in p_receipts)
 
-        # Consumed in production (production-consumption adjustments)
+        # Consumed in production. Production use is written as
+        # production-consumption (staging mark-used / production sync) or
+        # used-in-production (a desk write-off); counting only the first showed
+        # 0 lb consumed with 7,306 lb used (2026-10-01).
         consumed = sum(
             float(a.quantity or 0)
             for a in range_adjustments
-            if a.product_id == pid and a.adjustment_type == "production-consumption"
+            if a.product_id == pid and a.adjustment_type in _PRODUCTION_USE_TYPES
         )
 
         # Shipped out (both legacy and multi-product paths)
@@ -493,7 +547,7 @@ def build_activity_ledger(
         other_adj = sum(
             float(a.quantity or 0)
             for a in range_adjustments
-            if a.product_id == pid and a.adjustment_type != "production-consumption"
+            if a.product_id == pid and a.adjustment_type not in _PRODUCTION_USE_TYPES
         )
 
         # Current on hand. Legacy receipt quantity PLUS live serialized
@@ -512,7 +566,15 @@ def build_activity_ledger(
             Receipt.quantity > 0,
         ).all()
         current_on_hand = sum(float(r.quantity or 0) for r in current_receipts)
-        current_on_hand += container_qty_for_product(db, pid, include_held=True)
+        # Rack placements are NOT added on top: a lot-tracked lot is already in
+        # the sum above through its receipts' paper (racked + staged), and
+        # adding the racks again showed 13,500 lb for 6,750 on hand
+        # (2026-10-01). Only a lot with no receipt at all — an opening balance
+        # counted at cutover — is known solely by its placements.
+        current_on_hand += container_qty_for_product(
+            db, pid, include_held=True, include_placements=False
+        )
+        current_on_hand += _receiptless_placement_qty(db, pid)
 
         lot_numbers = sorted(set(r.lot_number for r in p_receipts if r.lot_number))
 
@@ -846,19 +908,32 @@ def build_movement_ledger(
             if end_dt and ts and ts > end_dt:
                 continue
             r = next((x for x in receipts if x.id == t.receipt_id), None)
+            # Only a ship-out leaves the building. A rack-to-rack move or a
+            # pull to staging is still stock on hand (staged material leaves
+            # the books when production's consumption adjustment lands), so
+            # counting them as OUT drove the running balance negative
+            # (2026-10-01 e2e). They stay listed, with the moved amount noted.
+            leaves = t.transfer_type == "shipped-out"
+            moved = round(float(t.quantity or 0), 2)
+            notes = t.reason or ""
+            if not leaves:
+                notes = f"{notes} (moved {moved:g}, still on hand)".strip()
             events.append({
                 "timestamp": ts,
                 "event_type": (
                     "Transfer" if t.transfer_type == "warehouse-transfer"
-                    else "Shipped Out" if t.transfer_type == "shipped-out"
+                    else "Shipped Out" if leaves
                     else "Staging"
                 ),
                 "lot_number": r.lot_number if r else "",
                 "category": "",
                 "qty_in": 0,
-                "qty_out": round(float(t.quantity or 0), 2),
+                "qty_out": moved if leaves else 0,
+                # The amount a move carried, kept out of in/out so the running
+                # balance stays right but the line no longer reads "0 / 0".
+                "qty_moved": 0 if leaves else moved,
                 "reference": t.order_number or "",
-                "notes": t.reason or "",
+                "notes": notes,
                 "by_user": user_name(db, t.approved_by or getattr(t, "docs_generated_by", None)),
             })
 
@@ -907,10 +982,13 @@ def build_movement_ledger(
             continue
         if end_dt and ts and ts > end_dt:
             continue
+        # The lot the adjustment was booked to — the line said nothing about
+        # WHICH lot lost the stock (2026-10-01).
+        adj_receipt = next((x for x in receipts if x.id == a.receipt_id), None)
         events.append({
             "timestamp": ts,
             "event_type": f"Adjustment ({a.adjustment_type})",
-            "lot_number": "",
+            "lot_number": adj_receipt.lot_number if adj_receipt else "",
             "category": "",
             "qty_in": 0,
             "qty_out": round(float(a.quantity or 0), 2),
@@ -919,7 +997,7 @@ def build_movement_ledger(
             "by_user": user_name(db, a.approved_by),
         })
 
-    events.sort(key=lambda e: (e["timestamp"] or datetime.min))
+    events.sort(key=lambda e: _sort_dt(e["timestamp"]))
 
     # Running balance
     balance = 0.0
@@ -966,9 +1044,12 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
         cname, ctype = category_info(db, r.category_id)
         vname = vendor_name(db, r.vendor_id)
 
+        # "completed" is how staging pulls and staging returns are written;
+        # without it material visibly left a rack for staging and came back
+        # with nothing on the recall timeline (2026-10-01).
         legacy_transfers = db.query(InventoryTransfer).filter(
             InventoryTransfer.receipt_id == r.id,
-            InventoryTransfer.status.in_(SHIPPED_OUT_DONE_STATUSES),
+            InventoryTransfer.status.in_(SHIPPED_OUT_DONE_STATUSES + ["completed"]),
         ).order_by(_ship_ts_col()).all()
 
         # Multi-product ship-outs that drew from this receipt via their lines
@@ -996,7 +1077,7 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
         # never appeared on the timeline. The timeline is sorted by date below.
         adjustments = sorted(
             approved_adjustments_for_receipt(db, r),
-            key=lambda a: (a.approved_at is None, a.approved_at or datetime.min),
+            key=lambda a: (a.approved_at is None, _sort_dt(a.approved_at)),
         )
 
         holds = db.query(InventoryHoldAction).filter(
@@ -1030,9 +1111,10 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             "from_location": None,
             "from_rows": [],
             "to_location": _loc_str(r.location, r.sub_location),
-            "to_rows": receipt_initial_rows(r, db),
+            "to_rows": _arrival_rows(db, r) or receipt_initial_rows(r, db),
             "order_number": None,
             "recipient": None,
+            "direction": "in",
         })
         for t in transfers:
             # For multi-product ship-outs, report only this receipt's portion (line.cases_picked)
@@ -1059,13 +1141,17 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
                 "purchase_order": None,
                 "bol": None,
                 "recipient": None,
+                # Only a ship-out leaves stock. A rack move, a staging pull or a
+                # return is the same material somewhere else; showing them as
+                # minus made one truck's timeline sum to -4,518 lb.
+                "direction": "out" if t.transfer_type == "shipped-out" else "move",
             })
         for a in adjustments:
             timeline.append({
                 "event": a.adjustment_type.replace("-", " ").title(),
                 "event_type": a.adjustment_type,
                 "date": a.approved_at,
-                "qty": round(float(a.quantity or 0), 2),
+                "qty": round(abs(float(a.quantity or 0)), 2),
                 "notes": a.reason or None,
                 "submitted_by": user_name(db, a.submitted_by),
                 "submitted_at": a.submitted_at,
@@ -1079,6 +1165,8 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
                 "purchase_order": None,
                 "bol": None,
                 "recipient": a.recipient,
+                # A negative quantity is a correction that put stock back.
+                "direction": "in" if float(a.quantity or 0) < 0 else "out",
             })
         for h in holds:
             timeline.append({
@@ -1086,6 +1174,7 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
                 "event_type": f"hold-{h.action}",
                 "date": h.approved_at,
                 "qty": h.total_quantity or 0,
+                "direction": "none",
                 "notes": h.reason or None,
                 "submitted_by": user_name(db, h.submitted_by),
                 "submitted_at": h.submitted_at,
@@ -1105,6 +1194,7 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             timeline.append({
                 "event": "Inter-Warehouse Transfer",
                 "event_type": "inter-warehouse-transfer",
+                "direction": "out",
                 "date": iwt.received_at or iwt.confirmed_at or iwt.initiated_at,
                 "qty": round(float(iwt.quantity or 0), 2),
                 "notes": iwt.notes or None,
@@ -1122,7 +1212,7 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
                 "recipient": None,
             })
 
-        timeline.sort(key=lambda e: (e["date"] or datetime.min))
+        timeline.sort(key=lambda e: _sort_dt(e["date"]))
 
         result.append({
             "receipt_id": r.id,
@@ -1134,7 +1224,7 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             "vendor_name": vname,
             "receipt_date": r.receipt_date,
             "production_date": r.production_date,
-            "expiration_date": r.expiration_date,
+            "expiration_date": calendar_day(r.expiration_date),
             "initial_quantity": round(init_qty, 2),
             "current_quantity": round(float(r.quantity or 0), 2),
             "unit": r.unit or "cases",
@@ -1148,6 +1238,8 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             "bol": r.bol,
             "timeline": timeline,
         })
+
+    result = _merge_lot_deliveries(db, receipts, result)
 
     containers = _lot_trace_containers(db, lot_number, warehouse_id)
 
@@ -1164,6 +1256,95 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             "partial": bool(result) and bool(containers),
         },
     }
+
+
+def _arrival_rows(db: Session, receipt: Receipt) -> list:
+    """Where a lot-tracked receipt's drums ARRIVED, from the receiving ledger.
+
+    The allocation JSON is the lot's CURRENT rack picture, so the "Received"
+    entry used to list wherever the drums happen to be today (2026-10-01).
+    Receiving scans are ledger events keyed to the receipt — undo events net
+    out — so they say where each truck was put away."""
+    if not receipt.material_lot_id:
+        return []
+    from app.models import LotPlacementEvent, MaterialLot
+
+    events = (
+        db.query(LotPlacementEvent)
+        .filter(
+            LotPlacementEvent.ref_type.in_(("receipt", "receiving")),
+            LotPlacementEvent.ref_id == receipt.id,
+        )
+        .all()
+    )
+    units_by_row: dict = {}
+    for ev in events:
+        units_by_row[ev.storage_row_id] = units_by_row.get(ev.storage_row_id, 0) + int(
+            ev.full_units_delta or 0
+        )
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    per = float(receipt.weight_per_container or 0) or float(getattr(lot, "weight_per_unit", 0) or 0)
+    unit = receipt.unit or "lbs"
+    rows = []
+    for row_id, units in units_by_row.items():
+        if units <= 0:
+            continue
+        row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
+        rows.append({
+            "row": row.name if row else row_id,
+            "qty": round(units * per, 2) if per else units,
+            "unit": unit if per else (getattr(lot, "unit_label", None) or "units"),
+        })
+    return rows
+
+
+def _merge_lot_deliveries(db: Session, receipts: list, entries: list) -> list:
+    """One trace entry per LOT for lot-tracked material, not one per truck.
+
+    Drums within a lot are interchangeable and consumption spills across its
+    receipts, so per-truck timelines could not add up: the 5,800 lb staging
+    use was booked against a truck that brought 5,020 (2026-10-01). Each
+    delivery keeps its own "Received" event; everything else is the lot's.
+    Legacy receipts (no material lot) are left exactly as they were."""
+    by_id = {r.id: r for r in receipts}
+    groups: dict = {}
+    order: list = []
+    for e in entries:
+        lot_id = getattr(by_id.get(e["receipt_id"]), "material_lot_id", None)
+        key = lot_id or e["receipt_id"]
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(e)
+
+    merged = []
+    for key in order:
+        group = groups[key]
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        group.sort(key=lambda e: _sort_dt(e.get("receipt_date") or e.get("submitted_at")))
+        first = dict(group[0])
+        for e in group:
+            for ev in e["timeline"]:
+                if ev.get("event_type") == "received" and len(group) > 1:
+                    ev["event"] = f"Received (delivery {group.index(e) + 1} of {len(group)})"
+        first["timeline"] = sorted(
+            (ev for e in group for ev in e["timeline"]),
+            key=lambda ev: _sort_dt(ev["date"]),
+        )
+        first["receipt_ids"] = [e["receipt_id"] for e in group]
+        first["deliveries"] = len(group)
+        first["initial_quantity"] = round(sum(e["initial_quantity"] for e in group), 2)
+        first["current_quantity"] = round(sum(e["current_quantity"] for e in group), 2)
+        first["on_hold"] = any(e["on_hold"] for e in group)
+        live = [e for e in group if e["status"] != ReceiptStatus.DEPLETED]
+        first["status"] = (live or group)[0]["status"]
+        for field in ("bol", "purchase_order"):
+            vals = [e[field] for e in group if e.get(field)]
+            first[field] = ", ".join(dict.fromkeys(vals)) or None
+        merged.append(first)
+    return merged
 
 
 def _lot_trace_containers(
@@ -1210,7 +1391,7 @@ def _lot_trace_containers(
             "sequence": c.sequence,
             "product_name": product_info(db, c.product_id)[0],
             "vendor_lot": c.vendor_lot,
-            "bbd": c.bbd,
+            "bbd": calendar_day(c.bbd),
             "status": c.status,
             "is_held": c.is_held,
             "net_weight": c.net_weight,
@@ -1444,7 +1625,7 @@ def build_expiry_alerts(
             "product_code": pcode,
             "category_name": cname,
             "category_type": ctype,
-            "expiration_date": exp_dt,
+            "expiration_date": calendar_day(exp_dt),
             "days_until_expiry": days_until,
             "urgency_bucket": bucket,
             "quantity": round(float(r.quantity or 0), 2),
@@ -1453,7 +1634,7 @@ def build_expiry_alerts(
         })
 
     bucket_order = ["expired", "0-30 days", "31-60 days", "61-90 days", "90+ days"]
-    rows.sort(key=lambda x: (bucket_order.index(x["urgency_bucket"]), x["expiration_date"] or datetime.max))
+    rows.sort(key=lambda x: (bucket_order.index(x["urgency_bucket"]), x["expiration_date"] or "9999-12-31"))
 
     bucket_summary: dict = {}
     for r in rows:
@@ -1762,43 +1943,71 @@ def build_reconciliation_report(
             "approved_by": user_name(db, t.approved_by),
         })
 
-    # 3 ─ per-lot paper vs racks (container counts, the reliable currency)
-    placed_sub = (
-        db.query(
-            LotPlacement.material_lot_id.label("lot_id"),
-            func.coalesce(func.sum(LotPlacement.full_units + LotPlacement.open_units), 0)
-            .label("racked_units"),
-        )
-        .group_by(LotPlacement.material_lot_id)
-        .subquery()
-    )
-    paper_q = (
-        db.query(
-            MaterialLot,
-            func.coalesce(func.sum(Receipt.container_count), 0).label("paper_units"),
-            func.coalesce(placed_sub.c.racked_units, 0).label("racked_units"),
-        )
-        .join(Receipt, and_(
-            Receipt.material_lot_id == MaterialLot.id,
-            Receipt.status == ReceiptStatus.APPROVED,
-        ))
-        .outerjoin(placed_sub, placed_sub.c.lot_id == MaterialLot.id)
-        .group_by(MaterialLot.id, placed_sub.c.racked_units)
-    )
+    # 3 ─ per-lot paper vs physical, in containers.
+    #
+    # Paper is what the receipts still claim NOW (quantity ÷ that receipt's
+    # own lbs per drum, approved AND depleted), and physical is what is
+    # racked plus what is out in staging (still on paper until production's
+    # consumption lands). The old check summed the frozen as-delivered
+    # container_count of approved receipts only, so every lot that had any
+    # consumption, write-off or drums in staging raised a false alarm
+    # (2026-10-01 e2e). Open drums count by their remaining weight, and a
+    # gap under half a drum is rounding across mixed-weight deliveries.
+    from app.models import StagingItem
+
+    lots_q = db.query(MaterialLot).filter(MaterialLot.is_deleted == False)  # noqa: E712
     if warehouse_id:
-        paper_q = paper_q.filter(MaterialLot.warehouse_id == warehouse_id)
+        lots_q = lots_q.filter(MaterialLot.warehouse_id == warehouse_id)
     imbalance_rows = []
-    for lot, paper_units, racked_units in paper_q.all():
-        if int(round(paper_units or 0)) == int(racked_units or 0):
+    for lot in lots_q.all():
+        receipts = db.query(Receipt).filter(
+            Receipt.material_lot_id == lot.id,
+            Receipt.status.in_((ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED)),
+        ).all()
+        if not receipts:
+            continue
+        lot_w = float(lot.weight_per_unit or 0)
+        paper_units = 0.0
+        staged_units = 0.0
+        unpriced = False
+        for r in receipts:
+            w = float(r.weight_per_container or 0) or lot_w
+            if w <= 0:
+                unpriced = True
+                break
+            paper_units += float(r.quantity or 0) / w
+            for si in db.query(StagingItem).filter(
+                StagingItem.receipt_id == r.id,
+                StagingItem.status.in_(("staged", "partially_used", "partially_returned")),
+            ).all():
+                staged_units += max(0.0, (
+                    float(si.quantity_staged or 0) - float(si.quantity_used or 0)
+                    - float(si.quantity_returned or 0)
+                ) / w)
+        if not unpriced and lot_w > 0:
+            from app.services.staging_pull_service import on_cart_quantity_for_lot
+            staged_units += on_cart_quantity_for_lot(db, lot.id) / lot_w
+        if unpriced:
+            # No weight anywhere: fall back to whole containers as delivered.
+            paper_units = float(sum(int(r.container_count or 0) for r in receipts
+                                    if r.status == ReceiptStatus.APPROVED))
+        racked_units = 0.0
+        for p in db.query(LotPlacement).filter(LotPlacement.material_lot_id == lot.id).all():
+            racked_units += int(p.full_units or 0)
+            if int(p.open_units or 0):
+                racked_units += (float(p.open_remaining_qty or 0) / lot_w) if lot_w > 0 \
+                    else int(p.open_units or 0)
+        physical = racked_units + staged_units
+        if abs(paper_units - physical) < 0.5:
             continue
         pname, _pcode = product_info(db, lot.product_id)
         imbalance_rows.append({
             "lot_code": lot.lot_code,
             "product_name": pname,
             "unit_label": lot.unit_label,
-            "paper_units": int(round(paper_units or 0)),
-            "racked_units": int(racked_units or 0),
-            "difference": int(racked_units or 0) - int(round(paper_units or 0)),
+            "paper_units": int(round(paper_units)),
+            "racked_units": int(round(racked_units)),
+            "difference": int(round(physical - paper_units)),
         })
 
     return {

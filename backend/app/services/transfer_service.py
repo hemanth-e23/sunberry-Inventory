@@ -7,7 +7,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Receipt, InventoryTransfer, MaterialLot, StorageRow, StorageArea, PalletLicence, Category
+    Receipt, InventoryTransfer, MaterialLot, StorageRow, StorageArea, PalletLicence, Category,
+    StagingItem,
 )
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus
 from app.exceptions import ForbiddenError, ValidationError
@@ -107,14 +108,45 @@ def lot_scoped_availability(
     reserved = open_reserved_for_receipts(
         db, [r.id for r in pool], exclude_id=exclude_transfer_id
     )
+    # Drums out in staging are still on paper (paper drops when production's
+    # consumption lands) but are no longer on any rack. Counting them offered
+    # 10,040 lb for transfer/write-off with 4,016 lb racked (2026-10-01 e2e).
+    staged = sum(
+        float(si.quantity_staged or 0) - float(si.quantity_used or 0)
+        - float(si.quantity_returned or 0)
+        for si in db.query(StagingItem).filter(
+            StagingItem.receipt_id.in_([r.id for r in pool]),
+            StagingItem.status.in_(("staged", "partially_used", "partially_returned")),
+        ).all()
+    )
+    if receipt.material_lot_id:
+        # Pulled on the gun, not yet submitted: off the rack, still on paper.
+        from app.services.staging_pull_service import on_cart_quantity_for_lot
+        staged += on_cart_quantity_for_lot(db, receipt.material_lot_id)
+    staged = max(0.0, staged)
     return {
-        "available": total - held - reserved,
+        "available": total - held - reserved - staged,
         "total": total,
         "held": held,
         "reserved": reserved,
+        "staged": staged,
         "lot_label": receipt.lot_number or receipt.id,
     }
 
+
+
+def describe_qty(receipt: Receipt, qty: float) -> str:
+    """'3012 lbs (6 drums)' — a refusal in bare pounds left a clerk who typed
+    drums guessing (2026-10-01). Drums only when the receipt knows its weight."""
+    unit = receipt.unit or "units"
+    text = f"{qty:g} {unit}"
+    per = float(receipt.weight_per_container or 0)
+    if per > 0:
+        word = receipt.container_unit or "containers"
+        if not word.endswith("s"):
+            word += "s"
+        text += f" ({qty / per:.4g} {word})"
+    return text
 
 def lot_hold_blocks(db: Session, receipt: Receipt) -> bool:
     """True when the receipt's material lot is under a QA hold. The per-receipt
@@ -127,6 +159,26 @@ def lot_hold_blocks(db: Session, receipt: Receipt) -> bool:
     return bool(lot is not None and lot.is_held)
 
 
+def reproject_receipt_lot(db: Session, receipt: Receipt) -> None:
+    """Re-run the rack projection after a PAPER-only change to a lot's receipts.
+
+    `project_lot` picks the newest LIVE receipt to carry the rack picture the
+    forms read. Rack mutations re-project, but paper changes (consumption,
+    ship-out spill, write-off spill) can deplete that carrier afterwards — and
+    the forms only list receipts with quantity > 0, so every drum of the lot
+    vanished from the Transfer and Adjustment screens while 7 stood on the
+    racks (2026-10-01 e2e). Idempotent; legacy (uncounted) lots are left alone
+    because projecting them from zero placements would wipe their JSON."""
+    if not receipt.material_lot_id:
+        return
+    if not lps.is_counted_lot(db, receipt.material_lot_id):
+        return
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    if lot is not None:
+        db.flush()
+        lps.project_lot(db, lot)
+
+
 def spill_receipt_deduction(db: Session, receipt: Receipt, amount: float) -> None:
     """Decrement paper quantity by `amount`, spilling any excess across the
     lot's other open receipts (oldest first) instead of clamping at zero.
@@ -136,6 +188,11 @@ def spill_receipt_deduction(db: Session, receipt: Receipt, amount: float) -> Non
     projection-carrier receipt left its siblings holding phantom quantity
     forever — racks said 60, paper said 80 (2026-09-29 finding 1). Callers
     deduct the racks themselves; this only settles the paper."""
+    _spill_deduction_paper(db, receipt, amount)
+    reproject_receipt_lot(db, receipt)
+
+
+def _spill_deduction_paper(db: Session, receipt: Receipt, amount: float) -> None:
     take = min(float(receipt.quantity or 0), float(amount))
     receipt.quantity = float(receipt.quantity or 0) - take
     if receipt.quantity <= 0:
@@ -218,6 +275,7 @@ def spill_receipt_credit(db: Session, receipt: Receipt, amount: float) -> None:
     if remaining > 1e-9:
         # Caps unknown or all full — the lot total still must be right.
         _credit(receipt, remaining, capped=False)
+    reproject_receipt_lot(db, receipt)
 
 
 def _require_unreserved_coverage(

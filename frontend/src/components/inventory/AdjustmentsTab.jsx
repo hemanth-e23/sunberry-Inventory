@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { useAppData } from '../../context/AppDataContext';
 import { useAuth } from '../../context/AuthContext';
 import { useConfirm } from '../../context/ConfirmContext';
@@ -6,7 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct } from '../../utils/rowSources';
+import { buildEntriesForProduct, containersFreed, describeContainers } from '../../utils/rowSources';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
@@ -33,7 +33,10 @@ const AdjustmentsTab = () => {
     subLocationMap,
     storageAreas,
     inventoryAdjustments,
+    inventoryTransfers,
     submitAdjustment,
+    refreshReceipts,
+    refreshTransfers,
     fetchPalletLicences,
   } = useAppData();
 
@@ -113,6 +116,15 @@ const AdjustmentsTab = () => {
 
   const rmAvailableProducts = products.filter(p => p.categoryId === rmForm.categoryId);
 
+  // Fresh numbers the moment a product is picked: receipts approved and
+  // transfers submitted elsewhere since this page loaded were invisible until
+  // a reload, so the form offered drums that were gone or promised (2026-10-01).
+  useEffect(() => {
+    if (!rmForm.productId) return;
+    refreshReceipts?.();
+    refreshTransfers?.();
+  }, [rmForm.productId, refreshReceipts, refreshTransfers]);
+
   // Product-wide breakdown: every place this product physically sits
   const rmEntries = useMemo(() => {
     if (!rmForm.productId) return [];
@@ -122,8 +134,10 @@ const AdjustmentsTab = () => {
       storageAreas,
       locations,
       subLocationMap,
+      pendingTransfers: inventoryTransfers,
+      allReceipts: receipts,
     });
-  }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap]);
+  }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap, inventoryTransfers, receipts]);
 
   // Proportional pallets-out suggestion for one source row (editable guess).
   const suggestedPalletsOut = (entry, displayQty) => {
@@ -133,6 +147,8 @@ const AdjustmentsTab = () => {
   };
   // Effective pallets-out: explicit override wins, else the suggestion.
   const resolvePalletsOut = (entry, displayQty) => {
+    // Drum room holding drums: the footprint is the drum count, not a question.
+    if (entry.footprintIsContent) return containersFreed(entry, displayQty);
     const v = rmPalletSelections[entry.key];
     if (v !== undefined) return Math.max(0, Number(v) || 0);
     return suggestedPalletsOut(entry, displayQty);
@@ -527,11 +543,17 @@ const AdjustmentsTab = () => {
                           <label>
                             <span>
                               Lot {entry.lotNumber} · {entry.locationLabel}
-                              {' — '}{availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} avail
+                              {' — '}{describeContainers(entry)
+                                ?? `${availDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${entry.displayUnit}`} avail
                               {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
                               {Number(entry.heldUnits) > 0 && (
                                 <span style={{ color: 'var(--color-danger, #b91c1c)', fontWeight: 600 }}>
                                   {' '}· {entry.heldUnits} on hold
+                                </span>
+                              )}
+                              {Number(entry.reservedWeight) > 0 && (
+                                <span style={{ color: 'var(--color-text-muted, #6b7280)', fontWeight: 600 }}>
+                                  {' '}· {(entry.reservedWeight / (entry.displayFactor || 1)).toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} on pending transfers
                                 </span>
                               )}
                             </span>
@@ -540,7 +562,12 @@ const AdjustmentsTab = () => {
                               min="0"
                               max={availDisp}
                               step="any"
-                              value={dispQty}
+                              // Nothing free here (all on hold or promised to
+                              // transfers): the label above says why. Leaving it
+                              // editable produced the browser's bare "Value must
+                              // be 0." on a held lot.
+                              disabled={availDisp <= 0}
+                              value={availDisp <= 0 ? '' : dispQty}
                               onChange={(e) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
                               placeholder="0"
                             />
@@ -554,7 +581,7 @@ const AdjustmentsTab = () => {
                               boxes per rack were also what made this grid wrap
                               mid-pair so you could not tell which pallet box
                               belonged to which rack. */}
-                          {entry.rowId && !entry.isCounted && (
+                          {entry.rowId && !entry.isCounted && !entry.footprintIsContent && (
                             <label>
                               <span>
                                 ↳ {entry.footprintUnit === 'pallets' ? 'Pallets' : entry.footprintUnit.replace(/^./, c => c.toUpperCase())} emptied from this row
