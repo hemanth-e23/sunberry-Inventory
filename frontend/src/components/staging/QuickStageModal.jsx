@@ -11,6 +11,7 @@ import {
   lotAllocationQty,
   rackAllocationQty,
 } from '../../utils/stagingDesk';
+import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 
 /**
  * QuickStageModal
@@ -197,7 +198,7 @@ const QuickStageModal = ({
         if (lot.full_units != null || lot.open_units != null) {
           const word = suggestion.unit_label || 'unit';
           const parts = [];
-          if (lot.full_units) parts.push(`${lot.full_units} ${word}${lot.full_units === 1 ? '' : 's'}`);
+          if (lot.full_units) parts.push(`${lot.full_units} ${lot.full_units === 1 ? singularUnit(word) : pluralizeUnit(singularUnit(word))}`);
           if (lot.open_units) parts.push(`${lot.open_units} open`);
           containerInfo = ` (${parts.join(' + ')})`;
         } else if (
@@ -547,8 +548,8 @@ const QuickStageModal = ({
                           {lot.available_quantity.toLocaleString()} {lot.unit || ''}
                           {lot.is_counted ? (
                             <div style={{ fontSize: '0.7rem', color: '#666' }}>
-                              {lot.available_units || 0} {lot.unit_label || 'unit'}
-                              {(lot.available_units || 0) === 1 ? '' : 's'}
+                              {lot.available_units || 0}{' '}
+                              {(lot.available_units || 0) === 1 ? singularUnit(lot.unit_label || 'unit') : pluralizeUnit(singularUnit(lot.unit_label || 'unit'))}
                               {(lot.open_units || 0) > 0 && (
                                 <span style={{ color: '#b45309', fontWeight: 600 }}>
                                   {' '}+ {lot.open_units} open (
@@ -625,7 +626,7 @@ const QuickStageModal = ({
                                         min="0"
                                         max={r.available_units || 0}
                                         step="1"
-                                        aria-label={`${lot.unit_label || 'unit'}s from ${r.storage_row_name}`}
+                                        aria-label={`${pluralizeUnit(singularUnit(lot.unit_label || 'unit'))} from ${r.storage_row_name}`}
                                         value={a.full ?? 0}
                                         onChange={(e) => {
                                           const n = Math.max(0, Math.min(
@@ -644,7 +645,7 @@ const QuickStageModal = ({
                                             min="0"
                                             max={r.open_units}
                                             step="1"
-                                            aria-label={`open ${lot.unit_label || 'unit'}s from ${r.storage_row_name}`}
+                                            aria-label={`open ${pluralizeUnit(singularUnit(lot.unit_label || 'unit'))} from ${r.storage_row_name}`}
                                             value={a.open ?? 0}
                                             onChange={(e) => {
                                               const n = Math.max(0, Math.min(

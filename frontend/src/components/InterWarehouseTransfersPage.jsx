@@ -8,6 +8,7 @@ import { formatDate, formatDateTime } from '../utils/dateUtils';
 import {
   ArrowRightLeft, Plus, RefreshCw, ChevronDown, ChevronUp, X
 } from 'lucide-react';
+import { pluralizeUnit, singularUnit } from '../utils/rowSources';
 
 const STATUS_CONFIG = {
   initiated:           { label: 'Initiated',            color: '#3b82f6', bg: '#eff6ff' },
@@ -338,16 +339,16 @@ function InitiateModal({ onClose, onCreated }) {
           {selectedReceipt?.weight_per_container && selectedReceipt?.container_unit && (
             <div style={{ marginBottom: 14, background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8, padding: '10px 14px' }}>
               <div style={{ fontSize: 12, color: '#0369a1', fontWeight: 600, marginBottom: 6 }}>
-                1 {selectedReceipt.container_unit} = {selectedReceipt.weight_per_container} {form.unit}
+                1 {singularUnit(selectedReceipt.container_unit)} = {selectedReceipt.weight_per_container} {form.unit}
                 {selectedReceipt.container_count && (
                   <span style={{ fontWeight: 400, marginLeft: 8 }}>
-                    ({Math.round(selectedReceipt.container_count)} {selectedReceipt.container_unit}s available in this lot)
+                    ({Math.round(selectedReceipt.container_count)} {pluralizeUnit(singularUnit(selectedReceipt.container_unit))} available in this lot)
                   </span>
                 )}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', whiteSpace: 'nowrap' }}>
-                  # of {selectedReceipt.container_unit}s:
+                  # of {pluralizeUnit(singularUnit(selectedReceipt.container_unit))}:
                 </label>
                 <input
                   style={{ ...inputStyle, width: 100 }}
@@ -1115,7 +1116,7 @@ const TransferCard = memo(function TransferCard({ transfer, currentUser, onActio
               {transfer.quantity.toLocaleString()} {transfer.unit}
               {transfer.source_receipt?.weight_per_container && transfer.source_receipt?.container_unit && (
                 <span style={{ color: '#9ca3af', marginLeft: 4 }}>
-                  (~{Math.round(transfer.quantity / transfer.source_receipt.weight_per_container)} {transfer.source_receipt.container_unit}s)
+                  (~{Math.round(transfer.quantity / transfer.source_receipt.weight_per_container)} {pluralizeUnit(singularUnit(transfer.source_receipt.container_unit))})
                 </span>
               )}
             </span>
@@ -1143,7 +1144,7 @@ const TransferCard = memo(function TransferCard({ transfer, currentUser, onActio
             const s = transfer.status;
             const sr = transfer.source_receipt;
             const barrelHint = sr?.weight_per_container && sr?.container_unit
-              ? ` (~${Math.round(transfer.quantity / sr.weight_per_container)} ${sr.container_unit}s)`
+              ? ` (~${Math.round(transfer.quantity / sr.weight_per_container)} ${pluralizeUnit(singularUnit(sr.container_unit))})`
               : '';
             const qty = `${transfer.quantity.toLocaleString()} ${transfer.unit}${barrelHint}`;
             const prod = transfer.product?.name || transfer.product_id;

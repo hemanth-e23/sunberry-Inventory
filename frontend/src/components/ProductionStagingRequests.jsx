@@ -5,13 +5,19 @@ import { useAppData } from '../context/AppDataContext';
 import { getDashboardPath } from '../App';
 import apiClient from '../api/client';
 import { formatDate, formatDateKey, formatDateTime, escapeHtml, getTodayDateKey } from '../utils/dateUtils';
-import { closeOutAvailable, isOverdue as isPastProductionDay } from '../utils/stagingDesk';
+import {
+  closeOutAvailable, effectiveRequestStatus, isOverdue as isPastProductionDay, loadCloseOutData,
+  stagedLinesSummary,
+} from '../utils/stagingDesk';
 import './StagingOverview.css'; // Re-use staging styles
-import { STAGING_ITEM_STATUS, STAGING_REQUEST_STATUS } from '../constants';
+import { ROLES, STAGING_ITEM_STATUS, STAGING_REQUEST_STATUS } from '../constants';
 import QuickStageModal from './staging/QuickStageModal';
 import MarkUsedModal from './staging/MarkUsedModal';
 import ReturnModal from './staging/ReturnModal';
 import CloseOutModal from './staging/CloseOutModal';
+
+// Mirrors backend APPROVAL_ROLES: who may close out on local figures (N5).
+const APPROVAL_ROLES = [ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN, ROLES.CORPORATE_ADMIN];
 
 const ProductionStagingRequests = () => {
   const navigate = useNavigate();
@@ -236,11 +242,11 @@ const ProductionStagingRequests = () => {
   const openCloseOutModal = async (sr) => {
     setCloseOutProps({ requestId: sr.id, data: null, loading: true, error: null });
     try {
-      await apiClient.post(`/service/staging-requests/${sr.id}/sync`, {});
-      const resp = await apiClient.get(
-        `/service/staging-requests/${sr.id}/close-out-data`
-      );
-      setCloseOutProps({ requestId: sr.id, data: resp.data, loading: false, error: null });
+      // N5: Production unreachable → this system's own figures, flagged.
+      const { data, productionError } = await loadCloseOutData(apiClient, sr.id);
+      setCloseOutProps({
+        requestId: sr.id, data, loading: false, error: null, productionError,
+      });
     } catch (err) {
       setCloseOutProps((prev) =>
         prev
@@ -694,8 +700,7 @@ const ProductionStagingRequests = () => {
             const isExpanded = expandedId === sr.id;
             const consolidated = consolidateItemsBySid(sr.items);
             const trackedGroups = consolidated.filter((g) => g.inventory_tracked !== false);
-            const fulfilledCount = trackedGroups.filter((g) => g.allFulfilled).length;
-            const totalCount = trackedGroups.length;
+            const stagedSummary = stagedLinesSummary(trackedGroups);
             const todayKey = getTodayDateKey();
             const isOpen = ![STAGING_REQUEST_STATUS.CLOSED, STAGING_REQUEST_STATUS.CANCELLED].includes(sr.status);
             const isOverdue = isOpen && isPastProductionDay(sr.production_date, todayKey);
@@ -755,11 +760,11 @@ const ProductionStagingRequests = () => {
                       <span>·</span>
                       <span>{formatDate(sr.created_at)}</span>
                       <span>·</span>
-                      <span>{fulfilledCount}/{totalCount} items staged</span>
+                      <span>{stagedSummary.label}</span>
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    {getStatusBadge(sr.status)}
+                    {getStatusBadge(effectiveRequestStatus(sr.status, trackedGroups))}
                     <span style={{ fontSize: '1.2rem', color: '#6c757d' }}>{isExpanded ? '▲' : '▼'}</span>
                   </div>
                 </div>
@@ -906,6 +911,8 @@ const ProductionStagingRequests = () => {
           data={closeOutProps.data}
           loading={closeOutProps.loading}
           error={closeOutProps.error}
+          productionError={closeOutProps.productionError}
+          canCloseWithoutProduction={APPROVAL_ROLES.includes(user?.role)}
           onClose={() => setCloseOutProps(null)}
           onSuccess={fetchRequests}
         />

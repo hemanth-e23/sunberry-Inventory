@@ -554,9 +554,10 @@ def _take_exact_containers(
                 )
                 want_open -= 1
         if want_open > 0:
-            word = lot.unit_label or "unit"
+            from app.constants import pluralize_unit
+            word = pluralize_unit(lot.unit_label or "unit")
             raise ValidationError(
-                f"There are not enough opened {word}s of this lot "
+                f"There are not enough opened {word} of this lot "
                 f"{'on that rack' if source_row_id else 'on the racks'}. "
                 "Refresh the lot list and try again."
             )
@@ -1133,6 +1134,8 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
         db, receipt, request.to_storage_row_id,
         request.to_location_id, getattr(request, "to_sub_location_id", None),
     )
+    if not request.to_location_id:
+        raise ValidationError("Pick the rack (or the location) the material went back to.")
 
     transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == staging_item.transfer_id).first()
     if not transfer:
@@ -1186,14 +1189,28 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
                 MaterialLot.id == receipt.material_lot_id
             ).first()
             if lot:
+                # The dialog's split (N7): full sealed drums + the weighed
+                # remainder, checked at the staged drums' own weight — the
+                # same call the Production Requests return makes.
+                full_units = getattr(request, "full_units", None)
+                weighed = getattr(request, "weighed_partial_qty", None)
+                split = {}
+                per_unit = staged_unit_weight(staging_item, receipt)
+                if full_units is not None or weighed is not None:
+                    split = {"full_units": full_units, "weighed_partial_qty": weighed}
+                    per_unit = return_split_unit_weight(
+                        db, lot, staging_item, receipt,
+                        quantity=float(request.quantity), **split,
+                    )
                 lps.return_units(
                     db, lot,
                     quantity=float(request.quantity),
                     to_row_id=request.to_storage_row_id,
-                    per_unit_weight=staged_unit_weight(staging_item, receipt),
+                    per_unit_weight=per_unit,
                     ref_type="staging",
                     ref_id=staging_item.id,
                     reason="Returned from staging",
+                    **split,
                 )
         else:
             # Content + explicit pallets onto the chosen row, tracked

@@ -16,10 +16,12 @@ import { isTerminal, useLotScanQueue } from '../../hooks/useLotScanQueue';
 import { useScanFocusKeeper } from '../../hooks/useScanFocusKeeper';
 import { useGunRacks } from '../../hooks/useGunRacks';
 import { decodeLotPayload } from '../../utils/labelPayload';
-import { readCached, saveCached, sessionCacheKey } from '../../utils/gunCache';
 import {
-  needsPalletCheck, offlineMessage, palletCheckKey, queuedScanLabel, rackFillLabel,
-  scanUnitsBadge, unitCount,
+  findCachedRack, readCached, saveCached, sessionCacheKey,
+} from '../../utils/gunCache';
+import {
+  offlineMessage, palletCheckKey, queuedScanLabel, rackFillLabel,
+  scanUnitsBadge, shouldAskPallet, unitCount,
 } from '../../utils/truckReceiving';
 import {
   apiErrorMessage, getReceivingSession,
@@ -107,6 +109,11 @@ const SessionView = ({ receiptId }) => {
   // The pallet-or-bag question (U2) and the (rack) answers already given.
   const [palletAsk, setPalletAsk] = useState(null);
   const palletConfirmed = useRef(new Set());
+  // N2: racks where the worker answered "One bag". Every scan onto such a
+  // rack books ONE until the worker taps the pallet button (`oneBagRows`);
+  // and even then the next pallet there is asked about first (`saidOneBag`).
+  const [oneBagRows, setOneBagRows] = useState(() => new Set());
+  const saidOneBag = useRef(new Set());
 
   // Sticky rack context. Deliberately NOT persisted across a reload: a rack
   // restored from storage is a guessed location, and under lot identity a wrong
@@ -431,8 +438,14 @@ const SessionView = ({ receiptId }) => {
     // deliberately not matched — row names are NOT unique, and that is the
     // fuzzy path that puts drums in the wrong barn.
     const fromCache = () => {
-      const upper = code.toUpperCase();
-      const hit = rowsRef.current.find((r) => (r.barcode || '').toUpperCase() === upper);
+      // Barcode, then a unique exact name — as the server does (N6).
+      const { row: hit, ambiguous } = findCachedRack(rowsRef.current, code);
+      if (ambiguous.length) {
+        return {
+          row: null,
+          error: `"${code}" is the name of ${ambiguous.length} racks — scan the rack's barcode label instead.`,
+        };
+      }
       return { row: hit || null, error: null };
     };
     if (!online) return fromCache();
@@ -464,13 +477,18 @@ const SessionView = ({ receiptId }) => {
         : 'Not put away — scan the rack first (offline, so pick the rack from the list).');
       return;
     }
-    const n = Math.max(1, Number(units) || perScan);
+    const n = Math.max(1, Number(units) || (oneBagRows.has(target.id) ? 1 : perScan));
     // U2: a pallet and a bag of this lot wear the same code. The first
     // pallet-sized scan onto a rack that has none of it yet asks which it was.
     const alreadyThere = (serverRowCounts[target.id] || 0) > 0
       || pendingItems.some((it) => it.payload?.storage_row_id === target.id);
-    if (!reuseKey && !palletChecked && !alreadyThere && needsPalletCheck({
-      unitsPerScan: n, confirmed: palletConfirmed.current, lineId: receiptId, rowId: target.id,
+    if (!reuseKey && !palletChecked && shouldAskPallet({
+      unitsPerScan: n,
+      confirmed: palletConfirmed.current,
+      saidOne: saidOneBag.current,
+      lineId: receiptId,
+      rowId: target.id,
+      alreadyThere,
     })) {
       playErrorTone();
       setPalletAsk({ lotCode, row: target, units: n });
@@ -510,7 +528,7 @@ const SessionView = ({ receiptId }) => {
       // reconciled to rather than the live one.
       ...prev.filter((h) => h.key !== entry.key),
     ].slice(0, HISTORY_LIMIT));
-  }, [row, online, send, receiptId, endpoint, perScan, logRefusal, oneUnit, serverRowCounts,
+  }, [row, online, send, receiptId, endpoint, perScan, oneBagRows, logRefusal, oneUnit, serverRowCounts,
     pendingItems, session]);
 
   const handleScanSubmit = useCallback(async (e) => {
@@ -698,14 +716,36 @@ const SessionView = ({ receiptId }) => {
     const ask = palletAsk;
     setPalletAsk(null);
     if (!ask) return;
+    const key = palletCheckKey(receiptId, ask.row.id);
     if (isPallet) {
-      palletConfirmed.current.add(palletCheckKey(receiptId, ask.row.id));
+      palletConfirmed.current.add(key);
+      saidOneBag.current.delete(key);
       recordUnit(ask.lotCode, { units: ask.units, palletChecked: true, intoRow: ask.row });
     } else {
+      // N2: the answer sticks for this rack — offline included — until the
+      // worker taps the pallet button.
+      palletConfirmed.current.delete(key);
+      saidOneBag.current.add(key);
+      setOneBagRows((prev) => new Set(prev).add(ask.row.id));
       recordUnit(ask.lotCode, { units: 1, palletChecked: true, intoRow: ask.row });
-      showInfo(`Booked 1 ${oneUnit}. More single ones? Switch "Each scan is" to 1.`);
+      showInfo(`Booked 1 ${oneUnit}. Every scan on ${ask.row.name} is now 1 ${oneUnit} — tap "a pallet" to go back.`);
     }
   }, [palletAsk, receiptId, recordUnit, showInfo, oneUnit]);
+
+  // The deliberate way back to pallets (N2) for the current rack. The next
+  // pallet-sized scan there still asks first.
+  const switchToPallet = useCallback(() => {
+    if (session?.units_per_pallet) setPerScan(session.units_per_pallet);
+    const target = row;
+    if (!target) return;
+    setOneBagRows((prev) => {
+      if (!prev.has(target.id)) return prev;
+      const next = new Set(prev);
+      next.delete(target.id);
+      return next;
+    });
+  }, [row, session]);
+  const oneBagHere = !!row && oneBagRows.has(row.id);
 
   /**
    * Racks for the manual picker, in two groups.
@@ -879,22 +919,34 @@ const SessionView = ({ receiptId }) => {
                   scan box, or the next trigger pull goes nowhere (F12). */}
               <button
                 type="button"
-                className={`sir-perscan-btn${perScan === session.units_per_pallet ? ' is-on' : ''}`}
+                className={`sir-perscan-btn${perScan === session.units_per_pallet && !oneBagHere ? ' is-on' : ''}`}
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => setPerScan(session.units_per_pallet)}
+                onClick={switchToPallet}
               >
                 <strong>{session.units_per_pallet}</strong>
                 <span>a pallet</span>
               </button>
               <button
                 type="button"
-                className={`sir-perscan-btn${perScan === 1 ? ' is-on' : ''}`}
+                className={`sir-perscan-btn${perScan === 1 || oneBagHere ? ' is-on' : ''}`}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => setPerScan(1)}
               >
                 <strong>1</strong>
                 <span>single {singularUnit(unit)}</span>
               </button>
+            </div>
+          </div>
+        )}
+        {session?.units_per_pallet > 1 && oneBagHere && (
+          <div className="sir-warn" role="status">
+            <AlertTriangle size={18} />
+            <div>
+              <strong>ONE {oneUnit.toUpperCase()} PER SCAN on {row.name}</strong>
+              <div className="sir-warn-detail">
+                You said &quot;one {oneUnit}&quot;, so every scan here books 1.
+                {' '}Tap &quot;a pallet&quot; to go back to pallets.
+              </div>
             </div>
           </div>
         )}

@@ -9,6 +9,7 @@ import ReceivingCheck from './ReceivingCheck';
 import TruckApprovalCard from './TruckApprovalCard';
 import { approveTruck } from '../../api/lotReceivingApi';
 import { groupReceiptsByTruck } from '../../utils/truckReceiving';
+import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 
 const STATUS_PENDING = new Set([RECEIPT_STATUS.RECORDED, RECEIPT_STATUS.REVIEWED]);
 
@@ -502,7 +503,7 @@ const ReceiptsTab = ({
                     // mistake as an 80-barrel receipt rendering as 80 cases.
                     const units = Number(alloc.units) || 0;
                     const label = units > 0
-                      ? `${units} ${alloc.unitLabel || 'unit'}${units === 1 ? '' : 's'}`
+                      ? `${units} ${units === 1 ? singularUnit(alloc.unitLabel || 'unit') : pluralizeUnit(singularUnit(alloc.unitLabel || 'unit'))}`
                       : `${alloc.pallets || 0} pallets`;
                     if (rowName) {
                       rowInfo.push(`${rowName} (${label})`);

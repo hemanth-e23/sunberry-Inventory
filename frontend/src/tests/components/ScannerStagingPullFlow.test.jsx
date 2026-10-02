@@ -247,9 +247,44 @@ describe('staging pull — one request', () => {
     await screen.findByText('← QA-D1');
     api.resolveRow.mockRejectedValue(new Error('Network Error'));
     scan('QA-D9');
-    expect((await screen.findAllByText(/not a rack saved on this gun, so the rack was NOT changed \(still QA-D1\)/)).length)
-      .toBeGreaterThan(0);
+    // N6: a stop panel titled as a RACK, and the Recent pulls row is not "Lot …".
+    expect(await screen.findByRole('heading', { name: 'Rack "QA-D9" not found' })).toBeInTheDocument();
+    expect(screen.getAllByText(/so the rack was NOT changed — still QA-D1/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Rack "QA-D9"$/)).toBeInTheDocument();
+    expect(screen.queryByText(/Lot QA-D9/)).not.toBeInTheDocument();
     expect(queue.send).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('OK — nothing was pulled'));
+    expect(screen.queryByRole('heading', { name: 'Rack "QA-D9" not found' })).not.toBeInTheDocument();
+  });
+
+  it('N6: offline, a real rack scanned by its NAME resolves from the saved list', async () => {
+    racks.rows = [D1, { id: 'r-p1', name: 'QA-P1', barcode: 'PAW-QA-P1', storage_unit: 'bag' }];
+    api.getStagingPullRequest.mockResolvedValue(requestOf([mango()]));
+    api.resolveRow.mockResolvedValue(D1);
+    renderAt('/forklift/staging-pull/sr1');
+    await screen.findByText('QA Mango Puree');
+    scan('QA-D1');
+    await screen.findByText('← QA-D1');
+    api.resolveRow.mockRejectedValue(new Error('Network Error'));
+    scan('QA-P1');
+    expect(await screen.findByText('← QA-P1')).toBeInTheDocument();
+    expect(screen.queryByText(/not found/)).not.toBeInTheDocument();
+    racks.rows = [];
+  });
+
+  it('N6: offline, a name two racks share is refused loudly, never picked', async () => {
+    racks.rows = [D1, { id: 'a', name: 'A-12', barcode: 'B1-A-12' }, { id: 'b', name: 'A-12', barcode: 'B2-A-12' }];
+    api.getStagingPullRequest.mockResolvedValue(requestOf([mango()]));
+    api.resolveRow.mockResolvedValue(D1);
+    renderAt('/forklift/staging-pull/sr1');
+    await screen.findByText('QA Mango Puree');
+    scan('QA-D1');
+    await screen.findByText('← QA-D1');
+    api.resolveRow.mockRejectedValue(new Error('Network Error'));
+    scan('A-12');
+    expect(await screen.findByRole('heading', { name: 'Rack "A-12" — which one?' })).toBeInTheDocument();
+    expect(screen.getByText('← QA-D1')).toBeInTheDocument();
+    racks.rows = [];
   });
 
   it('B9: Submit greyed while offline says why', async () => {

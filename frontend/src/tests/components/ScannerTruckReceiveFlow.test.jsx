@@ -409,6 +409,39 @@ describe('ScannerTruckReceiveFlow — pallet or bag (U2)', () => {
     fireEvent.click(screen.getByText('One bag — book 1'));
     expect(queue.send.mock.calls[0][2]).toMatchObject({ single: true, est_units: 1 });
   });
+
+  it('N2: after "One bag" every scan of that lot on that rack is 1 — offline too — until Pallet is tapped', async () => {
+    api.getTruck.mockResolvedValue(truckOf([bagLine]));
+    api.resolveRow.mockImplementation(atRack('r-p1', 'P1'));
+    renderTruck();
+    await screen.findByText(/bags are blocked/);
+    scan('QA-P1');
+    await screen.findAllByText('→ P1');
+    scan('SB2|LOT-C|C-0901|20270301');
+    fireEvent.click(screen.getByText('One bag — book 1'));
+    expect(screen.getByText('ONE BAG PER SCAN on P1')).toBeInTheDocument();
+    expect(screen.getByText('Each scan = 1 bag on P1 (you said one)')).toBeInTheDocument();
+
+    // The next scan (the lot is now on the rack, which used to skip the
+    // question and book +40) books ONE bag, no question.
+    await act(async () => { await new Promise((r) => setTimeout(r, 1100)); });
+    scan('SB2|LOT-C|C-0901|20270301');
+    expect(queue.send).toHaveBeenCalledTimes(2);
+    expect(queue.send.mock.calls[1][2]).toMatchObject({ single: true, est_units: 1 });
+    expect(screen.queryByText('Pallet sticker, or one bag?')).not.toBeInTheDocument();
+
+    // Back to pallets on purpose: the banner goes, and the next pallet-sized
+    // scan there is ASKED about, never booked as 40 silently.
+    fireEvent.click(screen.getByText('Pallet'));
+    expect(screen.queryByText('ONE BAG PER SCAN on P1')).not.toBeInTheDocument();
+    await act(async () => { await new Promise((r) => setTimeout(r, 1100)); });
+    scan('SB2|LOT-C|C-0901|20270301');
+    expect(screen.getByText('Pallet sticker, or one bag?')).toBeInTheDocument();
+    expect(queue.send).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByText('PALLET sticker — book 40 bags'));
+    expect(queue.send.mock.calls[2][2]).toMatchObject({ est_units: 40 });
+    expect(queue.send.mock.calls[2][2].single).toBeUndefined();
+  });
 });
 
 describe('ScannerTruckReceiveFlow — racks and holds (U9, U10)', () => {

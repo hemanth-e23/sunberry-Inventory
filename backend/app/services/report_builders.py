@@ -58,6 +58,10 @@ SHIPPED_OUT_STOCK_REMOVED_STATUSES = [
 # received or what is on hand must leave it out (2026-10-01, B3).
 NON_STOCK_RECEIPT_STATUSES = (ReceiptStatus.REJECTED.value,)
 
+# Lot Trace titles for a hold action (N8: `f"Hold {action.title()}"` read
+# "Hold Hold").
+HOLD_EVENT_TITLES = {"hold": "Put on Hold", "release": "Hold Released"}
+
 _AWARE_MIN = datetime.min.replace(tzinfo=timezone.utc)
 
 
@@ -1337,7 +1341,9 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             })
         for h in holds:
             timeline.append({
-                "event": f"Hold {h.action.title()}",
+                # "Put on Hold" / "Hold Released" — never "Hold Hold" (N8).
+                "event": HOLD_EVENT_TITLES.get(
+                    (h.action or "").lower(), f"Hold {(h.action or '').title()}".strip()),
                 "event_type": f"hold-{h.action}",
                 "date": h.approved_at,
                 "qty": h.total_quantity or 0,

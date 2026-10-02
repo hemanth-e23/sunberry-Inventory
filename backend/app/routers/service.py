@@ -466,19 +466,59 @@ def dismiss_staging_request(
 @router.get("/staging-requests/{request_id}/close-out-data")
 async def get_close_out_data(
     request_id: str,
+    skip_production: bool = False,
     db: Session = Depends(get_db),
 ):
-    """Get reconciliation data for Close Out modal."""
-    return await staging_request_service.get_close_out_data(db, request_id)
+    """Get reconciliation data for Close Out modal.
+
+    `skip_production=true` (N5): the desk could not reach the Production app,
+    so the figures are this system's own — staged / used / returned / leftover
+    — and the batch counts are not asked for (no 10 s wait on a dead host).
+    """
+    return await staging_request_service.get_close_out_data(
+        db, request_id, skip_production=skip_production,
+    )
+
+
+class CloseOutBody(BaseModel):
+    # N5: close on this system's figures because the Production app could not
+    # be reached. Supervisor+ only; recorded on the request.
+    without_production: bool = False
+
+
+def _desk_user(authorization: Optional[str], db: Session) -> Optional[User]:
+    """The signed-in desk user behind a Bearer token, or None (API key)."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    from app.utils.auth import verify_token
+    token_data = verify_token(authorization[7:])
+    if not token_data:
+        return None
+    return db.query(User).filter(User.username == token_data.username).first()
 
 
 @router.post("/staging-requests/{request_id}/close-out")
 def close_out_staging_request(
     request_id: str,
+    payload: Optional[CloseOutBody] = None,
+    authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
     """Close out a staging request after reconciliation."""
-    return staging_request_service.close_out_staging_request(db, request_id)
+    body = payload or CloseOutBody()
+    closed_by = None
+    if body.without_production:
+        from app.constants import APPROVAL_ROLES
+        user = _desk_user(authorization, db)
+        if user is None or user.role not in APPROVAL_ROLES:
+            raise HTTPException(
+                status_code=403,
+                detail="Only a supervisor can close out without the Production app's figures.",
+            )
+        closed_by = user.username
+    return staging_request_service.close_out_staging_request(
+        db, request_id, without_production=body.without_production, closed_by=closed_by,
+    )
 
 
 @router.get("/lots/lookup")

@@ -20,6 +20,10 @@ import { formatDate } from '../../utils/dateUtils';
  *                               { request, items, batches_completed, total_batches }
  *   loading    {boolean}        true while close-out data is being loaded
  *   error      {string}         error message from initial load, if any
+ *   productionError {string}    set when the Production app could not be
+ *                               reached (N5): the figures are this system's
+ *                               own, and a supervisor may close on them
+ *   canCloseWithoutProduction {boolean}  supervisor+ (mirrors the server)
  *   onClose    {function}       called when the modal should close
  *   onSuccess  {function}       called after successful close-out so parent can refresh
  */
@@ -28,6 +32,8 @@ const CloseOutModal = ({
   data,
   loading,
   error: loadError,
+  productionError = null,
+  canCloseWithoutProduction = false,
   onClose,
   onSuccess,
 }) => {
@@ -38,6 +44,9 @@ const CloseOutModal = ({
   const [actionError, setActionError] = useState('');
   const [actionSuccess, setActionSuccess] = useState('');
   const [submittingCloseOut, setSubmittingCloseOut] = useState(false);
+  // N5: the confirm step before closing on this system's figures.
+  const [confirmLocal, setConfirmLocal] = useState(false);
+  const localOnly = Boolean(productionError);
 
   // Inline close-out data state so "Refresh" works without lifting state
   const [localData, setLocalData] = useState(data);
@@ -53,7 +62,8 @@ const CloseOutModal = ({
   const refreshCloseOutData = async () => {
     try {
       const resp = await apiClient.get(
-        `/service/staging-requests/${requestId}/close-out-data`
+        `/service/staging-requests/${requestId}/close-out-data`,
+        localOnly ? { params: { skip_production: true } } : undefined,
       );
       setLocalData(resp.data);
     } catch (err) {
@@ -70,14 +80,20 @@ const CloseOutModal = ({
       );
       return;
     }
+    if (localOnly && !confirmLocal) {
+      setConfirmLocal(true);
+      return;
+    }
     setSubmittingCloseOut(true);
     setActionError('');
     try {
       await apiClient.post(
         `/service/staging-requests/${requestId}/close-out`,
-        {}
+        localOnly ? { without_production: true } : {}
       );
-      const successMsg = 'Staging request closed.';
+      const successMsg = localOnly
+        ? 'Staging request closed on this system\'s figures (no Production data).'
+        : 'Staging request closed.';
       addToast(successMsg, 'success');
       if (onSuccess) onSuccess();
       onClose();
@@ -88,6 +104,7 @@ const CloseOutModal = ({
       addToast(errMsg, 'error');
     } finally {
       setSubmittingCloseOut(false);
+      setConfirmLocal(false);
     }
   };
 
@@ -131,6 +148,9 @@ const CloseOutModal = ({
   };
 
   const hasLeftover = localData?.items?.some((i) => (i.leftover || 0) > 0.001);
+  // Without Production's figures only a supervisor may close (server agrees).
+  const closeBlocked = submittingCloseOut || hasLeftover
+    || (localOnly && !canCloseWithoutProduction);
 
   return (
     <>
@@ -169,9 +189,10 @@ const CloseOutModal = ({
                   {localData.request?.product_name} ·{' '}
                   {localData.request?.production_date
                     ? formatDate(localData.request.production_date + 'T12:00:00')
-                    : ''}{' '}
-                  · {localData.batches_completed}/{localData.total_batches}{' '}
-                  batches completed
+                    : ''}
+                  {localOnly
+                    ? ' · batches: not known (Production not reached)'
+                    : ` · ${localData.batches_completed}/${localData.total_batches} batches completed`}
                 </p>
               )}
             </div>
@@ -243,6 +264,34 @@ const CloseOutModal = ({
             </div>
           ) : localData ? (
             <>
+              {localOnly && (
+                <div
+                  role="alert"
+                  style={{
+                    margin: '1rem 1.5rem 0',
+                    padding: '0.75rem 1rem',
+                    background: '#fff7ed',
+                    border: '1px solid #fdba74',
+                    borderRadius: '6px',
+                    color: '#7c2d12',
+                    fontSize: '0.88rem',
+                    lineHeight: 1.45,
+                  }}
+                >
+                  <strong>Production usage could not be fetched.</strong>{' '}
+                  {productionError}
+                  <br />
+                  The figures below are this system&apos;s own: what was staged, marked used
+                  and returned here. Anything the floor used but nobody marked used here shows
+                  as leftover — mark it used (or return it) before closing.
+                  {!canCloseWithoutProduction && (
+                    <>
+                      <br />
+                      Only a supervisor can close out without the Production app&apos;s figures.
+                    </>
+                  )}
+                </div>
+              )}
               <div style={{ padding: '1rem 1.5rem' }}>
                 <table
                   style={{
@@ -438,26 +487,75 @@ const CloseOutModal = ({
                 >
                   Refresh
                 </button>
-                <button
-                  onClick={handleCompleteCloseOut}
-                  disabled={submittingCloseOut || hasLeftover}
-                  style={{
-                    padding: '0.5rem 1.5rem',
-                    borderRadius: '6px',
-                    border: 'none',
-                    backgroundColor:
-                      submittingCloseOut || hasLeftover ? '#6c757d' : '#0d6efd',
-                    color: 'white',
-                    cursor:
-                      submittingCloseOut || hasLeftover
-                        ? 'not-allowed'
-                        : 'pointer',
-                    fontWeight: 600,
-                    fontSize: '0.9rem',
-                  }}
-                >
-                  {submittingCloseOut ? 'Closing...' : 'Complete Close Out'}
-                </button>
+                {confirmLocal && (
+                  <div
+                    role="alertdialog"
+                    style={{
+                      flexBasis: '100%',
+                      padding: '0.6rem 0.85rem',
+                      background: '#fff7ed',
+                      border: '1px solid #fdba74',
+                      borderRadius: '6px',
+                      color: '#7c2d12',
+                      fontSize: '0.85rem',
+                    }}
+                  >
+                    Close out WITHOUT the Production app&apos;s usage? The request is closed on
+                    the figures above, and that is recorded on it.
+                    <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmLocal(false)}
+                        style={{
+                          padding: '0.4rem 0.9rem',
+                          borderRadius: '6px',
+                          border: '1px solid #6c757d',
+                          background: 'white',
+                          color: '#374151',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Go back
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCompleteCloseOut}
+                        disabled={submittingCloseOut}
+                        style={{
+                          padding: '0.4rem 0.9rem',
+                          borderRadius: '6px',
+                          border: 'none',
+                          background: '#c2410c',
+                          color: 'white',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {submittingCloseOut ? 'Closing...' : 'Confirm — close on these figures'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {!confirmLocal && (
+                  <button
+                    onClick={handleCompleteCloseOut}
+                    disabled={closeBlocked}
+                    style={{
+                      padding: '0.5rem 1.5rem',
+                      borderRadius: '6px',
+                      border: 'none',
+                      backgroundColor: closeBlocked ? '#6c757d' : '#0d6efd',
+                      color: 'white',
+                      cursor: closeBlocked ? 'not-allowed' : 'pointer',
+                      fontWeight: 600,
+                      fontSize: '0.9rem',
+                    }}
+                  >
+                    {submittingCloseOut
+                      ? 'Closing...'
+                      : localOnly ? 'Close out on these figures…' : 'Complete Close Out'}
+                  </button>
+                )}
               </div>
             </>
           ) : null}

@@ -2,7 +2,9 @@ import React, { useState, useCallback, useMemo } from "react";
 import { formatDate } from "../../utils/dateUtils";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
-import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
+import {
+  addByUnit, apiFetch, apiError, formatByUnit, formatNumber, singleUnit, today, monthStart, totalLabel,
+} from "./reportUtils";
 import ShipmentDetailModal from "./ShipmentDetailModal";
 
 // Collapse the per-line API rows into one summary row per order (transfer), so
@@ -22,11 +24,13 @@ const groupByOrder = (rows) => {
         notes: r.notes || null,
         products: new Set(),
         total_cases: 0,
+        by_unit: {},
       });
     }
     const g = map.get(key);
     if (r.product_name) g.products.add(r.product_name);
     g.total_cases += Number(r.cases || 0);
+    addByUnit(g.by_unit, r.unit, r.cases);
   }
   return Array.from(map.values()).map((g) => ({ ...g, product_count: g.products.size }));
 };
@@ -80,6 +84,12 @@ const ShipmentsReport = ({ productOptions }) => {
   }, []);
 
   const orderRows = useMemo(() => groupByOrder(shipData?.rows || []), [shipData]);
+  // The unit every shipped line is in, or null when lbs and cases are mixed.
+  const unit = useMemo(() => singleUnit(shipData?.rows || []), [shipData]);
+  const grandByUnit = useMemo(
+    () => (shipData?.rows || []).reduce((acc, r) => addByUnit(acc, r.unit, r.cases), {}),
+    [shipData],
+  );
 
   const orderCols = [
     { label: "Ship Date", value: (r) => formatDate(r.ship_date) },
@@ -90,7 +100,11 @@ const ShipmentsReport = ({ productOptions }) => {
       label: "Products",
       value: (r) => `${r.product_count} ${r.product_count === 1 ? "product" : "products"}`,
     },
-    { label: "Total Cases", className: "num", value: (r) => formatNumber(r.total_cases) },
+    {
+      label: totalLabel(unit),
+      className: "num",
+      value: (r) => (unit ? formatNumber(r.total_cases) : formatByUnit(r.by_unit)),
+    },
     { label: "Created By", value: (r) => r.requested_by || "—" },
     { label: "Approved By", value: (r) => r.approved_by || "—" },
     { label: "", className: "row-action", value: () => "View →" },
@@ -132,7 +146,11 @@ const ShipmentsReport = ({ productOptions }) => {
         <>
           <SummaryCards cards={[
             { label: "Orders", value: formatNumber(orderRows.length) },
-            { label: "Total Cases Shipped", value: formatNumber(shipData.totals?.total_cases), highlight: true },
+            {
+              label: `${totalLabel(unit)} Shipped`,
+              value: unit ? formatNumber(shipData.totals?.total_cases) : formatByUnit(grandByUnit),
+              highlight: true,
+            },
           ]} />
           <div className="reports-section">
             <div className="reports-section-header">

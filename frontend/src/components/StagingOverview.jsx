@@ -1,7 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
+import ReturnModal from './staging/ReturnModal';
+import { pluralizeUnit } from '../utils/rowSources';
 import { getDashboardPath } from '../App';
 import apiClient from '../api/client';
 import { formatDateTime } from '../utils/dateUtils';
@@ -18,8 +21,7 @@ import './Shared.css';
 const stagedFootprintLabel = (item) => {
   const cu = item?.receipt?.container_unit;
   if (!cu) return 'Pallets staged';
-  const word = String(cu);
-  const plural = word.endsWith('s') ? word : (/(x|z|ch|sh)$/.test(word) ? `${word}es` : `${word}s`);
+  const plural = pluralizeUnit(String(cu));
   return `${plural.charAt(0).toUpperCase()}${plural.slice(1)} staged`;
 };
 
@@ -28,7 +30,8 @@ import './StagingOverview.css';
 const StagingOverview = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { products, locations, subLocationMap, storageAreas, receipts } = useAppData();
+  const { products, receipts } = useAppData();
+  const { addToast } = useToast();
 
   const [stagingItems, setStagingItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -39,49 +42,12 @@ const StagingOverview = () => {
 
   // Modal states
   const [showMarkUsedModal, setShowMarkUsedModal] = useState(false);
-  const [showReturnModal, setShowReturnModal] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
   const [markUsedQuantity, setMarkUsedQuantity] = useState('');
-  const [returnQuantity, setReturnQuantity] = useState('');
-  const [returnLocation, setReturnLocation] = useState('');
-  const [returnSubLocation, setReturnSubLocation] = useState('');
-  const [returnStorageRow, setReturnStorageRow] = useState('');
-  const [returnPallets, setReturnPallets] = useState('');
+  // The Return dialog is the Production Requests one (N7): `{ item, details }`.
+  const [returnProps, setReturnProps] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   
-  // Get available storage rows for return location
-  const returnLocationRows = useMemo(() => {
-    if (!returnLocation) return [];
-    const rows = [];
-    storageAreas.forEach(area => {
-      if (area.locationId === returnLocation) {
-        area.rows?.forEach(row => {
-          rows.push({
-            id: row.id,
-            name: `${area.name} / ${row.name}`,
-            available: (row.palletCapacity || 0) - (row.occupiedPallets || 0)
-          });
-        });
-      }
-    });
-    // Also check sub-locations
-    (subLocationMap[returnLocation] || []).forEach(sub => {
-      // Check if sub-location has rows
-      storageAreas.forEach(area => {
-        if (area.subLocationId === sub.id) {
-          area.rows?.forEach(row => {
-            rows.push({
-              id: row.id,
-              name: `${area.name} / ${row.name}`,
-              available: (row.palletCapacity || 0) - (row.occupiedPallets || 0)
-            });
-          });
-        }
-      });
-    });
-    return rows;
-  }, [returnLocation, storageAreas, subLocationMap]);
-
   const productLookup = {};
   products.forEach(p => { productLookup[p.id] = p; });
 
@@ -126,15 +92,35 @@ const StagingOverview = () => {
     setShowMarkUsedModal(true);
   };
 
-  const handleReturn = (item) => {
-    const available = item.quantity_staged - item.quantity_used - item.quantity_returned;
-    setSelectedItem(item);
-    setReturnQuantity(available.toString());
-    setReturnLocation('');
-    setReturnSubLocation('');
-    setReturnStorageRow('');
-    setShowReturnModal(true);
+  // Same dialog as Production Requests (N7): full drums + weighed partial,
+  // any active rack, the original rack by default.
+  const handleReturn = async (item) => {
+    setError('');
+    try {
+      const { data: detail } = await apiClient.get(`/inventory/staging/${item.id}/return-details`);
+      setReturnProps({
+        item: {
+          ingredient_name: productLookup[item.product_id]?.name || 'Unknown',
+          id: item.id,
+        },
+        details: [{ ...detail, lot_number: detail.lot_number ?? item.receipt?.lot_number ?? '—' }],
+      });
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not load this staged item.');
+    }
   };
+
+  const submitReturnDetail = (detail, body) => apiClient.post(
+    `/inventory/staging/${detail.staging_item_id}/return`,
+    {
+      quantity: body.quantity,
+      to_location_id: body.to_location_id || null,
+      to_sub_location_id: body.to_sub_location_id || null,
+      to_storage_row_id: body.to_storage_row_id || null,
+      full_units: body.full_units ?? null,
+      weighed_partial_qty: body.weighed_partial_qty ?? null,
+    },
+  );
 
   const submitMarkUsed = async () => {
     if (!selectedItem || !markUsedQuantity || parseFloat(markUsedQuantity) <= 0) {
@@ -159,7 +145,9 @@ const StagingOverview = () => {
       setMarkUsedQuantity('');
       setError('');
       fetchStagingItems();
-      alert('Item marked as used successfully!');
+      // A toast, never alert(): a native alert blocks the whole tab until it
+      // is dismissed — the "page froze ~1 minute" after Mark as Used (N9).
+      addToast('Marked as used.', 'success');
     } catch (err) {
       console.error('Error marking item as used:', err);
       setError(err.response?.data?.detail || 'Failed to mark item as used.');
@@ -167,52 +155,6 @@ const StagingOverview = () => {
       setIsSubmitting(false);
     }
   };
-
-  const submitReturn = async () => {
-    if (!selectedItem || !returnQuantity || parseFloat(returnQuantity) <= 0) {
-      setError('Please enter a valid quantity.');
-      return;
-    }
-
-    if (!returnLocation) {
-      setError('Please select a return location.');
-      return;
-    }
-
-    const available = selectedItem.quantity_staged - selectedItem.quantity_used - selectedItem.quantity_returned;
-    if (parseFloat(returnQuantity) > available) {
-      const unit = selectedItem.receipt?.unit || receipts.find(r => r.id === selectedItem.receipt_id)?.quantityUnits || 'units';
-      setError(`Cannot return more than available (${available} ${unit}).`);
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      await apiClient.post(`/inventory/staging/${selectedItem.id}/return`, {
-        quantity: parseFloat(returnQuantity),
-        to_location_id: returnLocation,
-        to_sub_location_id: returnSubLocation || null,
-        to_storage_row_id: returnStorageRow || null,
-        pallets: returnPallets === '' ? null : Number(returnPallets),
-      });
-      setShowReturnModal(false);
-      setSelectedItem(null);
-      setReturnQuantity('');
-      setReturnLocation('');
-      setReturnSubLocation('');
-      setReturnStorageRow('');
-      setReturnPallets('');
-      setError('');
-      fetchStagingItems();
-      alert('Item returned successfully!');
-    } catch (err) {
-      console.error('Error returning item:', err);
-      setError(err.response?.data?.detail || 'Failed to return item.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
 
   const filteredItems = stagingItems.filter(item => {
     if (!stagingItemMatchesFilter(item, filterStatus)) {
@@ -451,124 +393,17 @@ const StagingOverview = () => {
         );
       })()}
 
-      {/* Return Modal */}
-      {showReturnModal && selectedItem && (() => {
-        const receipt = receipts.find(r => r.id === selectedItem.receipt_id);
-        const unit = selectedItem.receipt?.unit || receipt?.quantityUnits || 'cases';
-        const available = selectedItem.quantity_staged - selectedItem.quantity_used - selectedItem.quantity_returned;
-        return (
-          <div className="modal-overlay" onClick={() => !isSubmitting && setShowReturnModal(false)}>
-            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-              <h3>Return to Warehouse</h3>
-              <div style={{ marginBottom: '1rem' }}>
-                <p><strong>Product:</strong> {productLookup[selectedItem.product_id]?.name || 'Unknown'}</p>
-                <p><strong>Lot:</strong> {selectedItem.receipt?.lot_number || selectedItem.receipt_id || '-'}</p>
-                <p><strong>Available:</strong> {available.toLocaleString()} {unit}</p>
-                {selectedItem.pallets_staged && (
-                  <p style={{ fontSize: '0.875rem', color: '#666' }}>
-                    <strong>{stagedFootprintLabel(selectedItem)}:</strong> {selectedItem.pallets_staged.toFixed(2)}
-                    {selectedItem.pallets_used > 0 && ` (Used: ${selectedItem.pallets_used.toFixed(2)})`}
-                    {selectedItem.pallets_returned > 0 && ` (Returned: ${selectedItem.pallets_returned.toFixed(2)})`}
-                  </p>
-                )}
-              </div>
-              <label>
-                <span>Quantity to Return ({unit}):</span>
-                <input
-                  type="number"
-                  value={returnQuantity}
-                  onChange={(e) => setReturnQuantity(e.target.value)}
-                  min="0.01"
-                  step="0.01"
-                  required
-                />
-              </label>
-              <label>
-                <span>Return Location <span className="required">*</span>:</span>
-                <select
-                  value={returnLocation}
-                  onChange={(e) => {
-                    setReturnLocation(e.target.value);
-                    setReturnSubLocation('');
-                    setReturnStorageRow('');
-                  }}
-                  required
-                >
-                  <option value="">Select location</option>
-                  {locations.map(loc => (
-                    <option key={loc.id} value={loc.id}>{loc.name}</option>
-                  ))}
-                </select>
-              </label>
-              {returnLocation && (
-                <label>
-                  <span>Return Sub Location:</span>
-                  <select
-                    value={returnSubLocation}
-                    onChange={(e) => {
-                      setReturnSubLocation(e.target.value);
-                      setReturnStorageRow('');
-                    }}
-                  >
-                    <option value="">Select sub location (optional)</option>
-                    {(subLocationMap[returnLocation] || []).map(sub => (
-                      <option key={sub.id} value={sub.id}>{sub.name}</option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              {returnLocation && returnLocationRows.length > 0 && (
-                <label>
-                  <span>Storage Row / Rack (optional):</span>
-                  <select
-                    value={returnStorageRow}
-                    onChange={(e) => setReturnStorageRow(e.target.value)}
-                  >
-                    <option value="">Select row/rack (optional)</option>
-                    {returnLocationRows.map(row => (
-                      <option key={row.id} value={row.id}>
-                        {row.name} (Available: {row.available} pallets)
-                      </option>
-                    ))}
-                  </select>
-                  <p style={{ fontSize: '0.875rem', color: '#666', marginTop: '0.25rem' }}>
-                    Select a specific rack/row to reserve space. Leave empty if not using rack storage.
-                  </p>
-                </label>
-              )}
-            {returnStorageRow && (
-              <label>
-                <span>Pallets returned to this row:</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={returnPallets}
-                  onChange={(e) => setReturnPallets(e.target.value)}
-                  placeholder="Pallets placed back on the rack"
-                />
-              </label>
-            )}
-            <div className="modal-actions">
-              <button
-                onClick={() => setShowReturnModal(false)}
-                className="secondary-button"
-                disabled={isSubmitting}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={submitReturn}
-                className="primary-button"
-                disabled={isSubmitting}
-              >
-                {isSubmitting ? 'Processing...' : 'Return to Warehouse'}
-              </button>
-            </div>
-          </div>
-        </div>
-        );
-      })()}
+      {/* Return — the Production Requests dialog (N7) */}
+      {returnProps && (
+        <ReturnModal
+          requestId={null}
+          item={returnProps.item}
+          details={returnProps.details}
+          submitDetail={submitReturnDetail}
+          onClose={() => setReturnProps(null)}
+          onSuccess={fetchStagingItems}
+        />
+      )}
     </div>
   );
 };

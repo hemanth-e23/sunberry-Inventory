@@ -36,6 +36,22 @@ export const pullStatusLabel = (status) => {
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
 
+/**
+ * The status word for a request card (N8). A request whose stored status
+ * still says "pending" but has stock staged is NOT "Not started" — old
+ * requests, and ones whose staging came in by a path that never re-rated
+ * the request, read that way with 474 lbs on the floor.
+ */
+export const requestStatusLabel = (request = {}) => {
+  const key = String(request?.status || '').toLowerCase();
+  const done = Number(request?.fulfilled_qty) || 0;
+  const needed = Number(request?.needed_qty) || 0;
+  if (key === 'pending' && done > 0.001) {
+    return needed > 0 && done >= needed - 0.001 ? STATUS_WORDS.fulfilled : STATUS_WORDS.partial;
+  }
+  return pullStatusLabel(request?.status);
+};
+
 /** "22,776 of 89,754.66 lbs staged" (unit only when the server knows it). */
 export const progressLine = ({ fulfilled_qty: done, needed_qty: needed, unit } = {}) => (
   `${formatQty(done)} of ${formatQty(needed)}${unit ? ` ${unit}` : ''} staged`

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   attentionFlags, createDoubleFireGuard, describeFlag, describeRecountDiff, formatUnitTotals,
-  groupReceiptsByTruck, lineMismatchNote, matchTypedLot, needsPalletCheck, offlineMessage,
+  groupReceiptsByTruck, lineMismatchNote, matchTypedLot, needsPalletCheck, offlineMessage, shouldAskPallet,
   overScanTitle, palletCheckKey, parseLooseQty, queuedScanLabel, rackFillLabel, rackFillMap,
   scanUnitsBadge, truckUnitWords, unitCount,
 } from '../utils/truckReceiving';
@@ -252,5 +252,22 @@ describe('queuedScanLabel / offlineMessage (U1)', () => {
     expect(text).toMatch(/Nothing was changed/);
     expect(text).toMatch(/saved on this gun/);
     expect(text).not.toMatch(/\d{3}/);
+  });
+});
+
+describe('shouldAskPallet (N2)', () => {
+  const base = { unitsPerScan: 40, lineId: 'l1', rowId: 'r1' };
+  it('asks on a fresh rack, not once confirmed or once the lot is there', () => {
+    const confirmed = new Set();
+    expect(shouldAskPallet({ ...base, confirmed })).toBe(true);
+    expect(shouldAskPallet({ ...base, confirmed, alreadyThere: true })).toBe(false);
+    confirmed.add(palletCheckKey('l1', 'r1'));
+    expect(shouldAskPallet({ ...base, confirmed })).toBe(false);
+  });
+  it('always asks where the worker said "one bag", even with the lot already there', () => {
+    const saidOne = new Set([palletCheckKey('l1', 'r1')]);
+    expect(shouldAskPallet({ ...base, saidOne, alreadyThere: true })).toBe(true);
+    expect(shouldAskPallet({ ...base, saidOne, rowId: 'r2', alreadyThere: true })).toBe(false);
+    expect(shouldAskPallet({ ...base, saidOne, unitsPerScan: 1 })).toBe(false);
   });
 });

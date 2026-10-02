@@ -6,6 +6,7 @@ import { useConfirm } from "../../context/ConfirmContext";
 import { isDateInPast, isDateValid, getTodayDateKey } from "../../utils/dateUtils";
 import { generateLotNumberFromLine } from "../../utils/lotNumber";
 import { CATEGORY_TYPES } from "../../constants";
+import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 
 const defaultFormState = {
   categoryGroupId: "",
@@ -423,7 +424,7 @@ const useReceiptForm = () => {
         // Say the unit. "22 available of 22" gave no clue which of the two
         // capacity systems was being quoted, which is exactly how a drum room
         // came to read a pallet figure without anybody noticing.
-        const unitWord = roomUnit ? ` ${roomUnit}s` : '';
+        const unitWord = roomUnit ? ` ${pluralizeUnit(singularUnit(roomUnit))}` : '';
 
         return {
           value: row.id,

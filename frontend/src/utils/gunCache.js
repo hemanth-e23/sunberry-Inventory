@@ -58,3 +58,24 @@ export const sessionCacheKey = (receiptId) => `session:${receiptId}`;
 export const PULL_LIST_CACHE_KEY = 'pulls';
 export const pullRequestCacheKey = (requestId) => `pull:${requestId}`;
 export const pullHistoryCacheKey = (requestId) => `pull-history:${requestId}`;
+
+/**
+ * A scanned rack code → a rack from the list saved on this gun, the way the
+ * server resolves it (N6): BARCODE first (unique), then the exact rack NAME —
+ * but only when exactly one active rack has that name. The saved list is the
+ * caller's own warehouse, the same scope the server's name match uses.
+ *
+ * Returns `{ row, ambiguous }`: `row` is the hit or null; `ambiguous` lists the
+ * racks sharing that name when there is more than one (never a silent pick —
+ * row names are not unique, and a wrong rack cannot be untangled later).
+ */
+export const findCachedRack = (rows, code) => {
+  const upper = String(code || '').trim().toUpperCase();
+  const list = Array.isArray(rows) ? rows.filter((r) => r && r.is_active !== false) : [];
+  if (!upper) return { row: null, ambiguous: [] };
+  const byBarcode = list.find((r) => (r.barcode || '').toUpperCase() === upper);
+  if (byBarcode) return { row: byBarcode, ambiguous: [] };
+  const byName = list.filter((r) => (r.name || '').trim().toUpperCase() === upper);
+  if (byName.length === 1) return { row: byName[0], ambiguous: [] };
+  return { row: null, ambiguous: byName.length > 1 ? byName : [] };
+};

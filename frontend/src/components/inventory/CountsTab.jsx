@@ -15,6 +15,7 @@ import {
 import { listIngredientRows } from '../../api/ingredientIntakeApi';
 import { countRackOptions, countWording, describeCount, lotCountsByRow } from '../../utils/countRacks';
 import '../MasterDataPage.css';
+import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 
 /**
  * Counts — entering physical stock by hand, and the one-time cutover.
@@ -585,8 +586,8 @@ const CountsTab = () => {
                   )}
                 </div>
                 <span className="muted">
-                  {lot.full_units} {lot.unit_label}
-                  {lot.full_units === 1 ? '' : 's'} across {lot.row_count} rack
+                  {lot.full_units}{' '}
+                  {lot.full_units === 1 ? singularUnit(lot.unit_label) : pluralizeUnit(singularUnit(lot.unit_label))} across {lot.row_count} rack
                   {lot.row_count === 1 ? '' : 's'}
                 </span>
                 <button

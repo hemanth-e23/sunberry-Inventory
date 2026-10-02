@@ -7,6 +7,7 @@ import { formatDateKey, formatDateTime, escapeHtml } from '../../utils/dateUtils
 import apiClient from '../../api/client';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES } from '../../constants';
+import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 
 /**
  * What is available, said in the unit the lot is actually counted in.
@@ -22,7 +23,7 @@ const describeAvailable = (suggestion) => {
     const held = suggestion.held_units || 0;
     const open = suggestion.open_units || 0;
     const openQty = suggestion.open_remaining_qty || 0;
-    let text = `${n} ${label}${n === 1 ? '' : 's'}`;
+    let text = `${n} ${n === 1 ? singularUnit(label) : pluralizeUnit(singularUnit(label))}`;
     if (open) {
       // "…+ 1 open (130 lb)" — the partial drum a picker should grab first.
       text += ` + ${open} open (${Math.round(openQty * 10) / 10} ${suggestion.weight_unit || 'lb'})`;
@@ -68,11 +69,11 @@ const LotAmountInputs = ({ lot, unit, onChange }) => {
           min="0"
           step="1"
           max={suggestion.available_units || 0}
-          title={`How many ${label}s to pull`}
+          title={`How many ${pluralizeUnit(singularUnit(label))} to pull`}
           style={{ width: '80px', padding: '0.25rem' }}
         />
         <span style={{ fontSize: '0.875rem', whiteSpace: 'nowrap' }}>
-          {label}{units === 1 ? '' : 's'}
+          {units === 1 ? singularUnit(label) : pluralizeUnit(singularUnit(label))}
           {per > 0 && (
             <span style={{ color: '#6b7280' }}>
               {' '}= {(units * per).toLocaleString()} {suggestion.weight_unit || 'lbs'}
@@ -137,8 +138,8 @@ const PullPlan = ({ lot, plan }) => {
         </span>
       ) : (
         <span style={{ color: '#6b7280' }}>
-          {suggestion.available_units} {label}
-          {suggestion.available_units === 1 ? '' : 's'} across{' '}
+          {suggestion.available_units}{' '}
+          {suggestion.available_units === 1 ? singularUnit(label) : pluralizeUnit(singularUnit(label))} across{' '}
           {(suggestion.racks || []).map(r => r.storage_row_name).join(', ') || 'no rack'}
         </span>
       )}
@@ -478,7 +479,7 @@ const StagingTab = () => {
             ? (lot.units || 0)
             : (lot.quantity || 0);
           const amountUnit = counted
-            ? `${escapeHtml(suggestion.unit_label || 'unit')}s`
+            ? escapeHtml(pluralizeUnit(singularUnit(suggestion.unit_label || 'unit')))
             : escapeHtml(lot.unit || unit);
 
           return `

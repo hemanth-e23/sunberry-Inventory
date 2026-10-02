@@ -259,6 +259,24 @@ export const needsPalletCheck = ({ unitsPerScan, confirmed, lineId, rowId }) => 
 );
 
 /**
+ * Should a pallet-sized scan stop and ask "Pallet sticker, or one bag?" (N2).
+ *
+ * `saidOne` holds the lot/rack keys where the worker last answered "One bag".
+ * There a pallet is NEVER booked without asking again — even when the lot is
+ * already on the rack (which otherwise skips the question), because that
+ * answer is exactly what put it there. Answering PALLET clears the key.
+ */
+export const shouldAskPallet = ({
+  unitsPerScan, confirmed, saidOne, lineId, rowId, alreadyThere = false,
+}) => {
+  if ((Number(unitsPerScan) || 1) <= 1) return false;
+  const key = palletCheckKey(lineId, rowId);
+  if (saidOne && saidOne.has(key)) return true;
+  if (alreadyThere) return false;
+  return !(confirmed && confirmed.has(key));
+};
+
+/**
  * What a worker is told when the gun could not reach the server for something
  * that is not queued (finish, remove, load). Plain words; never a status code.
  */

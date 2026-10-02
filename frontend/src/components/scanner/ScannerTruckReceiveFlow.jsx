@@ -14,11 +14,12 @@ import {
 } from '../../utils/scanQueue';
 import { decodeLotPayload } from '../../utils/labelPayload';
 import {
+  findCachedRack,
   TRUCK_LIST_CACHE_KEY, readCached, saveCached, truckCacheKey,
 } from '../../utils/gunCache';
 import {
   createDoubleFireGuard, describeRecountDiff, formatUnitTotals, lineMismatchNote,
-  matchTypedLot, needsPalletCheck, offlineMessage, overScanTitle, palletCheckKey,
+  matchTypedLot, offlineMessage, overScanTitle, palletCheckKey, shouldAskPallet,
   parseLooseQty, queuedScanLabel, rackFillLabel, scanUnitsBadge, truckUnitWords, unitCount,
 } from '../../utils/truckReceiving';
 import { isTerminal, useLotScanQueue } from '../../hooks/useLotScanQueue';
@@ -427,6 +428,11 @@ const TruckView = ({ orderId }) => {
   // The pallet-or-bag question (U2), asked before anything is queued.
   const [palletAsk, setPalletAsk] = useState(null);
   const palletConfirmed = useRef(new Set());
+  // N2: lot/rack keys where the worker answered "One bag". Every scan of that
+  // lot onto that rack books ONE until the worker taps Pallet (`oneBagKeys`);
+  // and even then the next pallet there is asked about first (`saidOneBag`).
+  const [oneBagKeys, setOneBagKeys] = useState(() => new Set());
+  const saidOneBag = useRef(new Set());
 
   const inputRef = useRef(null);
 
@@ -584,6 +590,10 @@ const TruckView = ({ orderId }) => {
   const hasPalletised = palletLines.length > 0;
   // The truck's own words: a truck of bags and boxes is never told about drums.
   const words = useMemo(() => truckUnitWords(lines), [lines]);
+  // N2: the lines on the current rack the worker said "one bag" for.
+  const oneBagOnRow = useMemo(() => (row
+    ? palletLines.filter((l) => oneBagKeys.has(palletCheckKey(l.line_id, row.id)))
+    : []), [row, palletLines, oneBagKeys]);
   const mismatch = lineMismatchNote(lines, { countKey: 'shown' });
 
   // ── Load ───────────────────────────────────────────────────────────────────
@@ -682,8 +692,14 @@ const TruckView = ({ orderId }) => {
   const resolveRowCode = useCallback(async (code) => {
     // Offline: exact BARCODE equality against the rack list saved on the gun.
     const fromCache = () => {
-      const upper = code.toUpperCase();
-      const hit = rowsRef.current.find((r) => (r.barcode || '').toUpperCase() === upper);
+      // Barcode, then a unique exact name — as the server does (N6).
+      const { row: hit, ambiguous } = findCachedRack(rowsRef.current, code);
+      if (ambiguous.length) {
+        return {
+          row: null,
+          error: `"${code}" is the name of ${ambiguous.length} racks — scan the rack's barcode label instead.`,
+        };
+      }
       return { row: hit || null, error: null };
     };
     if (!online) return fromCache();
@@ -725,7 +741,8 @@ const TruckView = ({ orderId }) => {
       return null;
     }
     lastActivity.current = Date.now();
-    const isSingle = forceSingle || (single && !forcePallet);
+    const oneBagHere = !!line && oneBagKeys.has(palletCheckKey(line.line_id, target.id));
+    const isSingle = forceSingle || ((single || oneBagHere) && !forcePallet);
     const estUnits = isSingle ? 1 : Math.max(1, Number(line?.units_per_pallet) || 1);
 
     // U2: the first pallet-mode scan of this lot onto this rack asks whether
@@ -734,8 +751,13 @@ const TruckView = ({ orderId }) => {
     const alreadyThere = (line?.rows || []).some((r) => r.storage_row_id === target.id && r.count > 0)
       || pendingItems.some((it) => it.payload?.storage_row_id === target.id
         && sameCode(it.payload?.lot_code_resolved, lotCode));
-    if (line && !isSingle && !palletChecked && !alreadyThere && needsPalletCheck({
-      unitsPerScan: estUnits, confirmed: palletConfirmed.current, lineId: line.line_id, rowId: target.id,
+    if (line && !isSingle && !palletChecked && shouldAskPallet({
+      unitsPerScan: estUnits,
+      confirmed: palletConfirmed.current,
+      saidOne: saidOneBag.current,
+      lineId: line.line_id,
+      rowId: target.id,
+      alreadyThere,
     })) {
       playErrorTone();
       setPalletAsk({ lotCode, line, row: target, units: estUnits, note });
@@ -774,22 +796,43 @@ const TruckView = ({ orderId }) => {
       ...prev.filter((h) => h.key !== item.idempotency_key),
     ].slice(0, HISTORY_LIMIT));
     return item;
-  }, [truck, single, send, orderId, endpoint, logRefusal, words.one, pendingItems]);
+  }, [truck, single, oneBagKeys, send, orderId, endpoint, logRefusal, words.one, pendingItems]);
 
   // ── Pallet-or-bag answer (U2) ──────────────────────────────────────────────
   const answerPallet = useCallback((isPallet) => {
     const ask = palletAsk;
     setPalletAsk(null);
     if (!ask) return;
+    const key = palletCheckKey(ask.line.line_id, ask.row.id);
     if (isPallet) {
-      palletConfirmed.current.add(palletCheckKey(ask.line.line_id, ask.row.id));
-      recordDrum(ask.lotCode, { palletChecked: true, note: ask.note });
+      palletConfirmed.current.add(key);
+      saidOneBag.current.delete(key);
+      recordDrum(ask.lotCode, { palletChecked: true, forcePallet: true, note: ask.note });
     } else {
+      // N2: the answer sticks. The next scan of this lot here is one bag too —
+      // offline included — until the worker taps Pallet.
+      palletConfirmed.current.delete(key);
+      saidOneBag.current.add(key);
+      setOneBagKeys((prev) => new Set(prev).add(key));
       recordDrum(ask.lotCode, { forceSingle: true, note: ask.note });
       setSingle(false);
-      showInfo(`Booked 1 ${singularUnit(ask.line.unit_label || ask.line.count_unit)}. More loose ones? Use "Loose…" or the 1 button.`);
+      const one = singularUnit(ask.line.unit_label || ask.line.count_unit);
+      showInfo(`Booked 1 ${one}. Every scan of lot ${ask.line.vendor_lot || ask.line.lot_code} on ${ask.row.name} is now 1 ${one} — tap Pallet to go back.`);
     }
   }, [palletAsk, recordDrum, showInfo]);
+
+  // The deliberate way back to pallets (N2). Ends the one-bag answers on the
+  // current rack; the next pallet-sized scan of those lots there still asks.
+  const switchToPallet = useCallback(() => {
+    setSingle(false);
+    const target = rowRef.current;
+    if (!target) return;
+    setOneBagKeys((prev) => {
+      const suffix = `|${target.id}`;
+      if (![...prev].some((k) => k.endsWith(suffix))) return prev;
+      return new Set([...prev].filter((k) => !k.endsWith(suffix)));
+    });
+  }, []);
 
   // ── Typed code / no sticker (G3) ───────────────────────────────────────────
   // Book one of a line picked by hand. A palletised line asks pallet or loose
@@ -1303,16 +1346,16 @@ const TruckView = ({ orderId }) => {
                   scan box, or the next trigger pull goes nowhere (F12). */}
               <button
                 type="button"
-                className={`sir-perscan-btn${single ? '' : ' is-on'}`}
+                className={`sir-perscan-btn${single || oneBagOnRow.length ? '' : ' is-on'}`}
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => setSingle(false)}
+                onClick={switchToPallet}
               >
                 <strong>Pallet</strong>
                 <span>whole pallet</span>
               </button>
               <button
                 type="button"
-                className={`sir-perscan-btn${single ? ' is-on' : ''}`}
+                className={`sir-perscan-btn${single || oneBagOnRow.length ? ' is-on' : ''}`}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => setSingle((v) => !v)}
               >
@@ -1328,6 +1371,18 @@ const TruckView = ({ orderId }) => {
             >
               Loose…
             </button>
+          </div>
+        )}
+        {oneBagOnRow.length > 0 && (
+          <div className="sir-warn" role="status">
+            <AlertTriangle size={18} />
+            <div>
+              <strong>ONE {words.one.toUpperCase()} PER SCAN on {row?.name}</strong>
+              <div className="sir-warn-detail">
+                Lot {oneBagOnRow.map((l) => l.vendor_lot || l.lot_code).join(', ')}: you said
+                {' '}&quot;one {words.one}&quot;, so every scan of it here books 1. Tap Pallet to go back to pallets.
+              </div>
+            </div>
           </div>
         )}
 
@@ -1372,8 +1427,10 @@ const TruckView = ({ orderId }) => {
                     {line.expected_count === 0 && ' · NOT ON PAPERWORK'}
                   </span>
                   {(line.units_per_pallet || 0) > 1 && (
-                    <span className={`sir-truck-perscan${single ? ' is-single' : ''}`}>
-                      {single
+                    <span className={`sir-truck-perscan${single || oneBagOnRow.includes(line) ? ' is-single' : ''}`}>
+                      {oneBagOnRow.includes(line)
+                        ? `Each scan = 1 ${singularUnit(line.unit_label || line.count_unit)} on ${row?.name} (you said one)`
+                        : single
                         ? `Next scan = 1 ${singularUnit(line.unit_label || line.count_unit)}`
                         : `1 scan = ${unitCount(line.units_per_pallet, line.unit_label || line.count_unit)}`}
                     </span>

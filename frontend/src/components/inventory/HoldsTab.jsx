@@ -13,6 +13,7 @@ import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, HOLD_STATUS, RECEIPT_STATUS } from '../../constants';
 import { lotTotalText, lotHeldText, lotLocationText } from '../../utils/lotStatus';
 import { onePerLot, offRackText } from '../../utils/holdLots';
+import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 
 const HoldsTab = () => {
   const { addToast } = useToast();
@@ -510,7 +511,7 @@ const HoldsTab = () => {
                       >
                         <span style={{ minWidth: '110px', fontWeight: 500 }}>{rack.rowName}</span>
                         <span style={{ color: '#6b7280', fontSize: '13px', flex: 1 }}>
-                          {rack.units} {rack.unitLabel}{rack.units === 1 ? '' : 's'} here
+                          {rack.units} {rack.units === 1 ? singularUnit(rack.unitLabel) : pluralizeUnit(singularUnit(rack.unitLabel))} here
                         </span>
                       </div>
                     ))}

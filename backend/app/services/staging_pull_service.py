@@ -746,10 +746,14 @@ def _held_message(held: List[dict]) -> str:
     lines = []
     for h in held:
         reason = f" ({h['hold_reason']})" if h.get("hold_reason") else ""
-        where = ", ".join(h["racks"]) if h.get("racks") else "the rack they came from"
+        one = (float(h.get("units") or 0) + float(h.get("open_units") or 0)) == 1
+        where = ", ".join(h["racks"]) if h.get("racks") else (
+            "the rack it came from" if one else "the rack they came from")
+        # "1 box was", "2 boxes were" (N8: "1 box were on the cart").
+        verb, pronoun, obj = ("was", "It", "it") if one else ("were", "They", "them")
         lines.append(
             f"Lot {h['lot_name']} went ON HOLD{reason} while {_held_words(h)} "
-            f"were on the cart. They cannot be staged — put them back on {where}."
+            f"{verb} on the cart. {pronoun} cannot be staged — put {obj} back on {where}."
         )
     return " ".join(lines) + " Nothing was submitted."
 

@@ -16,11 +16,11 @@ import { decodeLotPayload, formatCalendarDate } from '../../utils/labelPayload';
 import { newIdempotencyKey, resolveRow } from '../../api/lotReceivingApi';
 import { useGunRacks } from '../../hooks/useGunRacks';
 import {
-  PULL_LIST_CACHE_KEY, pullHistoryCacheKey, pullRequestCacheKey, readCached, saveCached,
+  PULL_LIST_CACHE_KEY, findCachedRack, pullHistoryCacheKey, pullRequestCacheKey, readCached, saveCached,
 } from '../../utils/gunCache';
 import {
   cartSummary, formatQty, itemForLot, lotDisplayName, openPullUnit, perScanUnit,
-  progressLine, pullStatusLabel, queuedByItem, queuedRowMessage, rackFillText,
+  progressLine, queuedByItem, queuedRowMessage, rackFillText, requestStatusLabel,
   submitBlockReason, unitsWords,
 } from '../../utils/stagingPull';
 import { formatTime } from '../../utils/dateUtils';
@@ -248,7 +248,7 @@ const RequestListView = () => {
               <span className="sir-card-number">
                 {request.product_name || request.production_batch_uid}
               </span>
-              <span className="sir-card-status">{pullStatusLabel(request.status)}</span>
+              <span className="sir-card-status">{requestStatusLabel(request)}</span>
             </div>
             <div className="sir-card-meta">
               {request.formula_name ? `${request.formula_name} · ` : ''}
@@ -354,6 +354,8 @@ const RequestView = ({ requestId }) => {
   const [submitConfirm, setSubmitConfirm] = useState(null);
   // A lot went ON HOLD with units on the cart: submit stopped (PART 3, B3).
   const [heldStop, setHeldStop] = useState(null);
+  // A rack code refused offline or as ambiguous (N6) — must be acknowledged.
+  const [rackStop, setRackStop] = useState(null);
 
   const inputRef = useRef(null);
 
@@ -597,7 +599,7 @@ const RequestView = ({ requestId }) => {
     () => items.flatMap((it) => (it.cart_lots || []).filter((l) => l.is_held)),
     [items],
   );
-  const dialogOpen = !!rowPicker;
+  const dialogOpen = !!(rowPicker || rackStop);
 
   // "Each scan is 1 bag": the last lot pulled, else what the open lines are in.
   const scanUnitLabel = useMemo(() => {
@@ -653,12 +655,19 @@ const RequestView = ({ requestId }) => {
    *   none of them → not a rack; the caller may treat the token as a lot code
    */
   const resolveRowCode = useCallback(async (code) => {
-    // Offline: exact BARCODE equality against the cached list. Barcodes are
-    // unique; names are deliberately not matched — row names are NOT unique,
-    // and that fuzzy path pulls from the wrong barn.
+    // Offline: the cached list of every active rack in the warehouse, matched
+    // the way the server matches — barcode, then an exact name only when one
+    // rack has it (N6: "QA-P1" typed or printed as a name was refused). A name
+    // shared by two racks is refused out loud, never picked.
     const fromCache = () => {
-      const upper = code.toUpperCase();
-      const hit = rowsRef.current.find((r) => (r.barcode || '').toUpperCase() === upper);
+      const { row: hit, ambiguous } = findCachedRack(rowsRef.current, code);
+      if (ambiguous.length) {
+        return {
+          row: null,
+          error: `"${code}" is the name of ${ambiguous.length} racks — scan the rack's barcode label instead.`,
+          rackError: true,
+        };
+      }
       return { row: hit || null, error: null, offline: !hit, cached: !!hit };
     };
     if (!online) return fromCache();
@@ -686,6 +695,19 @@ const RequestView = ({ requestId }) => {
     showError(message);
     setHistory((prev) => [
       { key: newIdempotencyKey(), lotCode, rowName: '—', units: 0, state: 'error', refused: true, message },
+      ...prev,
+    ].slice(0, HISTORY_LIMIT));
+  }, [showError]);
+
+  // A rack code that could not be used (N6): loud — a stop panel the worker
+  // must tap — and listed as a RACK in Recent pulls, never as "Lot …".
+  const refuseRack = useCallback((code, message, title = `Rack "${code}" not found`) => {
+    showError(message);
+    setRackStop({ code, message, title });
+    setHistory((prev) => [
+      {
+        key: newIdempotencyKey(), rackCode: code, rowName: '—', units: 0, state: 'error', refused: true, message,
+      },
       ...prev,
     ].slice(0, HISTORY_LIMIT));
   }, [showError]);
@@ -771,8 +793,9 @@ const RequestView = ({ requestId }) => {
     scanInFlight.current = true;
     setBusy(true);
     try {
-      const { row: found, error, offline, cached } = await resolveRowCode(raw);
+      const { row: found, error, offline, cached, rackError } = await resolveRowCode(raw);
       if (found) { adoptRow(found, { offline: cached }); return; }
+      if (error && rackError) { refuseRack(raw, error, `Rack "${raw}" — which one?`); return; }
       if (error) { logRefusal(raw, error); return; }
       if (offline) {
         // A known lot code of this request is still a pull; anything else
@@ -780,8 +803,9 @@ const RequestView = ({ requestId }) => {
         // old rack by guess (PART 3, B9).
         const lineFor = itemForLot(itemsRef.current, { lotCode: raw });
         if (lineFor && row) { recordPull(raw); return; }
-        logRefusal(raw, `Offline — "${raw}" is not a rack saved on this gun, so the rack was NOT changed`
-          + `${row ? ` (still ${row.name})` : ''}. At a new rack? Press ${row ? 'Change' : 'Pick rack'} and choose it. `
+        refuseRack(raw, `"${raw}" is not a rack this gun knows (it is offline, and its saved list of `
+          + `${rowsRef.current.length} racks has no such barcode or name), so the rack was NOT changed`
+          + `${row ? ` — still ${row.name}` : ''}. At a new rack? Press ${row ? 'Change' : 'Pick rack'} and choose it. `
           + 'Pull drums by scanning their 2D sticker.');
         return;
       }
@@ -794,7 +818,7 @@ const RequestView = ({ requestId }) => {
       scanInFlight.current = false;
       setBusy(false);
     }
-  }, [scanInput, recordPull, resolveRowCode, adoptRow, row, showError, logRefusal]);
+  }, [scanInput, recordPull, resolveRowCode, adoptRow, row, showError, logRefusal, refuseRack]);
 
   // ── FEFO confirm ───────────────────────────────────────────────────────────
   const confirmFefo = useCallback(() => {
@@ -1293,7 +1317,7 @@ const RequestView = ({ requestId }) => {
                     ? 'Not pulled'
                     : `+${unitsWords([{ unit_label: entry.unitLabel || 'unit', units: entry.units || 1 }])}`}
                   {entry.pullOpen ? ' (open)' : ''}
-                  {` · ${entryLot(entry)}`}
+                  {entry.rackCode ? ` · Rack "${entry.rackCode}"` : ` · ${entryLot(entry)}`}
                 </span>
                 {entry.state !== 'ok' && entry.message && (
                   <span className="sir-history-msg">
@@ -1440,6 +1464,27 @@ const RequestView = ({ requestId }) => {
           the cart to staging; production takes it from there.
         </p>
       </div>
+
+      {rackStop && (
+        <div className="sir-overlay" role="dialog" aria-modal="true">
+          <div className="sir-dialog">
+            <X size={36} color="#dc2626" />
+            <h3>{rackStop.title}</h3>
+            <p className="sir-dialog-hint">{rackStop.message}</p>
+            {/* No autoFocus: the next scan's Enter must not dismiss this unread. */}
+            <button
+              type="button"
+              className="sir-btn sir-btn--warn"
+              onClick={() => { setRackStop(null); setRowPicker(true); refreshFill(); }}
+            >
+              Pick the rack from the list
+            </button>
+            <button type="button" className="sir-btn sir-btn--ghost" onClick={() => setRackStop(null)}>
+              OK — nothing was pulled
+            </button>
+          </div>
+        </div>
+      )}
 
       {rowPicker && (
         <div className="sir-overlay" role="dialog" aria-modal="true">

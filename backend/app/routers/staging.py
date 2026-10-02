@@ -149,6 +149,18 @@ def mark_staging_used(
     return staging_item
 
 
+@router.get("/staging/{staging_item_id}/return-details")
+def staging_return_details(
+    staging_item_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """What the Return dialog needs for one staged item (N7): counted or not,
+    drum weight, unit word, original rack."""
+    from app.services import staging_request_service
+    return staging_request_service.staging_item_return_detail(db, staging_item_id)
+
+
 @router.post("/staging/{staging_item_id}/return")
 def return_staging_item(
     staging_item_id: str,

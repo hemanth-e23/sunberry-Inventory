@@ -382,6 +382,48 @@ def fulfill_staging_request_item(
 # Get staging details for a request item
 # ---------------------------------------------------------------------------
 
+def staging_item_return_detail(db: Session, staging_item_id: str) -> dict:
+    """One staging item in the shape the desk Return dialog takes (N7).
+
+    Staging Overview lists bare staging items; its Return now uses the same
+    dialog as Production Requests — full drums + weighed partial, any active
+    rack, the original rack by default — so it needs the same facts.
+    """
+    si = db.query(StagingItem).filter(StagingItem.id == staging_item_id).first()
+    if not si:
+        raise NotFoundError("Staging item", staging_item_id)
+    receipt = db.query(Receipt).filter(Receipt.id == si.receipt_id).first()
+    is_counted = bool(receipt) and lps.is_counted_lot(db, receipt.material_lot_id)
+    lot = None
+    if is_counted:
+        lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    original_row = None
+    if si.original_storage_row_id:
+        original_row = db.query(StorageRow).filter(
+            StorageRow.id == si.original_storage_row_id
+        ).first()
+    loc_name, sub_loc_name = _get_location_names(db, si, receipt)
+    available = float(si.quantity_staged or 0) - float(si.quantity_used or 0) \
+        - float(si.quantity_returned or 0)
+    return {
+        "staging_item_id": si.id,
+        "available": round(available, 3),
+        "lot_number": receipt.lot_number if receipt else "\u2014",
+        "location_name": loc_name,
+        "sub_location_name": sub_loc_name,
+        "quantity_staged": si.quantity_staged,
+        "quantity_used": si.quantity_used,
+        "quantity_returned": si.quantity_returned,
+        "is_counted": is_counted,
+        "weight_per_unit": _return_unit_weight(si, receipt, lot),
+        "weight_unit": lot.weight_unit if lot else None,
+        "unit_label": lot.unit_label if lot else None,
+        "original_storage_row_id": si.original_storage_row_id,
+        "original_storage_row_name": original_row.name if original_row else None,
+        **_detail_extras(db, si, receipt),
+    }
+
+
 def get_staging_details(db: Session, request_id: str, item_id: str) -> dict:
     """
     Get detailed staging information for a specific request item.
@@ -1503,7 +1545,9 @@ def dismiss_staging_request(db: Session, request_id: str) -> dict:
 # Close Out — get reconciliation data
 # ---------------------------------------------------------------------------
 
-async def get_close_out_data(db: Session, request_id: str) -> dict:
+async def get_close_out_data(
+    db: Session, request_id: str, skip_production: bool = False,
+) -> dict:
     """
     Get reconciliation data for Close Out modal.
     Returns staged/used/returned/leftover per ingredient (consolidated by SID),
@@ -1519,7 +1563,11 @@ async def get_close_out_data(db: Session, request_id: str) -> dict:
     batch_uids = [u.strip() for u in (sr.production_batch_uid or "").split(",") if u.strip()]
     batches_completed = 0
     total_batches = len(batch_uids)
-    if batch_uids:
+    # None = not asked (skipped / no batches / not configured); True / False =
+    # whether the Production app answered. The desk shows a notice on False.
+    production_reachable = None
+    if batch_uids and not skip_production and PRODUCTION_API_URL:
+        production_reachable = False
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
@@ -1530,6 +1578,7 @@ async def get_close_out_data(db: Session, request_id: str) -> dict:
                     data = resp.json()
                     batches_data = data.get("batches", {})
                     batches_completed = sum(1 for b in batches_data.values() if b.get("status") == "Complete")
+                    production_reachable = True
         except Exception:
             pass
 
@@ -1644,6 +1693,8 @@ async def get_close_out_data(db: Session, request_id: str) -> dict:
         },
         "batches_completed": batches_completed,
         "total_batches": total_batches,
+        "production_reachable": production_reachable,
+        "production_skipped": bool(skip_production),
         "items": items_list,
     }
 
@@ -1671,8 +1722,19 @@ def request_local_today(db: Session, sr: StagingRequest, now: Optional[datetime]
     return now.astimezone(tz).date()
 
 
-def close_out_staging_request(db: Session, request_id: str) -> dict:
-    """Close out a staging request after reconciliation. All leftovers must be zero."""
+def close_out_staging_request(
+    db: Session,
+    request_id: str,
+    without_production: bool = False,
+    closed_by: Optional[str] = None,
+) -> dict:
+    """Close out a staging request after reconciliation. All leftovers must be zero.
+
+    `without_production` (N5): closed on this system's own figures because the
+    Production app could not be reached. The leftovers rule is unchanged; the
+    close is recorded in the request's notes so nobody later mistakes it for a
+    close that was reconciled against Production's usage.
+    """
     sr = db.query(StagingRequest).options(
         joinedload(StagingRequest.items)
     ).filter(StagingRequest.id == request_id).first()
@@ -1709,7 +1771,20 @@ def close_out_staging_request(db: Session, request_id: str) -> dict:
                     f"Leftover materials remain ({item.ingredient_name}: {leftover:.1f} {item.unit or ''}). Return or mark as used before closing out."
                 )
 
+    now = datetime.now(timezone.utc)
     sr.status = "closed"
-    sr.updated_at = datetime.now(timezone.utc)
+    sr.updated_at = now
+    if without_production:
+        sr.notes = (
+            (sr.notes or "")
+            + "\nClosed WITHOUT Production data (Production app not reachable) by "
+            + f"{closed_by or 'unknown'} at {now.isoformat(timespec='minutes')}; "
+            + "used / returned are this system's own figures."
+        ).strip()
     db.commit()
-    return {"status": "ok", "message": "Staging request closed"}
+    return {
+        "status": "ok",
+        "message": "Staging request closed"
+        + (" on this system's figures (no Production data)" if without_production else ""),
+        "without_production": bool(without_production),
+    }

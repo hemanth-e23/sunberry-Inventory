@@ -127,9 +127,15 @@ class MarkStagingUsedRequest(BaseSchema):
 
 class ReturnStagingRequest(BaseSchema):
     quantity: float
-    to_location_id: str
+    # Optional since the rack names its own room (PART 3, G2); one of the
+    # two is required, checked in the service.
+    to_location_id: Optional[str] = None
     to_sub_location_id: Optional[str] = None
     to_storage_row_id: Optional[str] = None
+    # Counted lots (N7): whole sealed containers + the weighed remainder of
+    # the opened one, as on the Production Requests Return dialog.
+    full_units: Optional[int] = None
+    weighed_partial_qty: Optional[float] = None
     # Explicit pallets returned to the rack (worker-entered). None falls back to
     # a proportional estimate from the staged pallets.
     pallets: Optional[float] = None

@@ -27,6 +27,34 @@ export const formatNumber = (value, fractionDigits = 0) =>
     maximumFractionDigits: fractionDigits,
   });
 
+// Shipped quantities are in each line's own unit — lbs for drummed material,
+// cases for finished goods. A column called "Total Cases" over lbs (N8) was
+// wrong; these say the unit.
+export const addByUnit = (byUnit, unit, qty) => {
+  const key = String(unit || "cases").trim() || "cases";
+  byUnit[key] = (byUnit[key] || 0) + Number(qty || 0);
+  return byUnit;
+};
+
+/** "1,422 lbs" or "1,422 lbs + 40 cases". */
+export const formatByUnit = (byUnit = {}, fractionDigits = 0) => {
+  const parts = Object.entries(byUnit)
+    .filter(([, qty]) => Math.abs(qty) > 0)
+    .map(([unit, qty]) => `${formatNumber(qty, fractionDigits)} ${unit}`);
+  return parts.length ? parts.join(" + ") : "0";
+};
+
+/** The one unit every row shares, or null when they differ (or no rows). */
+export const singleUnit = (rows = []) => {
+  const units = new Set(rows.map((r) => String(r.unit || "cases").trim() || "cases"));
+  return units.size === 1 ? [...units][0] : null;
+};
+
+/** "Total Lbs", "Total Cases", or "Total" when units are mixed. */
+export const totalLabel = (unit) => (
+  unit ? `Total ${unit.charAt(0).toUpperCase()}${unit.slice(1)}` : "Total"
+);
+
 export const sanitizeFileName = (name) =>
   name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "report";
 

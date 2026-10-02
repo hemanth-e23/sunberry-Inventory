@@ -4,6 +4,7 @@ import { useToast } from '../../context/ToastContext';
 import apiClient from '../../api/client';
 import ModalOverlay from './ModalOverlay';
 import { activeRacks } from '../../utils/stagingDesk';
+import { pluralizeUnit } from '../../utils/rowSources';
 
 /**
  * ReturnModal
@@ -21,6 +22,10 @@ import { activeRacks } from '../../utils/stagingDesk';
  *   onClose          {function}       called when the modal should close
  *   onSuccess        {function}       called after successful return so parent can refresh
  *   onCloseOutRefresh {function}      optional — called to refresh close-out data after success
+ *   submitDetail     {function}       optional — `(detail, body) => Promise`: posts one
+ *                                     line's return somewhere else. Staging Overview (N7)
+ *                                     returns bare staging items through
+ *                                     /inventory/staging/{id}/return with the same body.
  *
  * Counted lots return as a SPLIT: whole sealed drums plus the weighed
  * remainder in the opened one. The worker check-weighs the partial drum on
@@ -35,6 +40,7 @@ const ReturnModal = ({
   onClose,
   onSuccess,
   onCloseOutRefresh,
+  submitDetail,
 }) => {
   const { locations, subLocationMap, locationsTree } = useAppData();
   const { addToast } = useToast();
@@ -139,39 +145,40 @@ const ReturnModal = ({
     setActionSuccess('');
 
     try {
-      for (const detail of details || []) {
+      const post = (detail, body) => {
+        if (submitDetail) return submitDetail(detail, body);
         const itemId = detail._itemId ?? item.id;
+        return apiClient.post(
+          `/service/staging-requests/${requestId}/items/${itemId}/return`,
+          body,
+        );
+      };
+      for (const detail of details || []) {
         if (detail.is_counted) {
           const split = splits[detail.staging_item_id] || {};
           const full = parseInt(split.full, 10) || 0;
           const partial = parseFloat(split.partial) || 0;
           const qty = countedQty(detail);
           if (qty <= 0) continue;
-          await apiClient.post(
-            `/service/staging-requests/${requestId}/items/${itemId}/return`,
-            {
-              staging_item_id: detail.staging_item_id,
-              quantity: Math.round(qty * 1000) / 1000,
-              to_location_id: targetLocation,
-              to_sub_location_id: targetSubLocation,
-              to_storage_row_id: returnStorageRow || null,
-              full_units: full,
-              weighed_partial_qty: partial,
-            }
-          );
+          await post(detail, {
+            staging_item_id: detail.staging_item_id,
+            quantity: Math.round(qty * 1000) / 1000,
+            to_location_id: targetLocation,
+            to_sub_location_id: targetSubLocation,
+            to_storage_row_id: returnStorageRow || null,
+            full_units: full,
+            weighed_partial_qty: partial,
+          });
         } else {
           const qty = parseFloat(quantities[detail.staging_item_id]) || 0;
           if (qty <= 0) continue;
-          await apiClient.post(
-            `/service/staging-requests/${requestId}/items/${itemId}/return`,
-            {
-              staging_item_id: detail.staging_item_id,
-              quantity: qty,
-              to_location_id: targetLocation,
-              to_sub_location_id: targetSubLocation,
-              to_storage_row_id: returnStorageRow || null,
-            }
-          );
+          await post(detail, {
+            staging_item_id: detail.staging_item_id,
+            quantity: qty,
+            to_location_id: targetLocation,
+            to_sub_location_id: targetSubLocation,
+            to_storage_row_id: returnStorageRow || null,
+          });
         }
       }
 
@@ -432,7 +439,7 @@ const ReturnModal = ({
                               },
                             }))
                           }
-                          title={`Full ${d.unit_label || 'unit'}s`}
+                          title={`Full ${pluralizeUnit(d.unit_label || 'unit')}`}
                           style={{
                             width: '60px',
                             padding: '0.3rem',

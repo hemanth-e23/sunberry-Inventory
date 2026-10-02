@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { receivedInto } from "../../api/lotReceivingApi";
 import { formatDateTime as formatDate, formatDateKey } from "../../utils/dateUtils";
+import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 
 const ProductDetailModal = ({
   productId,
@@ -349,7 +350,7 @@ const ProductDetailModal = ({
                           || rowUnitLookup[x.rowId]
                           || 'unit';
                         const openNote = opens > 0 ? ` +${opens} open` : '';
-                        return `${x.rowName} (${units} ${unit}${units === 1 ? '' : 's'}${openNote})`;
+                        return `${x.rowName} (${units} ${units === 1 ? singularUnit(unit) : pluralizeUnit(singularUnit(unit))}${openNote})`;
                       })
                       .join(', ');
                   } else if (r.materialLotId && (putAway?.length || rowDetail)) {

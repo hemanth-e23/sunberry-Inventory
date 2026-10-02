@@ -166,6 +166,60 @@ export const describeAllocation = (lot, allocByRow = {}, unit = 'lbs') => {
 export const closeOutAvailable = (productionDate, todayKey) =>
   Boolean(productionDate && todayKey && String(productionDate).slice(0, 10) <= todayKey);
 
+/**
+ * Load the Close Out reconciliation (N5). The Production app is synced first
+ * so "used" includes what the floor scanned; when it cannot be reached the
+ * dialog still opens, on this system's own staged / used / returned figures
+ * (`skip_production=true`), with `productionError` saying why — instead of
+ * a dead end that only said "Production app is not reachable".
+ *
+ * `client` is the axios instance. Resolves `{ data, productionError }`; throws
+ * only when this system's own figures cannot be loaded either.
+ */
+export const loadCloseOutData = async (client, requestId) => {
+  let productionError = null;
+  try {
+    await client.post(`/service/staging-requests/${requestId}/sync`, {});
+  } catch (err) {
+    productionError = err?.response?.data?.detail
+      || 'The Production app could not be reached.';
+  }
+  const resp = await client.get(
+    `/service/staging-requests/${requestId}/close-out-data`,
+    productionError ? { params: { skip_production: true } } : undefined,
+  );
+  return { data: resp.data, productionError };
+};
+
+/**
+ * The request card header count (N8): lines with ANYTHING staged, not only
+ * the ones staged in full — QA-BATCH-2 read "0/3 items staged" with 474 and
+ * 55 lbs staged. `groups` are the tracked, SID-consolidated lines
+ * (`quantity_fulfilled`, `allFulfilled`, `anyStagingItems`).
+ */
+export const stagedLinesSummary = (groups = []) => {
+  const total = groups.length;
+  const staged = groups.filter(
+    (g) => g.allFulfilled || g.anyStagingItems || (Number(g.quantity_fulfilled) || 0) > 0.001,
+  ).length;
+  const full = groups.filter((g) => g.allFulfilled).length;
+  const label = `${staged}/${total} ${total === 1 ? 'item' : 'items'} staged`
+    + (staged > full ? ` (${full} in full)` : '');
+  return { staged, full, total, label };
+};
+
+/**
+ * The status a request card shows (N8). A request still stored as "pending"
+ * with stock staged reads "in_progress", never "Pending"/"Not started".
+ */
+export const effectiveRequestStatus = (status, groups = []) => {
+  if (status !== 'pending') return status;
+  const anyStaged = groups.some(
+    (g) => g.anyStagingItems || (Number(g.quantity_fulfilled) || 0) > 0.001,
+  );
+  return anyStaged ? 'in_progress' : status;
+};
+
 /** A request past its production day (the red "OVERDUE" banner). */
 export const isOverdue = (productionDate, todayKey) =>
   Boolean(productionDate && todayKey && String(productionDate).slice(0, 10) < todayKey);
