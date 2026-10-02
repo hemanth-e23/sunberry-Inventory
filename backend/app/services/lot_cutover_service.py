@@ -46,6 +46,7 @@ from app.models import (
     Vendor,
 )
 from app.services import lot_placement_service as lps
+from app.constants import pluralize_unit
 from app.utils.category_rules import is_weighed_material_category
 
 # Written into the ledger so a cutover entry is never mistaken for a real
@@ -236,6 +237,8 @@ def create_opening_balance(
         warehouse_id=warehouse_id,
         lot_unknown=not bool(vendor_lot),
     )
+    validate_open_containers(lot, open_units, open_remaining_qty, weight_per_unit)
+    before_lbs = _row_lbs(db, lot, storage_row_id)
 
     lps.apply_delta(
         db, lot, storage_row_id,
@@ -250,6 +253,11 @@ def create_opening_balance(
     )
 
     placement = lps._lock_placement(db, lot.id, storage_row_id)
+    sync_paper_to_count(
+        db, lot, before_lbs, _row_lbs(db, lot, storage_row_id),
+        storage_row_id=storage_row_id, user_id=user_id, warehouse_id=warehouse_id,
+        reason=note or "Found in a count",
+    )
     return {
         "material_lot_id": lot.id,
         "lot_code": lot.lot_code,
@@ -310,8 +318,10 @@ def count_row(
             "nobody's name on the release."
         )
 
+    validate_open_containers(lot, open_units, open_remaining_qty)
     before = lps._lock_placement(db, material_lot_id, storage_row_id)
     before_units = int(before.full_units or 0) if before else 0
+    before_lbs = _row_lbs(db, lot, storage_row_id)
 
     lps.set_count(
         db, lot, storage_row_id,
@@ -323,6 +333,11 @@ def count_row(
     )
     after = lps._lock_placement(db, material_lot_id, storage_row_id)
     row = db.query(StorageRow).filter(StorageRow.id == storage_row_id).first()
+    sync_paper_to_count(
+        db, lot, before_lbs, _row_lbs(db, lot, storage_row_id),
+        storage_row_id=storage_row_id, user_id=user_id, warehouse_id=lot.warehouse_id,
+        reason=note or "Physical count",
+    )
 
     return {
         "material_lot_id": material_lot_id,
@@ -439,3 +454,253 @@ def cutover_status(db: Session, warehouse_id: Optional[str] = None) -> dict:
             else "complete"
         ),
     }
+
+
+
+# ─── counts keep the books in step (2026-10-02 PART 4) ───────────────────────
+
+def _row_lbs(db: Session, lot: MaterialLot, storage_row_id: str) -> float:
+    placement = lps._lock_placement(db, lot.id, storage_row_id)
+    return lps.derived_weight(lot, placement) if placement else 0.0
+
+
+def validate_open_containers(lot, open_units: int, open_qty: float, weight_per_unit=None) -> None:
+    """An opened container cannot hold more than a full one. The Counts form
+    carried "1 open (210 lbs)" over onto a 55 lb bag lot and it was saved."""
+    open_units = int(open_units or 0)
+    open_qty = float(open_qty or 0)
+    if open_units == 0:
+        return
+    if open_qty <= 0:
+        raise ValidationError("Opened containers need the weight left in them.")
+    w = float(weight_per_unit or 0) or float(getattr(lot, "weight_per_unit", 0) or 0)
+    if w > 0 and open_qty > open_units * w + 0.01:
+        word = pluralize_unit(getattr(lot, "unit_label", None) or "unit")
+        raise ValidationError(
+            f"{open_qty:g} {getattr(lot, 'weight_unit', None) or 'lbs'} cannot be left in "
+            f"{open_units} opened {word} of {w:g} each — that is more than full."
+        )
+
+
+def sync_paper_to_count(
+    db: Session, lot: MaterialLot, before_lbs: float, after_lbs: float, *,
+    storage_row_id: str, user_id: Optional[str], warehouse_id: Optional[str], reason: str,
+) -> None:
+    """Move the lot's paper by what the count changed on the rack.
+
+    A count restated the RACK only: Lot Trace, the Activity Ledger and the
+    Snapshot read the receipts' paper and kept the old figure (a −1 bag
+    recount still read 3,025 vs 2,970 — PART 4, finding 4). The difference is
+    applied to the lot's receipts (oldest-first spill, as for any other
+    correction) and recorded as an approved stock correction so every report
+    shows it. A lot with no receipt at all (found stock) gets one — without it
+    the lot was invisible to the forms, By Location and the reports
+    (finding 2)."""
+    from app.enums import AdjustmentStatus
+    from app.models import InventoryAdjustment
+    from app.services.transfer_service import spill_receipt_credit, spill_receipt_deduction
+
+    diff = round(float(after_lbs) - float(before_lbs), 3)
+    if abs(diff) < 0.01:
+        return
+    receipts = (
+        db.query(Receipt)
+        .filter(Receipt.material_lot_id == lot.id, Receipt.is_deleted == False)  # noqa: E712
+        .order_by(Receipt.receipt_date, Receipt.created_at)
+        .all()
+    )
+    row = db.query(StorageRow).filter(StorageRow.id == storage_row_id).first()
+    row_name = row.name if row else storage_row_id
+    now = datetime.now(timezone.utc)
+
+    if not receipts:
+        if diff <= 0:
+            return
+        product = db.query(Product).filter(Product.id == lot.product_id).first()
+        units = int(round(diff / float(lot.weight_per_unit))) if lot.weight_per_unit else None
+        receipt = Receipt(
+            id=_mint_id("rcpt-found"),
+            product_id=lot.product_id,
+            category_id=product.category_id if product else None,
+            vendor_id=lot.vendor_id,
+            lot_number=lot.vendor_lot_number,
+            expiration_date=lot.bbd_current,
+            quantity=diff,
+            unit=lot.weight_unit or "lbs",
+            container_count=units,
+            container_unit=lot.unit_label,
+            weight_per_container=lot.weight_per_unit,
+            weight_unit=lot.weight_unit or "lbs",
+            material_lot_id=lot.id,
+            warehouse_id=warehouse_id or lot.warehouse_id,
+            status=ReceiptStatus.APPROVED,
+            submitted_by=user_id,
+            approved_by=user_id,
+            submitted_at=now,
+            approved_at=now,
+            receipt_date=now,
+            note=f"Found in a count on {row_name}: {reason}",
+        )
+        db.add(receipt)
+        db.flush()
+        lps.project_lot(db, lot)
+        return
+
+    live = [r for r in receipts if r.status == ReceiptStatus.APPROVED and float(r.quantity or 0) > 0]
+    carrier = (live or [r for r in receipts if r.status in (ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED)] or receipts)[-1]
+
+    def lot_paper():
+        db.flush()
+        return round(sum(
+            float(x.quantity or 0) for x in receipts
+            if x.status in (ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED)
+        ), 3)
+
+    before_paper = lot_paper()
+    if diff < 0:
+        spill_receipt_deduction(db, carrier, -diff)
+    else:
+        spill_receipt_credit(db, carrier, diff)
+    db.add(InventoryAdjustment(
+        id=_mint_id("adj-count"),
+        receipt_id=carrier.id,
+        product_id=carrier.product_id,
+        warehouse_id=carrier.warehouse_id or warehouse_id,
+        adjustment_type="stock-correction",
+        # Negative = stock put back, the convention the sync corrections use.
+        quantity=-diff,
+        reason=f"Count on {row_name}: {'found' if diff > 0 else 'missing'} "
+               f"{abs(diff):g} {lot.weight_unit or 'lbs'} — {reason}",
+        status=AdjustmentStatus.APPROVED,
+        submitted_by=user_id,
+        approved_by=user_id,
+        approved_at=now,
+        original_quantity=before_paper,
+        new_quantity=lot_paper(),
+        source_breakdown=[{"id": f"row-{storage_row_id}", "quantity": abs(diff)}],
+    ))
+
+
+# ─── count requests: a warehouse user's count waits for a supervisor ─────────
+
+def submit_count_request(
+    db: Session, *, kind: str, user_id: Optional[str], warehouse_id: Optional[str], **fields,
+):
+    """Store a count for approval. Validated now, so a supervisor never sees
+    one that could not apply; the system's figure is captured for the
+    variance shown on the card."""
+    from app.models import LotCountRequest
+
+    row_id = fields["storage_row_id"]
+    if not db.query(StorageRow).filter(StorageRow.id == row_id).first():
+        raise NotFoundError("Storage row", row_id)
+    lot = None
+    if kind == "recount":
+        lot = db.query(MaterialLot).filter(MaterialLot.id == fields["material_lot_id"]).first()
+        if not lot:
+            raise NotFoundError("Material lot", fields["material_lot_id"])
+        if lot.is_held:
+            raise ValidationError(
+                f"Lot {lot.vendor_lot_number or lot.lot_code} is on QA hold. Release the hold "
+                "before recording a count for it."
+            )
+        validate_open_containers(lot, fields.get("open_units", 0), fields.get("open_remaining_qty", 0))
+    else:
+        if int(fields.get("full_units") or 0) == 0 and int(fields.get("open_units") or 0) == 0:
+            raise ValidationError("Enter at least one unit")
+        validate_open_containers(
+            None, fields.get("open_units", 0), fields.get("open_remaining_qty", 0),
+            fields.get("weight_per_unit"),
+        )
+    placement = lps._lock_placement(db, lot.id, row_id) if lot else None
+    req = LotCountRequest(
+        id=_mint_id("count"),
+        kind=kind,
+        status="pending",
+        warehouse_id=warehouse_id or (lot.warehouse_id if lot else None),
+        material_lot_id=lot.id if lot else None,
+        storage_row_id=row_id,
+        product_id=(lot.product_id if lot else fields.get("product_id")),
+        vendor_id=fields.get("vendor_id"),
+        vendor_lot=fields.get("vendor_lot"),
+        bbd=fields.get("bbd"),
+        unit_label=fields.get("unit_label") or (lot.unit_label if lot else None),
+        weight_per_unit=fields.get("weight_per_unit") or (lot.weight_per_unit if lot else None),
+        weight_unit=fields.get("weight_unit") or (lot.weight_unit if lot else None),
+        full_units=int(fields.get("full_units") or 0),
+        open_units=int(fields.get("open_units") or 0),
+        open_remaining_qty=float(fields.get("open_remaining_qty") or 0),
+        system_full_units=int(placement.full_units or 0) if placement else 0,
+        system_open_units=int(placement.open_units or 0) if placement else 0,
+        system_open_qty=float(placement.open_remaining_qty or 0) if placement else 0.0,
+        note=fields.get("note"),
+        submitted_by=user_id,
+    )
+    db.add(req)
+    db.flush()
+    return req
+
+
+def count_request_view(db: Session, req) -> dict:
+    lot = db.query(MaterialLot).filter(MaterialLot.id == req.material_lot_id).first() if req.material_lot_id else None
+    product = db.query(Product).filter(Product.id == req.product_id).first() if req.product_id else None
+    row = db.query(StorageRow).filter(StorageRow.id == req.storage_row_id).first()
+    unit = req.unit_label or (lot.unit_label if lot else None) or "unit"
+    if req.kind == "recount":
+        variance = int(req.full_units) - int(req.system_full_units or 0)
+    else:
+        variance = int(req.full_units)
+    return {
+        "id": req.id, "kind": req.kind, "status": req.status,
+        "material_lot_id": req.material_lot_id,
+        "vendor_lot": (lot.vendor_lot_number if lot else req.vendor_lot),
+        "product_id": req.product_id, "product_name": product.name if product else "",
+        "storage_row_id": req.storage_row_id, "storage_row_name": row.name if row else req.storage_row_id,
+        "unit_label": unit,
+        "full_units": req.full_units, "open_units": req.open_units,
+        "open_remaining_qty": req.open_remaining_qty,
+        "system_full_units": req.system_full_units, "system_open_units": req.system_open_units,
+        "system_open_qty": req.system_open_qty,
+        "variance_units": variance,
+        "note": req.note, "submitted_by": req.submitted_by, "submitted_at": req.submitted_at,
+        "approved_by": req.approved_by, "approved_at": req.approved_at,
+        "rejection_reason": req.rejection_reason,
+        "warehouse_id": req.warehouse_id,
+    }
+
+
+def approve_count_request(db: Session, req, approver_id: str) -> dict:
+    """Apply a pending count as the approver. A recount is an ABSOLUTE figure:
+    it is applied as counted even if the rack changed since, and the card
+    showed the variance against the figure at submit."""
+    if req.status != "pending":
+        raise ValidationError(f"This count is already {req.status}.")
+    note = f"{req.note or 'Count'} (counted by {req.submitted_by}, approved)"
+    if req.kind == "recount":
+        result = count_row(
+            db, material_lot_id=req.material_lot_id, storage_row_id=req.storage_row_id,
+            full_units=req.full_units, open_units=req.open_units,
+            open_remaining_qty=req.open_remaining_qty, user_id=approver_id, note=note,
+        )
+    else:
+        result = create_opening_balance(
+            db, product_id=req.product_id, storage_row_id=req.storage_row_id,
+            full_units=req.full_units, vendor_id=req.vendor_id, vendor_lot=req.vendor_lot,
+            bbd=req.bbd, unit_label=req.unit_label or "drum",
+            weight_per_unit=req.weight_per_unit, weight_unit=req.weight_unit,
+            open_units=req.open_units, open_remaining_qty=req.open_remaining_qty,
+            warehouse_id=req.warehouse_id, user_id=approver_id, note=note,
+        )
+    req.status = "approved"
+    req.approved_by = approver_id
+    req.approved_at = datetime.now(timezone.utc)
+    return result
+
+
+def reject_count_request(db: Session, req, approver_id: str, reason: str) -> None:
+    if req.status != "pending":
+        raise ValidationError(f"This count is already {req.status}.")
+    req.status = "rejected"
+    req.approved_by = approver_id
+    req.approved_at = datetime.now(timezone.utc)
+    req.rejection_reason = reason

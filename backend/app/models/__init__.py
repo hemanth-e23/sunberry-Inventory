@@ -25,7 +25,7 @@ from app.models.location import (
 #     storage_rows, users). MUST precede receipt — Receipt.material_lot_id FKs
 #     material_lots.
 from app.models.material_lot import (
-    MaterialLot, MaterialLotBbdExtension, LotPlacement, LotPlacementEvent,
+    MaterialLot, MaterialLotBbdExtension, LotPlacement, LotPlacementEvent, LotCountRequest,
 )
 
 # 3. Receipt (FK: products, categories, vendors, locations, storage_rows, users, warehouses)
@@ -72,7 +72,7 @@ __all__ = [
     "CategoryGroup", "Category", "Vendor", "Product", "WarehouseCategoryAccess",
     "Location", "SubLocation", "StorageArea", "StorageRow",
     "ProductionShift", "ProductionLine",
-    "MaterialLot", "MaterialLotBbdExtension", "LotPlacement", "LotPlacementEvent",
+    "MaterialLot", "MaterialLotBbdExtension", "LotPlacement", "LotPlacementEvent", "LotCountRequest",
     "Receipt", "ReceiptAllocation",
     "InventoryTransfer", "InventoryTransferLine", "TransferPalletSwap",
     "InventoryAdjustment", "InventoryHoldAction",

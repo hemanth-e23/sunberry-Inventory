@@ -990,7 +990,7 @@ def get_reconciliation_summary(db: Session) -> list:
 # Notify ingredient used (push from Production)
 # ---------------------------------------------------------------------------
 
-def consume_receipt_quantity(db: Session, receipt, amount: float) -> None:
+def consume_receipt_quantity(db: Session, receipt, amount: float, *, staging_settled: bool = False) -> None:
     """Decrement paper quantity by `amount`, SPILLING any excess across the
     lot's other open receipts (oldest first) instead of clamping at zero
     (audit S5). The gun pins a StagingItem to the lot's NEWEST receipt, so a
@@ -1002,7 +1002,7 @@ def consume_receipt_quantity(db: Session, receipt, amount: float) -> None:
         receipt.status = ReceiptStatus.DEPLETED
     excess = float(amount) - take
     if excess <= 1e-9 or not receipt.material_lot_id:
-        _sweep_rack_excess(db, receipt)
+        _sweep_rack_excess(db, receipt, just_consumed=0.0 if staging_settled else float(amount))
         from app.services.transfer_service import reproject_receipt_lot
         reproject_receipt_lot(db, receipt)
         return
@@ -1032,14 +1032,14 @@ def consume_receipt_quantity(db: Session, receipt, amount: float) -> None:
             receipt.material_lot_id, excess,
         )
 
-    _sweep_rack_excess(db, receipt)
+    _sweep_rack_excess(db, receipt, just_consumed=0.0 if staging_settled else float(amount))
     # The carrier of the rack projection may have just depleted; move the
     # picture onto a live receipt so the forms keep offering the lot.
     from app.services.transfer_service import reproject_receipt_lot
     reproject_receipt_lot(db, receipt)
 
 
-def _sweep_rack_excess(db: Session, receipt) -> None:
+def _sweep_rack_excess(db: Session, receipt, just_consumed: float = 0.0) -> None:
     """Post-consumption invariant (2026-09-17): the racks may never claim
     more units than the paper says still exist.
 
@@ -1052,35 +1052,47 @@ def _sweep_rack_excess(db: Session, receipt) -> None:
     proper staging path already have their racks freed, so the sweep finds
     nothing and does nothing.
     """
-    import math as _math
-
     if not receipt.material_lot_id:
         return
     lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
     if lot is None:
         return
-    on_hand = lps.units_on_hand(db, lot.id)
-    racked = int(on_hand.get("full_units") or 0) + int(on_hand.get("open_units") or 0)
-    if racked <= 0:
+    placements = lps.placements_for_lot(db, lot.id)
+    if not placements:
         return
 
-    paper_units = 0.0
-    lot_receipts = (
-        db.query(Receipt)
-        .filter(
-            Receipt.material_lot_id == lot.id,
-            Receipt.status.in_((ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED)),
-        )
-        .all()
-    )
-    for r in lot_receipts:
-        qty = float(r.quantity or 0)
-        if qty <= 0:
-            continue
-        w = float(r.weight_per_container or 0) or float(lot.weight_per_unit or 0)
-        paper_units += (qty / w) if w > 0 else qty
+    # Compared in POUNDS, not containers. Counting an open drum as a whole
+    # drum against paper turned into drums made a 202 lb leftover marked used
+    # at Close Out remove a full sealed 474 lb drum that was still on the rack
+    # (2026-10-02 PART 4, finding 1). Racks are priced by delivery with open
+    # drums at what is left in them; the paper side excludes what is out in
+    # staging (on paper, off the racks).
+    from app.services.transfer_service import lot_scoped_availability
 
-    excess_units = racked - int(_math.ceil(paper_units - 1e-6))
+    db.flush()
+    rack_lbs = sum(lps.derived_weight(lot, p) for p in placements)
+    pool = lot_scoped_availability(db, receipt)
+    # Every caller records the staging item's "used" only AFTER this runs, so
+    # what was just consumed still reads as staged here; without this the
+    # 5,800 lb marked used was subtracted twice and the sweep took every drum
+    # of the lot off its racks.
+    staged = max(0.0, float(pool.get("staged") or 0) - float(just_consumed or 0))
+    paper_on_racks = float(pool["total"]) - staged
+    excess_lbs = rack_lbs - paper_on_racks
+
+    # Only whole SEALED containers come off, and only as many as the excess
+    # certainly covers at the heaviest delivery's weight — the sweep must
+    # never take a container that is physically there.
+    weights = [
+        float(r.weight_per_container or 0) or float(lot.weight_per_unit or 0)
+        for r in db.query(Receipt).filter(Receipt.material_lot_id == lot.id).all()
+    ]
+    heaviest = max([w for w in weights if w > 0] or [float(lot.weight_per_unit or 0)])
+    if heaviest <= 0:
+        return
+    excess_units = int((excess_lbs + 0.01) // heaviest)
+    sealed_free = sum(max(0, int(p.full_units or 0) - int(p.held_units or 0)) for p in placements)
+    excess_units = min(excess_units, sealed_free)
     if excess_units <= 0:
         return
     try:

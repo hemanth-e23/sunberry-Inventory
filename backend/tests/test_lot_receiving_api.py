@@ -464,8 +464,10 @@ class TestCutoverApi:
         )
         assert response.status_code == 400
 
-    def test_an_opening_balance_creates_stock(self, client, api_seed, wh_headers):
-        response = client.post("/api/lot-cutover/opening-balance", headers=wh_headers, json={
+    def test_an_opening_balance_creates_stock(self, client, api_seed, wh_headers, admin_headers):
+        # Counts that must APPLY are entered by a plant admin: a warehouse
+        # user's count now waits for a supervisor (2026-10-02).
+        response = client.post("/api/lot-cutover/opening-balance", headers=admin_headers, json={
             "product_id": PRODUCT,
             "storage_row_id": ROW_1,
             "full_units": 31,
@@ -488,13 +490,15 @@ class TestCutoverApi:
         })
         assert response.status_code == 403
 
-    def test_a_count_reports_its_variance(self, client, api_seed, wh_headers):
-        created = client.post("/api/lot-cutover/opening-balance", headers=wh_headers, json={
+    def test_a_count_reports_its_variance(self, client, api_seed, wh_headers, admin_headers):
+        # Counts that must APPLY are entered by a plant admin: a warehouse
+        # user's count now waits for a supervisor (2026-10-02).
+        created = client.post("/api/lot-cutover/opening-balance", headers=admin_headers, json={
             "product_id": PRODUCT, "storage_row_id": ROW_1, "full_units": 40,
             "vendor_lot": "OLD-MG", "unit_label": "drum", "weight_per_unit": 500.0,
         }).json()
 
-        counted = client.post("/api/lot-cutover/count", headers=wh_headers, json={
+        counted = client.post("/api/lot-cutover/count", headers=admin_headers, json={
             "material_lot_id": created["material_lot_id"],
             "storage_row_id": ROW_1,
             "full_units": 38,
@@ -505,9 +509,11 @@ class TestCutoverApi:
         assert counted.json()["system_units"] == 40
 
     def test_unlabelled_lots_lists_what_still_needs_stickers(
-        self, client, api_seed, wh_headers
+        self, client, api_seed, wh_headers, admin_headers
     ):
-        client.post("/api/lot-cutover/opening-balance", headers=wh_headers, json={
+        # Counts that must APPLY are entered by a plant admin: a warehouse
+        # user's count now waits for a supervisor (2026-10-02).
+        client.post("/api/lot-cutover/opening-balance", headers=admin_headers, json={
             "product_id": PRODUCT, "storage_row_id": ROW_1, "full_units": 12,
             "vendor_lot": "OLD-MG", "bbd": BBD, "unit_label": "drum",
             "weight_per_unit": 500.0,
@@ -605,9 +611,11 @@ class TestWarehouseIsolation:
         ).status_code == 403
 
     def test_another_warehouses_lot_cannot_be_counted(
-        self, client, api_seed, wh_headers, db_session
+        self, client, api_seed, wh_headers, admin_headers, db_session
     ):
-        created = client.post("/api/lot-cutover/opening-balance", headers=wh_headers, json={
+        # Counts that must APPLY are entered by a plant admin: a warehouse
+        # user's count now waits for a supervisor (2026-10-02).
+        created = client.post("/api/lot-cutover/opening-balance", headers=admin_headers, json={
             "product_id": PRODUCT, "storage_row_id": ROW_1, "full_units": 10,
             "vendor_lot": "MG-X", "unit_label": "drum", "weight_per_unit": 500.0,
         }).json()
@@ -665,13 +673,15 @@ class TestRemainingGates:
         assert response.status_code == 403
 
     def test_an_opening_balance_cannot_name_another_warehouse(
-        self, client, api_seed, wh_headers, db_session
+        self, client, api_seed, wh_headers, admin_headers, db_session
     ):
+        # Counts that must APPLY are entered by a plant admin: a warehouse
+        # user's count now waits for a supervisor (2026-10-02).
         """The client does not get to choose whose books it writes to. The field
         is gone from the schema, so naming it is ignored, not honoured."""
         from app.models import MaterialLot as ML
 
-        response = client.post("/api/lot-cutover/opening-balance", headers=wh_headers, json={
+        response = client.post("/api/lot-cutover/opening-balance", headers=admin_headers, json={
             "product_id": PRODUCT, "storage_row_id": ROW_1, "full_units": 200,
             "vendor_lot": "SNEAK-1", "unit_label": "drum", "weight_per_unit": 500.0,
             "warehouse_id": OTHER_WH,
@@ -874,9 +884,11 @@ class TestCalendarDatesSurviveTheRoundTrip:
         assert sheet["labels"][0] == sheet["labels"][1]
 
     def test_an_opening_balance_takes_a_bare_date_too(
-        self, client, api_seed, wh_headers
+        self, client, api_seed, wh_headers, admin_headers
     ):
-        response = client.post("/api/lot-cutover/opening-balance", headers=wh_headers, json={
+        # Counts that must APPLY are entered by a plant admin: a warehouse
+        # user's count now waits for a supervisor (2026-10-02).
+        response = client.post("/api/lot-cutover/opening-balance", headers=admin_headers, json={
             "product_id": PRODUCT, "storage_row_id": ROW_1, "full_units": 5,
             "vendor_lot": "CAL-4", "bbd": "2027-06-30", "unit_label": "drum",
             "weight_per_unit": 500.0,

@@ -183,7 +183,43 @@ const CountsTab = () => {
     }
   };
 
+  // Opened / left belong to ONE lot on ONE rack. Carried over, they saved a
+  // 55 lb bag lot as "1 open (210 lbs)" (2026-10-02 PART 4, finding 3).
+  useEffect(() => {
+    setEntry((prev) => (prev.open_units === '' && prev.open_remaining_qty === ''
+      ? prev
+      : { ...prev, open_units: '', open_remaining_qty: '' }));
+  }, [entry.product_id, entry.material_lot_id, entry.storage_row_id, mode]);
+
+  // An opened container cannot hold more than a full one.
+  const openOverFull = () => {
+    const openUnits = Number(entry.open_units) || 0;
+    const left = Number(entry.open_remaining_qty) || 0;
+    if (!openUnits && !left) return '';
+    if (openUnits && left <= 0) return 'Enter how much is left in the opened containers.';
+    if (!openUnits && left > 0) return 'Enter how many containers are opened.';
+    const lot = countableLots.find((l) => l.material_lot_id === entry.material_lot_id);
+    const w = Number(entry.weight_per_unit) || Number(lot?.weight_per_unit) || 0;
+    if (w > 0 && left > openUnits * w + 0.01) {
+      return `${left} ${entry.weight_unit || 'lbs'} cannot be left in ${openUnits} opened — each holds ${w} when full.`;
+    }
+    return '';
+  };
+
+  const pendingToast = (result) => addToast(
+    `Sent for approval: ${result.counted_units ?? result.full_units} ${countWording(result.unit_label).many}`
+      + ` on ${result.storage_row_name}`
+      + (result.variance != null && mode === 'set' ? ` (system ${result.system_units}, ${result.variance > 0 ? '+' : ''}${result.variance})` : '')
+      + ' — stock changes when a supervisor approves.',
+    'info',
+  );
+
   const submitEntry = async () => {
+    const overFull = openOverFull();
+    if (overFull) {
+      addToast(overFull, 'error');
+      return;
+    }
     if (!entry.product_id || !entry.storage_row_id) {
       addToast('Product and rack are both needed.', 'error');
       return;
@@ -211,6 +247,11 @@ const CountsTab = () => {
           note: 'Physical count',
         });
         setLastEntry({ ...result, unit_label: result.unit_label, counted: true });
+        if (result.pending) {
+          pendingToast(result);
+          await load();
+          return;
+        }
         addToast(
           result.variance === 0
             ? `${result.counted_units} ${countWording(result.unit_label).many} — matches the system`
@@ -244,6 +285,11 @@ const CountsTab = () => {
       // always the SAME lot in the next rack along. Only the rack and the count
       // are cleared, which is the pair that actually changes as you walk a barn.
       setEntry((prev) => ({ ...prev, storage_row_id: '', full_units: '', open_units: '', open_remaining_qty: '' }));
+      if (result.pending) {
+        pendingToast(result);
+        await load();
+        return;
+      }
       addToast(
         `${result.full_units} ${countWording(result.unit_label).many} in ${result.storage_row_name} · ${result.lot_code}`,
         'success',

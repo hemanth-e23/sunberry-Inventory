@@ -352,3 +352,45 @@ class LotPlacementEvent(Base):
 
     material_lot = relationship("MaterialLot", backref="placement_events")
     actor = relationship("User", foreign_keys=[actor_id])
+
+
+class LotCountRequest(Base):
+    """A physical count waiting for a supervisor (2026-10-02 PART 4).
+
+    Counts used to restate stock the moment anyone entered them — a 55 lb bag
+    saved as "1 open (210 lbs)" went straight into the books. A warehouse
+    user's count now waits here; a supervisor's applies at once (owner's
+    decision). `kind` is 'recount' (absolute figure for a lot already on a
+    rack) or 'found' (stock with no record: may create the lot). The system's
+    figure at submit is kept so the approver sees the variance it was based on.
+    """
+    __tablename__ = "lot_count_requests"
+
+    id = Column(String(50), primary_key=True)
+    kind = Column(String(20), nullable=False)
+    status = Column(String(20), nullable=False, default="pending", server_default="pending")
+    warehouse_id = Column(String(50), ForeignKey("warehouses.id"), nullable=True, index=True)
+    material_lot_id = Column(String(50), ForeignKey("material_lots.id"), nullable=True, index=True)
+    storage_row_id = Column(String(50), ForeignKey("storage_rows.id"), nullable=False)
+    product_id = Column(String(50), ForeignKey("products.id"), nullable=True)
+    # 'found' entries describe a lot that may not exist yet.
+    vendor_id = Column(String(50), nullable=True)
+    vendor_lot = Column(String(100), nullable=True)
+    bbd = Column(DateTime(timezone=True), nullable=True)
+    unit_label = Column(String(20), nullable=True)
+    weight_per_unit = Column(Float, nullable=True)
+    weight_unit = Column(String(10), nullable=True)
+    # What the counter says is there (recount: absolute; found: added).
+    full_units = Column(Integer, nullable=False, default=0)
+    open_units = Column(Integer, nullable=False, default=0)
+    open_remaining_qty = Column(Float, nullable=False, default=0)
+    # What the system said at submit.
+    system_full_units = Column(Integer, nullable=True)
+    system_open_units = Column(Integer, nullable=True)
+    system_open_qty = Column(Float, nullable=True)
+    note = Column(Text, nullable=True)
+    submitted_by = Column(String(50), nullable=True)
+    submitted_at = Column(DateTime(timezone=True), server_default=func.now())
+    approved_by = Column(String(50), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    rejection_reason = Column(Text, nullable=True)

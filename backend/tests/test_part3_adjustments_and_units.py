@@ -200,3 +200,27 @@ def test_writeoff_approved_after_the_rack_changed_records_both_figures(client, p
     assert done.quantity == pytest.approx(3 * B)
     assert "rack changed after submit" in done.reason
     assert _paper(s) == pytest.approx(before - 3 * B)
+
+
+def test_consumption_sweep_never_takes_a_sealed_drum_for_open_ones(client, plant, db_session):
+    """PART 4, finding 1: two OPEN drums (300 lb, 210 lb) on racks of a mixed
+    502/474 lot; the books match the racks. The old sweep counted each open
+    drum as a whole drum against paper converted to drums and took a sealed
+    474 off another rack. The sweep must find nothing to do."""
+    from app.services.staging_request_service import _sweep_rack_excess
+
+    s, carrier = _mixed_rack(client, db_session)          # ROW3: 2×502 + 3×474
+    s.receive_truck("A", VL, "2027-03-01", 3, ROW1, weight=B)
+    for row, part in ((ROW3, A - 300), (ROW1, B - 210)):   # leave 300 and 210 open
+        adj = s.post("/api/inventory/adjustments", WH_H, json={
+            "receipt_id": carrier.id, "product_id": PRODUCT, "category_id": CAT,
+            "adjustment_type": "used-in-production", "quantity": part, "reason": "part",
+            "source_breakdown": [{"id": f"row-{row}", "quantity": part, "units": 0, "open_qty": part}],
+        }).json()
+        s.post(f"/api/inventory/adjustments/{adj['id']}/approve", SUP_H)
+    before = {r: _rack(s, r) for r in (ROW1, ROW3)}
+    db_session.expire_all()
+    receipt = db_session.query(Receipt).filter(Receipt.id == carrier.id).one()
+    _sweep_rack_excess(db_session, receipt)
+    db_session.flush()
+    assert {r: _rack(s, r) for r in (ROW1, ROW3)} == before

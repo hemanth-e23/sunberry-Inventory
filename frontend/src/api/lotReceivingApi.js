@@ -220,3 +220,11 @@ export const truckFinish = (orderId, payload = {}) =>
 /** Approve every line of a finished truck in one go, then close the order. */
 export const approveTruck = (orderId) =>
   unwrap(apiClient.post(`/lot-receiving/trucks/${orderId}/approve`));
+
+// ─── count approvals: a warehouse user's count waits for a supervisor ────────
+export const listCountRequests = (status = 'pending') =>
+  unwrap(apiClient.get('/lot-cutover/count-requests', { params: { status } }));
+export const approveCountRequest = (id) =>
+  unwrap(apiClient.post(`/lot-cutover/count-requests/${id}/approve`));
+export const rejectCountRequest = (id, reason) =>
+  unwrap(apiClient.post(`/lot-cutover/count-requests/${id}/reject`, null, { params: { reason } }));

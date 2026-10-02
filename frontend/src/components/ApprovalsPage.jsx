@@ -17,6 +17,8 @@ import HoldsTab from "./approvals/HoldsTab";
 import AdjustmentsTab from "./approvals/AdjustmentsTab";
 import ForkliftTab from "./approvals/ForkliftTab";
 import IngredientIntakesTab from "./approvals/IngredientIntakesTab";
+import CountsApprovalTab from "./approvals/CountsApprovalTab";
+import { listCountRequests } from "../api/lotReceivingApi";
 
 const STATUS_PENDING = new Set([RECEIPT_STATUS.RECORDED, RECEIPT_STATUS.REVIEWED]);
 
@@ -351,6 +353,16 @@ const ApprovalsPage = () => {
   // high-cardinality), so the tab badge takes its own count and the tab keeps it
   // fresh after each approve/reject.
   const [ingredientIntakeCount, setIngredientIntakeCount] = useState(0);
+  // Counts waiting for a supervisor (2026-10-02). Loaded up front so the tab
+  // shows its badge before anyone opens it.
+  const [countRequestCount, setCountRequestCount] = useState(0);
+  useEffect(() => {
+    let live = true;
+    listCountRequests('pending')
+      .then((data) => { if (live) setCountRequestCount((data || []).length); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
   useEffect(() => {
     let cancelled = false;
     listIntakes({ status: INTAKE_STATUS.SUBMITTED, limit: 1 })
@@ -378,7 +390,7 @@ const ApprovalsPage = () => {
     const todayApproved = approvedHistory.filter(r => toDateKey(r.approvedAt) === todayKey).length;
     const urgentCount = backlogPending.filter(r => getDaysAgo(r.submittedAt || r.receiptDate) >= 7).length;
     const totalPendingReceipts = todaysPending.length + backlogPending.length;
-    const totalPendingItems = totalPendingReceipts + pendingTransfers.length + pendingHolds.length + pendingAdjustments.length + pendingForkliftRequests.length + ingredientIntakeCount;
+    const totalPendingItems = totalPendingReceipts + pendingTransfers.length + pendingHolds.length + pendingAdjustments.length + pendingForkliftRequests.length + ingredientIntakeCount + countRequestCount;
     return {
       totalPending: totalPendingItems,
       receiptsPending: totalPendingReceipts,
@@ -390,7 +402,7 @@ const ApprovalsPage = () => {
       urgentCount,
       todayCount: todaysPending.length,
     };
-  }, [todaysPending, backlogPending, approvedHistory, todayKey, pendingTransfers, pendingHolds, pendingAdjustments, pendingForkliftRequests, ingredientIntakeCount]);
+  }, [todaysPending, backlogPending, approvedHistory, todayKey, pendingTransfers, pendingHolds, pendingAdjustments, pendingForkliftRequests, ingredientIntakeCount, countRequestCount]);
 
   return (
     <div className="approvals-page">
@@ -442,6 +454,7 @@ const ApprovalsPage = () => {
             { key: 'holds', label: 'Holds', count: summaryStats.holdsPending },
             { key: 'adjustments', label: 'Adjustments', count: summaryStats.adjustmentsPending },
             { key: 'ingredient-intakes', label: 'Ingredient Intakes', count: ingredientIntakeCount },
+            { key: 'counts', label: 'Counts', count: countRequestCount },
           ].map(({ key, label, count }) => (
             <button
               key={key}
@@ -567,6 +580,13 @@ const ApprovalsPage = () => {
               userNameMap={userNameMap}
             />
           </section>
+        )}
+
+        {activeTab === 'counts' && (
+          <CountsApprovalTab
+            userNameMap={userNameMap}
+            onPendingCountChange={setCountRequestCount}
+          />
         )}
 
         {activeTab === 'ingredient-intakes' && (

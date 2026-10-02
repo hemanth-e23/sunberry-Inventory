@@ -76,6 +76,10 @@ class OpeningBalanceResult(BaseSchema):
     derived_weight: float = 0
     weight_unit: Optional[str] = None
     needs_labels: bool = True
+    # Set when the count was stored for a supervisor's approval instead of
+    # applied (a warehouse user's count, 2026-10-02).
+    pending: bool = False
+    request_id: Optional[str] = None
 
 
 class CountRowRequest(BaseSchema):
@@ -98,6 +102,10 @@ class CountRowResult(BaseSchema):
     variance: int = 0
     unit_label: Optional[str] = None
     derived_weight: float = 0
+    # Set when the count was stored for a supervisor's approval instead of
+    # applied (a warehouse user's count, 2026-10-02).
+    pending: bool = False
+    request_id: Optional[str] = None
 
 
 class UnlabelledLot(BaseSchema):

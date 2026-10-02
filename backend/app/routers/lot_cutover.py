@@ -119,10 +119,20 @@ def opening_balance(
     that a drum was opened — both numbers have to come from a person who walked
     the rack.
     """
+    warehouse_id = resolve_warehouse_for_write(current_user)
+    if current_user.role not in APPROVAL_ROLES:
+        # A warehouse user's count waits for a supervisor (owner's decision,
+        # 2026-10-02): stock no longer changes the moment anyone types it.
+        req = lcs.submit_count_request(
+            db, kind="found", user_id=str(current_user.id), warehouse_id=warehouse_id,
+            **payload.model_dump(),
+        )
+        db.commit()
+        return _pending_result(db, req)
     result = lcs.create_opening_balance(
         db,
         # Resolved from the caller, never taken from the body — see the schema.
-        warehouse_id=resolve_warehouse_for_write(current_user),
+        warehouse_id=warehouse_id,
         user_id=str(current_user.id),
         **payload.model_dump(),
     )
@@ -156,11 +166,97 @@ def count(
     if wh_id and lot.warehouse_id != wh_id:
         raise ForbiddenError("Cannot count a different warehouse's lot")
 
+    if current_user.role not in APPROVAL_ROLES:
+        req = lcs.submit_count_request(
+            db, kind="recount", user_id=str(current_user.id),
+            warehouse_id=lot.warehouse_id, **payload.model_dump(),
+        )
+        db.commit()
+        return _pending_result(db, req)
     result = lcs.count_row(
         db, user_id=str(current_user.id), **payload.model_dump()
     )
     db.commit()
     return result
+
+
+def _pending_result(db: Session, req) -> dict:
+    """Same shape the form already reads, flagged as waiting for approval."""
+    view = lcs.count_request_view(db, req)
+    lot = db.query(MaterialLot).filter(MaterialLot.id == req.material_lot_id).first() if req.material_lot_id else None
+    return {
+        "material_lot_id": req.material_lot_id or "",
+        "lot_code": lot.lot_code if lot else (req.vendor_lot or ""),
+        "product_id": req.product_id or "",
+        "product_name": view["product_name"],
+        "storage_row_id": req.storage_row_id,
+        "storage_row_name": view["storage_row_name"],
+        "full_units": req.full_units,
+        "open_units": req.open_units,
+        "unit_label": view["unit_label"],
+        "system_units": req.system_full_units or 0,
+        "counted_units": req.full_units,
+        "variance": view["variance_units"],
+        "pending": True,
+        "request_id": req.id,
+    }
+
+
+@router.get("/count-requests")
+def list_count_requests(
+    status: Optional[str] = Query("pending"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_counter),
+):
+    """Counts waiting for (or past) approval, in the caller's plant."""
+    from app.models import LotCountRequest
+
+    q = db.query(LotCountRequest)
+    if status and status != "all":
+        q = q.filter(LotCountRequest.status == status)
+    wh_id = warehouse_filter(current_user)
+    if wh_id:
+        q = q.filter(LotCountRequest.warehouse_id == wh_id)
+    return [lcs.count_request_view(db, r) for r in q.order_by(LotCountRequest.submitted_at.desc()).all()]
+
+
+def _approvable_request(db: Session, request_id: str, current_user: User):
+    from app.models import LotCountRequest
+
+    if current_user.role not in APPROVAL_ROLES:
+        raise ForbiddenError("Only a supervisor can approve or reject counts")
+    req = db.query(LotCountRequest).filter(LotCountRequest.id == request_id).first()
+    if not req:
+        raise NotFoundError("Count request", request_id)
+    wh_id = warehouse_filter(current_user)
+    if wh_id and req.warehouse_id and req.warehouse_id != wh_id:
+        raise ForbiddenError("Cannot approve a different warehouse's count")
+    return req
+
+
+@router.post("/count-requests/{request_id}/approve")
+def approve_count_request(
+    request_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    req = _approvable_request(db, request_id, current_user)
+    lcs.approve_count_request(db, req, str(current_user.id))
+    db.commit()
+    return lcs.count_request_view(db, req)
+
+
+@router.post("/count-requests/{request_id}/reject")
+def reject_count_request(
+    request_id: str,
+    reason: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    req = _approvable_request(db, request_id, current_user)
+    lcs.reject_count_request(db, req, str(current_user.id), reason)
+    db.commit()
+    return lcs.count_request_view(db, req)
 
 
 @router.get("/unlabelled-lots", response_model=List[UnlabelledLot])

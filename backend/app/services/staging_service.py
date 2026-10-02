@@ -1087,7 +1087,8 @@ def mark_staging_used(db: Session, staging_item: StagingItem, request, current_u
     # Spills across the lot's receipts instead of clamping at zero (audit S5).
     from app.services.staging_request_service import consume_receipt_quantity
 
-    consume_receipt_quantity(db, receipt, request.quantity)
+    # quantity_used was already updated above (see the sweep's note).
+    consume_receipt_quantity(db, receipt, request.quantity, staging_settled=True)
     db.add(adjustment)
 
     return staging_item
