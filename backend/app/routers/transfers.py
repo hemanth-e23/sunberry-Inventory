@@ -291,6 +291,17 @@ def create_transfer(
     # two receipts, the form routes everything to one of them, and drums
     # within a counted lot are fungible — so the receipt's own quantity is the
     # wrong denominator.
+    # Stated in containers: price what those containers weigh (their
+    # deliveries), so a rack mixing 474s and 502s is not priced at an average
+    # nobody can approve (2026-10-01 PART 3, B5). Before the lot check, so it
+    # compares the real pounds.
+    if lps.is_counted_lot(db, receipt.material_lot_id):
+        priced, total = transfer_service.price_counted_breakdown(
+            db, receipt, transfer_data.source_breakdown, allow_partial=False,
+        )
+        if total is not None:
+            transfer_data.source_breakdown = priced
+            transfer_data.quantity = total
     pool = transfer_service.lot_scoped_availability(db, receipt)
     available = pool["available"]
     if transfer_data.quantity > available:
@@ -301,7 +312,7 @@ def create_transfer(
         )
         causes = []
         if pool["reserved"] > 0:
-            causes.append(f"{q(pool['reserved'])} is already on other pending transfers")
+            causes.append(f"{q(pool['reserved'])} is already promised to other pending requests")
         if pool["held"] > 0:
             causes.append(f"{q(pool['held'])} is on hold")
         if pool.get("staged", 0) > 0:

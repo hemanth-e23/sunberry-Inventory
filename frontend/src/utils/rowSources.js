@@ -621,3 +621,23 @@ export const stockSummary = (entries = []) => {
     text: `On hand ${part(onHandUnits, onHand)} · available ${part(availableUnits, available)}`,
   };
 };
+
+/**
+ * Split what was typed for one counted (lot × rack) entry into whole
+ * containers and a part-container in pounds — the shape the server prices
+ * exactly (2026-10-01 PART 3, B4/B5). Pounds typed as drums × a rack's
+ * AVERAGE weight could not be approved on a rack mixing 474s and 502s, and
+ * "half a drum used" had no way in.
+ *
+ * Returns null for entries not counted in containers (legacy material), so
+ * callers keep sending pounds only.
+ */
+export const containerSplit = (entry, displayQty, partialLbs = 0) => {
+  const factor = Number(entry?.displayFactor) || 0;
+  if (!entry?.isCounted || !(factor > 1)) return null;
+  const qty = Math.max(0, Number(displayQty) || 0);
+  const units = Math.floor(qty + 1e-9);
+  const fraction = qty - units;
+  const openQty = Math.round((fraction * factor + Math.max(0, Number(partialLbs) || 0)) * 1000) / 1000;
+  return { units, openQty };
+};

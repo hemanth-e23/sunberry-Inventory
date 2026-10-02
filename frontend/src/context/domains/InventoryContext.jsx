@@ -173,6 +173,9 @@ export const InventoryProvider = ({ children }) => {
             // tell a pallet-based Finished Goods adjustment from a lot-based
             // one, and showing neither a lot nor a quantity.
             palletLicenceIds: adj.pallet_licence_ids || [],
+            // Pending write-offs hold their drums back on the forms, like
+            // pending transfers (2026-10-01 PART 3, B10).
+            sourceBreakdown: adj.source_breakdown || [],
             status: adj.status,
             submittedAt: adj.submitted_at,
             submittedBy: adj.submitted_by,
@@ -673,6 +676,7 @@ export const InventoryProvider = ({ children }) => {
         reason: response.data.reason,
         recipient: response.data.recipient,
         palletLicenceIds: response.data.pallet_licence_ids || [],
+        sourceBreakdown: response.data.source_breakdown || [],
         status: response.data.status || 'pending',
         submittedAt: response.data.submitted_at,
         submittedBy: response.data.submitted_by,

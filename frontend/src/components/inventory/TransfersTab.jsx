@@ -6,7 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct, rowCapacityInfo, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary } from '../../utils/rowSources';
+import { buildEntriesForProduct, rowCapacityInfo, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary, containerSplit } from '../../utils/rowSources';
 import RmEntryQtyInput from './RmEntryQtyInput';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS, SHIP_OUT_REASON, SHIP_OUT_REASON_LABELS } from '../../constants';
@@ -23,6 +23,7 @@ const TransfersTab = () => {
     subLocationMap,
     storageAreas,
     inventoryTransfers,
+    inventoryAdjustments,
     submitTransfer,
     refreshReceipts,
     refreshTransfers,
@@ -281,10 +282,11 @@ const TransfersTab = () => {
       storageAreas,
       locations,
       subLocationMap,
-      pendingTransfers: inventoryTransfers,
+      // Pending write-offs reserve too (PART 3, B10).
+      pendingTransfers: [...inventoryTransfers, ...(inventoryAdjustments || [])],
       allReceipts: receipts,
     });
-  }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap, inventoryTransfers, receipts]);
+  }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap, inventoryTransfers, inventoryAdjustments, receipts]);
 
   // ─── RM: submit ──────────────────────────────────────────────────────────────
   const handleRmSubmit = async (event) => {
@@ -326,6 +328,11 @@ const TransfersTab = () => {
       })
       .filter(p => p.storageQty > 0);
 
+    const partPick = picks.find((p) => (containerSplit(p.entry, p.displayQty)?.openQty || 0) > 0);
+    if (partPick) {
+      setRmError(`${partPick.entry.locationLabel}: move whole ${partPick.entry.displayUnit}s — part of a container cannot move between racks.`);
+      return;
+    }
     if (picks.length === 0) {
       setRmError('Enter how much to move from each lot/location in the breakdown.');
       return;
@@ -384,6 +391,10 @@ const TransfersTab = () => {
       // payload (2026-09-29 audit, bags finding 2).
       const sourceBreakdown = items.map(({ entry, displayQty, storageQty }) => {
         const e = { id: entry.sourceId, quantity: storageQty };
+        // Counted containers go as a COUNT; the server prices what those
+        // drums weigh (their deliveries), not drums × a rack average.
+        const split = containerSplit(entry, displayQty);
+        if (split) e.units = split.units;
         if (entry.rowId && !entry.isCounted) e.pallets = resolvePalletsOut(entry, displayQty);
         return e;
       });
@@ -685,7 +696,7 @@ const TransfersTab = () => {
                               )}
                               {Number(entry.reservedWeight) > 0 && (
                                 <span style={{ color: 'var(--color-text-muted, #6b7280)', fontWeight: 600 }}>
-                                  {' '}· {countWithUnit(Math.round((entry.reservedWeight / (entry.displayFactor || 1)) * 100) / 100, entry.displayUnit)} on pending transfers
+                                  {' '}· {countWithUnit(Math.round((entry.reservedWeight / (entry.displayFactor || 1)) * 100) / 100, entry.displayUnit)} on pending requests
                                 </span>
                               )}
                               {notOnRackCount && (

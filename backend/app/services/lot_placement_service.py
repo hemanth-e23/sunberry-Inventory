@@ -1273,6 +1273,70 @@ def take_units(
     return taken
 
 
+def take_partial(
+    db: Session,
+    lot: MaterialLot,
+    *,
+    row_id: str,
+    quantity: float,
+    event_type: str,
+    actor_id: Optional[str] = None,
+    ref_type: Optional[str] = None,
+    ref_id: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> float:
+    """Take `quantity` of CONTENT (lbs) that is less than whole containers.
+
+    The plant writes off "half a drum used" the day after staging; the forms
+    took only whole drums and approval refused 251 lb as "not a whole number"
+    (2026-10-01 PART 3, B4). Content comes off an open drum on that rack first;
+    if there is none, or not enough, a sealed drum is OPENED (it stays on the
+    rack as an open drum with what is left in it) — the same shape a weighed
+    return from production already leaves. Returns the lbs taken."""
+    qty = float(quantity or 0)
+    if qty <= 0:
+        return 0.0
+    if lot.is_held:
+        raise ConflictError(
+            f"Lot {lot.vendor_lot_number or lot.lot_code} is on hold. "
+            "Release the hold before taking any of it."
+        )
+    placement = _lock_placement(db, lot.id, row_id)
+    open_qty = float(placement.open_remaining_qty or 0) if placement else 0.0
+    if placement is None or (open_qty + 1e-6 < qty and _free_units(placement) <= 0):
+        row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
+        raise ConflictError(
+            f"Lot {lot.vendor_lot_number or lot.lot_code} has no open or sealed "
+            f"{lot.unit_label or 'unit'} on {row.name if row else row_id} to take "
+            f"{qty:g} from."
+        )
+    if open_qty + 1e-6 < qty:
+        # Open one sealed unit: its weight is that of the oldest delivery on
+        # the rack, which is the one the ledger will take.
+        weight = fifo_units_weight(db, lot, row_id, 1)
+        apply_delta(
+            db, lot, row_id, event_type=EVENT_OPENED,
+            full_units_delta=-1, open_units_delta=1, open_qty_delta=weight,
+            actor_id=actor_id, ref_type=ref_type, ref_id=ref_id,
+            reason="Opened for a partial write-off",
+        )
+        placement = _lock_placement(db, lot.id, row_id)
+        open_qty = float(placement.open_remaining_qty or 0)
+    if open_qty + 1e-6 < qty:
+        raise ConflictError(
+            f"Only {open_qty:g} {lot.weight_unit or 'lbs'} is in the open "
+            f"{lot.unit_label or 'unit'}s on that rack; take whole units for the rest."
+        )
+    emptied = open_qty - qty <= 0.01
+    apply_delta(
+        db, lot, row_id, event_type=event_type,
+        open_qty_delta=-(open_qty if emptied else qty),
+        open_units_delta=-1 if emptied and int(placement.open_units or 0) > 0 else 0,
+        actor_id=actor_id, ref_type=ref_type, ref_id=ref_id, reason=reason,
+    )
+    return qty
+
+
 def put_units(
     db: Session,
     lot: MaterialLot,

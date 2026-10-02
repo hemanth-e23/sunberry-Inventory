@@ -6,7 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary } from '../../utils/rowSources';
+import { buildEntriesForProduct, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary, containerSplit, singularUnit } from '../../utils/rowSources';
 import RmEntryQtyInput from './RmEntryQtyInput';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
@@ -67,6 +67,8 @@ const AdjustmentsTab = () => {
   });
   // Map of entry.key -> qty string the operator typed
   const [rmEntrySelections, setRmEntrySelections] = useState({});
+  // Pounds taken from a part-container, per (lot × rack) entry.
+  const [rmPartialSelections, setRmPartialSelections] = useState({});
   // Per-source-row pallets to FREE (keyed by entry.key). Undefined = proportional
   // suggestion; explicit value (incl. '0') overrides.
   const [rmPalletSelections, setRmPalletSelections] = useState({});
@@ -145,10 +147,11 @@ const AdjustmentsTab = () => {
       storageAreas,
       locations,
       subLocationMap,
-      pendingTransfers: inventoryTransfers,
+      // Pending write-offs reserve too (PART 3, B10).
+      pendingTransfers: [...inventoryTransfers, ...(inventoryAdjustments || [])],
       allReceipts: receipts,
     });
-  }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap, inventoryTransfers, receipts]);
+  }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap, inventoryTransfers, inventoryAdjustments, receipts]);
 
   // Proportional pallets-out suggestion for one source row (editable guess).
   const suggestedPalletsOut = (entry, displayQty) => {
@@ -239,8 +242,10 @@ const AdjustmentsTab = () => {
     const picks = rmEntries
       .map(entry => {
         const displayQty = Number(rmEntrySelections[entry.key] || 0);
-        const storageQty = displayQty * entry.displayFactor;
-        return { entry, displayQty, storageQty };
+        // "+ lbs from a part drum" (PART 3, B4): half a drum used has a way in.
+        const partialLbs = Number(rmPartialSelections[entry.key] || 0);
+        const storageQty = displayQty * entry.displayFactor + Math.max(0, partialLbs);
+        return { entry, displayQty, partialLbs, storageQty };
       })
       .filter(p => p.storageQty > 0);
 
@@ -288,9 +293,16 @@ const AdjustmentsTab = () => {
       // Pallets-out only for UNCOUNTED lots — a counted lot's footprint is
       // derived from the container count server-side and any figure here is
       // discarded (2026-09-29 audit, bags finding 2).
-      const sourceBreakdown = items.map(({ entry, displayQty, storageQty }) => {
+      const sourceBreakdown = items.map(({ entry, displayQty, partialLbs, storageQty }) => {
         const e = { id: entry.sourceId, quantity: storageQty };
         if (entry.rowId && !entry.isCounted) e.pallets = resolvePalletsOut(entry, displayQty);
+        // Counted containers go as a COUNT plus any part-container in pounds;
+        // the server prices exactly what leaves (its deliveries' weights).
+        const split = containerSplit(entry, displayQty, partialLbs);
+        if (split) {
+          e.units = split.units;
+          if (split.openQty > 0) e.open_qty = split.openQty;
+        }
         return e;
       });
       const groupQty = items.reduce((s, it) => s + it.storageQty, 0);
@@ -314,6 +326,7 @@ const AdjustmentsTab = () => {
       const count = groups.size;
       setRmForm({ categoryGroupId: '', categoryId: '', productId: '', adjustmentType: 'stock-correction', quantity: '', reason: '', recipient: '' });
       setRmEntrySelections({});
+      setRmPartialSelections({});
       setRmPalletSelections({});
       addToast(
         count === 1
@@ -479,6 +492,7 @@ const AdjustmentsTab = () => {
                   const cat = productCategories.find(c => c.id === e.target.value);
                   setRmForm(prev => ({ ...prev, categoryGroupId: cat?.parentId || '', categoryId: e.target.value, productId: '', receiptId: '' }));
                   setRmEntrySelections({});
+      setRmPartialSelections({});
                   setRmPalletSelections({});
                 }}
               >
@@ -500,6 +514,7 @@ const AdjustmentsTab = () => {
                   onChange={id => {
                     setRmForm(prev => ({ ...prev, productId: id, quantity: '' }));
                     setRmEntrySelections({});
+      setRmPartialSelections({});
                     setRmPalletSelections({});
                   }}
                   placeholder="Select product"
@@ -563,7 +578,7 @@ const AdjustmentsTab = () => {
                               )}
                               {Number(entry.reservedWeight) > 0 && (
                                 <span style={{ color: 'var(--color-text-muted, #6b7280)', fontWeight: 600 }}>
-                                  {' '}· {countWithUnit(Math.round((entry.reservedWeight / (entry.displayFactor || 1)) * 100) / 100, entry.displayUnit)} on pending transfers
+                                  {' '}· {countWithUnit(Math.round((entry.reservedWeight / (entry.displayFactor || 1)) * 100) / 100, entry.displayUnit)} on pending requests
                                 </span>
                               )}
                             </span>
@@ -577,6 +592,28 @@ const AdjustmentsTab = () => {
                               disabled={availDisp <= 0}
                               onChange={(v) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: v }))}
                             />
+                            {/* Part of a drum (half a drum used the day after
+                                staging): comes out of an open drum on this
+                                rack, or opens a sealed one (PART 3, B4). */}
+                            {entry.isCounted && Number(entry.displayFactor) > 1
+                              && !(Number(entry.unitsPerPallet) > 1) && availDisp > 0 && (
+                              <span style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
+                                <span className="muted small">+</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="any"
+                                  value={rmPartialSelections[entry.key] ?? ''}
+                                  onChange={(e) => setRmPartialSelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
+                                  placeholder="0"
+                                  aria-label={`${entry.unit || 'lbs'} from part of a ${singularUnit(entry.displayUnit || 'drum')}`}
+                                  style={{ flex: '0 1 6rem' }}
+                                />
+                                <span className="muted small">
+                                  {entry.unit || 'lbs'} from part of a {singularUnit(entry.displayUnit || 'drum')}
+                                </span>
+                              </span>
+                            )}
                           </label>
                           {/* NO pallet input for a counted lot. The footprint is DERIVED
                               from the container count (`_pallet_footprint`), and

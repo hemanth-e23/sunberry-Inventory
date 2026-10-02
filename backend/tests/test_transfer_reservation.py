@@ -59,7 +59,7 @@ class TestCreateSideReservation:
             headers=auth_headers,
         )
         assert too_much.status_code == 400
-        assert "pending transfers" in too_much.json()["detail"]
+        assert "pending requests" in too_much.json()["detail"]
 
         remainder = client.post(
             "/api/inventory/transfers",

@@ -55,15 +55,20 @@ def test_adjustment_rejects_mismatched_breakdown(client, auth_headers, approved_
 
 
 @pytest.mark.integration
-def test_adjustment_accepts_matching_breakdown(client, auth_headers, approved_receipt):
+def test_adjustment_accepts_matching_breakdown(client, auth_headers, approved_receipt, db_session):
+    # The rack the lot actually sits on: since 2026-10-01 a submit that asks a
+    # rack for more than it holds is refused, so the entries must name it.
+    from app.models import LotPlacement
+    (rack,) = {p.storage_row_id for p in db_session.query(LotPlacement).filter(
+        LotPlacement.material_lot_id == approved_receipt.material_lot_id).all()}
     resp = client.post(
         "/api/inventory/adjustments",
         json={
             "receipt_id": approved_receipt.id, "adjustment_type": "damage-reduction",
             "quantity": 100, "reason": "x",
             "source_breakdown": [
-                {"id": "row-1", "quantity": 60},
-                {"id": "row-2", "quantity": 40},
+                {"id": f"row-{rack}", "quantity": 60},
+                {"id": f"row-{rack}", "quantity": 40},
             ],
         },
         headers=auth_headers,

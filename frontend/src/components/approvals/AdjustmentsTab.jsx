@@ -4,6 +4,7 @@ import { useAppData } from "../../context/AppDataContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { formatTimeAgo, getDaysAgo } from "../../utils/dateUtils";
+import { pluralizeUnit, singularUnit } from "../../utils/rowSources";
 
 const getPriorityLevel = (days) => {
   if (days === 0) return { level: 'low', label: 'New', color: '#10b981' };
@@ -67,9 +68,32 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
         const days = getDaysAgo(adjustment.submittedAt);
         const priority = getPriorityLevel(days);
         const typeStyle = adjustmentTypeColors[adjustment.adjustmentType] || { bg: '#f3f4f6', color: '#374151' };
-        const currentQty = receipt?.quantity ?? 0;
-        const adjQty = Number(adjustment.quantity) || 0;
-        const afterQty = Math.max(0, currentQty - adjQty);
+        // A lot received on several trucks is several receipts; "current" is
+        // the LOT, not the one delivery this adjustment is filed under — that
+        // read "656 → −1004 → 0" (2026-10-01 PART 3, B7).
+        const lotReceipts = receipt?.materialLotId
+          ? Object.values(receiptLookup).filter((r) => r.materialLotId === receipt.materialLotId
+            && ['approved', 'depleted'].includes(String(r.status)))
+          : (receipt ? [receipt] : []);
+        const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+        const currentQty = round2(lotReceipts.reduce((t, r) => t + (Number(r.quantity) || 0), 0));
+        const adjQty = round2(adjustment.quantity);
+        const afterQty = round2(Math.max(0, currentQty - adjQty));
+        // Which rack, how many containers, what they weigh — as submitted.
+        const rackNames = {};
+        lotReceipts.forEach((r) => (r.rawMaterialRowAllocations || []).forEach((a) => {
+          if (a?.rowId) rackNames[a.rowId] = a.rowName || rackNames[a.rowId];
+        }));
+        const containerWord = receipt?.containerUnit || 'unit';
+        const rackLines = (adjustment.sourceBreakdown || []).map((b) => {
+          const rowId = String(b?.id || '').replace(/^row-/, '');
+          const units = b?.units != null ? Number(b.units) : null;
+          const part = Number(b?.open_qty) || 0;
+          const bits = [];
+          if (units) bits.push(`${units} ${units === 1 ? singularUnit(containerWord) : pluralizeUnit(singularUnit(containerWord))}`);
+          if (part) bits.push(`${round2(part).toLocaleString()} ${receipt?.quantityUnits || 'lbs'} of a part ${singularUnit(containerWord)}`);
+          return `${rackNames[rowId] || rowId}: ${bits.join(' + ') || ''}${bits.length ? ' — ' : ''}${round2(b?.quantity).toLocaleString()} ${receipt?.quantityUnits || 'lbs'}`;
+        });
         const isIncrease = adjustment.adjustmentType === 'stock-correction' && adjQty > 0;
 
         return (
@@ -108,6 +132,12 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
               </div>
             )}
 
+            {rackLines.length > 0 && (
+              <ul style={{ margin: '0 0 8px', paddingLeft: '18px', fontSize: '13px', color: '#374151' }}>
+                {rackLines.map((line) => <li key={line}>{line}</li>)}
+              </ul>
+            )}
+
             {/* Before / After quantity panel */}
             {receipt && (
               <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '12px 16px', marginBottom: '12px' }}>
@@ -115,7 +145,7 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '15px' }}>
                   <div style={{ textAlign: 'center' }}>
                     <div style={{ fontSize: '11px', color: '#6b7280', marginBottom: '2px' }}>Current</div>
-                    <div style={{ fontWeight: 700, fontSize: '18px', color: '#111827' }}>{currentQty}</div>
+                    <div style={{ fontWeight: 700, fontSize: '18px', color: '#111827' }}>{currentQty.toLocaleString()}</div>
                     <div style={{ fontSize: '11px', color: '#6b7280' }}>{receipt.quantityUnits || 'cases'}</div>
                   </div>
                   <div style={{ fontSize: '20px', color: '#9ca3af', flex: 1, textAlign: 'center' }}>
@@ -123,13 +153,13 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
                   </div>
                   <div style={{ textAlign: 'center', padding: '6px 12px', background: '#fee2e2', borderRadius: '8px' }}>
                     <div style={{ fontSize: '11px', color: '#991b1b', marginBottom: '2px' }}>Adjusting by</div>
-                    <div style={{ fontWeight: 700, fontSize: '18px', color: '#dc2626' }}>−{adjQty}</div>
+                    <div style={{ fontWeight: 700, fontSize: '18px', color: '#dc2626' }}>−{adjQty.toLocaleString()}</div>
                     <div style={{ fontSize: '11px', color: '#991b1b' }}>{receipt.quantityUnits || 'cases'}</div>
                   </div>
                   <div style={{ fontSize: '20px', color: '#9ca3af', flex: 1, textAlign: 'center' }}>→</div>
                   <div style={{ textAlign: 'center', padding: '6px 12px', background: afterQty === 0 ? '#fee2e2' : '#f0fdf4', borderRadius: '8px' }}>
                     <div style={{ fontSize: '11px', color: afterQty === 0 ? '#991b1b' : '#166534', marginBottom: '2px' }}>After</div>
-                    <div style={{ fontWeight: 700, fontSize: '18px', color: afterQty === 0 ? '#dc2626' : '#16a34a' }}>{afterQty}</div>
+                    <div style={{ fontWeight: 700, fontSize: '18px', color: afterQty === 0 ? '#dc2626' : '#16a34a' }}>{afterQty.toLocaleString()}</div>
                     <div style={{ fontSize: '11px', color: afterQty === 0 ? '#991b1b' : '#166534' }}>{receipt.quantityUnits || 'cases'}</div>
                   </div>
                 </div>

@@ -11,6 +11,7 @@ from app.services import lot_placement_service as lps
 from app.services.ship_out_service import _release_row_capacity
 from app.services.transfer_service import (
     _rebuild_receipt_allocation_from_licences,
+    breakdown_units,
     lot_scoped_availability,
     spill_receipt_credit,
     spill_receipt_deduction,
@@ -98,7 +99,7 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
                 # the lot meanwhile), and a multi-receipt lot's write-off can
                 # legitimately exceed the one receipt the form routed to.
                 qty = float(adjustment.quantity or 0)
-                pool = lot_scoped_availability(db, receipt)
+                pool = lot_scoped_availability(db, receipt, exclude_adjustment_id=adjustment.id)
                 # Net of open transfers too — the hold gate above no longer
                 # doubles as the "transfer under review" guard.
                 available = pool["available"]
@@ -109,7 +110,20 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
                         f"adjustment asks for {qty:g}. Stock changed since it "
                         "was submitted — edit the adjustment first."
                     )
-            adjustment.original_quantity = receipt.quantity
+            # Before/after are the LOT's: one delivery's paper said "150 → −150"
+            # and "656 → −1004 → 0" when the deduction spilled across trucks
+            # (2026-10-01 PART 3, B7).
+            def lot_paper():
+                if not receipt.material_lot_id:
+                    return round(float(receipt.quantity or 0), 3)
+                db.flush()
+                return round(sum(
+                    float(x.quantity or 0) for x in db.query(Receipt).filter(
+                        Receipt.material_lot_id == receipt.material_lot_id,
+                        Receipt.status.in_((ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED)),
+                    ).all()
+                ), 3)
+            adjustment.original_quantity = lot_paper()
             if adjustment.adjustment_type in DEDUCTION_TYPES:
                 if receipt.material_lot_id:
                     # Paper follows the racks lot-wide: spill any excess to
@@ -120,7 +134,7 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
                 # When the operator picked specific rows on the form, deduct
                 # from those rows so on-hand-by-row stays accurate.
                 _apply_row_breakdown(db, receipt, adjustment)
-            adjustment.new_quantity = receipt.quantity
+            adjustment.new_quantity = lot_paper()
             if receipt.quantity <= 0:
                 receipt.status = ReceiptStatus.DEPLETED
 
@@ -197,8 +211,20 @@ def _apply_row_breakdown_counted(
         # The operator named the racks, so honour exactly that. Their weight per
         # rack becomes a count per rack.
         exact = 0.0
+        stated = breakdown_units(adjustment.source_breakdown)
         for row_id, qty in deductions.items():
-            units = lps.row_units_for_quantity(db, lot, row_id, float(qty or 0), receipt=receipt)
+            given, open_qty = stated.get(row_id, (None, 0.0))
+            if given is not None:
+                units = given
+            else:
+                units = lps.row_units_for_quantity(db, lot, row_id, float(qty or 0), receipt=receipt)
+            if open_qty > 0:
+                # Part of a container — "half a drum used" (PART 3, B4).
+                exact += lps.take_partial(
+                    db, lot, row_id=row_id, quantity=open_qty,
+                    event_type=lps.EVENT_ADJUSTED,
+                    ref_type="adjustment", ref_id=adjustment.id, reason=adjustment.reason,
+                )
             if units <= 0:
                 continue
             exact += lps.fifo_units_weight(db, lot, row_id, units)

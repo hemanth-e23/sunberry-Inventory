@@ -10,9 +10,9 @@ from app.models import (
     Receipt, InventoryTransfer, MaterialLot, StorageRow, StorageArea, PalletLicence, Category,
     StagingItem,
 )
-from app.enums import TransferStatus, PalletStatus, ReceiptStatus
+from app.enums import TransferStatus, PalletStatus, ReceiptStatus, DEDUCTION_TYPES
 from app.exceptions import ForbiddenError, ValidationError
-from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED
+from app.constants import ROLE_WAREHOUSE, CATEGORY_FINISHED, pluralize_unit
 from app.services import lot_placement_service as lps
 from app.services.row_allocation import (
     parse_breakdown, parse_pallet_breakdown, deduct_rm_rows, add_rm_rows,
@@ -53,11 +53,17 @@ def open_reserved_quantity(
 
 
 def open_reserved_for_receipts(
-    db: Session, receipt_ids, *, exclude_id: Optional[str] = None
+    db: Session, receipt_ids, *, exclude_id: Optional[str] = None,
+    exclude_adjustment_id: Optional[str] = None,
 ) -> float:
-    """Σ quantity of in-flight transfers across a SET of receipts — the lot
-    form of `open_reserved_quantity`. Two pending transfers of one lot booked
-    against different sibling receipts used to be invisible to each other."""
+    """Σ quantity of in-flight transfers AND pending write-offs across a SET of
+    receipts — the lot form of `open_reserved_quantity`. Two pending transfers
+    of one lot booked against different sibling receipts used to be invisible
+    to each other; a pending adjustment left its drums on offer (2026-10-01
+    PART 3, B10)."""
+    from app.models import InventoryAdjustment
+    from app.enums import AdjustmentStatus
+
     ids = [rid for rid in receipt_ids if rid]
     if not ids:
         return 0.0
@@ -69,11 +75,19 @@ def open_reserved_for_receipts(
     )
     if exclude_id:
         query = query.filter(InventoryTransfer.id != exclude_id)
-    return float(query.scalar() or 0.0)
+    adj = db.query(func.coalesce(func.sum(InventoryAdjustment.quantity), 0.0)).filter(
+        InventoryAdjustment.receipt_id.in_(ids),
+        InventoryAdjustment.status == AdjustmentStatus.PENDING,
+        InventoryAdjustment.adjustment_type.in_(tuple(DEDUCTION_TYPES)),
+    )
+    if exclude_adjustment_id:
+        adj = adj.filter(InventoryAdjustment.id != exclude_adjustment_id)
+    return float(query.scalar() or 0.0) + float(adj.scalar() or 0.0)
 
 
 def lot_scoped_availability(
-    db: Session, receipt: Receipt, *, exclude_transfer_id: Optional[str] = None
+    db: Session, receipt: Receipt, *, exclude_transfer_id: Optional[str] = None,
+    exclude_adjustment_id: Optional[str] = None,
 ) -> dict:
     """Availability pool for an RM/packaging receipt, measured at LOT scope.
 
@@ -106,7 +120,8 @@ def lot_scoped_availability(
     total = sum(float(r.quantity or 0) for r in pool)
     held = sum(float(r.held_quantity or 0) for r in pool)
     reserved = open_reserved_for_receipts(
-        db, [r.id for r in pool], exclude_id=exclude_transfer_id
+        db, [r.id for r in pool], exclude_id=exclude_transfer_id,
+        exclude_adjustment_id=exclude_adjustment_id,
     )
     # Drums out in staging are still on paper (paper drops when production's
     # consumption lands) but are no longer on any rack. Counting them offered
@@ -142,27 +157,104 @@ def describe_qty(receipt: Receipt, qty: float) -> str:
     text = f"{qty:g} {unit}"
     per = float(receipt.weight_per_container or 0)
     if per > 0:
-        word = receipt.container_unit or "containers"
-        if not word.endswith("s"):
-            word += "s"
-        text += f" ({qty / per:.4g} {word})"
+        n = qty / per
+        word = receipt.container_unit or "container"
+        word = word.rstrip("s") if abs(n - 1) < 1e-9 else pluralize_unit(word)
+        text += f" ({n:.4g} {word})"
     return text
 
 
+
+def breakdown_units(breakdown) -> Dict[str, tuple]:
+    """`{row_id: (units | None, open_qty)}` from a breakdown whose entries say
+    HOW MANY containers (and, for a write-off, how much of an open one).
+
+    The forms send drums since 2026-10-01: pounds typed as drums × a rack's
+    AVERAGE weight could not be approved on a rack mixing 474s and 502s
+    ("1434.6 is not a whole number of drums"), and a write-off approved at
+    1,430.841 lb booked 1,478 (PART 3, B5). Entries without `units` keep the
+    old pounds-only meaning."""
+    out: Dict[str, tuple] = {}
+    for entry in (breakdown or []):
+        sid = (entry or {}).get("id", "")
+        if not isinstance(sid, str) or not sid.startswith("row-"):
+            continue
+        rid = sid.removeprefix("row-")
+        units = entry.get("units")
+        units = int(units) if units is not None and str(units) != "" else None
+        open_qty = float(entry.get("open_qty") or 0)
+        prev_u, prev_o = out.get(rid, (None, 0.0))
+        if units is not None:
+            units += prev_u or 0
+        elif prev_u is not None:
+            units = prev_u
+        out[rid] = (units, prev_o + open_qty)
+    return out
+
+
+def price_counted_breakdown(db: Session, receipt: Receipt, breakdown, *, allow_partial: bool):
+    """Exact pounds for a counted-lot breakdown stated in containers.
+
+    Returns `(breakdown, total)` with each entry's `quantity` set to what THOSE
+    containers weigh — the oldest deliveries on that rack first, the order
+    the ledger removes them — plus any partial. `total` is None when no entry
+    states units (an old pounds-only request), so callers leave it alone."""
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    if lot is None or not breakdown:
+        return breakdown, None
+    if not any((e or {}).get("units") is not None for e in breakdown):
+        return breakdown, None
+    priced = []
+    total = 0.0
+    for entry in breakdown:
+        entry = dict(entry or {})
+        sid = entry.get("id", "")
+        units = entry.get("units")
+        open_qty = float(entry.get("open_qty") or 0)
+        if open_qty and not allow_partial:
+            raise ValidationError(
+                "Part of a container cannot move between racks — move whole "
+                f"{lot.unit_label or 'unit'}s."
+            )
+        if open_qty < 0 or (units is not None and int(units) < 0):
+            raise ValidationError("Quantities cannot be negative.")
+        if isinstance(sid, str) and sid.startswith("row-") and units is not None:
+            rid = sid.removeprefix("row-")
+            lbs = lps.fifo_units_weight(db, lot, rid, int(units)) + open_qty
+            entry["units"] = int(units)
+            entry["quantity"] = round(lbs, 3)
+        total += float(entry.get("quantity") or 0)
+        priced.append(entry)
+    return priced, round(total, 3)
+
 def _pending_rack_units(db: Session, lot: MaterialLot, receipt_ids: list) -> Dict[str, int]:
-    """Units other in-flight transfers of this lot will take, per source rack."""
+    """Units other in-flight transfers AND write-offs of this lot will take,
+    per source rack. A pending adjustment used to leave its drums on offer
+    (2026-10-01 PART 3, B10)."""
+    from app.models import InventoryAdjustment
+    from app.enums import AdjustmentStatus
+
     out: Dict[str, int] = {}
-    pending = db.query(InventoryTransfer).filter(
+    breakdowns = [t.source_breakdown for t in db.query(InventoryTransfer).filter(
         InventoryTransfer.receipt_id.in_(receipt_ids),
         InventoryTransfer.status.in_((TransferStatus.PENDING, TransferStatus.FORKLIFT_SUBMITTED)),
-    ).all()
-    for t in pending:
-        rows, _unresolved = resolve_breakdown(db, t.source_breakdown)
+    ).all()]
+    breakdowns += [a.source_breakdown for a in db.query(InventoryAdjustment).filter(
+        InventoryAdjustment.receipt_id.in_(receipt_ids),
+        InventoryAdjustment.status == AdjustmentStatus.PENDING,
+    ).all()]
+    for bd in breakdowns:
+        stated = breakdown_units(bd)
+        rows, _unresolved = resolve_breakdown(db, bd)
         for rid, qty in rows.items():
-            try:
-                n = lps.row_units_for_quantity(db, lot, rid, float(qty or 0), exact=False)
-            except ValidationError:
-                continue
+            given = stated.get(rid, (None, 0.0))[0]
+            if given is not None:
+                n = given
+            else:
+                try:
+                    n = lps.row_units_for_quantity(db, lot, rid, float(qty or 0), exact=False)
+                except ValidationError:
+                    continue
             out[rid] = out.get(rid, 0) + n
     return out
 
@@ -185,8 +277,18 @@ def check_source_racks(db: Session, receipt: Receipt, source_breakdown) -> None:
     reserved = _pending_rack_units(db, lot, receipt_ids)
     placements = {p.storage_row_id: p for p in lps.placements_for_lot(db, lot.id)}
     word = lot.unit_label or "unit"
+    stated = breakdown_units(source_breakdown)
     for rid, qty in rows.items():
-        asked = lps.row_units_for_quantity(db, lot, rid, float(qty or 0), receipt=receipt)
+        given, open_qty = stated.get(rid, (None, 0.0))
+        if given is not None:
+            asked = given
+        else:
+            asked = lps.row_units_for_quantity(db, lot, rid, float(qty or 0), receipt=receipt)
+        # A partial comes out of an open container, or opens a sealed one.
+        if open_qty > 0:
+            placement = placements.get(rid)
+            if not placement or float(placement.open_remaining_qty or 0) + 1e-6 < open_qty:
+                asked += 1
         placement = placements.get(rid)
         on_rack = int(placement.full_units or 0) if placement else 0
         held = (on_rack if lot.is_held else min(int(placement.held_units or 0), on_rack)) if placement else 0
@@ -198,7 +300,7 @@ def check_source_racks(db: Session, receipt: Receipt, source_breakdown) -> None:
             if held:
                 causes.append(f"{held} on hold")
             if promised:
-                causes.append(f"{promised} on other pending transfers")
+                causes.append(f"{promised} promised to other pending requests")
             raise ValidationError(
                 f"{row.name if row else rid} has {free} free {word}"
                 f"{'' if free == 1 else 's'} of lot {lot.vendor_lot_number or lot.lot_code} "
@@ -615,7 +717,10 @@ def _apply_raw_material_internal_transfer(
             "rack first."
         )
 
-    moved_units = _move_counted_lot(db, receipt, source_cases, dest_cases, transfer.id)
+    moved_units = _move_counted_lot(
+        db, receipt, source_cases, dest_cases, transfer.id,
+        source_breakdown=transfer.source_breakdown,
+    )
 
     # Postcondition: approval must move on the racks exactly what the paper
     # says. Every silent-no-op incident in the 2026-09 audit was the absence
@@ -626,7 +731,12 @@ def _apply_raw_material_internal_transfer(
     # — and compared with what the racks would move. A transfer saying 10
     # drums while naming racks for 6 must still be refused (audit T5/T8).
     expected_units = 0
-    if lot:
+    stated = breakdown_units(transfer.source_breakdown)
+    if lot and stated and all(u is not None for u, _o in stated.values()):
+        # Stated in containers: the racks move exactly what was stated, and
+        # submit already priced the paper from those containers.
+        expected_units = sum(u for u, _o in stated.values())
+    elif lot:
         named_lbs = sum(float(q or 0) for rid, q in source_cases.items() if rid)
         named_units = sum(
             lps.row_units_for_quantity(db, lot, rid, float(q or 0), receipt=receipt)
@@ -664,7 +774,8 @@ def _apply_raw_material_internal_transfer(
 
 
 def _move_counted_lot(
-    db: Session, receipt: Receipt, source_cases: dict, dest_cases: dict, ref_id: str
+    db: Session, receipt: Receipt, source_cases: dict, dest_cases: dict, ref_id: str,
+    source_breakdown=None,
 ) -> int:
     """Rack-to-rack for a counted lot: whole containers, source rack to dest rack.
     Returns the total units actually moved, for the caller's postcondition.
@@ -687,9 +798,12 @@ def _move_counted_lot(
     if not dest_rows:
         return 0
 
+    stated = breakdown_units(source_breakdown)
     moved = 0
     for index, (src_row, qty) in enumerate(source_cases.items()):
-        units = lps.row_units_for_quantity(db, lot, src_row, float(qty or 0), receipt=receipt)
+        given = stated.get(src_row, (None, 0.0))[0]
+        units = given if given is not None else lps.row_units_for_quantity(
+            db, lot, src_row, float(qty or 0), receipt=receipt)
         if units <= 0 or not src_row:
             continue
         dest_row = dest_rows[index] if index < len(dest_rows) else dest_rows[-1]
@@ -737,8 +851,11 @@ def _apply_raw_material_ship_out(
         if source_cases:
             # The worker named the racks they pulled from. Honour exactly that.
             exact = 0.0
+            stated = breakdown_units(transfer.source_breakdown)
             for row_id, qty in source_cases.items():
-                units = lps.row_units_for_quantity(db, lot, row_id, float(qty or 0), receipt=receipt)
+                given = stated.get(row_id, (None, 0.0))[0]
+                units = given if given is not None else lps.row_units_for_quantity(
+                    db, lot, row_id, float(qty or 0), receipt=receipt)
                 if units > 0 and row_id:
                     # What those drums actually weigh (their deliveries), so
                     # the paper drops by the same pounds the racks lose.

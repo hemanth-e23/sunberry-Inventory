@@ -14,6 +14,7 @@ from app.schemas import (
 from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
 from app.enums import AdjustmentStatus
 from app.services import adjustment_service, transfer_service
+from app.services import lot_placement_service as lps
 from app.constants import ROLE_WAREHOUSE
 
 router = APIRouter()
@@ -82,6 +83,27 @@ def create_adjustment(
         receipt = db.query(Receipt).filter(Receipt.id == adjustment_data.receipt_id).first()
         if not receipt:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found")
+        # The product is the receipt's. A mismatched product_id was accepted and
+        # then shown under the receipt's name (2026-10-01 PART 3, B6).
+        if adjustment_data.product_id and adjustment_data.product_id != receipt.product_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The product does not match this lot's receipt.",
+            )
+        adjustment_dict["product_id"] = receipt.product_id
+        # Stated in containers: price exactly what will leave each rack (its
+        # deliveries' weights) plus any partial, so the worker, the approver
+        # and the books see the same pounds (PART 3, B4/B5).
+        if adjustment_data.source_breakdown and lps.is_counted_lot(db, receipt.material_lot_id):
+            priced, total = transfer_service.price_counted_breakdown(
+                db, receipt, adjustment_data.source_breakdown, allow_partial=True,
+            )
+            if total is not None:
+                adjustment_data.source_breakdown = priced
+                adjustment_data.quantity = total
+                adjustment_dict["source_breakdown"] = priced
+                adjustment_dict["quantity"] = total
+            transfer_service.check_source_racks(db, receipt, adjustment_data.source_breakdown)
         if adjustment_data.quantity <= 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Quantity must be greater than zero")
         # A held lot refuses the write-off at SUBMIT time — the approve-time
@@ -110,7 +132,7 @@ def create_adjustment(
                 f"lot {pool['lot_label']}'s available {q(max(0.0, cap))}"
             )
             if pool["reserved"] > 0:
-                detail += f" — {q(pool['reserved'])} is on pending transfers"
+                detail += f" — {q(pool['reserved'])} is promised to other pending requests"
             if pool.get("staged", 0) > 0:
                 detail += f" — {q(pool['staged'])} is out in staging"
             raise HTTPException(
