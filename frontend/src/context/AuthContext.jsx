@@ -23,13 +23,43 @@ const getLoginDate = () => localStorage.getItem('loginDate') || '';
 const setLoginDate = (d) => localStorage.setItem('loginDate', d);
 const clearLoginDate = () => localStorage.removeItem('loginDate');
 
+// The header's "viewing warehouse" pick, kept for the browser tab. It used to
+// live only in React state, so any full page load (a typed URL, a refresh, a
+// link opened in place) dropped a corporate user back to "All Warehouses"
+// mid-task (2026-10-01, F16). sessionStorage, not localStorage: a second tab
+// may legitimately be looking at a different plant.
+const VIEW_WAREHOUSE_KEY = 'viewWarehouse';
+const readViewWarehouse = () => {
+  try {
+    return JSON.parse(sessionStorage.getItem(VIEW_WAREHOUSE_KEY) || 'null') || {};
+  } catch {
+    return {};
+  }
+};
+const writeViewWarehouse = (id, name) => {
+  try {
+    if (id) sessionStorage.setItem(VIEW_WAREHOUSE_KEY, JSON.stringify({ id, name: name || null }));
+    else sessionStorage.removeItem(VIEW_WAREHOUSE_KEY);
+  } catch {
+    // Storage blocked (private mode) — the pick just won't survive a reload.
+  }
+};
+
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [sessionWarning, setSessionWarning] = useState(null);
-  const [selectedWarehouse, setSelectedWarehouse] = useState(null);
-  const [selectedWarehouseName, setSelectedWarehouseName] = useState(null);
+  const [selectedWarehouse, setSelectedWarehouse] = useState(() => {
+    const id = readViewWarehouse().id || null;
+    // Set the header NOW, not in the effect below: children's effects run
+    // before this provider's, so the first page loads would go out unscoped.
+    setViewWarehouse(id);
+    return id;
+  });
+  const [selectedWarehouseName, setSelectedWarehouseName] = useState(
+    () => readViewWarehouse().name || null,
+  );
   const isForklift = useRef(false);
   const queryClient = useQueryClient();
 
@@ -38,6 +68,8 @@ export const AuthProvider = ({ children }) => {
     setIsAuthenticated(false);
     setSessionWarning(null);
     setSelectedWarehouse(null);
+    setSelectedWarehouseName(null);
+    writeViewWarehouse(null);
     clearLoginDate();
     localStorage.removeItem('user');
     localStorage.removeItem('token');
@@ -61,6 +93,10 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     setViewWarehouse(selectedWarehouse);
   }, [selectedWarehouse]);
+
+  useEffect(() => {
+    writeViewWarehouse(selectedWarehouse, selectedWarehouseName);
+  }, [selectedWarehouse, selectedWarehouseName]);
 
   const clearSessionWarning = useCallback(() => setSessionWarning(null), []);
 
@@ -229,6 +265,15 @@ export const AuthProvider = ({ children }) => {
   };
 
   const isCorporateUser = user && CORPORATE_ROLES.includes(user.role);
+
+  // Only corporate users pick a warehouse. A plant user signing in on a tab a
+  // corporate user left must not inherit their pick.
+  useEffect(() => {
+    if (user && !CORPORATE_ROLES.includes(user.role) && selectedWarehouse) {
+      setSelectedWarehouse(null);
+      setSelectedWarehouseName(null);
+    }
+  }, [user, selectedWarehouse]);
 
   const value = {
     user,

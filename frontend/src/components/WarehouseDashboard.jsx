@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
 import { hasFeature } from '../utils/warehouseFeatures';
+import { hasSendBackTag } from '../utils/receiptNotes';
+import { RECEIPT_STATUS } from '../constants';
 import {
   TrendingUp,
   FileText,
@@ -24,8 +26,10 @@ const WarehouseDashboard = () => {
   // Count sent-back receipts
   const sentBackCount = useMemo(() => {
     return receipts.filter(receipt => {
-      if (receipt.status !== 'recorded') return false;
-      return receipt.note && receipt.note.includes('[Sent Back by Supervisor]');
+      // Same rule as the Receipt Corrections list.
+      if (receipt.status === RECEIPT_STATUS.SENT_BACK || receipt.status === 'sent-back') return true;
+      if (receipt.status !== RECEIPT_STATUS.RECORDED) return false;
+      return hasSendBackTag(receipt.note);
     }).length;
   }, [receipts]);
 

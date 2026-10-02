@@ -171,6 +171,14 @@ function WarehouseSelector() {
       .catch(() => {});
   }, []);
 
+  // A pick restored after a page load (AuthContext keeps it per tab) needs its
+  // timezone back too — dates would otherwise render in the browser's zone.
+  useEffect(() => {
+    if (!selectedWarehouse) return;
+    const wh = warehouses.find(w => w.id === selectedWarehouse);
+    if (wh) setAppTimezone(wh.timezone || null);
+  }, [selectedWarehouse, warehouses]);
+
   return (
     <div className="warehouse-selector">
       <Building2 size={15} className="warehouse-selector-icon" />

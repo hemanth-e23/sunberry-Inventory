@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Printer } from 'lucide-react';
 import Modal from '../Modal';
+import { pluralizeUnit } from '../../utils/rowSources';
 
 /**
  * What are you labelling — pallets, or the containers on them?
@@ -89,7 +90,7 @@ const PrintStickersDialog = ({ lot, open, onCancel, onConfirm, busy = false }) =
           {option(
             'pallet',
             `${plural(palletCount, 'pallet sticker')}`,
-            `One per wrapped pallet — ${perPallet} ${unitLabel}s under each. `
+            `One per wrapped pallet — ${perPallet} ${pluralizeUnit(unitLabel)} under each. `
             + 'This is what goes on at receiving.',
           )}
           {option(
@@ -124,7 +125,7 @@ const PrintStickersDialog = ({ lot, open, onCancel, onConfirm, busy = false }) =
               <span style={{ display: 'block', fontSize: '0.8rem', color: '#6b7280' }}>
                 {/* The staging case: one pallet gets opened, and only its
                     contents need labelling before they can be scanned out. */}
-                For opening a pallet — sticker just the {unitLabel}s coming off it.
+                For opening a pallet — sticker just the {pluralizeUnit(unitLabel)} coming off it.
               </span>
             </span>
           </label>

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Plus, Truck } from 'lucide-react';
 import { useAppData } from '../../context/AppDataContext';
 import { useAuth } from '../../context/AuthContext';
@@ -10,12 +10,15 @@ import { formatCalendarDate } from '../../utils/labelPayload';
 import { formatDateKey, getTodayDateKey } from '../../utils/dateUtils';
 import {
   apiErrorMessage, cancelIncomingOrder, closeIncomingOrder, createIncomingOrder,
-  checkInTruck, listIncomingOrders, printSessionLabels, releaseIncomingOrder,
+  checkInTruck, knownLotWeights, listIncomingOrders, printSessionLabels, releaseIncomingOrder,
 } from '../../api/lotReceivingApi';
 import { formatUnitTotals } from '../../utils/truckReceiving';
 import LotLabelPrint from '../ingredient/LotLabelPrint';
 import '../OutgoingDashboard.css';
-import { singularUnit } from '../../utils/rowSources';
+import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
+import {
+  countOf, isAwaitingApproval, lotLookupKey, missingLineDetails, weightMismatchWarning,
+} from '../../utils/incomingLines';
 
 /**
  * Incoming orders — corporate plans, the plant receives.
@@ -95,6 +98,26 @@ const STATUS_CHIP = {
   cancelled: 'cancelled',
 };
 
+// Amber, never red — the same convention as short/over on the cards. A
+// weight that differs from an earlier delivery is a question, not an error.
+const WARN_STYLE = { color: '#b45309', fontWeight: 600 };
+
+const WeightNote = ({ text }) => (text ? (
+  <div className="og-sub" style={WARN_STYLE}>
+    <AlertTriangle size={13} /> {text}
+  </div>
+) : null);
+
+/** A confirm message with the F17 weight questions under it (JSX — ConfirmDialog keeps no line breaks). */
+const withWarnings = (text, notes = []) => (notes.length ? (
+  <>
+    {text}
+    {notes.map((note) => (
+      <span key={note} style={{ ...WARN_STYLE, display: 'block', marginTop: 8 }}>{note}</span>
+    ))}
+  </>
+) : text);
+
 const emptyLine = () => ({
   product_id: '',
   vendor_lot: '',
@@ -127,6 +150,12 @@ const IncomingTab = () => {
   const [releaseForm, setReleaseForm] = useState(null);
   // The day the plant is looking at. Same shape as the outbound tab.
   const [dateKey, setDateKey] = useState(() => getTodayDateKey());
+  // Earlier deliveries' weight per unit, by lot key (lotLookupKey). Filled
+  // while a form is open so a known lot typed at a different weight is
+  // questioned before it is booked (F17). A failed lookup is cached as
+  // "nothing known" — the warning is a nicety, never a gate.
+  const [knownWeights, setKnownWeights] = useState({});
+  const askedWeights = useRef(new Set());
 
   // Corporate must pick a target warehouse in the header before creating
   // anything. Without it `resolve_warehouse_for_write` raises a raw 400 —
@@ -185,6 +214,50 @@ const IncomingTab = () => {
 
   useEffect(() => { load(); }, [load]);
 
+  // The lot each open form line describes, in the shape the lookup takes.
+  // Walk-in / order lines take the header vendor; check-in lines their own.
+  const lotQueries = useMemo(() => {
+    const out = [];
+    (form?.lines || []).forEach((l) => out.push({
+      product_id: l.product_id, vendor_id: form.vendor_id, vendor_lot: l.vendor_lot, bbd: l.bbd,
+    }));
+    (startForm?.lines || []).forEach((d) => out.push({
+      product_id: d.line.product_id, vendor_id: d.vendor_id, vendor_lot: d.vendor_lot, bbd: d.bbd,
+    }));
+    return out.filter((q) => lotLookupKey(q));
+  }, [form, startForm]);
+
+  useEffect(() => {
+    const todo = lotQueries.filter((q) => !askedWeights.current.has(lotLookupKey(q)));
+    if (!todo.length) return undefined;
+    // Debounced: the lot number is typed a character at a time.
+    const timer = setTimeout(() => {
+      todo.forEach((q) => {
+        const key = lotLookupKey(q);
+        if (askedWeights.current.has(key)) return;
+        askedWeights.current.add(key);
+        knownLotWeights(q)
+          .catch(() => ({ lots: [] }))
+          .then((data) => setKnownWeights((prev) => ({ ...prev, [key]: data || { lots: [] } })));
+      });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [lotQueries]);
+
+  // Forget the answers when no form is open: a truck checked in since then is
+  // exactly the earlier delivery the next form must hear about.
+  useEffect(() => {
+    if (!form && !startForm) {
+      askedWeights.current = new Set();
+      setKnownWeights({});
+    }
+  }, [form, startForm]);
+
+  /** The F17 "different weight, correct?" text for one line, or null. */
+  const weightWarning = (query, typed, unit) => weightMismatchWarning(
+    knownWeights[lotLookupKey(query)], typed, { vendorLot: query.vendor_lot, unit },
+  );
+
   const startCreate = () => {
     setForm({
       vendor_id: '',
@@ -240,18 +313,42 @@ const IncomingTab = () => {
       return;
     }
     // NO vendor gate here, deliberately. Raising an order does not create a
-    // lot — the lot is minted at start-receiving — so nothing can collide yet,
-    // and corporate legitimately raises orders before every detail is known.
-    // The gate lives where the lot is actually born and where somebody is
-    // holding the BOL. See the check in `beginReceiving`.
+    // lot — the lot is minted at check-in — so nothing can collide yet. The
+    // vendor gate lives where the lot is actually born and where somebody is
+    // holding the BOL. See `submitCheckIn`.
+    //
+    // The plant rule IS enforced here (2026-10-01, F14): a delivery with no
+    // vendor lot, no best-by or no weight per unit is not accepted, so it is
+    // refused before it lands on the schedule. The server refuses it too.
+    const productName = (id) => (products || []).find((p) => p.id === id)?.name || 'A line';
+    for (const line of lines) {
+      const missing = missingLineDetails(line);
+      if (missing.length) {
+        addToast(
+          `${productName(line.product_id)}: no ${missing.join(', ')}. A delivery without `
+          + 'its vendor lot, best-by date and weight per unit is not accepted.',
+          'error',
+        );
+        return;
+      }
+    }
     const isWalkIn = Boolean(form.walkIn);
     const totalUnits = lines.reduce((sum, l) => sum + Number(l.expected_count || 0), 0);
+    const weightNotes = lines
+      .map((l) => weightWarning(
+        { product_id: l.product_id, vendor_id: form.vendor_id, vendor_lot: l.vendor_lot, bbd: l.bbd },
+        l.weight_per_unit, l.unit_label,
+      ))
+      .filter(Boolean);
     const ok = await confirm(
-      `This order is for ${selectedWarehouseName || 'the selected warehouse'}. `
-      + `${totalUnits} units across ${lines.length} product line${lines.length === 1 ? '' : 's'}. `
-      + (isWalkIn
-        ? 'It goes straight onto today\'s schedule, ready to sticker and scan.'
-        : 'Creating it puts nothing in stock.'),
+      withWarnings(
+        `This order is for ${selectedWarehouseName || 'the selected warehouse'}. `
+        + `${totalUnits} units across ${countOf(lines.length, 'product line')}. `
+        + (isWalkIn
+          ? 'It goes straight onto today\'s schedule, ready to sticker and scan.'
+          : 'Creating it puts nothing in stock.'),
+        weightNotes,
+      ),
       {
         title: isWalkIn ? 'Log walk-in delivery' : 'Create incoming order',
         confirmLabel: isWalkIn ? 'Log walk-in' : 'Create',
@@ -393,6 +490,10 @@ const IncomingTab = () => {
     lines: (order.lines || []).filter((l) => !l.receipt_id).map((l) => lineDraft(order, l)),
   });
 
+  const draftQuery = (d) => ({
+    product_id: d.line.product_id, vendor_id: d.vendor_id, vendor_lot: d.vendor_lot, bbd: d.bbd,
+  });
+
   const patchDraft = (index, patch) => setStartForm((prev) => ({
     ...prev,
     lines: prev.lines.map((d, i) => (i === index ? { ...d, ...patch } : d)),
@@ -440,6 +541,17 @@ const IncomingTab = () => {
         return;
       }
     }
+    // A known lot at a different weight: ask, never refuse (F17).
+    const weightNotes = startForm.lines
+      .map((d) => weightWarning(draftQuery(d), d.weight_per_unit, d.line.unit_label))
+      .filter(Boolean);
+    if (weightNotes.length) {
+      const ok = await confirm(
+        withWarnings('Check the weight per unit against the paperwork before checking in.', weightNotes),
+        { title: 'Different weight than before', confirmLabel: 'It is correct — check in' },
+      );
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       const truck = await checkInTruck(order.id, {
@@ -480,7 +592,7 @@ const IncomingTab = () => {
       setStartForm(null);
       const merged = startForm.lines.length - truck.lines.filter((l) => opened.has(l.line_id)).length;
       addToast(
-        `${order.order_number} checked in — ${stickers} stickers for ${truck.lines.length} lots`
+        `${order.order_number} checked in — ${countOf(stickers, 'sticker')} for ${countOf(truck.lines.length, 'lot')}`
         + (merged > 0 ? ` (${merged} duplicate line${merged > 1 ? 's' : ''} merged)` : '')
         + '. Scan them in on the gun.',
         'success',
@@ -585,6 +697,7 @@ const IncomingTab = () => {
     const difference = received - expected;
     const isOpen = OPEN_STATUSES.includes(order.status);
     const short = Math.max(0, -difference);
+    const awaitingApproval = isAwaitingApproval(order);
 
     return (
       <div
@@ -614,7 +727,9 @@ const IncomingTab = () => {
           <div className="og-card-title">
             <strong>{order.order_number}</strong>
             <span className={`og-chip og-chip-${STATUS_CHIP[order.status] || 'scheduled'}`}>
-              {STATUS_LABELS[order.status] || order.status}
+              {awaitingApproval
+                ? 'Finished — awaiting approval'
+                : (STATUS_LABELS[order.status] || order.status)}
             </span>
           </div>
           <div className="og-sub">
@@ -686,7 +801,7 @@ const IncomingTab = () => {
                       </button>
                     )}
                     <b>{line.received_count}</b> of {line.expected_count}{' '}
-                    {line.unit_label || 'unit'}s
+                    {pluralizeUnit(line.unit_label || 'unit')}
                     {/* Amber, never red. Short and over are both legal and both
                         happen; red would train people to click past it. */}
                     {lineShort > 0 && (
@@ -750,7 +865,7 @@ const IncomingTab = () => {
               </button>
             </div>
           )}
-          {order.forklift_submitted_at && isOpen && (
+          {awaitingApproval && (
             <div className="og-sub" style={{ fontWeight: 600 }}>Scanned — waiting for approval</div>
           )}
 
@@ -1108,7 +1223,7 @@ const IncomingTab = () => {
                       />
                     </label>
                     <label>
-                      <span>Lbs per {unit}</span>
+                      <span>Lbs per {unit} <span className="og-prefill">required</span></span>
                       {/* text + inputMode, never type="number": a number input
                           edits itself when the wheel passes over it. */}
                       <input
@@ -1124,7 +1239,7 @@ const IncomingTab = () => {
                     </label>
                     {asksPerPallet(unit) && (
                       <label>
-                        <span>{unit}s per pallet</span>
+                        <span>{pluralizeUnit(unit)} per pallet</span>
                         <input
                           type="text"
                           inputMode="numeric"
@@ -1149,6 +1264,7 @@ const IncomingTab = () => {
                       />
                     </label>
                   </div>
+                  <WeightNote text={weightWarning(draftQuery(draft), draft.weight_per_unit, unit)} />
                 </fieldset>
               );
             })}
@@ -1169,7 +1285,7 @@ const IncomingTab = () => {
                     const count = Number(d.expected_count) || 0;
                     return sum + (per > 1 ? Math.ceil(count / per) : count);
                   }, 0);
-                  return `Check in & print ${n} stickers`;
+                  return `Check in & print ${countOf(n, 'sticker')}`;
                 })()}
               </button>
             </div>
@@ -1231,9 +1347,15 @@ const IncomingTab = () => {
           <>
             {form.walkIn && (
               <div className="og-note" style={{ margin: '0 0 12px' }}>
-                <Truck size={14} /> Copy what is on the driver&apos;s BOL. This
-                goes onto <strong>today&apos;s</strong> schedule right away — then
-                print the stickers and scan it in, exactly like a scheduled load.
+                {/* One text span: .og-note is a flex row, so loose text and the
+                    <strong> each became their own column. */}
+                <Truck size={14} />
+                <span>
+                  Copy what is on the driver&apos;s BOL — vendor lot, best-by and
+                  weight per unit are required. This goes onto{' '}
+                  <strong>today&apos;s</strong> schedule right away — then print the
+                  stickers and scan it in, exactly like a scheduled load.
+                </span>
               </div>
             )}
             <div className="og-modal-form">
@@ -1326,7 +1448,7 @@ const IncomingTab = () => {
                   />
                 </label>
                 <label>
-                  <span>Vendor lot</span>
+                  <span>Vendor lot <span className="og-prefill">required</span></span>
                   <input
                     value={line.vendor_lot}
                     onChange={(e) => patchLine(index, { vendor_lot: e.target.value })}
@@ -1334,7 +1456,7 @@ const IncomingTab = () => {
                   />
                 </label>
                 <label>
-                  <span>BBD</span>
+                  <span>BBD <span className="og-prefill">required</span></span>
                   <input
                     type="date"
                     value={line.bbd}
@@ -1388,7 +1510,7 @@ const IncomingTab = () => {
                     <span>
                       Per pallet{' '}
                       <span className="og-prefill">
-                        how many {line.unit_label}s are wrapped on one pallet
+                        how many {pluralizeUnit(line.unit_label)} are wrapped on one pallet
                       </span>
                     </span>
                     <input
@@ -1436,6 +1558,12 @@ const IncomingTab = () => {
                     placeholder="500"
                   />
                 </label>
+                <WeightNote
+                  text={weightWarning(
+                    { product_id: line.product_id, vendor_id: form.vendor_id, vendor_lot: line.vendor_lot, bbd: line.bbd },
+                    line.weight_per_unit, line.unit_label,
+                  )}
+                />
               </div>
             ))}
 

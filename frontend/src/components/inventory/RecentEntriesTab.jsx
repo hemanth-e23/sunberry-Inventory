@@ -9,6 +9,8 @@ import { useAppData } from "../../context/AppDataContext";
 import LotLabelPrint from "../ingredient/LotLabelPrint";
 import PrintStickersDialog from "../ingredient/PrintStickersDialog";
 import { singularUnit } from '../../utils/rowSources';
+import { stripReviewTags } from '../../utils/receiptNotes';
+import { countOf } from '../../utils/incomingLines';
 
 const parseDate = (value) => {
   if (!value) return null;
@@ -120,6 +122,13 @@ const RecentEntriesTab = ({
           quantity: qty,
           quantityUnits: qtyUnits,
           pallets: derivedPallets,
+          // The containers this entry brought in — pounds alone hid "9 drums"
+          // (2026-10-01, F15). Finished goods count pallets above instead.
+          containers:
+            productType !== CATEGORY_TYPES.FINISHED
+            && Number(receipt.containerCount) > 0 && receipt.containerUnit
+              ? countOf(Number(receipt.containerCount), singularUnit(receipt.containerUnit))
+              : null,
           lot: receipt.lotNo || "—",
           hold: Boolean(receipt.hold),
           submittedBy: formatUserName(receipt.submittedBy, userLookup),
@@ -135,7 +144,9 @@ const RecentEntriesTab = ({
             parseDate(receipt.submittedAt) ||
             parseDate(receipt.receiptDate) || 0,
           locations: getReceiptLocations(receipt),
-          note: receipt.note || "",
+          // Review tags ("[Sent Back by …]: …") are workflow history, not the
+          // worker's note — they show on Receipt Corrections instead.
+          note: stripReviewTags(receipt.note),
           // How many identical stickers this receipt is worth — one per
           // container. Finished goods are excluded: their pallets carry unique
           // licences, not one repeated lot sticker.
@@ -247,6 +258,9 @@ const RecentEntriesTab = ({
                       Qty: <strong>{entry.quantity}</strong> {entry.quantityUnits || ''}
                       {entry.pallets !== null && entry.pallets !== undefined && (
                         <span className="muted"> · {entry.pallets} pallets</span>
+                      )}
+                      {entry.containers && (
+                        <span className="muted"> · {entry.containers}</span>
                       )}
                     </span>
                     <span>Lot: {entry.lot}</span>

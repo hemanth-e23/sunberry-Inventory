@@ -124,6 +124,9 @@ def _serialize_order(db: Session, order: IngredientIntake) -> dict:
             "material_lot_id": line.material_lot_id,
             "lot_code": lot.lot_code if lot else None,
             "receipt_id": line.receipt_id,
+            # The gun finished this line (per-line sessions predate the truck
+            # finish) — the card says "finished, awaiting approval" off it.
+            "forklift_submitted": bool(receipt and receipt.forklift_submitted_at),
         })
         unit = (lot.unit_label if lot else None) or line.container_type or "unit"
         bucket = totals.setdefault(unit, {"unit": unit, "expected": 0, "scanned": 0})
@@ -750,6 +753,26 @@ def resolve_row_endpoint(
     sticker.
     """
     return lrs.resolve_scanned_row(db, current_user, code)
+
+
+@router.get("/lots/known-weights")
+def known_weights(
+    product_id: str = Query(..., min_length=1),
+    vendor_lot: str = Query(..., min_length=1),
+    vendor_id: Optional[str] = None,
+    bbd: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_receiver),
+):
+    """Weight per unit of earlier deliveries of this lot — read only.
+
+    The walk-in, order and check-in forms ask it so a second truck of a known
+    lot arriving at a different weight gets a "correct?" before it is booked.
+    """
+    return lrs.known_lot_weights(
+        db, product_id=product_id, vendor_id=vendor_id or None,
+        vendor_lot=vendor_lot, bbd=bbd or None,
+    )
 
 
 @router.get("/lots/lookup")

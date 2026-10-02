@@ -5,6 +5,8 @@ import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
 import { getDashboardPath } from '../App';
 import { formatDateTime } from '../utils/dateUtils';
+import { RECEIPT_STATUS } from '../constants';
+import { hasSendBackTag, latestSendBack, stripReviewTags, composeReceiptNote } from '../utils/receiptNotes';
 import './Shared.css';
 import './ReceiptCorrectionsPage.css';
 
@@ -23,9 +25,9 @@ const ReceiptCorrectionsPage = () => {
   // plus 'recorded' receipts carrying a supervisor send-back note.
   const sentBackReceipts = useMemo(() => {
     return receipts.filter(receipt => {
-      if (receipt.status === 'sent_back' || receipt.status === 'sent-back') return true;
-      if (receipt.status !== 'recorded') return false;
-      return receipt.note && receipt.note.includes('[Sent Back by');
+      if (receipt.status === RECEIPT_STATUS.SENT_BACK || receipt.status === 'sent-back') return true;
+      if (receipt.status !== RECEIPT_STATUS.RECORDED) return false;
+      return hasSendBackTag(receipt.note);
     });
   }, [receipts]);
 
@@ -60,7 +62,9 @@ const ReceiptCorrectionsPage = () => {
         purchaseOrder: receipt.purchaseOrder || '',
         sid: receipt.sid || '',
         brix: receipt.brix || '',
-        note: receipt.note || '',
+        // Only the worker's own text is editable; the review tags are
+        // re-attached on save (composeReceiptNote) so the history survives.
+        note: stripReviewTags(receipt.note),
         location: receipt.location || '',
         subLocation: receipt.subLocation || ''
       });
@@ -82,8 +86,11 @@ const ReceiptCorrectionsPage = () => {
     // carries the day, so sending it back unchanged rewrote the time to
     // midnight UTC (the evening before, in Eastern). Send it only when the
     // user actually picked a different day; the server keeps the original
-    // time of day either way.
-    const changes = { ...draft };
+    // time of day either way. The note goes back with its review tags.
+    const changes = {
+      ...draft,
+      note: composeReceiptNote(draft.note, selectedReceipt.note),
+    };
     if ((changes.receiptDate || '') === (selectedReceipt.receiptDate || '')) {
       delete changes.receiptDate;
     }
@@ -110,11 +117,9 @@ const ReceiptCorrectionsPage = () => {
     setDraft({});
   };
 
-  const extractSupervisorInstructions = (note) => {
-    if (!note) return '';
-    const match = note.match(/\[Sent Back by Supervisor\]:\s*(.*?)(?:\n|$)/);
-    return match ? match[1].trim() : '';
-  };
+  // Any reviewer's name can be in the tag ("[Sent Back by QA Supervisor]: …").
+  const extractSupervisorInstructions = (note) => latestSendBack(note)?.text || '';
+  const sentBackBy = (note) => latestSendBack(note)?.by || '';
 
 
   const formatReceiptLabel = (receipt) => {
@@ -173,7 +178,9 @@ const ReceiptCorrectionsPage = () => {
 
                     {instructions && (
                       <div className="supervisor-instructions">
-                        <h5>Supervisor Instructions:</h5>
+                        <h5>
+                          Supervisor Instructions{sentBackBy(receipt.note) ? ` (sent back by ${sentBackBy(receipt.note)})` : ''}:
+                        </h5>
                         <p>{instructions}</p>
                       </div>
                     )}
@@ -204,8 +211,15 @@ const ReceiptCorrectionsPage = () => {
 
             <div className="detail-content">
               <div className="instructions-section">
-                <h4>Supervisor Instructions</h4>
-                <div className="instructions-box">
+                <h4>
+                  Supervisor Instructions
+                  {sentBackBy(selectedReceipt.note) && (
+                    <span className="muted" style={{ fontWeight: 400, marginLeft: 8 }}>
+                      sent back by {sentBackBy(selectedReceipt.note)}
+                    </span>
+                  )}
+                </h4>
+                <div className="instructions-box" style={{ whiteSpace: 'pre-wrap' }}>
                   {extractSupervisorInstructions(selectedReceipt.note) || 'No specific instructions provided.'}
                 </div>
               </div>

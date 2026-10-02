@@ -45,6 +45,7 @@ from tests.test_lot_receiving import (  # noqa: F401  (fixture import)
 from tests.test_lot_receiving_api import (  # noqa: F401  (fixture import)
     ROW_1 as API_ROW_1,
     _make_order,
+    _start,
     admin_headers,
     api_seed,
     fk_headers,
@@ -110,8 +111,10 @@ class TestOneLinePerLot:
         assert order.expected_count == 9
 
     def test_lines_with_no_lot_number_never_merge(self, db_session, recv_seed):
-        order = _order(db_session, lines=[_line(lot=None, count=2), _line(lot=None, count=2)])
-        assert len(order.lots) == 2
+        # An order can no longer be entered without a lot number (F14), so the
+        # merge rule is checked on its own: unknown never merges with unknown.
+        merged = lrs.merge_duplicate_lines([_line(lot=None, count=2), _line(lot=None, count=2)])
+        assert len(merged) == 2
 
     def test_check_in_merges_lines_corrected_into_the_same_lot(self, db_session, recv_seed):
         order = _order(db_session, lines=[_line(lot="MG-1", count=2), _line(lot="MG-9", count=3)])
@@ -454,3 +457,73 @@ class TestTruckApi:
 
         detail = client.get(f"/api/lot-receiving/orders/{order['id']}", headers=wh_headers).json()
         assert detail["totals_by_unit"] == [{"unit": "drum", "expected": 2, "scanned": 1}]
+
+
+class TestIncompleteLinesAreRefused:
+    """Plant rule (2026-10-01 browser test, F14): no vendor lot, no best-by or no
+    weight per unit is not accepted — refused when the order or walk-in is typed."""
+
+    @pytest.mark.parametrize("field,value,word", [
+        ("vendor_lot", None, "vendor lot"),
+        ("vendor_lot", "   ", "vendor lot"),
+        ("bbd", None, "best-by"),
+        ("weight_per_unit", None, "weight per drum"),
+        ("weight_per_unit", 0, "weight per drum"),
+    ])
+    def test_a_missing_detail_refuses_the_order(self, db_session, recv_seed, field, value, word):
+        line = _line()
+        line[field] = value
+        with pytest.raises(ValidationError) as exc:
+            _order(db_session, lines=[line])
+        assert word in exc.value.detail
+        assert db_session.query(IntakeLot).count() == 0
+
+    def test_a_complete_line_is_accepted(self, db_session, recv_seed):
+        assert len(_order(db_session, lines=[_line()]).lots) == 1
+
+
+class TestKnownLotWeights:
+    """F17: the desk is warned when a known lot arrives at a different weight."""
+
+    def test_an_earlier_delivery_reports_its_weight(self, db_session, recv_seed):
+        _truck(db_session, [_line(lot="MG-1", count=2)])
+        out = lrs.known_lot_weights(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR, vendor_lot=" mg-1 ", bbd=BBD,
+        )
+        assert len(out["lots"]) == 1
+        assert out["lots"][0]["weights"] == [
+            {"weight_per_unit": 500.0, "weight_unit": "lbs", "deliveries": 1}
+        ]
+
+    def test_without_a_vendor_any_vendors_lot_is_considered(self, db_session, recv_seed):
+        _truck(db_session, [_line(lot="MG-1", count=2)])
+        out = lrs.known_lot_weights(
+            db_session, product_id=PRODUCT, vendor_id=None, vendor_lot="MG-1", bbd=BBD,
+        )
+        assert [w["weight_per_unit"] for w in out["lots"][0]["weights"]] == [500.0]
+
+    def test_a_different_best_by_is_a_different_lot(self, db_session, recv_seed):
+        _truck(db_session, [_line(lot="MG-1", count=2)])
+        out = lrs.known_lot_weights(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR, vendor_lot="MG-1",
+            bbd=datetime(2028, 1, 1, tzinfo=timezone.utc),
+        )
+        assert out["lots"] == []
+
+    def test_the_endpoint_answers_the_desk(self, client, api_seed, wh_headers):
+        order = _make_order(client, wh_headers)
+        _start(client, wh_headers, order)
+        res = client.get(
+            "/api/lot-receiving/lots/known-weights", headers=wh_headers,
+            params={"product_id": order["lines"][0]["product_id"], "vendor_lot": "MG-API",
+                    "bbd": "2027-04-01"},
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["lots"][0]["weights"][0]["weight_per_unit"] == 500.0
+
+    def test_a_forklift_cannot_ask(self, client, api_seed, fk_headers):
+        res = client.get(
+            "/api/lot-receiving/lots/known-weights", headers=fk_headers,
+            params={"product_id": "x", "vendor_lot": "y"},
+        )
+        assert res.status_code == 403

@@ -1202,6 +1202,29 @@ def merge_duplicate_lines(lines: list, *, default_vendor_id=None) -> list:
     return merged
 
 
+def _missing_line_details(line: dict) -> list:
+    """What a line still lacks of the three facts the plant will not receive without.
+
+    Plant rule (2026-10-01 browser test, F14): a delivery with no vendor lot, no
+    best-by or no weight per unit is NOT accepted. Check-in already refused it,
+    but only after the line had been logged — the card then sat on today's
+    schedule reading "no lot number yet". Refusing at the order is the same rule
+    applied where the paperwork is typed.
+    """
+    missing = []
+    if not str(line.get("vendor_lot") or "").strip():
+        missing.append("vendor lot")
+    if not line.get("bbd"):
+        missing.append("best-by date")
+    try:
+        weight = float(line.get("weight_per_unit") or 0)
+    except (TypeError, ValueError):
+        weight = 0.0
+    if weight <= 0:
+        missing.append(f"weight per {line.get('unit_label') or 'unit'}")
+    return missing
+
+
 def create_incoming_order(db: Session, payload: dict, *, user_id: str, warehouse_id: str):
     """Corporate plans a delivery into one destination site.
 
@@ -1215,6 +1238,19 @@ def create_incoming_order(db: Session, payload: dict, *, user_id: str, warehouse
     lines = payload.get("lines") or []
     if not lines:
         raise ValidationError("An incoming order needs at least one product line")
+    for index, line in enumerate(lines, start=1):
+        missing = _missing_line_details(line)
+        if missing:
+            product = (
+                db.query(Product).filter(Product.id == line.get("product_id")).first()
+                if line.get("product_id") else None
+            )
+            name = product.name if product else f"Line {index}"
+            raise ValidationError(
+                f"{name}: no {', '.join(missing)}. A delivery without its vendor "
+                "lot, best-by date and weight per unit is not accepted — copy them "
+                "off the paperwork first."
+            )
 
     order = IngredientIntake(
         id=_mint_id("inord"),
@@ -1267,6 +1303,73 @@ def create_incoming_order(db: Session, payload: dict, *, user_id: str, warehouse
     order.expected_count = total
     db.flush()
     return order
+
+
+def _like_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def known_lot_weights(
+    db: Session, *, product_id: str, vendor_id=None, vendor_lot=None, bbd=None
+) -> dict:
+    """What earlier deliveries of THIS lot weighed per unit (2026-10-01, F17).
+
+    Same product + vendor + vendor lot + best-by is the same lot, so a second
+    truck saying 474 lb/drum where the first said 502 is either a different
+    drum size or a typo. Nothing here refuses it — mixed weights are tracked
+    per delivery — the desk only wants to ask "correct?" before it is booked.
+
+    With no vendor yet (a walk-in may not know it) every vendor's lot with that
+    number and best-by is considered: a warning too many beats a typo missed.
+    """
+    norm = lps.normalize_lot_number(vendor_lot)
+    if not product_id or not norm:
+        return {"lots": []}
+    query = db.query(MaterialLot).filter(MaterialLot.product_id == product_id)
+    if vendor_id:
+        query = query.filter(
+            MaterialLot.lot_key == lps.build_lot_key(product_id, vendor_id, vendor_lot, bbd)
+        )
+    else:
+        pattern = "|".join([
+            _like_escape(product_id), "%", _like_escape(norm),
+            _like_escape(calendar_day(bbd) or ""),
+        ])
+        query = query.filter(MaterialLot.lot_key.like(pattern, escape="\\"))
+
+    out = []
+    for lot in query.limit(10).all():
+        rows = (
+            db.query(
+                Receipt.weight_per_container,
+                func.max(Receipt.weight_unit),
+                func.count(Receipt.id),
+            )
+            .filter(
+                Receipt.material_lot_id == lot.id,
+                Receipt.weight_per_container.isnot(None),
+                Receipt.status != ReceiptStatus.REJECTED,
+            )
+            .group_by(Receipt.weight_per_container)
+            .all()
+        )
+        weights = [
+            {"weight_per_unit": float(w), "weight_unit": unit or lot.weight_unit or "lbs",
+             "deliveries": int(n)}
+            for w, unit, n in rows if w
+        ]
+        if not weights and lot.weight_per_unit:
+            weights = [{"weight_per_unit": float(lot.weight_per_unit),
+                        "weight_unit": lot.weight_unit or "lbs", "deliveries": 1}]
+        if weights:
+            out.append({
+                "lot_id": lot.id,
+                "lot_code": lot.lot_code,
+                "vendor_lot": lot.vendor_lot_number,
+                "unit_label": lot.unit_label,
+                "weights": weights,
+            })
+    return {"lots": out}
 
 
 def release_order(

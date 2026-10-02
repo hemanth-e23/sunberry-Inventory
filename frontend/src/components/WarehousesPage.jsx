@@ -157,7 +157,7 @@ function WarehouseModal({ warehouse, onClose, onSaved }) {
           </div>
 
           <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', paddingTop: 8 }}>
-            <button type="button" onClick={onClose} style={{ padding: '9px 20px', borderRadius: 6, border: '1px solid #d1d5db', background: '#fff', cursor: 'pointer', fontSize: 14 }}>Cancel</button>
+            <button type="button" onClick={onClose} style={{ padding: '9px 20px', borderRadius: 6, border: '1px solid #d1d5db', background: '#fff', color: '#374151', cursor: 'pointer', fontSize: 14 }}>Cancel</button>
             <button type="submit" disabled={saving} style={{ padding: '9px 20px', borderRadius: 6, border: 'none', background: '#2563eb', color: '#fff', cursor: 'pointer', fontSize: 14, fontWeight: 600 }}>
               {saving ? 'Saving...' : (isEdit ? 'Save Changes' : 'Create Warehouse')}
             </button>

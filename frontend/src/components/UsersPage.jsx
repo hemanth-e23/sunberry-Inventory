@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
@@ -30,6 +30,12 @@ const UsersPage = () => {
   const { addToast } = useToast();
   const [filter, setFilter] = useState('all');
   const [showForm, setShowForm] = useState(false);
+  // Bumped on every open so the form scrolls into view even when it was
+  // already mounted (2026-10-01, F16: after the first user the button seemed
+  // to do nothing — the form opened above the fold, out of sight, and the next
+  // click toggled it shut again).
+  const [formOpenedAt, setFormOpenedAt] = useState(0);
+  const formRef = useRef(null);
   const [editingUser, setEditingUser] = useState(null);
   const [warehouses, setWarehouses] = useState([]);
   const [formData, setFormData] = useState({
@@ -43,6 +49,18 @@ const UsersPage = () => {
   });
 
   const isSuperadmin = user?.role === 'superadmin';
+
+  useEffect(() => {
+    if (showForm && formOpenedAt) {
+      formRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+      formRef.current?.querySelector?.('input')?.focus?.();
+    }
+  }, [showForm, formOpenedAt]);
+
+  const openForm = () => {
+    setShowForm(true);
+    setFormOpenedAt(Date.now());
+  };
   const needsWarehouse = (role) => PLANT_ROLES.includes(role);
 
   useEffect(() => {
@@ -108,6 +126,7 @@ const UsersPage = () => {
       } else {
         await addUser(payload);
       }
+      addToast(editingUser ? 'User updated' : `User ${payload.username} created`, 'success');
       resetForm();
       setShowForm(false);
     } catch (error) {
@@ -127,7 +146,7 @@ const UsersPage = () => {
       badgeId: u.badgeId || u.badge_id || '',
       warehouse_id: u.warehouse_id || '',
     });
-    setShowForm(true);
+    openForm();
   };
 
   return (
@@ -164,9 +183,11 @@ const UsersPage = () => {
                   <option value="forklift">Forklift</option>
                 </select>
               </div>
-              <button className="primary-button" onClick={() => {
+              <button type="button" className="primary-button" onClick={() => {
+                // Explicit open / close, never a blind toggle.
                 resetForm();
-                setShowForm(prev => !prev);
+                if (showForm) setShowForm(false);
+                else openForm();
               }}>
                 {showForm ? 'Close Form' : (
                   <>
@@ -181,7 +202,7 @@ const UsersPage = () => {
         </section>
 
         {showForm && (
-          <section className="panel">
+          <section className="panel" ref={formRef}>
             <form onSubmit={handleSubmit} className="simple-form">
               <div className="form-grid">
                 <label>
@@ -307,14 +328,12 @@ const UsersPage = () => {
                 <button type="submit" className="primary-button">
                   {editingUser ? 'Update User' : 'Create User'}
                 </button>
-                {editingUser && (
-                  <button type="button" className="secondary-button" onClick={() => {
-                    resetForm();
-                    setShowForm(false);
-                  }}>
-                    Cancel
-                  </button>
-                )}
+                <button type="button" className="secondary-button" onClick={() => {
+                  resetForm();
+                  setShowForm(false);
+                }}>
+                  Cancel
+                </button>
               </div>
             </form>
           </section>

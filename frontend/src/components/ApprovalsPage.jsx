@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useAppData } from "../context/AppDataContext";
 import { useAuth } from "../context/AuthContext";
 import { getDashboardPath } from "../App";
-import { getDaysAgo, toDateKey, getTodayDateKey } from "../utils/dateUtils";
+import { formatDateTime, getDaysAgo, toDateKey, getTodayDateKey } from "../utils/dateUtils";
 import apiClient from "../api/client";
 import "./Shared.css";
 import "./ApprovalsPage.css";
@@ -286,6 +286,19 @@ const ApprovalsPage = () => {
     [receipts, todayKey, user, currentUserId],
   );
 
+  // A warehouse user's OWN pending receipts. The server refuses self-approval,
+  // so they are left out of the queue above — but hiding them entirely read as
+  // "0 awaiting" while the user's truck sat unapproved (2026-10-01, F16). They
+  // are listed, read-only, as waiting for someone else.
+  const ownPending = useMemo(
+    () => (user?.role !== 'warehouse' ? [] : receipts
+      .filter((receipt) =>
+        STATUS_PENDING.has(receipt.status)
+        && (receipt.submittedBy === currentUserId || receipt.submitted_by === currentUserId))
+      .sort((a, b) => new Date(b.submittedAt || b.receiptDate || 0) - new Date(a.submittedAt || a.receiptDate || 0))),
+    [receipts, user, currentUserId],
+  );
+
   const backlogPending = useMemo(
     () =>
       receipts
@@ -442,6 +455,29 @@ const ApprovalsPage = () => {
         </div>
 
         {/* Content based on active tab */}
+        {activeTab === 'receipts' && ownPending.length > 0 && (
+          <section className="panel" style={{ marginBottom: 16 }}>
+            <h3 style={{ margin: '0 0 6px' }}>
+              Your receipts — awaiting another approver ({ownPending.length})
+            </h3>
+            <p className="muted" style={{ margin: '0 0 8px' }}>
+              You can&apos;t approve your own receipts. A supervisor or another
+              warehouse user has to approve these.
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {ownPending.slice(0, 20).map((receipt) => (
+                <li key={receipt.id}>
+                  <strong>{productLookup[receipt.productId]?.name || 'Unknown product'}</strong>
+                  {receipt.lotNo ? ` · lot ${receipt.lotNo}` : ''}
+                  {receipt.incomingOrderNumber ? ` · ${receipt.incomingOrderNumber}` : ''}
+                  <span className="muted">
+                    {' '}· submitted {formatDateTime(receipt.submittedAt || receipt.receiptDate)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         {activeTab === 'receipts' && (
           <ReceiptsTab
             productLookup={productLookup}

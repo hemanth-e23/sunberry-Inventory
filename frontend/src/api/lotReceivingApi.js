@@ -144,6 +144,13 @@ export const resolveRow = (code) =>
 export const lookupLot = (code) =>
   unwrap(apiClient.get('/lot-receiving/lots/lookup', { params: { code } }));
 
+// Weight per unit of earlier deliveries of the same lot (product + vendor +
+// vendor lot + best-by) — read only, for the "different weight, correct?" hint.
+export const knownLotWeights = ({ product_id, vendor_id, vendor_lot, bbd }) =>
+  unwrap(apiClient.get('/lot-receiving/lots/known-weights', {
+    params: { product_id, vendor_lot, vendor_id: vendor_id || undefined, bbd: bbd || undefined },
+  }));
+
 // ─── cutover ─────────────────────────────────────────────────────────────────
 
 export const getCutoverStatus = () => unwrap(apiClient.get('/lot-cutover/status'));

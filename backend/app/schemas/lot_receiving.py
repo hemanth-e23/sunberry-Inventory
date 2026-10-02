@@ -92,6 +92,7 @@ class IncomingOrderLineOut(BaseSchema):
     material_lot_id: Optional[str] = None
     lot_code: Optional[str] = None
     receipt_id: Optional[str] = None
+    forklift_submitted: bool = False
 
 
 class IncomingOrderOut(BaseSchema):

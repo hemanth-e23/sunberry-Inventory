@@ -188,7 +188,7 @@ const LocationsSection = ({ onAssignFGArea }) => {
                 onChange={(e) => setNewLocationName(e.target.value)}
                 placeholder="New location name"
                 required
-                style={{ flex: 1, border: '1px solid var(--color-border)', borderRadius: '6px', padding: '7px 10px', fontSize: '0.875rem' }}
+                style={{ flex: 1, minWidth: 0, border: '1px solid var(--color-border)', borderRadius: '6px', padding: '7px 10px', fontSize: '0.875rem' }}
               />
               <button type="submit" className="primary-button" style={{ whiteSpace: 'nowrap' }}>
                 + Add Location
@@ -198,13 +198,13 @@ const LocationsSection = ({ onAssignFGArea }) => {
             {/* Add Sub Location */}
             <form
               onSubmit={handleAddSubLocation}
-              style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'white', border: '2px solid var(--color-border)', borderLeft: '4px solid var(--color-primary)', borderRadius: '8px', padding: '10px 14px' }}
+              style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px', background: 'white', border: '2px solid var(--color-border)', borderLeft: '4px solid var(--color-primary)', borderRadius: '8px', padding: '10px 14px' }}
             >
               <select
                 value={parentForSub}
                 onChange={(e) => setParentForSub(e.target.value)}
                 required
-                style={{ flex: '0 0 160px', border: '1px solid var(--color-border)', borderRadius: '6px', padding: '7px 10px', fontSize: '0.875rem' }}
+                style={{ flex: '0 1 160px', minWidth: 0, border: '1px solid var(--color-border)', borderRadius: '6px', padding: '7px 10px', fontSize: '0.875rem' }}
               >
                 <option value="">Parent location</option>
                 {locationsTree.map((location) => (
@@ -219,9 +219,9 @@ const LocationsSection = ({ onAssignFGArea }) => {
                 onChange={(e) => setNewSubName(e.target.value)}
                 placeholder="Sub-location name"
                 required
-                style={{ flex: 1, border: '1px solid var(--color-border)', borderRadius: '6px', padding: '7px 10px', fontSize: '0.875rem' }}
+                style={{ flex: '1 1 140px', minWidth: 0, border: '1px solid var(--color-border)', borderRadius: '6px', padding: '7px 10px', fontSize: '0.875rem' }}
               />
-              <button type="submit" className="secondary-button" style={{ whiteSpace: 'nowrap' }}>
+              <button type="submit" className="secondary-button" style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>
                 + Add Sub Location
               </button>
             </form>
@@ -648,6 +648,10 @@ const LocationsSection = ({ onAssignFGArea }) => {
                                             flexWrap: "wrap",
                                           }}
                                         >
+                                          {/* Pallet figures mean nothing in a room
+                                              stored as drums/bags/boxes — its
+                                              capacity is set on the room. */}
+                                          {!unit && (<>
                                           <label
                                             style={{
                                               display: "flex",
@@ -700,6 +704,7 @@ const LocationsSection = ({ onAssignFGArea }) => {
                                               }}
                                             />
                                           </label>
+                                          </>)}
                                           <label
                                             className="checkbox"
                                             style={{
@@ -803,7 +808,10 @@ const LocationsSection = ({ onAssignFGArea }) => {
                                                   capacity ·{" "}
                                                   {Number(row.occupiedPallets || 0).toFixed(2)}/
                                                   {row.palletCapacity} pallets in
-                                                  use ·{" "}
+                                                  use
+                                                  {Number(row.occupiedCases || 0) > 0 && (
+                                                    <>
+                                                  {" "}·{" "}
                                                   {Number(row.occupiedCases || 0).toLocaleString()}{" "}
                                                   {/* `occupied_cases` is overloaded: CASES for
                                                       packaging, derived POUNDS for anything
@@ -811,6 +819,8 @@ const LocationsSection = ({ onAssignFGArea }) => {
                                                       made four 470 lb drums read as
                                                       "1880 cases stored". */}
                                                   {row.contentUnit || "cases"} stored
+                                                    </>
+                                                  )}
                                                 </>
                                               )}
                                             </span>
@@ -930,11 +940,14 @@ const LocationsSection = ({ onAssignFGArea }) => {
                                 const form = e.currentTarget;
                                 const name =
                                   form.elements["subRowName"].value.trim();
+                                // A typed room's capacity lives on the room
+                                // (unitCapacity), so its rows send no
+                                // pallet figures of their own.
                                 const palletCapacity = Number(
-                                  form.elements["subRowCap"].value || 0,
+                                  form.elements["subRowCap"]?.value || 0,
                                 );
                                 const defaultCasesPerPallet = Number(
-                                  form.elements["subRowCPP"].value || 0,
+                                  form.elements["subRowCPP"]?.value || 0,
                                 );
                                 if (!name) return;
                                 try {
@@ -960,28 +973,51 @@ const LocationsSection = ({ onAssignFGArea }) => {
                                 borderRadius: "4px",
                               }}
                             >
-                              <input
-                                name="subRowName"
-                                placeholder="Add row (e.g., cage-1)"
-                                style={{ flex: 1 }}
-                              />
-                              <input
-                                name="subRowCap"
-                                type="number"
-                                min="0"
-                                placeholder="Pallet cap"
-                                style={{ width: 100 }}
-                              />
-                              <input
-                                name="subRowCPP"
-                                type="number"
-                                min="0"
-                                placeholder="Cases/pallet"
-                                style={{ width: 110 }}
-                              />
+                              {/* Labelled fields, not placeholders: at these
+                                  widths the placeholders were cut to "Add",
+                                  "Pallet c" and "Cases/pa". A room stored as
+                                  drums/bags/boxes asks nothing about pallets or
+                                  cases — its capacity is set once on the room. */}
+                              <label>
+                                <span>New row</span>
+                                <input
+                                  name="subRowName"
+                                  placeholder="e.g. cage-1"
+                                />
+                              </label>
+                              {unit ? (
+                                <span
+                                  className="muted"
+                                  style={{ alignSelf: "center", fontSize: "0.85rem" }}
+                                >
+                                  Holds {sub.unitCapacity || 0}{" "}
+                                  {pluralUnit(unit, sub.unitCapacity || 0)} (set on
+                                  the room)
+                                </span>
+                              ) : (
+                                <>
+                                  <label>
+                                    <span>Pallet capacity</span>
+                                    <input
+                                      name="subRowCap"
+                                      type="number"
+                                      min="0"
+                                    />
+                                  </label>
+                                  <label>
+                                    <span>Cases per pallet</span>
+                                    <input
+                                      name="subRowCPP"
+                                      type="number"
+                                      min="0"
+                                    />
+                                  </label>
+                                </>
+                              )}
                               <button
                                 type="submit"
                                 className="secondary-button"
+                                style={{ whiteSpace: "nowrap" }}
                               >
                                 Add Row
                               </button>

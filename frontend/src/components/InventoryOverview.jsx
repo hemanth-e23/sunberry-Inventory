@@ -18,6 +18,7 @@ import ProductDetailModal from "./inventory/ProductDetailModal";
 import PrintReportModal from "./inventory/PrintReportModal";
 import LocationsTab from "./inventory/LocationsTab";
 import { buildRowUnitLookup } from "../utils/rowSources";
+import { formatContainers, summarizeContainers } from "../utils/inventoryContainers";
 
 const parseDate = (value) => {
   if (!value) return null;
@@ -162,6 +163,22 @@ const InventoryOverview = () => {
   // walking it for subLocations silently yields nothing and every rack falls
   // back to "pallets". `locationsTree` is the real nested state.
   const rowUnitLookup = useMemo(() => buildRowUnitLookup(locationsTree), [locationsTree]);
+
+  // rowId -> { location, subLocation } it sits in. Truck-received (lot) receipts
+  // carry no location of their own — only the rack projection — so the room is
+  // found from the rack. Without this, every racked lot product showed "—" in
+  // Location(s) (2026-10-01, F10).
+  const rowPlaceLookup = useMemo(() => {
+    const map = {};
+    (locationsTree || []).forEach((loc) => {
+      (loc.subLocations || []).forEach((sub) => {
+        (sub.rows || []).forEach((row) => {
+          if (row.id) map[row.id] = { location: loc.id, subLocation: sub.id };
+        });
+      });
+    });
+    return map;
+  }, [locationsTree]);
 
   // Helper function to fetch row name from backend if not in lookup
   const fetchRowName = useCallback(async (rowId) => {
@@ -315,13 +332,27 @@ const InventoryOverview = () => {
     const footprintFor = (rowId) => rowUnitLookup[rowId] || 'pallets';
 
     if (receipt.rawMaterialRowAllocations && Array.isArray(receipt.rawMaterialRowAllocations)) {
+      // Grouped by the room each rack is in, not by the receipt's own location
+      // (a lot receipt has none, and one lot can span two rooms).
+      const byRoom = new Map();
       receipt.rawMaterialRowAllocations.forEach(alloc => {
         const rowName = rowLookup[alloc.rowId] || alloc.rowName || alloc.rowId;
         const pallets = alloc.pallets || 0;
-        if (rowName) {
-          rowInfo.push(`${rowName}${pallets > 0 ? ` (${pallets} ${footprintFor(alloc.rowId)})` : ''}`);
-        }
+        if (!rowName) return;
+        const place = rowPlaceLookup[alloc.rowId];
+        const roomLabel = (place && getLocationLabel(locationLookup, place.location, place.subLocation))
+          || label || alloc.areaName || "";
+        if (!byRoom.has(roomLabel)) byRoom.set(roomLabel, []);
+        byRoom.get(roomLabel).push(`${rowName}${pallets > 0 ? ` (${pallets} ${footprintFor(alloc.rowId)})` : ''}`);
       });
+      const rooms = [...byRoom.entries()].filter(([room]) => room);
+      if (rooms.length) {
+        return rooms.map(([room, rows]) => ({
+          label: room,
+          detail: `Row${rows.length > 1 ? 's' : ''}: ${rows.join(', ')}`,
+        }));
+      }
+      byRoom.forEach((rows) => rowInfo.push(...rows));
     }
     else if (receipt.storageRowId || receipt.storage_row_id) {
       const rowId = receipt.storageRowId || receipt.storage_row_id;
@@ -337,7 +368,7 @@ const InventoryOverview = () => {
       return [{ label, detail }];
     }
     return [];
-  }, [productCategories, locationsTree, locationLookup, rowLookup, rowUnitLookup, rowNameCache]);
+  }, [productCategories, locationsTree, locationLookup, rowLookup, rowUnitLookup, rowPlaceLookup, rowNameCache]);
 
   // Inventory rows computation (needed by the table and print modal)
   const vendorNameById = useMemo(() => {
@@ -462,14 +493,12 @@ const InventoryOverview = () => {
 
         const quantityUnitLabel = (lastApproval?.quantityUnits || lastSubmission?.quantityUnits || (category?.type === CATEGORY_TYPES.FINISHED ? 'cases' : ''));
 
-        const refReceipt = lastApproval || lastSubmission;
-        let containerInfo = null;
-        if (refReceipt?.containerCount && refReceipt?.containerUnit && refReceipt?.weightPerContainer && refReceipt?.weightUnit) {
-          const currentContainers = refReceipt.weightPerContainer > 0
-            ? Math.round((summary.quantity / refReceipt.weightPerContainer) * 100) / 100
-            : refReceipt.containerCount;
-          containerInfo = `≈ ${currentContainers.toLocaleString()} ${refReceipt.containerUnit} @ ${refReceipt.weightPerContainer.toLocaleString()} ${refReceipt.weightUnit} ea.`;
-        }
+        // Counted containers from the rack projection, or each receipt's own
+        // weight — never the product's pounds ÷ one receipt's weight, which
+        // read "≈ 22.5 drum @ 502" for 23 drums at two weights (F10).
+        const containerInfo = category?.type === CATEGORY_TYPES.FINISHED
+          ? null
+          : formatContainers(summarizeContainers(productReceipts));
 
         return {
           id: product.id,

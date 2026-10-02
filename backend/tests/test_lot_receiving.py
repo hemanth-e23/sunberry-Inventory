@@ -142,9 +142,9 @@ class TestIncomingOrder:
     def test_one_order_per_destination_carries_many_products(self, db_session, recv_seed):
         """A truck carries mango and guava; the order has to as well."""
         order = _order(db_session, lines=[
-            {"product_id": PRODUCT, "vendor_lot": "MG-1", "expected_count": 20,
+            {"product_id": PRODUCT, "vendor_lot": "MG-1", "bbd": BBD, "expected_count": 20,
              "unit_label": "drum", "weight_per_unit": 500.0, "weight_unit": "lbs"},
-            {"product_id": OTHER_PRODUCT, "vendor_lot": "GV-1", "expected_count": 20,
+            {"product_id": OTHER_PRODUCT, "vendor_lot": "GV-1", "bbd": BBD, "expected_count": 20,
              "unit_label": "drum", "weight_per_unit": 450.0, "weight_unit": "lbs"},
         ])
         assert len(order.lots) == 2
@@ -199,7 +199,7 @@ class TestIncomingOrder:
 
     def test_a_complete_close_needs_no_reason(self, db_session, recv_seed):
         order = _order(db_session, lines=[{
-            "product_id": PRODUCT, "vendor_lot": "MG-77", "expected_count": 3,
+            "product_id": PRODUCT, "vendor_lot": "MG-77", "bbd": BBD, "expected_count": 3,
             "unit_label": "drum", "weight_per_unit": 500.0, "weight_unit": "lbs",
         }])
         receipt = lrs.start_receiving(db_session, order, order.lots[0], user_id=USER)

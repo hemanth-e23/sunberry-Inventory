@@ -701,35 +701,23 @@ class TestRemainingGates:
             headers=wh_headers, json={"reason": "nope"},
         ).status_code == 404
 
-    def test_a_weightless_line_is_flagged_and_cannot_print(
+    def test_a_weightless_line_is_refused_when_the_order_is_entered(
         self, client, api_seed, wh_headers
     ):
         """Pounds are derived from weight-per-unit, so a NULL one makes scanned
-        material read as zero stock to production. The lot is flagged, which
-        stops stickers — and nothing can be scanned in without a sticker."""
+        material read as zero stock to production. Plant rule (2026-10-01, F14):
+        such a delivery is not accepted — refused when the order is typed, not
+        only later at check-in."""
         response = client.post("/api/lot-receiving/orders", headers=wh_headers, json={
             "vendor_id": VENDOR,
             "lines": [{
-                "product_id": PRODUCT, "vendor_lot": "NO-WT",
+                "product_id": PRODUCT, "vendor_lot": "NO-WT", "bbd": BBD,
                 "expected_count": 10, "unit_label": "drum",
             }],
         })
-        order = response.json()
-        client.post(
-            f"/api/lot-receiving/orders/{order['id']}/release",
-            headers=wh_headers, json={"expected_date": "2026-08-25"},
-        )
-        summary = client.post(
-            f"/api/lot-receiving/orders/{order['id']}/start-receiving",
-            headers=wh_headers, json={"line_id": order["lines"][0]["id"]},
-        ).json()
-        assert summary["needs_review"] is True
-
-        printed = client.post(
-            f"/api/lot-receiving/sessions/{summary['receipt_id']}/print-labels",
-            headers=wh_headers, json={"count": 10},
-        )
-        assert printed.status_code == 409
+        assert response.status_code == 400
+        assert "weight per drum" in response.json()["detail"]
+        assert client.get("/api/lot-receiving/orders", headers=wh_headers).json() == []
 
     def test_a_receipt_from_an_order_carries_a_category(
         self, client, api_seed, wh_headers, db_session
@@ -745,7 +733,7 @@ class TestRemainingGates:
         order = client.post("/api/lot-receiving/orders", headers=wh_headers, json={
             "vendor_id": VENDOR,
             "lines": [{
-                "product_id": PRODUCT, "vendor_lot": "CAT-1", "expected_count": 4,
+                "product_id": PRODUCT, "vendor_lot": "CAT-1", "bbd": BBD, "expected_count": 4,
                 "unit_label": "drum", "weight_per_unit": 500.0, "weight_unit": "lbs",
             }],
         }).json()
@@ -772,7 +760,7 @@ class TestWeightUnitIsAskedNotAssumed:
         order = client.post("/api/lot-receiving/orders", headers=wh_headers, json={
             "vendor_id": VENDOR,
             "lines": [{
-                "product_id": PRODUCT, "vendor_lot": "UNIT-1", "expected_count": 10,
+                "product_id": PRODUCT, "vendor_lot": "UNIT-1", "bbd": BBD, "expected_count": 10,
                 "unit_label": "drum", "weight_per_unit": 200.0, "weight_unit": "kg",
             }],
         }).json()
