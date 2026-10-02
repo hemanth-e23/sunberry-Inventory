@@ -59,6 +59,9 @@ const ReportsPage = () => {
         <div className="header-content">
           <h1>Reporting</h1>
           <p>Analyze inventory performance, receipts, and warehouse activity.</p>
+          {(user?.role === 'supervisor' || user?.role === 'admin') && (
+            <p className="muted small">Showing your plant only.</p>
+          )}
         </div>
       </div>
 

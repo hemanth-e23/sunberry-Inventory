@@ -40,7 +40,7 @@ def test_create_transfer_partial_hold_boundary(client, auth_headers, seed_data, 
     ok = client.post(
         "/api/inventory/transfers",
         json={"receipt_id": "rec-h", "quantity": 600, "unit": "lbs",
-              "transfer_type": "shipped-out", "order_number": "SO-600"},
+              "transfer_type": "shipped-out", "order_number": "SO-600", "ship_out_reason": "sale"},
         headers=auth_headers,
     )
     assert ok.status_code == 200, ok.text
@@ -48,7 +48,7 @@ def test_create_transfer_partial_hold_boundary(client, auth_headers, seed_data, 
     too_much = client.post(
         "/api/inventory/transfers",
         json={"receipt_id": "rec-h", "quantity": 601, "unit": "lbs",
-              "transfer_type": "shipped-out", "order_number": "SO-601"},
+              "transfer_type": "shipped-out", "order_number": "SO-601", "ship_out_reason": "sale"},
         headers=auth_headers,
     )
     assert too_much.status_code == 400
@@ -65,7 +65,7 @@ def test_approve_shipout_blocks_when_held_increased(
         "/api/inventory/transfers",
         json={
             "receipt_id": "rec-h", "quantity": 600, "unit": "lbs",
-            "transfer_type": "shipped-out", "order_number": "SO-1",
+            "transfer_type": "shipped-out", "order_number": "SO-1", "ship_out_reason": "sale",
         },
         headers=auth_headers,
     )

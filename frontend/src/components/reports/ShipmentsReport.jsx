@@ -18,6 +18,8 @@ const groupByOrder = (rows) => {
         ship_date: r.ship_date,
         requested_by: r.requested_by,
         approved_by: r.approved_by,
+        ship_out_reason_label: r.ship_out_reason_label || null,
+        notes: r.notes || null,
         products: new Set(),
         total_cases: 0,
       });
@@ -82,6 +84,8 @@ const ShipmentsReport = ({ productOptions }) => {
   const orderCols = [
     { label: "Ship Date", value: (r) => formatDate(r.ship_date) },
     { label: "Order #", value: (r) => r.order_number || "—" },
+    { label: "Reason", value: (r) => r.ship_out_reason_label || "—" },
+    { label: "Notes", value: (r) => r.notes || "—" },
     {
       label: "Products",
       value: (r) => `${r.product_count} ${r.product_count === 1 ? "product" : "products"}`,

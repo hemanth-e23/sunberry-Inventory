@@ -92,7 +92,7 @@ def test_partial_donation_reports_the_original_quantity(
     """500 on hand, donate 100 -> the report reads 500 initial, 400 now."""
     _donate(client, auth_headers, admin_auth_headers, ["pl-1", "pl-2"])
 
-    receipt = _trace(client, auth_headers)
+    receipt = _trace(client, admin_auth_headers)  # reports: supervisor and up (G5)
     assert receipt["current_quantity"] == 400
     # Was 400 before the fix: the 100 donated cases were never added back.
     assert receipt["initial_quantity"] == 500
@@ -109,7 +109,7 @@ def test_fully_donated_lot_does_not_report_zero_initial(
     """
     _donate(client, auth_headers, admin_auth_headers, [f"pl-{i}" for i in range(1, 11)])
 
-    receipt = _trace(client, auth_headers)
+    receipt = _trace(client, admin_auth_headers)  # reports: supervisor and up (G5)
     assert receipt["current_quantity"] == 0
     assert receipt["initial_quantity"] == 500, "a depleted lot must still show what it held"
 
@@ -121,7 +121,7 @@ def test_donation_appears_on_the_timeline(
     """The timeline showed only 'Received' — the donation has to be on it."""
     _donate(client, auth_headers, admin_auth_headers, ["pl-1", "pl-2"])
 
-    receipt = _trace(client, auth_headers)
+    receipt = _trace(client, admin_auth_headers)  # reports: supervisor and up (G5)
     events = receipt["timeline"]
 
     received = next(e for e in events if e["event_type"] == "received")
@@ -153,6 +153,6 @@ def test_adjustment_is_counted_once(
     adj.receipt_id = "rec-gt"          # now findable down both paths
     db_session.commit()
 
-    receipt = _trace(client, auth_headers)
+    receipt = _trace(client, admin_auth_headers)  # reports: supervisor and up (G5)
     assert receipt["initial_quantity"] == 500, "counted twice — 600 means the dedupe broke"
     assert sum(1 for e in receipt["timeline"] if e["event_type"] == "donation") == 1

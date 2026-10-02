@@ -119,8 +119,10 @@ function InitiateModal({ onClose, onCreated }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    // Inactive plants are not destinations (or sources): "Plant C Test" was
+    // offered while switched off (2026-10-01, G2).
     apiClient.get('/master-data/warehouses')
-      .then(res => setWarehouses(res.data))
+      .then(res => setWarehouses((res.data || []).filter(w => w.is_active !== false)))
       .catch(() => {});
   }, []);
 
@@ -443,7 +445,7 @@ function ActionModal({ title, onClose, onConfirm, requireNote = false, noteLabel
         />
         <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 16px' }}>{noteLabel}</p>
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-          <button onClick={onClose} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #d1d5db', background: '#fff', cursor: 'pointer' }}>Cancel</button>
+          <button onClick={onClose} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #d1d5db', background: '#fff', color: '#374151', cursor: 'pointer' }}>Go back</button>
           <button onClick={() => { if (requireNote && !notes.trim()) return; onConfirm(notes); }}
             style={{ padding: '8px 16px', borderRadius: 6, border: 'none', background: '#2563eb', color: '#fff', cursor: 'pointer', fontWeight: 600 }}>
             Confirm
@@ -767,7 +769,7 @@ function ConfirmShipmentModal({ transfer, onClose, onConfirm }) {
         <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 16px' }}>Notes (optional)</p>
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-          <button onClick={onClose} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #d1d5db', background: '#fff', cursor: 'pointer' }}>Cancel</button>
+          <button onClick={onClose} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #d1d5db', background: '#fff', color: '#374151', cursor: 'pointer' }}>Cancel</button>
           <button
             disabled={!canConfirm}
             onClick={() => {
@@ -1018,7 +1020,7 @@ function PlaceInStorageModal({ receiptId, warehouseId, productName, quantity, un
         )}
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 16 }}>
-          <button onClick={onClose} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #d1d5db', background: '#fff', cursor: 'pointer' }}>Cancel</button>
+          <button onClick={onClose} style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #d1d5db', background: '#fff', color: '#374151', cursor: 'pointer' }}>Cancel</button>
           <button
             disabled={!canSave && rows.length > 0 || saving || !palletCount}
             onClick={handleSave}

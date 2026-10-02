@@ -102,6 +102,7 @@ export const AppDataProvider = ({ children }) => {
     allocationHistory: receipt.allocationHistory,
     refreshReceipts: receipt.refreshReceipts,
     refreshTransfers: inventory.refreshTransfers,
+    refreshHoldActions: inventory.refreshHoldActions,
     submitReceipt: receipt.submitReceipt,
     updateReceiptStatus: receipt.updateReceiptStatus,
     updateReceipt: receipt.updateReceipt,

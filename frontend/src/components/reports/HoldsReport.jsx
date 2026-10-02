@@ -3,6 +3,7 @@ import { formatDate } from "../../utils/dateUtils";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
+import { describeLotQty } from "../../utils/lotStatus";
 
 const holdActionOptions = [
   { value: "all", label: "Hold & Release" },
@@ -40,11 +41,16 @@ const HoldsReport = () => {
     { label: "Action", value: (r) => r.action.charAt(0).toUpperCase() + r.action.slice(1) },
     { label: "Product", value: (r) => r.product_name },
     { label: "Lot #", value: (r) => r.lot_number || "—" },
-    { label: "Quantity", value: (r) => formatNumber(r.quantity) },
+    // History: what the action covered when it was approved (blank for
+    // actions approved before the figure was recorded).
+    { label: "Qty at Action", value: (r) => (r.quantity_at_action != null ? `${formatNumber(r.quantity_at_action)} ${r.unit || ""}`.trim() : "—") },
+    // Now: the LOT, lot-wide — every delivery and rack, with its unit count.
+    { label: "Lot Now", value: (r) => (r.current_quantity != null ? describeLotQty(r.current_quantity, r.unit, r.current_units, r.unit_label) : "—") },
+    { label: "Held Now", value: (r) => (r.current_hold_status ? describeLotQty(r.current_held_quantity, r.unit, r.current_held_units, r.unit_label) : "Not held") },
     { label: "Reason", value: (r) => r.reason || "—" },
     { label: "Submitted By", value: (r) => r.submitted_by || "—" },
     { label: "Approved By", value: (r) => r.approved_by || "—" },
-    { label: "Location", value: (r) => r.hold_location || "—" },
+    { label: "Location (now)", value: (r) => r.hold_location || "—" },
   ];
 
   return (

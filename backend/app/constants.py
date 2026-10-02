@@ -18,6 +18,23 @@ BOL_SERIAL_DIGITS = 6
 # Role groups
 ADMIN_ROLES = frozenset({ROLE_ADMIN, ROLE_SUPERADMIN, ROLE_CORPORATE_ADMIN})
 APPROVAL_ROLES = frozenset({ROLE_ADMIN, ROLE_SUPERADMIN, ROLE_CORPORATE_ADMIN, ROLE_SUPERVISOR})
+# Who may open Reports (2026-10-01, G5): supervisors and up. Plant roles are
+# scoped to their own warehouse by warehouse_filter; corporate roles see all.
+REPORT_ROLES = APPROVAL_ROLES | frozenset({"corporate_viewer"})
+
+# Why raw material / packaging left the building on a Shipped Out transfer
+# (2026-10-01, G4). Required for RM shipped-out; stored on
+# inventory_transfers.ship_out_reason.
+SHIP_OUT_REASON_RETURN_TO_VENDOR = "return_to_vendor"
+SHIP_OUT_REASON_SALE = "sale"
+SHIP_OUT_REASON_SAMPLE = "sample"
+SHIP_OUT_REASON_OTHER = "other"
+SHIP_OUT_REASONS = {
+    SHIP_OUT_REASON_RETURN_TO_VENDOR: "Return to vendor",
+    SHIP_OUT_REASON_SALE: "Sale",
+    SHIP_OUT_REASON_SAMPLE: "Sample",
+    SHIP_OUT_REASON_OTHER: "Other",
+}
 
 # ─── Category Types ───────────────────────────────────────────────────────────
 CATEGORY_FINISHED = "finished"

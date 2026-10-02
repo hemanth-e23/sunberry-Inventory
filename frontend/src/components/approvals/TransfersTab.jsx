@@ -254,7 +254,7 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                     {transferLines.length} product line{transferLines.length !== 1 ? 's' : ''}: {productSummary}
                   </div>
                 )}
-                <span className="badge">{isShipOut ? 'Shipped Out' : (transfer.reason || 'Transfer')}</span>
+                <span className="badge">{isShipOut ? 'Shipped Out' : 'Transfer'}</span>
                 {isShipOut && forkliftDone && (
                   <span style={{ marginLeft: '8px', background: '#22c55e', color: 'white', borderRadius: '999px', padding: '2px 10px', fontSize: '12px', fontWeight: 600 }}>
                     ✓ Forklift Done
@@ -288,9 +288,20 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                   {transfer.quantity} {unit}
                   {(() => {
                     // The container count is what the approver reasons in
-                    // ("60 drums", not 28,440 lbs) — derived at THIS
-                    // receipt's own weight, shown only when the quantity is
-                    // a clean whole-container multiple.
+                    // ("60 drums", not 28,440 lbs). The server prices it per
+                    // SOURCE RACK — a mixed lot weighs 502 on one rack and
+                    // 474 on another, so dividing by one receipt's weight
+                    // dropped the count on "1,506 lbs" (2026-10-01, B8).
+                    const serverUnits = Number(transfer.containerUnits || 0);
+                    if (serverUnits > 0 && transfer.containerUnit) {
+                      return (
+                        <span style={{ color: '#0369a1', fontWeight: 700 }}>
+                          {' '}= {serverUnits} {footprintLabel(serverUnits, pluralizeUnit(transfer.containerUnit))}
+                        </span>
+                      );
+                    }
+                    // Fallback: this receipt's own weight, shown only when the
+                    // quantity is a clean whole-container multiple.
                     const wpc = Number(receipt?.weightPerContainer || 0);
                     const cu = receipt?.containerUnit;
                     if (!(wpc > 0) || !cu) return null;
@@ -315,6 +326,19 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                 <div>
                   <dt>Order #</dt>
                   <dd>{transfer.orderNumber || transfer.order_number}</dd>
+                </div>
+              )}
+              {isShipOut && transfer.shipOutReasonLabel && (
+                <div>
+                  <dt>Why it is leaving</dt>
+                  <dd style={{ fontWeight: 600 }}>{transfer.shipOutReasonLabel}</dd>
+                </div>
+              )}
+              {/* The submitter's notes — approvers never saw them (G4). */}
+              {!isMultiProduct && transfer.reason && (
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <dt>Notes</dt>
+                  <dd style={{ whiteSpace: 'pre-wrap' }}>{transfer.reason}</dd>
                 </div>
               )}
               <div>
@@ -476,7 +500,19 @@ const TransfersTab = ({ pendingTransfers, receiptLookup, productLookup, rowLooku
                     <div style={{ fontWeight: 600, color: '#6b7280', marginBottom: '4px' }}>From</div>
                     {sourceRows.length > 0 ? (
                       <ul style={{ margin: 0, paddingLeft: '18px' }}>
-                        {sourceRows.map((r, i) => <li key={i}>{r.label} — {r.cases} {unit}{r.pallets !== null ? `, ${r.pallets} ${footprintLabel(r.pallets, r.footprintUnit)}` : ''}</li>)}
+                        {sourceRows.map((r, i) => {
+                          // Whole containers off THIS rack, at its own weight.
+                          const srcId = (transfer.sourceBreakdown || [])[i]?.id;
+                          const n = Number((transfer.sourceUnits || []).find(u => u.id === srcId)?.units || 0);
+                          const cu = transfer.containerUnit;
+                          return (
+                            <li key={i}>
+                              {r.label} — {r.cases} {unit}
+                              {n > 0 && cu ? ` = ${n} ${footprintLabel(n, pluralizeUnit(cu))}` : ''}
+                              {r.pallets !== null ? `, ${r.pallets} ${footprintLabel(r.pallets, r.footprintUnit)}` : ''}
+                            </li>
+                          );
+                        })}
                       </ul>
                     ) : (
                       <div>{locationLookupMap[transfer.fromLocation] || transfer.fromLocation || '—'}</div>

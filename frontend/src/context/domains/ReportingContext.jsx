@@ -7,6 +7,7 @@ import { numberFrom } from '../../utils/allocationUtils';
 import { rowCapacityInfo } from '../../utils/rowSources';
 import { toDateKey } from '../../utils/dateUtils';
 import { isRawMaterialType } from '../../constants';
+import { rowHeldShare, countHeldLots } from '../../utils/lotStatus';
 
 // ─── Pure helper functions ────────────────────────────────────────────────────
 
@@ -275,7 +276,8 @@ export const ReportingProvider = ({ children }) => {
           totalPalletCapacity += capacity;
           const used = Math.min(capacity, occupied);
           occupiedPallets += used;
-          if (row.hold) heldPallets += used;
+          // Lot-level holds count too, not only the legacy rack flag (B6).
+          heldPallets += used * rowHeldShare(row);
         });
       });
     });
@@ -293,11 +295,20 @@ export const ReportingProvider = ({ children }) => {
     const utilization =
       totalPalletCapacity > 0 ? Math.min(100, (occupiedPallets / totalPalletCapacity) * 100) : 0;
 
+    const rmReceipts = receipts.filter((receipt) => {
+      const product = products.find((p) => p.id === receipt.productId);
+      const category = categories.find((c) => c.id === product?.categoryId);
+      return isRawMaterialType(category?.type);
+    });
+
     return {
       totalPalletCapacity,
       occupiedPallets,
       availablePallets: Math.max(totalPalletCapacity - occupiedPallets, 0),
-      heldPallets,
+      heldPallets: Math.round(heldPallets * 100) / 100,
+      // Distinct lots on QA hold — a held lot sitting on no counted rack
+      // still shows up here.
+      heldLots: countHeldLots(locationsState, rmReceipts),
       utilization,
       floorStagingPallets,
     };

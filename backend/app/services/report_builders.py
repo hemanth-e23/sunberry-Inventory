@@ -20,8 +20,9 @@ from app.enums import (
     TransferStatus, AdjustmentStatus, HoldStatus, InterWarehouseStatus, ReceiptStatus,
     ShipOutLifecycle,
 )
-from app.constants import CATEGORY_FINISHED
+from app.constants import CATEGORY_FINISHED, SHIP_OUT_REASONS
 from app.services.availability import container_qty_for_product
+from app.services.lot_status import room_label_for_rows
 from app.utils.calendar_dates import calendar_day
 from app.utils.warehouse_time import DEFAULT_WAREHOUSE_TIMEZONE, warehouse_timezone, zone
 
@@ -50,6 +51,12 @@ SHIPPED_OUT_STOCK_REMOVED_STATUSES = [
 ]
 
 
+
+# A receipt in one of these statuses holds no stock: a REJECTED delivery
+# keeps its paperwork quantity for the record (D-0801's rejected 150 lb line
+# still says 150) but never entered the books. Reports that count what was
+# received or what is on hand must leave it out (2026-10-01, B3).
+NON_STOCK_RECEIPT_STATUSES = (ReceiptStatus.REJECTED.value,)
 
 _AWARE_MIN = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -81,6 +88,15 @@ def _ship_ts_col():
 def _ship_dt(t):
     """Python-side ship timestamp for a loaded transfer (mirror of _ship_ts_col)."""
     return t.time_out or t.docs_generated_at or t.approved_at
+
+
+def ship_out_reason_label(t) -> Optional[str]:
+    """"Return to vendor" / "Sale" / "Sample" / "Other" for a shipped-out
+    transfer (G4), None when the transfer predates the field."""
+    code = getattr(t, "ship_out_reason", None)
+    if not code:
+        return None
+    return SHIP_OUT_REASONS.get(code, code)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -356,7 +372,9 @@ def approved_adjustments_for_receipt(
 _PRODUCTION_USE_TYPES = frozenset({"production-consumption", "used-in-production"})
 
 
-def _receiptless_placement_qty(db: Session, product_id: str) -> float:
+def _receiptless_placement_qty(
+    db: Session, product_id: str, warehouse_id: Optional[str] = None
+) -> float:
     """Weight on racks for lots of this product that have no receipt — the
     cutover opening balances. Every other lot is counted through its paper."""
     from app.models import LotPlacement, MaterialLot
@@ -364,12 +382,14 @@ def _receiptless_placement_qty(db: Session, product_id: str) -> float:
     has_receipt = db.query(Receipt.id).filter(
         Receipt.material_lot_id == MaterialLot.id
     ).exists()
-    rows = (
+    q = (
         db.query(LotPlacement, MaterialLot)
         .join(MaterialLot, MaterialLot.id == LotPlacement.material_lot_id)
         .filter(MaterialLot.product_id == product_id, ~has_receipt)
-        .all()
     )
+    if warehouse_id:
+        q = q.filter(LotPlacement.warehouse_id == warehouse_id)
+    rows = q.all()
     return sum(
         int(p.full_units or 0) * float(lot.weight_per_unit or 0)
         + float(p.open_remaining_qty or 0)
@@ -497,19 +517,23 @@ def build_activity_ledger(
     category_id: Optional[str] = None,
     category_type: Optional[str] = None,
     tz: Optional[str] = None,
+    warehouse_id: Optional[str] = None,
 ) -> dict:
-    tz = tz or report_timezone(db)
+    tz = tz or report_timezone(db, warehouse_id)
     start_dt = parse_dt_start(start_date, tz)
     end_dt = parse_dt_end(end_date, tz)
 
     # Collect all product_ids with activity in range
     product_ids: set = set()
 
-    # Receipts created in range
+    # Receipts created in range. A rejected delivery is not stock (B3).
     rq = db.query(Receipt).filter(
         Receipt.receipt_date >= start_dt,
         Receipt.receipt_date <= end_dt,
+        Receipt.status.notin_(NON_STOCK_RECEIPT_STATUSES),
     )
+    if warehouse_id:
+        rq = rq.filter(Receipt.warehouse_id == warehouse_id)
     if product_id:
         rq = rq.filter(Receipt.product_id == product_id)
     if category_id:
@@ -530,6 +554,8 @@ def build_activity_ledger(
         _ship_ts_col() >= start_dt,
         _ship_ts_col() <= end_dt,
     )
+    if warehouse_id:
+        tq = tq.filter(InventoryTransfer.warehouse_id == warehouse_id)
     range_transfers = tq.all()
     for t in range_transfers:
         if t.receipt_id:
@@ -546,6 +572,8 @@ def build_activity_ledger(
         InventoryAdjustment.approved_at >= start_dt,
         InventoryAdjustment.approved_at <= end_dt,
     )
+    if warehouse_id:
+        aq = aq.filter(InventoryAdjustment.warehouse_id == warehouse_id)
     range_adjustments = aq.all()
     for a in range_adjustments:
         if a.product_id:
@@ -616,10 +644,15 @@ def build_activity_ledger(
         # change every existing number in this report. include_held=True matches
         # "holds ignored"; pending stays out because an unapproved intake is not
         # yet on the books.
-        current_receipts = db.query(Receipt).filter(
+        current_q = db.query(Receipt).filter(
             Receipt.product_id == pid,
             Receipt.quantity > 0,
-        ).all()
+            # A rejected delivery's paperwork quantity is not stock (B3).
+            Receipt.status.notin_(NON_STOCK_RECEIPT_STATUSES),
+        )
+        if warehouse_id:
+            current_q = current_q.filter(Receipt.warehouse_id == warehouse_id)
+        current_receipts = current_q.all()
         current_on_hand = sum(float(r.quantity or 0) for r in current_receipts)
         # Rack placements are NOT added on top: a lot-tracked lot is already in
         # the sum above through its receipts' paper (racked + staged), and
@@ -627,9 +660,9 @@ def build_activity_ledger(
         # (2026-10-01). Only a lot with no receipt at all — an opening balance
         # counted at cutover — is known solely by its placements.
         current_on_hand += container_qty_for_product(
-            db, pid, include_held=True, include_placements=False
+            db, pid, warehouse_id, include_held=True, include_placements=False
         )
-        current_on_hand += _receiptless_placement_qty(db, pid)
+        current_on_hand += _receiptless_placement_qty(db, pid, warehouse_id)
 
         lot_numbers = sorted(set(r.lot_number for r in p_receipts if r.lot_number))
 
@@ -740,6 +773,9 @@ def build_shipments_report(
                     "approved_by": approver,
                     "requested_by": user_name(db, t.requested_by),
                     "is_multi_product": True,
+                    "ship_out_reason": t.ship_out_reason,
+                    "ship_out_reason_label": ship_out_reason_label(t),
+                    "notes": t.reason or None,
                 })
             continue
 
@@ -768,6 +804,9 @@ def build_shipments_report(
             "approved_by": approver,
             "requested_by": user_name(db, t.requested_by),
             "is_multi_product": False,
+            "ship_out_reason": t.ship_out_reason,
+            "ship_out_reason_label": ship_out_reason_label(t),
+            "notes": t.reason or None,
         })
 
     totals = {
@@ -923,19 +962,25 @@ def build_movement_ledger(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     tz: Optional[str] = None,
+    warehouse_id: Optional[str] = None,
 ) -> dict:
     pname, pcode = product_info(db, product_id)
-    receipts = db.query(Receipt).filter(Receipt.product_id == product_id).all()
+    rq = db.query(Receipt).filter(Receipt.product_id == product_id)
+    if warehouse_id:
+        rq = rq.filter(Receipt.warehouse_id == warehouse_id)
+    receipts = rq.all()
     receipt_ids = [r.id for r in receipts]
 
-    tz = tz or report_timezone(db)
+    tz = tz or report_timezone(db, warehouse_id)
     start_dt = parse_dt_start(start_date, tz) if start_date else None
     end_dt = parse_dt_end(end_date, tz) if end_date else None
 
     events = []
 
-    # Receipts
+    # Receipts. A rejected delivery brought nothing onto the books (B3).
     for r in receipts:
+        if r.status in NON_STOCK_RECEIPT_STATUSES:
+            continue
         ts = r.receipt_date or r.created_at
         if start_dt and ts and ts < start_dt:
             continue
@@ -976,6 +1021,9 @@ def build_movement_ledger(
             leaves = t.transfer_type == "shipped-out"
             moved = round(float(t.quantity or 0), 2)
             notes = t.reason or ""
+            why = ship_out_reason_label(t) if leaves else None
+            if why:
+                notes = f"{why}: {notes}" if notes else why
             if not leaves:
                 notes = f"{notes} (moved {moved:g}, still on hand)".strip()
             events.append({
@@ -985,6 +1033,7 @@ def build_movement_ledger(
                     else "Shipped Out" if leaves
                     else "Staging"
                 ),
+                "ship_out_reason": ship_out_reason_label(t) if leaves else None,
                 "lot_number": r.lot_number if r else "",
                 "category": "",
                 "qty_in": 0,
@@ -1036,6 +1085,8 @@ def build_movement_ledger(
         InventoryAdjustment.product_id == product_id,
         InventoryAdjustment.status == AdjustmentStatus.APPROVED,
     )
+    if warehouse_id:
+        aq = aq.filter(InventoryAdjustment.warehouse_id == warehouse_id)
     for a in aq.all():
         ts = a.approved_at or a.submitted_at
         if start_dt and ts and ts < start_dt:
@@ -1153,12 +1204,25 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             ]),
         ).order_by(InterWarehouseTransfer.received_at).all()
 
-        init_qty = initial_receipt_qty(r, db)
+        # A rejected delivery never entered stock: it stays on the trace (the
+        # truck did arrive) but carries no quantity into the lot's totals.
+        rejected = r.status == ReceiptStatus.REJECTED
+        init_qty = 0.0 if rejected else initial_receipt_qty(r, db)
+
+        # The room the drums were PUT AWAY in, from the receiving ledger's
+        # racks. The receipt's own location follows whichever transfer was
+        # approved last, so moving 2 drums to quarantine relabelled the whole
+        # delivery "QA Barn › QA Quarantine" while it sat on QA-D3/QA-D4
+        # (2026-10-01, B5).
         arrival = _arrival_rows(db, r)
+        arrival_room = (
+            room_label_for_rows(db, [a["row_id"] for a in arrival if a.get("row_id")])
+            if arrival else None
+        )
 
         timeline = []
         timeline.append({
-            "event": "Received",
+            "event": "Received (rejected — not booked)" if rejected else "Received",
             "event_type": "received",
             "date": r.receipt_date or r.created_at,
             "qty": round(init_qty, 2),
@@ -1172,14 +1236,14 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             "from_location": None,
             "from_rows": [],
             # Where the receiving scans actually put it, when the ledger says.
-            # A walk-in or truck receipt carries no location of its own, so
-            # deliveries 1, 3 and 4 of A-0925 showed no arrival at all while
-            # delivery 2 (which had one) did (browser test PART 2, U11).
-            "to_location": _arrival_location(db, arrival) or _loc_str(r.location, r.sub_location),
-            "to_rows": arrival or receipt_initial_rows(r, db),
+            # A walk-in or truck receipt carries no location of its own, and
+            # the receipt's location follows the last approved transfer
+            # (browser test PART 2, U11 and B5).
+            "to_location": _arrival_location(db, arrival) or arrival_room or _loc_str(r.location, r.sub_location),
+            "to_rows": arrival or ([] if rejected else receipt_initial_rows(r, db)),
             "order_number": None,
             "recipient": None,
-            "direction": "in",
+            "direction": "none" if rejected else "in",
         })
         for t in transfers:
             # For multi-product ship-outs, report only this receipt's portion (line.cases_picked)
@@ -1203,6 +1267,9 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
                 "to_location": _loc_str(t.to_location, t.to_sub_location),
                 "to_rows": breakdown_rows(db, t.destination_breakdown, r.unit or "cases"),
                 "order_number": t.order_number,
+                "ship_out_reason": (
+                    ship_out_reason_label(t) if t.transfer_type == "shipped-out" else None
+                ),
                 "purchase_order": None,
                 "bol": None,
                 "recipient": None,
@@ -1325,7 +1392,7 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             "production_date": r.production_date,
             "expiration_date": calendar_day(r.expiration_date),
             "initial_quantity": round(init_qty, 2),
-            "current_quantity": round(float(r.quantity or 0), 2),
+            "current_quantity": 0.0 if rejected else round(float(r.quantity or 0), 2),
             "unit": r.unit or "cases",
             "status": r.status,
             "on_hold": r.hold,
@@ -1390,6 +1457,7 @@ def _arrival_rows(db: Session, receipt: Receipt) -> list:
             continue
         row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
         rows.append({
+            "row_id": row_id,
             "row": row.name if row else row_id,
             "row_id": row_id,
             "qty": round(units * per, 2) if per else units,
@@ -1452,7 +1520,8 @@ def _merge_lot_deliveries(db: Session, receipts: list, entries: list) -> list:
         for e in group:
             for ev in e["timeline"]:
                 if ev.get("event_type") == "received" and len(group) > 1:
-                    ev["event"] = f"Received (delivery {group.index(e) + 1} of {len(group)})"
+                    tag = " — rejected, not booked" if e["status"] == ReceiptStatus.REJECTED else ""
+                    ev["event"] = f"Received (delivery {group.index(e) + 1} of {len(group)}{tag})"
         first["timeline"] = sorted(
             (ev for e in group for ev in e["timeline"]),
             key=lambda ev: _sort_dt(ev["date"]),
@@ -1462,7 +1531,10 @@ def _merge_lot_deliveries(db: Session, receipts: list, entries: list) -> list:
         first["initial_quantity"] = round(sum(e["initial_quantity"] for e in group), 2)
         first["current_quantity"] = round(sum(e["current_quantity"] for e in group), 2)
         first["on_hold"] = any(e["on_hold"] for e in group)
-        live = [e for e in group if e["status"] != ReceiptStatus.DEPLETED]
+        live = [e for e in group
+                if e["status"] not in (ReceiptStatus.DEPLETED, ReceiptStatus.REJECTED)]
+        if not live:
+            live = [e for e in group if e["status"] != ReceiptStatus.REJECTED]
         first["status"] = (live or group)[0]["status"]
         for field in ("bol", "purchase_order"):
             vals = [e[field] for e in group if e.get(field)]
@@ -1576,6 +1648,9 @@ def build_holds_report(
 
     hold_actions = query.order_by(InventoryHoldAction.approved_at.desc()).all()
 
+    from app.services.lot_status import lot_status
+
+    lot_cache: dict = {}
     rows = []
     for h in hold_actions:
         receipt = db.query(Receipt).filter(Receipt.id == h.receipt_id).first()
@@ -1584,6 +1659,13 @@ def build_holds_report(
         if product_id and receipt.product_id != product_id:
             continue
         pname, pcode = product_info(db, receipt.product_id)
+        # The LOT now — every delivery, every rack — not the named receipt's
+        # paperwork: B-0910 read 5,688 lb on its release row with 13 drums /
+        # 6,162 lb held, and LOCATION was "—" on every row (2026-10-01, B4/B5).
+        key = receipt.material_lot_id or receipt.id
+        if key not in lot_cache:
+            lot_cache[key] = lot_status(db, receipt)
+        now = lot_cache[key] or {}
         rows.append({
             "hold_id": h.id,
             "action_date": h.approved_at,
@@ -1591,12 +1673,26 @@ def build_holds_report(
             "product_name": pname,
             "product_code": pcode,
             "lot_number": receipt.lot_number,
-            "quantity": h.total_quantity or receipt.quantity,
+            # History: what the action covered when approved (None before the
+            # figure was stamped at approval).
+            "quantity_at_action": h.total_quantity,
+            # Kept for older readers: the historical figure when there is one,
+            # else the LOT's current amount (never one receipt's paperwork).
+            "quantity": (
+                h.total_quantity if h.total_quantity is not None
+                else now.get("quantity", receipt.quantity)
+            ),
+            "unit": now.get("unit") or receipt.unit,
+            "unit_label": now.get("unit_label"),
+            "current_quantity": now.get("quantity"),
+            "current_units": now.get("units"),
+            "current_held_quantity": now.get("held_quantity"),
+            "current_held_units": now.get("held_units"),
             "reason": h.reason,
             "submitted_by": user_name(db, h.submitted_by),
             "approved_by": user_name(db, h.approved_by),
-            "hold_location": receipt.hold_location,
-            "current_hold_status": receipt.hold,
+            "hold_location": now.get("location_label") or receipt.hold_location,
+            "current_hold_status": bool(now.get("is_held")) if now else bool(receipt.hold),
         })
 
     return {
@@ -1902,8 +1998,12 @@ def build_vendor_receipts_report(
             "status": r.status,
         })
 
+    # Rejected deliveries stay listed (with their status) but add nothing to
+    # what a vendor delivered: their quantity never entered stock (B3).
     vendor_summary: dict = {}
     for r in rows:
+        if r["status"] in NON_STOCK_RECEIPT_STATUSES:
+            continue
         v = r["vendor_name"]
         if v not in vendor_summary:
             vendor_summary[v] = {"receipts": 0, "quantity": 0}

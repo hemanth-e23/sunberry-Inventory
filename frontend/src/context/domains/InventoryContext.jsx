@@ -50,6 +50,13 @@ const mapTransfer = (t) => ({
   quantity: t.quantity,
   reason: t.reason,
   orderNumber: t.order_number,
+  // Why RM / packaging was shipped out (G4) — code + label from the server.
+  shipOutReason: t.ship_out_reason || null,
+  shipOutReasonLabel: t.ship_out_reason_label || null,
+  // Whole containers, priced per source rack (B8); null when not a whole count.
+  containerUnits: t.container_units ?? null,
+  containerUnit: t.container_unit || null,
+  sourceUnits: t.source_units || [],
   status: t.status,
   submittedAt: t.submitted_at,
   submittedBy: t.requested_by,
@@ -66,6 +73,27 @@ const mapTransfer = (t) => ({
   voidedAt: t.voided_at,
   voidedBy: t.voided_by,
   voidedReason: t.voided_reason,
+  editHistory: [],
+});
+
+// One mapping for the initial load, submits and refreshes.
+const mapHold = (hold) => ({
+  id: hold.id,
+  receiptId: hold.receipt_id,
+  action: hold.action,
+  reason: hold.reason,
+  status: hold.status,
+  submittedAt: hold.submitted_at,
+  submittedBy: hold.submitted_by,
+  approvedBy: hold.approved_by || null,
+  approvedAt: hold.approved_at || null,
+  totalQuantity: hold.total_quantity,
+  // What the action covered when approved (history) vs. the LOT now.
+  quantityAtAction: hold.quantity_at_action ?? null,
+  lotStatus: hold.lot_status || null,
+  holdItems: hold.hold_items || [],
+  palletLicenceIds: hold.pallet_licence_ids || [],
+  palletLicenceDetails: hold.pallet_licence_details || [],
   editHistory: [],
 });
 
@@ -92,6 +120,14 @@ export const InventoryProvider = ({ children }) => {
     }
   }, []);
   const [inventoryHoldActions, setInventoryHoldActions] = useState([]);
+  const refreshHoldActions = useCallback(async () => {
+    try {
+      const response = await apiClient.get('/inventory/hold-actions');
+      setInventoryHoldActions((response.data || []).map(mapHold));
+    } catch (error) {
+      console.error('Error refreshing hold actions:', error);
+    }
+  }, []);
   const [inventoryAdjustments, setInventoryAdjustments] = useState([]);
   const [cycleCounts, setCycleCounts] = useState([]);
   const [forkliftRequests, setForkliftRequests] = useState([]);
@@ -110,23 +146,7 @@ export const InventoryProvider = ({ children }) => {
       await Promise.allSettled([
         apiClient.get('/inventory/hold-actions').then((holdsResponse) => {
           if (cancelled) return;
-          const holds = holdsResponse.data.map((hold) => ({
-            id: hold.id,
-            receiptId: hold.receipt_id,
-            action: hold.action,
-            reason: hold.reason,
-            status: hold.status,
-            submittedAt: hold.submitted_at,
-            submittedBy: hold.submitted_by,
-            approvedBy: hold.approved_by,
-            approvedAt: hold.approved_at,
-            totalQuantity: hold.total_quantity,
-            holdItems: hold.hold_items || [],
-            palletLicenceIds: hold.pallet_licence_ids || [],
-            palletLicenceDetails: hold.pallet_licence_details || [],
-            editHistory: [],
-          }));
-          setInventoryHoldActions(holds);
+          setInventoryHoldActions(holdsResponse.data.map(mapHold));
         }).catch((error) => console.error('Error fetching hold actions:', error)),
 
         apiClient.get('/inventory/transfers').then((transfersResponse) => {
@@ -250,6 +270,7 @@ export const InventoryProvider = ({ children }) => {
         reason: transfer.reason || '',
         transfer_type: transfer.transferType || 'warehouse-transfer',
         order_number: transfer.orderNumber || null,
+        ship_out_reason: transfer.transferType === 'shipped-out' ? (transfer.shipOutReason || null) : null,
         source_breakdown: transfer.sourceBreakdown || null,
         destination_breakdown: transfer.destinationBreakdown || null,
         ...(transfer.palletLicenceIds?.length ? { pallet_licence_ids: transfer.palletLicenceIds } : {}),
@@ -268,6 +289,11 @@ export const InventoryProvider = ({ children }) => {
         reason: response.data.reason,
         transferType: response.data.transfer_type,
         orderNumber: response.data.order_number,
+        shipOutReason: response.data.ship_out_reason || null,
+        shipOutReasonLabel: response.data.ship_out_reason_label || null,
+        containerUnits: response.data.container_units ?? null,
+        containerUnit: response.data.container_unit || null,
+        sourceUnits: response.data.source_units || [],
         sourceBreakdown: response.data.source_breakdown || [],
         destinationBreakdown: response.data.destination_breakdown || [],
         palletLicenceIds: response.data.pallet_licence_ids || [],
@@ -498,24 +524,12 @@ export const InventoryProvider = ({ children }) => {
 
       const response = await apiClient.post('/inventory/hold-actions', payload);
 
-      const newAction = {
-        id: response.data.id,
-        receiptId: response.data.receipt_id,
-        action: response.data.action,
-        reason: response.data.reason,
-        status: response.data.status || 'pending',
-        submittedAt: response.data.submitted_at,
-        submittedBy: response.data.submitted_by,
-        approvedBy: response.data.approved_by || null,
-        approvedAt: response.data.approved_at || null,
-        totalQuantity: response.data.total_quantity,
-        holdItems: response.data.hold_items || [],
-        palletLicenceIds: response.data.pallet_licence_ids || [],
-        palletLicenceDetails: response.data.pallet_licence_details || [],
-        editHistory: [],
-      };
+      const newAction = mapHold({ ...response.data, status: response.data.status || 'pending' });
 
-      setInventoryHoldActions((prev) => [...prev, newAction]);
+      // Newest first, like the server's list — and then re-read it so the new
+      // action carries the lot's current racks and held amount (lot_status).
+      setInventoryHoldActions((prev) => [newAction, ...prev]);
+      refreshHoldActions();
       return { success: true, action: newAction };
     } catch (error) {
       console.error('Error submitting hold action:', error);
@@ -585,7 +599,14 @@ export const InventoryProvider = ({ children }) => {
             return { ...receipt, hold: targetHold.action === 'hold' };
           }),
         );
+        // A lot hold covers every receipt of the lot; re-read them so the
+        // sibling deliveries' hold state is current too.
+        try {
+          const receiptsResponse = await apiClient.get('/receipts/', { params: { limit: 10000 } });
+          setReceipts(receiptsResponse.data.map((rec) => mapReceipt(rec, products, categories)));
+        } catch (_) { /* the optimistic flag above stands */ }
       }
+      refreshHoldActions();
       return { success: true };
     } catch (error) {
       console.error('Error approving hold action:', error);
@@ -610,6 +631,7 @@ export const InventoryProvider = ({ children }) => {
             : hold,
         ),
       );
+      refreshHoldActions();
       return { success: true };
     } catch (error) {
       console.error('Error rejecting hold action:', error);
@@ -1121,6 +1143,7 @@ export const InventoryProvider = ({ children }) => {
   const value = {
     inventoryTransfers,
     refreshTransfers,
+    refreshHoldActions,
     inventoryHoldActions,
     inventoryAdjustments,
     cycleCounts,

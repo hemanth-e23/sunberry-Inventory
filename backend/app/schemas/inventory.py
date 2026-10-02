@@ -16,6 +16,8 @@ class InventoryTransferBase(BaseSchema):
     reason: Optional[str] = Field(None, max_length=1000)
     transfer_type: str = "warehouse-transfer"
     order_number: Optional[str] = Field(None, max_length=100)
+    # return_to_vendor | sale | sample | other — required for RM shipped-out.
+    ship_out_reason: Optional[str] = Field(None, max_length=30)
     source_breakdown: Optional[List[dict]] = None
     destination_breakdown: Optional[List[dict]] = None
     pallet_licence_ids: Optional[List[str]] = None
@@ -42,6 +44,11 @@ class InventoryTransfer(InventoryTransferBase):
     submitted_at: datetime
     created_at: datetime
     pallet_licence_details: Optional[List[PalletLicenceTransferRef]] = None
+    ship_out_reason_label: Optional[str] = None
+    # Whole containers per source rack for an open RM transfer (lot_status.transfer_units).
+    container_units: Optional[int] = None
+    container_unit: Optional[str] = None
+    source_units: Optional[List[dict]] = None
 
 
 class ShipOutPalletPick(BaseSchema):

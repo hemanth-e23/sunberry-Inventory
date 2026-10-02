@@ -4,6 +4,7 @@ import { useAppData } from "../../context/AppDataContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { formatTimeAgo, getDaysAgo } from "../../utils/dateUtils";
+import { lotTotalText, lotHeldText, lotLocationText } from "../../utils/lotStatus";
 
 const getPriorityLevel = (days) => {
   if (days === 0) return { level: 'low', label: 'New', color: '#10b981' };
@@ -108,22 +109,35 @@ const HoldsTab = ({ pendingHolds, receiptLookup, productLookup, categoryLookup, 
                     <span style={{ color: '#6b7280' }}>Lot Number</span>
                     <div style={{ fontWeight: 600, marginTop: '2px' }}>{receipt?.lotNo || '—'}</div>
                   </div>
+                  {/* The LOT now (every delivery, every rack) — not the named
+                      receipt's paperwork or its last-transfer location, which
+                      read "5,688 lbs" and "QA Quarantine" for a 13-drum lot on
+                      the Drum Room racks (2026-10-01, B4/B5). */}
                   <div>
                     <span style={{ color: '#6b7280' }}>Lot Quantity</span>
-                    <div style={{ fontWeight: 600, marginTop: '2px' }}>{(receipt?.quantity ?? 0).toLocaleString()} {receipt?.quantityUnits || 'cases'}</div>
+                    <div style={{ fontWeight: 600, marginTop: '2px' }}>
+                      {lotTotalText(hold.lotStatus)
+                        || `${(receipt?.quantity ?? 0).toLocaleString()} ${receipt?.quantityUnits || 'cases'}`}
+                    </div>
                   </div>
-                  {receipt?.heldQuantity > 0 && (
+                  {lotHeldText(hold.lotStatus) && (
                     <div>
                       <span style={{ color: '#6b7280' }}>Currently on Hold</span>
-                      <div style={{ fontWeight: 600, color: '#d97706', marginTop: '2px' }}>{receipt.heldQuantity} {receipt?.quantityUnits || 'units'}</div>
+                      <div style={{ fontWeight: 600, color: '#d97706', marginTop: '2px' }}>{lotHeldText(hold.lotStatus)}</div>
                     </div>
                   )}
-                  {(receipt?.locationId || receipt?.location) && (
-                    <div>
-                      <span style={{ color: '#6b7280' }}>Location</span>
-                      <div style={{ fontWeight: 600, marginTop: '2px' }}>{locationLookupMap[receipt.subLocationId || receipt.subLocation || receipt.locationId || receipt.location] || '—'}</div>
-                    </div>
-                  )}
+                  {(() => {
+                    const where = lotLocationText(hold.lotStatus)
+                      || (!hold.lotStatus && (receipt?.locationId || receipt?.location)
+                        ? locationLookupMap[receipt.subLocationId || receipt.subLocation || receipt.locationId || receipt.location]
+                        : null);
+                    return where ? (
+                      <div>
+                        <span style={{ color: '#6b7280' }}>Location</span>
+                        <div style={{ fontWeight: 600, marginTop: '2px' }}>{where}</div>
+                      </div>
+                    ) : null;
+                  })()}
                 </div>
               )}
             </div>

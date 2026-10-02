@@ -635,6 +635,16 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
+        {/* Reports for plant supervisors (2026-10-01, G5). The server scopes
+            every report to the supervisor's own plant. */}
+        <Route path="/supervisor/reports" element={
+          <ProtectedRoute requiredRole="supervisor">
+            <Layout>
+              {page(<ReportsPage />)}
+            </Layout>
+          </ProtectedRoute>
+        } />
+
         <Route path="/supervisor/cycle-counting" element={
           <ProtectedRoute requiredRole="supervisor">
             <Layout>

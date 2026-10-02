@@ -334,6 +334,15 @@ def approve_hold_action(db: Session, hold_action: InventoryHoldAction, current_u
         # stage every drum, silently.
         _apply_lot_hold(db, receipt, hold_action, current_user)
 
+        # Record what the action covered AT APPROVAL — the lot-wide amount
+        # (every delivery, every rack), not the named receipt's paperwork.
+        # The Holds report shows it as history next to the current figure.
+        if hold_action.total_quantity is None:
+            from app.services.lot_status import lot_status
+            status_now = lot_status(db, receipt)
+            if status_now is not None:
+                hold_action.total_quantity = status_now["quantity"]
+
     hold_action.status = HoldStatus.APPROVED
     hold_action.approved_by = str(current_user.id)
     hold_action.approved_at = datetime.now(timezone.utc)

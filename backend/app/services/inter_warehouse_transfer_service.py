@@ -19,6 +19,52 @@ from app.services.row_allocation import (
 from app.utils import category_rules
 
 
+LOT_TRACKED_IWT_REFUSAL = (
+    "This material is tracked by lot and counted in whole units, so it "
+    "cannot be moved with a quantity transfer. Plant-to-plant movement "
+    "for counted stock is not built yet — record it with corporate."
+)
+
+# Receipts the confirm step's auto-find may pick (link_source_receipt).
+_IWT_SOURCE_STATUSES = (ReceiptStatus.APPROVED, ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED)
+
+
+def initiation_blocked_by_lot_tracking(
+    db: Session,
+    *,
+    from_warehouse_id: str,
+    product_id: str,
+    lot_number: str = None,
+    quantity: float = 0,
+    source_receipt_id: str = None,
+) -> bool:
+    """Would this transfer be refused at Confirm Shipment because its source
+    is lot-tracked? Answered at INITIATION (G2 interim, 2026-10-01).
+
+    True when the named source receipt is lot-tracked; otherwise when every
+    candidate source (product, sender, lot if typed) is lot-tracked, or the
+    one the confirm step's FIFO auto-find would pick is."""
+    if source_receipt_id:
+        receipt = db.query(Receipt).filter(Receipt.id == source_receipt_id).first()
+        return bool(receipt is not None and receipt.material_lot_id)
+    q = db.query(Receipt).filter(
+        Receipt.product_id == product_id,
+        Receipt.warehouse_id == from_warehouse_id,
+        Receipt.status.in_(_IWT_SOURCE_STATUSES),
+        Receipt.quantity > 0,
+        Receipt.is_deleted == False,  # noqa: E712
+    )
+    if lot_number:
+        q = q.filter(Receipt.lot_number == lot_number)
+    candidates = q.order_by(Receipt.receipt_date.asc()).all()
+    if not candidates:
+        return False
+    if all(r.material_lot_id for r in candidates):
+        return True
+    fifo = next((r for r in candidates if float(r.quantity or 0) >= float(quantity or 0)), None)
+    return bool(fifo is not None and fifo.material_lot_id)
+
+
 def _is_finished_goods(db: Session, receipt: Receipt) -> bool:
     # Delegates to the shared predicate (app/utils/category_rules.py). This was
     # duplicated verbatim here and in transfer_service.py:18; the local name is
@@ -90,14 +136,7 @@ def link_source_receipt(
     # corporate confirmation, for a partner site that does not use this app).
     # Until then a lot-model transfer is blocked rather than half-done.
     if receipt.material_lot_id:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This material is tracked by lot and counted in whole units, so it "
-                "cannot be moved with a quantity transfer. Plant-to-plant movement "
-                "for counted stock is not built yet — record it with corporate."
-            ),
-        )
+        raise HTTPException(status_code=400, detail=LOT_TRACKED_IWT_REFUSAL)
 
     transfer.source_receipt_id = receipt.id
     return receipt

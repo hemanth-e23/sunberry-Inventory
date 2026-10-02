@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.constants import REPORT_ROLES
 from app.utils.auth import get_current_active_user, warehouse_filter
 from app.services.report_builders import (
     build_point_in_time_snapshot,
@@ -21,7 +22,18 @@ from app.services.report_builders import (
     report_timezone,
 )
 
-router = APIRouter()
+def require_report_access(current_user=Depends(get_current_active_user)):
+    """Reports are for supervisors and up (2026-10-01, G5). A plant
+    supervisor or admin sees their OWN plant only — every builder is scoped by
+    `warehouse_filter`, which pins a plant user to their warehouse; corporate
+    roles keep their cross-warehouse view. Warehouse and forklift users have
+    no Reports page and get no report data."""
+    if current_user.role not in REPORT_ROLES:
+        raise HTTPException(status_code=403, detail="Reports are available to supervisors and above.")
+    return current_user
+
+
+router = APIRouter(dependencies=[Depends(require_report_access)])
 
 
 def _report_tz(db: Session, user) -> str:
@@ -85,6 +97,7 @@ def activity_ledger(
         return build_activity_ledger(
             db,
             tz=_report_tz(db, current_user),
+            warehouse_id=warehouse_filter(current_user),
             start_date=start_date,
             end_date=end_date,
             product_id=product_id,
@@ -158,6 +171,7 @@ def movement_ledger(
     return build_movement_ledger(
         db,
         tz=_report_tz(db, current_user),
+        warehouse_id=warehouse_filter(current_user),
         product_id=product_id,
         start_date=start_date,
         end_date=end_date,

@@ -218,6 +218,14 @@ const LotTraceReport = () => {
                         </div>
                       )}
 
+                      {/* Why it left (Return to vendor / Sale / Sample / Other) */}
+                      {event.ship_out_reason && (
+                        <div className="timeline-detail-row">
+                          <span className="detail-label">Reason</span>
+                          <span className="detail-value">{event.ship_out_reason}</span>
+                        </div>
+                      )}
+
                       {/* Row 4: PO / BOL (received) */}
                       {(event.purchase_order || event.bol) && (
                         <div className="timeline-detail-row">

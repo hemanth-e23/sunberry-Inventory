@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback, useRef } from 'react';
+import React, { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import { useAppData } from '../../context/AppDataContext';
 import { useAuth } from '../../context/AuthContext';
 import { useConfirm } from '../../context/ConfirmContext';
@@ -11,6 +11,7 @@ import { formatUserName } from '../../utils/userDisplay';
 import { sortHoldsNewestFirst } from '../../utils/holdHistory';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, HOLD_STATUS, RECEIPT_STATUS } from '../../constants';
+import { lotTotalText, lotHeldText, lotLocationText } from '../../utils/lotStatus';
 
 const HoldsTab = () => {
   const { addToast } = useToast();
@@ -114,6 +115,37 @@ const HoldsTab = () => {
     [rmReceipts, rmReceiptId]
   );
 
+  // The LOT's current racks, totals and held amount, lot-wide, from the
+  // server. The receipt's own quantity / heldQuantity is one delivery's
+  // paperwork: B-0910 read "5,688 lbs" on hold with 13 drums (6,162 lb) held
+  // after a drum arrived while it was held (2026-10-01, B4).
+  const [rmLotStatus, setRmLotStatus] = useState(null);
+  const lotStatusSeq = useRef(0);
+  useEffect(() => {
+    const seq = ++lotStatusSeq.current;
+    if (!rmReceiptId) { setRmLotStatus(null); return; }
+    apiClient.get(`/inventory/hold-actions/lot-status/${rmReceiptId}`)
+      .then((res) => { if (seq === lotStatusSeq.current) setRmLotStatus(res.data || null); })
+      .catch(() => { if (seq === lotStatusSeq.current) setRmLotStatus(null); });
+  }, [rmReceiptId, inventoryHoldActions]);
+
+  // The server's lot-wide answer wins: a delivery that arrived while the lot
+  // was held carries no heldQuantity of its own, yet the lot is held.
+  const selectedIsHeld = rmLotStatus && rmLotStatus.receipt_id === rmReceiptId
+    ? Boolean(rmLotStatus.is_held)
+    : isReceiptHeld(selectedRmReceipt);
+
+  // Lots on hold NOW, one card per LOT (not per receipt — and not every
+  // receipt with the transient review flag a pending transfer sets).
+  const [heldLots, setHeldLots] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.get('/inventory/hold-actions/held-lots')
+      .then((res) => { if (!cancelled) setHeldLots(Array.isArray(res.data) ? res.data : []); })
+      .catch(() => { if (!cancelled) setHeldLots([]); });
+    return () => { cancelled = true; };
+  }, [inventoryHoldActions, selectedWarehouse]);
+
   /**
    * The racks this lot actually sits on, with how many containers are on each.
    *
@@ -125,6 +157,16 @@ const HoldsTab = () => {
    * act on.
    */
   const rmRacks = useMemo(() => {
+    if (rmLotStatus?.source === 'racks' && Array.isArray(rmLotStatus.racks)) {
+      return rmLotStatus.racks
+        .filter(r => r.row_id && Number(r.units) > 0)
+        .map(r => ({
+          rowId: r.row_id,
+          rowName: r.room_name ? `${r.row_name} (${r.room_name})` : (r.row_name || r.row_id),
+          units: Number(r.units),
+          unitLabel: rmLotStatus.unit_label || 'unit',
+        }));
+    }
     const allocs = selectedRmReceipt?.rawMaterialRowAllocations;
     if (!Array.isArray(allocs)) return [];
     return allocs
@@ -135,7 +177,7 @@ const HoldsTab = () => {
         units: Number(a.units),
         unitLabel: a.unitLabel || 'unit',
       }));
-  }, [selectedRmReceipt]);
+  }, [selectedRmReceipt, rmLotStatus]);
 
 
   const formatReceiptLabel = (receipt) => {
@@ -250,7 +292,7 @@ const HoldsTab = () => {
       if (!ok) return;
     }
 
-    const action = isReceiptHeld(selectedRmReceipt) ? 'release' : 'hold';
+    const action = selectedIsHeld ? 'release' : 'hold';
 
     // Lot-hold only: no rack items ever — the hold is the whole lot.
     setRmSubmitting(true);
@@ -416,13 +458,24 @@ const HoldsTab = () => {
             {selectedRmReceipt && (
               <div style={{ background: selectedRmReceipt.hold ? '#fffbeb' : '#f0fdf4', border: `1px solid ${selectedRmReceipt.hold ? '#fde68a' : '#bbf7d0'}`, borderRadius: '8px', padding: '12px 16px', marginTop: '8px' }}>
                 <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '4px' }}>
-                  {isReceiptHeld(selectedRmReceipt)
+                  {selectedIsHeld
                     ? '🔒 On hold — submit to release'
                     : '✅ Lot is available — submit to place on hold'}
                 </div>
                 <div style={{ fontSize: '13px', color: '#6b7280' }}>
-                  Lot {selectedRmReceipt.lotNo || '—'} · {(selectedRmReceipt.quantity || 0).toLocaleString()} {selectedRmReceipt.quantityUnits || 'cases'}
+                  Lot {selectedRmReceipt.lotNo || '—'} · {lotTotalText(rmLotStatus)
+                    || `${(selectedRmReceipt.quantity || 0).toLocaleString()} ${selectedRmReceipt.quantityUnits || 'cases'}`}
                 </div>
+                {lotHeldText(rmLotStatus) && (
+                  <div style={{ fontSize: '13px', color: '#92400e', marginTop: '2px' }}>
+                    Held now: {lotHeldText(rmLotStatus)}
+                  </div>
+                )}
+                {lotLocationText(rmLotStatus) && (
+                  <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '2px' }}>
+                    Where: {lotLocationText(rmLotStatus)}
+                  </div>
+                )}
               </div>
             )}
 
@@ -430,7 +483,7 @@ const HoldsTab = () => {
                 lot, on every rack. The racks are listed as context so QA can
                 see where the material sits — and route a few suspect drums to
                 the QUARANTINE rack by transfer instead of freezing the lot. */}
-            {selectedRmReceipt && !isReceiptHeld(selectedRmReceipt) && (
+            {selectedRmReceipt && !selectedIsHeld && (
               <div style={{ marginTop: '12px' }}>
                 <div style={{ fontSize: '12px', color: '#6b7280' }}>
                   A hold covers every container of this lot, on every rack —
@@ -473,7 +526,7 @@ const HoldsTab = () => {
               <button type="submit" className="primary-button" disabled={rmSubmitting || !rmReceiptId}>
                 {rmSubmitting
                   ? 'Submitting…'
-                  : isReceiptHeld(selectedRmReceipt) ? 'Submit Release Request' : 'Submit Hold Request'}
+                  : selectedIsHeld ? 'Submit Release Request' : 'Submit Hold Request'}
               </button>
             </div>
           </form>
@@ -516,22 +569,26 @@ const HoldsTab = () => {
       <div className="on-hold-grid">
         <h3>Currently On Hold</h3>
         <div className="card-grid">
-          {receipts.filter(r => r.hold).map(receipt => {
+          {heldLots.map(lot => {
+            const ids = new Set(lot.receipt_ids || [lot.receipt_id]);
             const lastHold = inventoryHoldActions
-              .filter(a => a.receiptId === receipt.id && a.status === HOLD_STATUS.APPROVED && a.action === 'hold')
-              .slice(-1)[0];
+              .filter(a => ids.has(a.receiptId) && a.status === HOLD_STATUS.APPROVED && a.action === 'hold')
+              .sort((a, b) => new Date(b.approvedAt || b.submittedAt || 0) - new Date(a.approvedAt || a.submittedAt || 0))[0];
+            const receipt = receipts.find(r => r.id === lot.receipt_id);
+            const product = productLookup[lot.product_id];
             return (
-              <div key={receipt.id} className="hold-card">
-                <span className="title">{formatReceiptLabel(receipt)}</span>
-                <span className="meta">Since: {lastHold ? formatDateTime(lastHold.approvedAt || lastHold.submittedAt) : 'Pending'}</span>
-                <span className="meta">Placed By: {lastHold ? formatUserName(lastHold.submittedBy, userLookup) : '-'}</span>
-                {receipt.heldQuantity > 0 && (
-                  <span className="meta">Held: {receipt.heldQuantity} {receipt.quantityUnits || 'cases'}</span>
-                )}
+              <div key={lot.material_lot_id || lot.receipt_id} className="hold-card">
+                <span className="title">
+                  {receipt ? formatReceiptLabel(receipt) : `${product?.name || 'Unknown'} · Lot ${lot.lot_number || '-'}`}
+                </span>
+                <span className="meta">Since: {lastHold ? formatDateTime(lastHold.approvedAt || lastHold.submittedAt) : (lot.held_at ? formatDateTime(lot.held_at) : '-')}</span>
+                <span className="meta">Placed By: {lastHold ? formatUserName(lastHold.submittedBy, userLookup) : (lot.held_by ? formatUserName(lot.held_by, userLookup) : '-')}</span>
+                <span className="meta">Held: {lotHeldText(lot)}</span>
+                {lotLocationText(lot) && <span className="meta">Where: {lotLocationText(lot)}</span>}
               </div>
             );
           })}
-          {!receipts.some(r => r.hold) && (
+          {heldLots.length === 0 && (
             <div className="empty">No inventory currently on hold.</div>
           )}
         </div>

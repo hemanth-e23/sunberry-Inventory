@@ -9,7 +9,7 @@ import { formatDateTime } from '../../utils/dateUtils';
 import { buildEntriesForProduct, rowCapacityInfo, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary } from '../../utils/rowSources';
 import RmEntryQtyInput from './RmEntryQtyInput';
 import '../InventoryActionsPage.css';
-import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
+import { CATEGORY_TYPES, RECEIPT_STATUS, SHIP_OUT_REASON, SHIP_OUT_REASON_LABELS } from '../../constants';
 
 const TransfersTab = () => {
   const { addToast } = useToast();
@@ -52,6 +52,7 @@ const TransfersTab = () => {
     reason: '',
     transferType: 'warehouse-transfer',
     orderNumber: '',
+    shipOutReason: '',
   });
   const [rmEntrySelections, setRmEntrySelections] = useState({});
   // Per-source-row pallets to FREE (keyed by entry.key). Undefined = use the
@@ -302,6 +303,15 @@ const TransfersTab = () => {
       return;
     }
     if (rmForm.transferType === 'shipped-out' && !rmForm.orderNumber.trim()) { setRmError('Order number is required.'); return; }
+    // Why it is leaving (G4): a return to vendor and a sale used to look the same.
+    if (rmForm.transferType === 'shipped-out' && !rmForm.shipOutReason) {
+      setRmError('Choose why this material is leaving.');
+      return;
+    }
+    if (rmForm.transferType === 'shipped-out' && rmForm.shipOutReason === SHIP_OUT_REASON.OTHER && !rmForm.reason.trim()) {
+      setRmError('Say in the notes why the material is leaving.');
+      return;
+    }
 
     // The total to move is DERIVED from the per-lot picks, each converted at
     // its own receipt's weight. The old top-level quantity gate multiplied by
@@ -397,6 +407,7 @@ const TransfersTab = () => {
         reason: rmForm.reason.trim(),
         transferType: rmForm.transferType,
         orderNumber: rmForm.transferType === 'shipped-out' ? rmForm.orderNumber.trim() : null,
+        shipOutReason: rmForm.transferType === 'shipped-out' ? rmForm.shipOutReason : null,
         sourceBreakdown,
         ...(destinationBreakdown ? { destinationBreakdown } : {}),
       });
@@ -408,7 +419,7 @@ const TransfersTab = () => {
 
     if (failures.length === 0) {
       const count = groups.size;
-      setRmForm({ productId: '', quantity: '', toLocation: '', toSubLocation: '', toRowId: '', reason: '', transferType: 'warehouse-transfer', orderNumber: '' });
+      setRmForm({ productId: '', quantity: '', toLocation: '', toSubLocation: '', toRowId: '', reason: '', transferType: 'warehouse-transfer', orderNumber: '', shipOutReason: '' });
       setRmEntrySelections({});
       setRmPalletSelections({});
       setRmDestPallets('');
@@ -564,7 +575,7 @@ const TransfersTab = () => {
               <span>Transfer Type</span>
               <select
                 value={rmForm.transferType}
-                onChange={(e) => { setRmForm(prev => ({ ...prev, transferType: e.target.value, orderNumber: '', toLocation: '', toSubLocation: '', toRowId: '' })); setRmDestPallets(''); }}
+                onChange={(e) => { setRmForm(prev => ({ ...prev, transferType: e.target.value, orderNumber: '', shipOutReason: '', toLocation: '', toSubLocation: '', toRowId: '' })); setRmDestPallets(''); }}
               >
                 <option value="warehouse-transfer">Warehouse Transfer</option>
                 <option value="shipped-out">Shipped Out</option>
@@ -580,6 +591,22 @@ const TransfersTab = () => {
                   onChange={(e) => setRmForm(prev => ({ ...prev, orderNumber: e.target.value }))}
                   placeholder="Enter order number"
                 />
+              </label>
+            )}
+
+            {rmForm.transferType === 'shipped-out' && (
+              <label>
+                <span>Reason for shipping out <span className="required">*</span></span>
+                <select
+                  value={rmForm.shipOutReason}
+                  onChange={(e) => setRmForm(prev => ({ ...prev, shipOutReason: e.target.value }))}
+                  required
+                >
+                  <option value="">Select a reason…</option>
+                  {Object.values(SHIP_OUT_REASON).map(code => (
+                    <option key={code} value={code}>{SHIP_OUT_REASON_LABELS[code]}</option>
+                  ))}
+                </select>
               </label>
             )}
 
@@ -782,7 +809,10 @@ const TransfersTab = () => {
             })()}
 
             <label className="full-width">
-              <span>{rmForm.transferType === 'shipped-out' ? 'Shipping Notes' : 'Reason / Notes'}</span>
+              <span>
+                {rmForm.transferType === 'shipped-out' ? 'Shipping Notes' : 'Reason / Notes'}
+                {rmForm.transferType === 'shipped-out' && rmForm.shipOutReason === SHIP_OUT_REASON.OTHER && <span className="required"> *</span>}
+              </span>
               <textarea
                 value={rmForm.reason}
                 onChange={(e) => setRmForm(prev => ({ ...prev, reason: e.target.value }))}
@@ -822,6 +852,7 @@ const TransfersTab = () => {
                       : <span>Qty: {(transfer.quantity || 0).toLocaleString()}</span>
                     }
                     {transfer.orderNumber && <span><strong>Order #:</strong> {transfer.orderNumber}</span>}
+                    {transfer.shipOutReasonLabel && <span><strong>Why:</strong> {transfer.shipOutReasonLabel}</span>}
                     <span>Requested: {formatDateTime(transfer.submittedAt)}</span>
                   </div>
                 </li>

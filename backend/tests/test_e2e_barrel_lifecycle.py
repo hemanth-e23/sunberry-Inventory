@@ -218,7 +218,10 @@ class Story:
             assert r.status_code == 200, f"POST {url} -> {r.status_code}: {r.text}"
         return r
 
-    def get(self, url, headers=WH_H, params=None):
+    def get(self, url, headers=None, params=None):
+        if headers is None:
+            # Reports are supervisor-and-up since 2026-10-01 (G5).
+            headers = SUP_H if url.startswith("/api/reports") else WH_H
         r = self.c.get(url, headers=headers, params=params)
         assert r.status_code == 200, f"GET {url} -> {r.status_code}: {r.text}"
         return r.json()
@@ -848,7 +851,7 @@ def test_rm_ship_out_that_drains_the_carrier_keeps_the_lot_on_the_forms(
     lbs = 12 * W
     t = s.post("/api/inventory/transfers", WH_H, json={
         "receipt_id": entry["receiptId"], "quantity": lbs, "reason": "sold",
-        "transfer_type": "shipped-out", "order_number": "SO-E2E-1",
+        "transfer_type": "shipped-out", "order_number": "SO-E2E-1", "ship_out_reason": "sale",
         "source_breakdown": [{"id": entry["sourceId"], "quantity": lbs}],
     }).json()
     s.post(f"/api/inventory/transfers/{t['id']}/approve", SUP_H)

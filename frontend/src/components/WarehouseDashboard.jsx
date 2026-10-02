@@ -82,6 +82,7 @@ const WarehouseDashboard = () => {
     occupiedPallets: rmOccupiedPallets,
     availablePallets: rmAvailablePallets,
     heldPallets: rmHeldPallets,
+    heldLots: rmHeldLots,
     utilization: rmUtilization,
     floorStagingPallets: rmFloorStagingPallets,
   } = rawMaterialsCapacitySummary || {};
@@ -170,7 +171,10 @@ const WarehouseDashboard = () => {
             <ul className="metric-breakdown">
               <li><strong>{rmOccupiedPallets != null ? Number(rmOccupiedPallets).toFixed(2) : 0}</strong> occupied</li>
               <li><strong>{rmAvailablePallets != null ? Number(rmAvailablePallets).toFixed(2) : 0}</strong> available</li>
-              <li><strong>{rmHeldPallets ?? 0}</strong> on hold</li>
+              <li>
+                <strong>{rmHeldPallets ?? 0}</strong> on hold
+                {rmHeldLots > 0 && ` (${rmHeldLots} lot${rmHeldLots === 1 ? '' : 's'})`}
+              </li>
               <li><strong>{rmTotalPalletCapacity ?? 0}</strong> total</li>
             </ul>
           </div>

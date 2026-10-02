@@ -345,8 +345,12 @@ function Sidebar({ isOpen, isCollapsed, onToggleCollapse, onClose }) {
 
     // --- Reports ---
     const reportItems = [];
-    if (isAdmin) {
+    // Supervisors get Reports too, scoped server-side to their own plant
+    // (2026-10-01, G5). Warehouse users still have none.
+    if (isAdmin || role === 'supervisor') {
       reportItems.push({ label: 'Reports', icon: BarChart3, to: `${prefix}/reports` });
+    }
+    if (isAdmin) {
       reportItems.push({ label: 'BOL Report', icon: FileSpreadsheet, to: `${prefix}/bol` });
     }
     if (reportItems.length > 0) {

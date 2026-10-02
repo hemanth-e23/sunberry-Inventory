@@ -168,7 +168,7 @@ def test_void_releases_receipt_hold(
         json={
             "receipt_id": approved_receipt.id,
             "quantity": 50,
-            "transfer_type": "shipped-out",
+            "transfer_type": "shipped-out", "ship_out_reason": "sale",
             "order_number": "SO-VOID-1",
         },
         headers=auth_headers,

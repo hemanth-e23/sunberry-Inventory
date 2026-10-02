@@ -18,6 +18,8 @@ class InventoryTransfer(Base):
     reason = Column(Text)
     transfer_type = Column(String(50), default="warehouse-transfer")
     order_number = Column(String(100), nullable=True)
+    # Why RM / packaging was shipped out (constants.SHIP_OUT_REASONS); notes stay in `reason`.
+    ship_out_reason = Column(String(30), nullable=True)
     source_breakdown = Column(JSON, nullable=True)
     destination_breakdown = Column(JSON, nullable=True)
     pallet_licence_ids = Column(JSON, nullable=True)

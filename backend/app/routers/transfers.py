@@ -30,10 +30,12 @@ from app.utils.auth import get_current_active_user, warehouse_filter, resolve_wa
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus, ShipOutScanReason, ShipOutLifecycle
 from app.services import transfer_service
 from app.services import lot_placement_service as lps
+from app.services.lot_status import transfer_units
 from app.constants import (
     ROLE_FORKLIFT, ROLE_WAREHOUSE, APPROVAL_ROLES,
     TRANSFER_TYPE_SHIPPED_OUT,
     SWAP_SOURCE_FORKLIFT, SWAP_SOURCE_WAREHOUSE_EDIT,
+    SHIP_OUT_REASONS, SHIP_OUT_REASON_OTHER,
 )
 
 router = APIRouter()
@@ -53,6 +55,8 @@ def _transfer_to_response(transfer, db: Session) -> dict:
         "reason": transfer.reason,
         "transfer_type": transfer.transfer_type or "warehouse-transfer",
         "order_number": transfer.order_number,
+        "ship_out_reason": getattr(transfer, "ship_out_reason", None),
+        "ship_out_reason_label": SHIP_OUT_REASONS.get(getattr(transfer, "ship_out_reason", None) or ""),
         "source_breakdown": transfer.source_breakdown,
         "destination_breakdown": transfer.destination_breakdown,
         "pallet_licence_ids": transfer.pallet_licence_ids,
@@ -69,6 +73,11 @@ def _transfer_to_response(transfer, db: Session) -> dict:
         "voided_by": getattr(transfer, "voided_by", None),
         "voided_reason": getattr(transfer, "voided_reason", None),
     }
+    # Container count for a raw-material / packaging transfer, priced at each
+    # SOURCE RACK's own weight per unit (B8): a mixed-weight lot read
+    # "1,506 lbs" with no drum count because the card divided by one receipt's
+    # weight (3 × 502 is not a whole number of 474s).
+    data.update(transfer_units(db, transfer))
     pl_ids = transfer.pallet_licence_ids or []
     if pl_ids:
         licences = db.query(PalletLicence).filter(PalletLicence.id.in_(pl_ids)).all()
@@ -346,7 +355,34 @@ def create_transfer(
             detail="Order number is required for shipped-out transfers"
         )
 
+    # Why the material is leaving (G4, 2026-10-01): a return to vendor and a
+    # sale looked identical — free-text notes only. Required for RM /
+    # packaging shipped out; "Other" must say what in the notes.
+    ship_out_reason = (transfer_data.ship_out_reason or "").strip() or None
+    if transfer_data.transfer_type == "shipped-out":
+        if ship_out_reason is None and not transfer_service._is_finished_goods(db, receipt):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Choose why this material is leaving: Return to vendor, Sale, Sample or Other.",
+            )
+        if ship_out_reason is not None and ship_out_reason not in SHIP_OUT_REASONS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Unknown ship-out reason '{ship_out_reason}'. Use one of: "
+                    + ", ".join(SHIP_OUT_REASONS) + "."
+                ),
+            )
+        if ship_out_reason == SHIP_OUT_REASON_OTHER and not (transfer_data.reason or "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Say in the notes why the material is leaving when the reason is Other.",
+            )
+    else:
+        ship_out_reason = None
+
     transfer_dict = transfer_data.dict()
+    transfer_dict["ship_out_reason"] = ship_out_reason
     transfer_id = f"transfer-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
 
     # Inherit the receipt's unit unless the caller stated one. Both the schema

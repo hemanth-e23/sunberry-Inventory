@@ -14,13 +14,33 @@ from app.schemas import (
 from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
 from app.enums import HoldStatus
 from app.services import hold_service
+from app.services import lot_status as lot_status_service
 from app.constants import ROLE_WAREHOUSE
 
 router = APIRouter()
 
 
-def _hold_action_to_response(hold: InventoryHoldAction, db: Session) -> dict:
-    """Serialize a hold action, enriching pallet holds with licence + location details."""
+def _lot_status_for(db: Session, receipt_id, cache: dict = None):
+    """The LOT's current racks and held amount for a lot hold (B4/B5): the
+    receipt's own held_quantity and location are a snapshot of one delivery
+    and of the last transfer, not of the lot."""
+    if not receipt_id:
+        return None
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if receipt is None:
+        return None
+    key = receipt.material_lot_id or receipt.id
+    if cache is not None and key in cache:
+        return cache[key]
+    status_ = lot_status_service.lot_status(db, receipt)
+    if cache is not None:
+        cache[key] = status_
+    return status_
+
+
+def _hold_action_to_response(hold: InventoryHoldAction, db: Session, lot_cache: dict = None) -> dict:
+    """Serialize a hold action, enriching pallet holds with licence + location details
+    and lot holds with the lot's CURRENT racks and held amount (`lot_status`)."""
     data = {
         "id": hold.id,
         "receipt_id": hold.receipt_id,
@@ -36,7 +56,13 @@ def _hold_action_to_response(hold: InventoryHoldAction, db: Session) -> dict:
         "submitted_at": hold.submitted_at,
         "created_at": hold.created_at,
         "pallet_licence_details": [],
+        # What the action covered when it was approved (stamped at approval;
+        # None for actions approved before 2026-10-01).
+        "quantity_at_action": hold.total_quantity,
+        "lot_status": None,
     }
+    if hold.receipt_id and not hold.pallet_licence_ids:
+        data["lot_status"] = _lot_status_for(db, hold.receipt_id, lot_cache)
     pl_ids = hold.pallet_licence_ids or []
     if pl_ids:
         pallets = db.query(PalletLicence).filter(PalletLicence.id.in_(pl_ids)).all()
@@ -93,7 +119,34 @@ def get_hold_actions(
     # Order newest-first before limiting so the 100-row cap returns the most
     # recent holds, not an arbitrary subset.
     hold_actions = query.order_by(InventoryHoldAction.created_at.desc()).offset(skip).limit(limit).all()
-    return [_hold_action_to_response(h, db) for h in hold_actions]
+    lot_cache: dict = {}
+    return [_hold_action_to_response(h, db, lot_cache) for h in hold_actions]
+
+
+@router.get("/hold-actions/held-lots")
+def get_held_lots(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """Raw-material / packaging lots on QA hold NOW — one entry per lot, with
+    its current racks and the lot-wide held amount (drums and weight)."""
+    return lot_status_service.held_lots(db, warehouse_filter(current_user))
+
+
+@router.get("/hold-actions/lot-status/{receipt_id}")
+def get_lot_status(
+    receipt_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
+    """The lot's current racks, totals and hold, lot-wide, for the hold form."""
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    wh_id = warehouse_filter(current_user)
+    if wh_id and receipt.warehouse_id and receipt.warehouse_id != wh_id:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    return lot_status_service.lot_status(db, receipt)
 
 @router.post("/hold-actions", response_model=InventoryHoldActionSchema)
 def create_hold_action(

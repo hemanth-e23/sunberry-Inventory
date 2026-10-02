@@ -108,6 +108,22 @@ export const SHIP_OUT_SCAN_REASON = {
   WRONG_LOT_NEEDS_SWAP: 'wrong_lot_needs_swap',
 };
 
+// Why raw material / packaging left on a Shipped Out transfer (G4). Mirrors
+// backend app/constants.py SHIP_OUT_REASONS; required for RM shipped-out.
+export const SHIP_OUT_REASON = {
+  RETURN_TO_VENDOR: 'return_to_vendor',
+  SALE: 'sale',
+  SAMPLE: 'sample',
+  OTHER: 'other',
+};
+
+export const SHIP_OUT_REASON_LABELS = {
+  [SHIP_OUT_REASON.RETURN_TO_VENDOR]: 'Return to vendor',
+  [SHIP_OUT_REASON.SALE]: 'Sale',
+  [SHIP_OUT_REASON.SAMPLE]: 'Sample',
+  [SHIP_OUT_REASON.OTHER]: 'Other',
+};
+
 export const STAGING_ITEM_STATUS = {
   STAGED: 'staged',
   PENDING: 'pending',

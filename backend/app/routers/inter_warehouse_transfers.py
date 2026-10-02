@@ -203,6 +203,21 @@ def initiate_transfer(
             raise HTTPException(status_code=400, detail="Source receipt product does not match")
         source_receipt_id = receipt.id
 
+    # Lot-tracked (counted) stock cannot move plant-to-plant yet. Refuse at
+    # INITIATION, where corporate is still at the form, instead of letting the
+    # transfer sit until the sender's Confirm Shipment hits the same refusal
+    # (2026-10-01 browser test, G2). Same check, same words as
+    # iwt_service.link_source_receipt, which stays as the backstop.
+    if iwt_service.initiation_blocked_by_lot_tracking(
+        db,
+        from_warehouse_id=data.from_warehouse_id,
+        product_id=data.product_id,
+        lot_number=data.lot_number,
+        quantity=data.quantity,
+        source_receipt_id=source_receipt_id,
+    ):
+        raise HTTPException(status_code=400, detail=iwt_service.LOT_TRACKED_IWT_REFUSAL)
+
     transfer = InterWarehouseTransfer(
         id=f"iwt-{uuid.uuid4().hex[:12]}",
         from_warehouse_id=data.from_warehouse_id,
