@@ -1,7 +1,7 @@
 import copy
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -147,6 +147,94 @@ def describe_qty(receipt: Receipt, qty: float) -> str:
             word += "s"
         text += f" ({qty / per:.4g} {word})"
     return text
+
+
+def _pending_rack_units(db: Session, lot: MaterialLot, receipt_ids: list) -> Dict[str, int]:
+    """Units other in-flight transfers of this lot will take, per source rack."""
+    out: Dict[str, int] = {}
+    pending = db.query(InventoryTransfer).filter(
+        InventoryTransfer.receipt_id.in_(receipt_ids),
+        InventoryTransfer.status.in_((TransferStatus.PENDING, TransferStatus.FORKLIFT_SUBMITTED)),
+    ).all()
+    for t in pending:
+        rows, _unresolved = resolve_breakdown(db, t.source_breakdown)
+        for rid, qty in rows.items():
+            try:
+                n = lps.row_units_for_quantity(db, lot, rid, float(qty or 0), exact=False)
+            except ValidationError:
+                continue
+            out[rid] = out.get(rid, 0) + n
+    return out
+
+
+def check_source_racks(db: Session, receipt: Receipt, source_breakdown) -> None:
+    """Refuse a request that asks a rack for more than it can give.
+
+    Free = sealed units on the rack, minus held ones, minus what other pending
+    transfers of the lot already take from that rack. Approval re-checks the
+    physical count (take/move refuse a short rack); this is the submit-time
+    answer, while the person who typed it is still at the screen."""
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    if lot is None:
+        return
+    rows, _unresolved = resolve_breakdown(db, source_breakdown)
+    if not rows:
+        return
+    receipt_ids = [r.id for r in db.query(Receipt).filter(
+        Receipt.material_lot_id == lot.id).all()]
+    reserved = _pending_rack_units(db, lot, receipt_ids)
+    placements = {p.storage_row_id: p for p in lps.placements_for_lot(db, lot.id)}
+    word = lot.unit_label or "unit"
+    for rid, qty in rows.items():
+        asked = lps.row_units_for_quantity(db, lot, rid, float(qty or 0), receipt=receipt)
+        placement = placements.get(rid)
+        on_rack = int(placement.full_units or 0) if placement else 0
+        held = (on_rack if lot.is_held else min(int(placement.held_units or 0), on_rack)) if placement else 0
+        promised = reserved.get(rid, 0)
+        free = max(0, on_rack - held - promised)
+        if asked > free:
+            row = db.query(StorageRow).filter(StorageRow.id == rid).first()
+            causes = []
+            if held:
+                causes.append(f"{held} on hold")
+            if promised:
+                causes.append(f"{promised} on other pending transfers")
+            raise ValidationError(
+                f"{row.name if row else rid} has {free} free {word}"
+                f"{'' if free == 1 else 's'} of lot {lot.vendor_lot_number or lot.lot_code} "
+                f"but {asked} {'was' if asked == 1 else 'were'} asked for"
+                + (f" ({on_rack} on the rack: " + ", ".join(causes) + ")" if causes else "")
+                + "."
+            )
+
+
+def resolve_destination(
+    db: Session, current_user, to_sub_location_id: Optional[str], destination_breakdown, quantity: float,
+):
+    """The destination breakdown a counted-lot transfer will approve against.
+
+    Named racks pass through. A room with no racks gets its open-space row
+    (ingredient_row_service.open_space_row). A room with racks but none named
+    is refused here, at submit — it used to be accepted and could never be
+    approved, while reserving the stock (2026-10-01 PART 2, G1)."""
+    from app.models import SubLocation
+    from app.services.ingredient_row_service import open_space_row
+
+    rows, unresolved = resolve_breakdown(db, destination_breakdown)
+    if rows and not unresolved:
+        return destination_breakdown
+    room_id = to_sub_location_id
+    if not room_id and unresolved:
+        room_id = unresolved[0]
+    room = db.query(SubLocation).filter(SubLocation.id == room_id).first() if room_id else None
+    if room is None:
+        raise ValidationError("Pick where the material is going: a room and, if it has racks, the rack.")
+    row = open_space_row(db, room, current_user)
+    if row is None:
+        raise ValidationError(
+            f"{room.name} has racks — pick the rack the material is going to."
+        )
+    return [{"id": f"row-{row.id}", "quantity": float(quantity)}]
 
 def lot_hold_blocks(db: Session, receipt: Receipt) -> bool:
     """True when the receipt's material lot is under a QA hold. The per-receipt

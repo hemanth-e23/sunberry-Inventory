@@ -476,6 +476,63 @@ def ensure_default_row(db: Session, sub_location: SubLocation, current_user) -> 
 # Never while it holds stock: a row with drums on it is a real place, however
 # it got there, and hiding it would hide the drums. It retires once emptied.
 
+def open_space_row(db: Session, sub_location: SubLocation, current_user) -> Optional[StorageRow]:
+    """The one row that stands for a room with NO racks — an open floor area.
+
+    The plant stages by moving drums to a staging area that has no racks, then
+    writes them off as used the next day (2026-10-01 browser test, G1). A
+    placement needs a row, so a rack-less room gets one named after itself —
+    the same shape `ensure_default_row` gives a typed room, but for ANY room,
+    because a loose staging floor is not typed. A retired row of that shape is
+    brought back rather than duplicated.
+
+    Returns None when the room has racks of its own: then a person must say
+    which one, and inventing a place here would hide that choice.
+    """
+    active_ids = _room_row_ids(db, sub_location.id, active_only=True)
+    if active_ids:
+        # Already an open floor: its one row is the room itself.
+        if len(active_ids) == 1:
+            only = db.query(StorageRow).filter(StorageRow.id == active_ids[0]).first()
+            if only is not None and is_default_shaped(only, sub_location):
+                return only
+        return None
+
+    retired = next(
+        (
+            row for row in db.query(StorageRow)
+            .filter(StorageRow.sub_location_id == sub_location.id).all()
+            if is_default_shaped(row, sub_location)
+        ),
+        None,
+    )
+    if retired is not None:
+        retired.is_active = True
+        db.flush()
+        return retired
+
+    row = StorageRow(
+        id=f"row-{uuid.uuid4().hex[:12]}",
+        name=sub_location.name,
+        sub_location_id=sub_location.id,
+        storage_area_id=None,
+        pallet_capacity=0,
+        default_cases_per_pallet=0,
+        occupied_pallets=0,
+        occupied_cases=0,
+        hold=False,
+        is_active=True,
+        is_partial_pallet_location=False,
+    )
+    db.add(row)
+    db.flush()
+    try:
+        assign_barcodes(db, current_user, row_ids=[row.id])
+    except Exception:
+        pass   # recoverable, exactly as in ensure_default_row
+    return row
+
+
 def _room_row_ids(db: Session, sub_location_id: str, active_only: bool = True) -> List[str]:
     """Every row in a room — hung off the sub-location directly or off one of
     its storage areas."""

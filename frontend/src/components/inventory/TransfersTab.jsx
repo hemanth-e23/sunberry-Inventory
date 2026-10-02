@@ -295,7 +295,10 @@ const TransfersTab = () => {
       setRmError('Choose a destination sub location.');
       return;
     }
-    if (rmForm.transferType !== 'shipped-out' && rmDestRows.length > 0 && !rmForm.toRowId) {
+    // A room with one row (an open floor such as the staging area) needs no
+    // choice; a room with no rows is resolved server-side to its open space.
+    const destRowId = rmForm.toRowId || (rmDestRows.length === 1 ? rmDestRows[0].id : '');
+    if (rmForm.transferType !== 'shipped-out' && rmDestRows.length > 0 && !destRowId) {
       setRmError('Select a destination row.');
       return;
     }
@@ -355,7 +358,7 @@ const TransfersTab = () => {
     // from the source rows; an explicit override is split across receipt groups
     // proportionally to each group's pallets-out.
     const totalOut = picks.reduce((s, p) => s + resolvePalletsOut(p.entry, p.displayQty), 0);
-    const hasDestRow = rmForm.transferType !== 'shipped-out' && !!rmForm.toRowId;
+    const hasDestRow = rmForm.transferType !== 'shipped-out' && !!destRowId;
     const effDestTotal = hasDestRow
       ? (rmDestPallets !== '' ? Math.max(0, Number(rmDestPallets) || 0) : totalOut)
       : 0;
@@ -382,7 +385,7 @@ const TransfersTab = () => {
         : (totalOut > 0 ? Math.round(effDestTotal * groupOut / totalOut) : effDestTotal);
       const destinationBreakdown = hasDestRow
         ? [{
-            id: `row-${rmForm.toRowId}`,
+            id: `row-${destRowId}`,
             quantity: groupQty,
             ...(groupCounted ? {} : { pallets: groupDestPallets }),
           }]

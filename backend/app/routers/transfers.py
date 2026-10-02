@@ -322,6 +322,23 @@ def create_transfer(
             ),
         )
 
+    if (
+        not transfer_service._is_finished_goods(db, receipt)
+        and lps.is_counted_lot(db, receipt.material_lot_id)
+    ):
+        # Each named rack must hold what is asked of it, net of what other
+        # pending transfers already take from it. The lot-wide check alone let
+        # 5 drums be asked of a rack with 4 free (2026-10-01 PART 2, B1).
+        transfer_service.check_source_racks(db, receipt, transfer_data.source_breakdown)
+        if transfer_data.transfer_type != "shipped-out" and transfer_data.source_breakdown:
+            # A destination with no racks is an open floor (the plant's
+            # staging area): it gets its one open-space row. A room WITH racks
+            # but none picked is refused now, not at approval (PART 2, G1).
+            transfer_data.destination_breakdown = transfer_service.resolve_destination(
+                db, current_user, transfer_data.to_sub_location_id,
+                transfer_data.destination_breakdown, float(transfer_data.quantity),
+            )
+
     # Validate order number for shipped-out transfers
     if transfer_data.transfer_type == "shipped-out" and not transfer_data.order_number:
         raise HTTPException(
