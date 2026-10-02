@@ -73,16 +73,25 @@ export const isAwaitingApproval = (order = {}) => {
  * line (F15): "B-0910: 13 of 14 — will be booked short (Damaged on arrival)".
  * Approval books what was SCANNED, so the approver is told before, not after.
  */
+/** A truck line whose receipt was rejected (its units already reversed). */
+export const isRejectedLine = (line) => String(line?.receipt_status || '').toLowerCase() === 'rejected';
+
+/** Lines an approval still books — rejected ones are done. */
+export const approvableLines = (truck = {}) => (truck.lines || []).filter((l) => !isRejectedLine(l));
+
 export const approvalBookingNotes = (truck = {}) => {
   const shortReason = (line) => {
     const flag = (truck.flags || []).find((f) => f.kind === 'short' && f.line_id === line.line_id);
     return flag?.detail || truck.short_reason || '';
   };
   return (truck.lines || []).flatMap((line) => {
+    const name = line.vendor_lot || line.lot_code || line.product_name || 'A line';
+    // A rejected line is settled: its units came off the racks and it is not
+    // part of this approval (re-check after F8, 2026-10-01).
+    if (isRejectedLine(line)) return [`${name}: rejected — not booked`];
     const scanned = Number(line.scanned_count || 0);
     const expected = Number(line.expected_count || 0);
     if (scanned === expected) return [];
-    const name = line.vendor_lot || line.lot_code || line.product_name || 'A line';
     if (expected === 0) return [`${name}: ${scanned} not on the paperwork — will be booked as extra`];
     if (scanned < expected) {
       const reason = shortReason(line);

@@ -5,7 +5,7 @@ import { useToast } from '../../context/ToastContext';
 import { useConfirm } from '../../context/ConfirmContext';
 import { formatCalendarDate } from '../../utils/labelPayload';
 import { attentionFlags, describeFlag, formatUnitTotals } from '../../utils/truckReceiving';
-import { approvalBookingNotes, countOf } from '../../utils/incomingLines';
+import { approvableLines, approvalBookingNotes, countOf, isRejectedLine } from '../../utils/incomingLines';
 
 /**
  * One card per TRUCK (incoming order) on the approvals page, instead of one per
@@ -45,7 +45,7 @@ const TruckApprovalCard = ({ orderId, receiptIds, onEdit, onApproved }) => {
     // Approval books what was SCANNED. Say which lines that makes short or
     // over BEFORE the click, not in a toast after it (2026-10-01, F15).
     const notes = approvalBookingNotes(truck);
-    const question = `Approve all ${countOf(truck.lines.length, 'line')} of `
+    const question = `Approve ${countOf(approvableLines(truck).length, 'line')} of `
       + `${truck.order_number} and close it?`;
     const ok = await confirm(
       notes.length ? (
@@ -85,7 +85,9 @@ const TruckApprovalCard = ({ orderId, receiptIds, onEdit, onApproved }) => {
     return <article className="approval-card truck-card"><p className="muted">Loading truck…</p></article>;
   }
 
-  const flags = attentionFlags(truck.flags);
+  // Flags about a rejected line are history, not something to approve over.
+  const rejectedIds = new Set((truck.lines || []).filter(isRejectedLine).map((l) => l.line_id));
+  const flags = attentionFlags((truck.flags || []).filter((f) => !rejectedIds.has(f.line_id)));
   const finished = Boolean(truck.forklift_submitted_at);
   const pending = new Set(receiptIds || []);
 

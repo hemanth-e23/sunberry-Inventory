@@ -319,6 +319,8 @@ const TruckView = ({ orderId }) => {
   // "Loose units: [qty]" — N singles of one lot onto the rack in one step, for
   // a broken pallet. 30 loose bags were 30 tap-refocus-scan cycles (F12).
   const [loose, setLoose] = useState(null);
+  // The loose entry in flight, so its N single bookings show as one "+N".
+  const looseBatchRef = useRef(null);
   // A refusal the worker must acknowledge — an unknown sticker or a closed
   // truck. A list row alone was missed (F13).
   const [stop, setStop] = useState(null);
@@ -428,12 +430,23 @@ const TruckView = ({ orderId }) => {
     // reads; our sticker code is a long machine string.
     const hitLine = (response.truck?.lines || []).find((l) => l.line_id === response.line_id);
     const lotLabel = hitLine?.vendor_lot ? `Lot ${hitLine.vendor_lot}` : response.lot_code;
+    // One "Loose… 5" entry is five single bookings; the badge must say +5,
+    // not the last +1 (re-check 2026-10-01).
+    const batch = looseBatchRef.current;
+    const inBatch = batch && batch.lineId === response.line_id && Number(response.units) === 1;
+    if (inBatch) {
+      batch.booked += 1;
+      if (batch.booked >= batch.total) looseBatchRef.current = null;
+    }
+    const unitWord = response.count_unit || hitLine?.unit_label;
     const hit = {
       lineId: response.line_id,
       text: `${lotLabel} → ${response.row_name}`,
       count: `${response.line_scanned_count} of ${response.line_expected_count}`,
       product: response.product_name,
-      badge: scanUnitsBadge(response.units, response.count_unit || hitLine?.unit_label),
+      badge: inBatch
+        ? { text: `+${unitCount(batch.booked, unitWord)} · loose`, pallet: false }
+        : scanUnitsBadge(response.units, unitWord),
     };
     setLastHit(hit);
     patchHistory(item.idempotency_key, {
@@ -698,6 +711,7 @@ const TruckView = ({ orderId }) => {
     if (error) { setLoose((prev) => ({ ...prev, error })); return; }
     // N separate single scans, each under its own idempotency key: a lost
     // response replays one bag, never the batch.
+    looseBatchRef.current = { lineId: line.line_id, total: qty, booked: 0 };
     for (let i = 0; i < qty; i += 1) {
       if (!recordDrum(line.lot_code, { forceSingle: true })) break;
     }
@@ -1337,7 +1351,10 @@ const TruckView = ({ orderId }) => {
             <div className="sir-dialog-list">
               {scannedPlaces.map(({ line, row: r }) => {
                 const unit = line.unit_label || line.count_unit || 'unit';
-                const perPallet = Math.min(r.count, line.units_per_pallet || 1);
+                // A pallet can only come off a rack that could hold a whole one:
+                // 4 loose boxes offered "−4 boxes (pallet)" (re-check 2026-10-01).
+                const fullPallet = Number(line.units_per_pallet) || 1;
+                const perPallet = r.count >= fullPallet ? fullPallet : 1;
                 const lotName = `Lot ${line.vendor_lot || line.lot_code}`;
                 const detail = `${line.product_name} · sticker ${line.lot_code} · ${unitCount(r.count, unit)} there now`;
                 return (

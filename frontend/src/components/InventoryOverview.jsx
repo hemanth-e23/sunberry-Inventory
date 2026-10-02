@@ -17,7 +17,7 @@ import InventoryTable from "./inventory/InventoryTable";
 import ProductDetailModal from "./inventory/ProductDetailModal";
 import PrintReportModal from "./inventory/PrintReportModal";
 import LocationsTab from "./inventory/LocationsTab";
-import { buildRowUnitLookup } from "../utils/rowSources";
+import { buildRowUnitLookup, pluralizeUnit, singularUnit } from "../utils/rowSources";
 import { formatContainers, summarizeContainers } from "../utils/inventoryContainers";
 
 const parseDate = (value) => {
@@ -343,7 +343,15 @@ const InventoryOverview = () => {
         const roomLabel = (place && getLocationLabel(locationLookup, place.location, place.subLocation))
           || label || alloc.areaName || "";
         if (!byRoom.has(roomLabel)) byRoom.set(roomLabel, []);
-        byRoom.get(roomLabel).push(`${rowName}${pallets > 0 ? ` (${pallets} ${footprintFor(alloc.rowId)})` : ''}`);
+        // Lot-tracked racks say what is ON them ("40 bags"), not the slots it
+        // fills — "QA-P3 (1 pallets)" for a pallet of bags (re-check 2026-10-01).
+        const units = Number(alloc.units) || 0;
+        const what = units > 0 && alloc.unitLabel
+          ? `${units} ${units === 1 ? singularUnit(alloc.unitLabel) : pluralizeUnit(singularUnit(alloc.unitLabel))}`
+          : pallets > 0
+            ? `${pallets} ${pallets === 1 ? singularUnit(footprintFor(alloc.rowId)) : footprintFor(alloc.rowId)}`
+            : '';
+        byRoom.get(roomLabel).push(`${rowName}${what ? ` (${what})` : ''}`);
       });
       const rooms = [...byRoom.entries()].filter(([room]) => room);
       if (rooms.length) {
