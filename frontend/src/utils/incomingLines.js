@@ -109,6 +109,11 @@ export const approvalBookingNotes = (truck = {}) => {
     const expected = Number(line.expected_count || 0);
     if (scanned === expected) return [];
     if (expected === 0) return [`${name}: ${scanned} not on the paperwork — will be booked as extra`];
+    if (scanned === 0 && expected > 0) {
+      // Nothing came off the truck for this line: approval closes it as not
+      // delivered instead of booking it (production, 2026-10-02).
+      return [`${name}: 0 of ${expected} — nothing scanned, will be closed as not delivered`];
+    }
     if (scanned < expected) {
       const reason = shortReason(line);
       return [`${name}: ${scanned} of ${expected} — will be booked short${reason ? ` (${reason})` : ''}`];

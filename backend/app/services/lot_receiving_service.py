@@ -2679,9 +2679,24 @@ def truck_approve(db: Session, *, order: IngredientIntake, current_user) -> dict
         )
 
     approved = 0
+    not_delivered = 0
     for line in order.lots or []:
         receipt = _line_receipt(db, line)
         if receipt and receipt.status in (ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED):
+            if int(session_counts(db, receipt)["total"] or 0) == 0:
+                # Finished at the gun with NOTHING scanned for this line: none
+                # of it came off the truck. Approving fell back to the typed-
+                # rows gate ("rows place 0 of 20") and blocked the whole truck
+                # (production, 2026-10-02). Nothing arrived, so nothing is
+                # booked: the line is closed as not delivered, with the reason.
+                receipt_service.reject_receipt(
+                    db, receipt,
+                    f"Not delivered — 0 of {int(line.expected_count or 0)} scanned"
+                    + (f" (short: {order.short_reason})" if order.short_reason else ""),
+                    current_user,
+                )
+                not_delivered += 1
+                continue
             receipt_service.approve_receipt(db, receipt, current_user)
             approved += 1
 
@@ -2691,7 +2706,10 @@ def truck_approve(db: Session, *, order: IngredientIntake, current_user) -> dict
             reason=order.short_reason or None,
         )
     db.flush()
-    return {"status": "approved", "approved_receipts": approved, "truck": truck_summary(db, order)}
+    return {
+        "status": "approved", "approved_receipts": approved,
+        "not_delivered": not_delivered, "truck": truck_summary(db, order),
+    }
 
 
 def open_trucks(db: Session, *, warehouse_id: Optional[str] = None) -> list:

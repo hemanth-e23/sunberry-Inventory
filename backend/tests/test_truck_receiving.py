@@ -378,6 +378,31 @@ class TestFinishAndApprove:
         with pytest.raises(ValidationError):
             lrs.truck_approve(db_session, order=order, current_user=_approver(db_session))
 
+    def test_a_line_with_nothing_scanned_is_closed_as_not_delivered(self, db_session, recv_seed):
+        """Production 2026-10-02: a truck finished short with one line at 0 of
+        20 could not be approved at all — the empty line fell back to the
+        typed-rows gate ("rows place 0 of 20"). Nothing arrived, so nothing is
+        booked: that line is rejected as not delivered, the rest approved."""
+        order = _truck(db_session, [_line(lot="MG-1", count=1), _line(lot="MG-2", count=20)])
+        _scan(db_session, order, _lot_code(db_session, order, "MG-1"))
+        mg1 = next(l for l in order.lots if l.vendor_lot == "MG-1")
+        lrs.truck_recount(
+            db_session, order=order, storage_row_id=ROW_1,
+            counts=[{"line_id": mg1.id, "actual": 1}], user_id=USER,
+        )
+        assert lrs.truck_finish(
+            db_session, order=order, user_id=USER, confirmed=True, short_reason="truck_short",
+        )["status"] == "submitted"
+
+        out = lrs.truck_approve(db_session, order=order, current_user=_approver(db_session))
+        assert out["approved_receipts"] == 1 and out["not_delivered"] == 1
+        by_lot = {
+            l.vendor_lot: db_session.query(Receipt).filter(Receipt.id == l.receipt_id).one()
+            for l in order.lots
+        }
+        assert by_lot["MG-1"].status == ReceiptStatus.APPROVED
+        assert by_lot["MG-2"].status == ReceiptStatus.REJECTED
+
     def test_approve_approves_every_line_and_closes_the_order(self, db_session, recv_seed):
         order = _truck(db_session, [_line(lot="MG-1", count=1), _line(lot="MG-2", count=1)])
         for vendor_lot in ("MG-1", "MG-2"):

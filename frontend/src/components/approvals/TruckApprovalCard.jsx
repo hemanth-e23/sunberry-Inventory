@@ -64,7 +64,11 @@ const TruckApprovalCard = ({ orderId, receiptIds, onEdit, onApproved }) => {
     setBusy(true);
     try {
       const result = await approveTruck(orderId);
-      addToast(`${truck.order_number} approved — ${countOf(result.approved_receipts, 'line')}`, 'success');
+      addToast(
+        `${truck.order_number} approved — ${countOf(result.approved_receipts, 'line')}`
+          + (result.not_delivered ? `; ${countOf(result.not_delivered, 'line')} closed as not delivered` : ''),
+        'success',
+      );
       setTruck(result.truck);
       await onApproved?.();
     } catch (err) {
