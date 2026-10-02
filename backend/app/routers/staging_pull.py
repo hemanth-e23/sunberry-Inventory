@@ -72,6 +72,19 @@ def undo(
     return result
 
 
+@router.post("/requests/{request_id}/return-held", response_model=StagingPullSubmitResponse)
+def return_held(
+    request_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Put on-cart units of a lot that went ON HOLD back on their racks.
+
+    Submit refuses to stage a held lot (`lot_held`); this is the one-press
+    answer on the gun. Commits internally."""
+    return sps.return_held(db, request_id, str(current_user.id))
+
+
 @router.post("/requests/{request_id}/submit", response_model=StagingPullSubmitResponse)
 def submit(
     request_id: str,

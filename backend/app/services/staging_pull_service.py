@@ -43,6 +43,7 @@ from app.models import (
     StagingItem,
     StagingRequest,
     StagingRequestItem,
+    StorageRow,
 )
 from app.services import lot_placement_service as lps
 from app.services import staging_service
@@ -137,6 +138,91 @@ def _pending_by_item(db: Session, item_ids: List[str]) -> Dict[str, float]:
     return out
 
 
+def _lot_name(lot) -> str:
+    """What a worker calls a lot: the vendor's lot number off the drum, never
+    our internal lot code (browser test PART 3, B9/U1)."""
+    if not lot:
+        return "—"
+    return lot.vendor_lot_number or lot.lot_code or "—"
+
+
+def _unit_word(label: Optional[str], n: float) -> str:
+    """'1 drum', '10 bags', '6 boxes' — plural that reads right on the gun
+    ("6 boxs pulled." was the PART 3 typo)."""
+    word = (label or "unit").strip() or "unit"
+    count = int(n) if float(n).is_integer() else n
+    if count == 1:
+        return f"{count} {word}"
+    if word.endswith("s"):
+        return f"{count} {word}"
+    if word.endswith(("x", "ch", "sh")):
+        return f"{count} {word}es"
+    return f"{count} {word}s"
+
+
+def _show_day(value) -> Optional[str]:
+    """MM/DD/YYYY for a CALENDAR field. Calendar fields arrive as plain
+    'YYYY-MM-DD' strings now (calendar_day), so never call strftime on them —
+    that crashed every non-FEFO pull (PART 3, B1)."""
+    day = calendar_day(value)
+    if not day or len(day) != 10:
+        return None
+    y, m, d = day.split("-")
+    return f"{m}/{d}/{y}"
+
+
+def _cart_lines(db: Session, item_ids: List[str]) -> Dict[str, Dict[str, dict]]:
+    """What is on the cart, per request item and lot: units, open units, lbs,
+    racks — so the gun can say "2 drums of lot A-0801" and not just pounds."""
+    out: Dict[str, Dict[str, dict]] = {}
+    cache: dict = {}
+    lots: dict = {}
+    for ev in _pending_events(db, item_ids):
+        lot = lots.get(ev.material_lot_id)
+        if lot is None:
+            lot = db.query(MaterialLot).filter(MaterialLot.id == ev.material_lot_id).first()
+            lots[ev.material_lot_id] = lot
+        entry = out.setdefault(ev.ref_id, {}).setdefault(ev.material_lot_id, {
+            "material_lot_id": ev.material_lot_id,
+            "lot_code": lot.lot_code if lot else None,
+            "vendor_lot": lot.vendor_lot_number if lot else None,
+            "lot_name": _lot_name(lot),
+            "unit_label": (lot.unit_label if lot else None) or "unit",
+            "units": 0,
+            "open_units": 0,
+            "quantity": 0.0,
+            "is_held": bool(lot.is_held) if lot else False,
+            "hold_reason": lot.hold_reason if lot else None,
+            "row_ids": [],
+        })
+        entry["units"] += -int(ev.full_units_delta or 0)
+        entry["open_units"] += -int(ev.open_units_delta or 0)
+        entry["quantity"] += _event_quantity(db, ev, cache)
+        if ev.storage_row_id and ev.storage_row_id not in entry["row_ids"]:
+            entry["row_ids"].append(ev.storage_row_id)
+    for per_lot in out.values():
+        for entry in per_lot.values():
+            entry["quantity"] = round(entry["quantity"], 3)
+    return out
+
+
+def _units_summary(lines) -> List[dict]:
+    """[{unit_label, units, open_units}] summed per unit word."""
+    by_unit: Dict[str, dict] = {}
+    for line in lines:
+        label = line.get("unit_label") or "unit"
+        e = by_unit.setdefault(label, {"unit_label": label, "units": 0, "open_units": 0})
+        e["units"] += int(line.get("units") or 0)
+        e["open_units"] += int(line.get("open_units") or 0)
+    return list(by_unit.values())
+
+
+def _row_names(db: Session, row_ids) -> Dict[str, str]:
+    ids = [r for r in set(row_ids or []) if r]
+    if not ids:
+        return {}
+    return {r.id: r.name for r in db.query(StorageRow).filter(StorageRow.id.in_(ids)).all()}
+
 
 def on_cart_quantity_for_lot(db: Session, material_lot_id: str) -> float:
     """Weight pulled off this lot's racks onto a cart and not yet submitted.
@@ -175,12 +261,17 @@ def open_requests(db: Session) -> list:
         pending = _pending_by_item(db, item_ids)
         needed = sum(float(i.quantity_needed or 0) for i in sr.items)
         fulfilled = sum(float(i.quantity_fulfilled or 0) for i in sr.items)
+        # The totals add pounds across products; say WHICH unit they are in
+        # when every line agrees, so the gun can print "22,776 of 89,754.66
+        # lbs" instead of bare numbers (PART 3, U1).
+        units = {(i.unit or "").strip().lower() for i in sr.items if i.unit}
         out.append({
             "id": sr.id,
             "production_batch_uid": sr.production_batch_uid,
             "product_name": sr.product_name,
             "formula_name": sr.formula_name,
-            "production_date": sr.production_date.isoformat() if sr.production_date else None,
+            "production_date": calendar_day(sr.production_date),
+            "unit": next(iter(units)) if len(units) == 1 else None,
             "status": sr.status,
             "item_count": len(sr.items),
             "needed_qty": round(needed, 3),
@@ -190,6 +281,62 @@ def open_requests(db: Session) -> list:
     return out
 
 
+def _product_id_for(db: Session, item) -> Optional[str]:
+    if item.product_id:
+        return item.product_id
+    if item.sid:
+        product = db.query(Product).filter(Product.sid == item.sid).first()
+        return product.id if product else None
+    return None
+
+
+def _product_lots(db: Session, product_id: Optional[str]) -> List[tuple]:
+    """(lot, units on racks) for every lot of this product that still has
+    something on a rack — the gun's offline map from a sticker's lot code to a
+    request line, and the source of the line's ON HOLD note."""
+    if not product_id:
+        return []
+    lots = (
+        db.query(MaterialLot)
+        .filter(MaterialLot.product_id == product_id,
+                MaterialLot.is_deleted == False)  # noqa: E712
+        .order_by(MaterialLot.bbd_current.asc().nullslast(), MaterialLot.created_at.asc())
+        .limit(100)
+        .all()
+    )
+    out = []
+    for lot in lots:
+        units = sum(
+            int(p.full_units or 0) + int(p.open_units or 0)
+            for p in lps.placements_for_lot(db, lot.id)
+        )
+        if units > 0:
+            out.append((lot, units))
+    return out
+
+
+def _staged_units(db: Session, item) -> List[dict]:
+    """Containers already handed to staging for this line (gun pulls record
+    them on the StagingItem; a desk stage that typed pounds has none)."""
+    ids = _parse_staging_item_ids(item.staging_item_ids)
+    if not ids:
+        return []
+    lines = []
+    for si in db.query(StagingItem).filter(StagingItem.id.in_(ids)).all():
+        units = int(round(float(si.pallets_staged or 0)))
+        if units <= 0:
+            continue
+        receipt = db.query(Receipt).filter(Receipt.id == si.receipt_id).first()
+        lot = None
+        if receipt and receipt.material_lot_id:
+            lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+        label = (lot.unit_label if lot else None) or (receipt.container_unit if receipt else None)
+        if not label:
+            continue
+        lines.append({"unit_label": label, "units": units, "open_units": 0})
+    return _units_summary(lines)
+
+
 def request_detail(db: Session, request_id: str) -> dict:
     sr = db.query(StagingRequest).filter(StagingRequest.id == request_id).first()
     if not sr:
@@ -197,6 +344,7 @@ def request_detail(db: Session, request_id: str) -> dict:
 
     item_ids = [i.id for i in sr.items]
     pending = _pending_by_item(db, item_ids)
+    cart = _cart_lines(db, item_ids)
 
     items = []
     for item in sr.items:
@@ -205,10 +353,8 @@ def request_detail(db: Session, request_id: str) -> dict:
         item_pending = pending.get(item.id, 0.0)
         remaining = max(0.0, needed - fulfilled - item_pending)
 
-        product_id = item.product_id
-        if not product_id and item.sid:
-            product = db.query(Product).filter(Product.sid == item.sid).first()
-            product_id = product.id if product else None
+        product_id = _product_id_for(db, item)
+        lots = _product_lots(db, product_id)
 
         # FEFO suggestion, racks fullest-first — advisory for the gun.
         suggestion = None
@@ -218,16 +364,50 @@ def request_detail(db: Session, request_id: str) -> dict:
             )
             if suggestions:
                 s = suggestions[0]
+                first_receipt = db.query(Receipt).filter(
+                    Receipt.id == s.get("receipt_id")
+                ).first()
+                first_lot = None
+                if first_receipt and first_receipt.material_lot_id:
+                    first_lot = db.query(MaterialLot).filter(
+                        MaterialLot.id == first_receipt.material_lot_id
+                    ).first()
                 suggestion = {
                     "receipt_id": s.get("receipt_id"),
                     "lot_number": s.get("lot_number"),
+                    "lot_code": first_lot.lot_code if first_lot else None,
                     "expiration_date": calendar_day(s.get("expiration_date")),
                     "available_quantity": s.get("available_quantity"),
                     "is_counted": s.get("is_counted"),
                     "unit_label": s.get("unit_label"),
                     "available_units": s.get("available_units"),
+                    "open_units": s.get("open_units") or 0,
+                    "open_remaining_qty": s.get("open_remaining_qty") or 0.0,
                     "racks": s.get("racks", []),
                 }
+
+        # A lot that went ON HOLD is not offered — say so on the line, or it
+        # just looks like the FEFO hint vanished (PART 3, U1).
+        held_lots = [
+            {
+                "lot_code": lot.lot_code,
+                "vendor_lot": lot.vendor_lot_number,
+                "lot_name": _lot_name(lot),
+                "hold_reason": lot.hold_reason,
+                "unit_label": lot.unit_label,
+                "units": units,
+            }
+            for lot, units in lots if lot.is_held
+        ]
+        cart_lines = list(cart.get(item.id, {}).values())
+        for line in cart_lines:
+            line.pop("row_ids", None)
+        unit_labels = [lot.unit_label for lot, _u in lots if lot.unit_label]
+        unit_label = (
+            (suggestion or {}).get("unit_label")
+            or (cart_lines[0]["unit_label"] if cart_lines else None)
+            or (unit_labels[0] if unit_labels else None)
+        )
 
         items.append({
             "id": item.id,
@@ -241,6 +421,20 @@ def request_detail(db: Session, request_id: str) -> dict:
             "remaining_qty": round(remaining, 3),
             "status": item.status,
             "suggestion": suggestion,
+            # Containers, not just pounds (PART 3, U1).
+            "unit_label": unit_label,
+            "unit_labels": sorted(set(unit_labels)),
+            "cart_lots": cart_lines,
+            "pending_units": _units_summary(cart_lines),
+            "staged_units": _staged_units(db, item),
+            "held_lots": held_lots,
+            # Lot codes of this product, so an OFFLINE gun can put a queued
+            # sticker on the right line before the server answers (B9).
+            "lots": [
+                {"lot_code": lot.lot_code, "vendor_lot": lot.vendor_lot_number,
+                 "unit_label": lot.unit_label, "is_held": bool(lot.is_held)}
+                for lot, _u in lots
+            ],
         })
 
     return {
@@ -248,7 +442,7 @@ def request_detail(db: Session, request_id: str) -> dict:
         "production_batch_uid": sr.production_batch_uid,
         "product_name": sr.product_name,
         "formula_name": sr.formula_name,
-        "production_date": sr.production_date.isoformat() if sr.production_date else None,
+        "production_date": calendar_day(sr.production_date),
         "status": sr.status,
         "items": items,
     }
@@ -365,12 +559,19 @@ def scan(db: Session, request_id: str, body, user_id: Optional[str]) -> dict:
             ).first()
             if first_receipt and first_receipt.material_lot_id and \
                     first_receipt.material_lot_id != lot.id:
+                # `expiration_date` is a plain 'YYYY-MM-DD' calendar string
+                # now — formatting it with strftime crashed EVERY non-FEFO
+                # pull with a 500 (PART 3, B1).
+                best_by = _show_day(first.get("expiration_date"))
+                racks = [r.get("storage_row_name") for r in (first.get("racks") or [])
+                         if r.get("storage_row_name")]
                 return _scan_payload(
                     db, sr, status="needs_confirm", item=item, lot=lot,
                     message=(
-                        f"FEFO suggests lot {first.get('lot_number') or '—'} first"
-                        f"{' (expires ' + first['expiration_date'].strftime('%Y-%m-%d') + ')' if first.get('expiration_date') else ''}."
-                        " Pull this one anyway?"
+                        f"Lot {first.get('lot_number') or '—'} is older"
+                        f"{' (best by ' + best_by + ')' if best_by else ''}"
+                        f"{' on ' + ', '.join(racks[:2]) if racks else ''}"
+                        f" and should go first. Pull lot {_lot_name(lot)} anyway?"
                     ),
                     warning="not_fefo_lot",
                 )
@@ -414,7 +615,7 @@ def scan(db: Session, request_id: str, body, user_id: Optional[str]) -> dict:
         db.flush()
         return _scan_payload(
             db, sr, status="ok", item=item, lot=lot, units=0, quantity=share,
-            message=f"Open {lot.unit_label or 'unit'} pulled — about {round(share, 1)} {lot.weight_unit or 'lbs'}.",
+            message=f"Open {lot.unit_label or 'unit'} of lot {_lot_name(lot)} pulled — about {round(share, 1)} {lot.weight_unit or 'lbs'}.",
         )
 
     free = 0
@@ -424,8 +625,8 @@ def scan(db: Session, request_id: str, body, user_id: Optional[str]) -> dict:
         return _scan_payload(
             db, sr, status="not_enough", item=item, lot=lot,
             message=(
-                f"Only {free} sealed {lot.unit_label or 'unit'}"
-                f"{'' if free == 1 else 's'} of this lot on that rack. "
+                f"Only {_unit_word(lot.unit_label, free)} (sealed) of lot "
+                f"{_lot_name(lot)} on that rack. "
                 "Check the rack, or scan the rack you are actually pulling from."
             ),
         )
@@ -449,7 +650,7 @@ def scan(db: Session, request_id: str, body, user_id: Optional[str]) -> dict:
     return _scan_payload(
         db, sr, status="ok", item=item, lot=lot,
         units=int(body.units), quantity=qty,
-        message=f"{body.units} {lot.unit_label or 'unit'}{'' if body.units == 1 else 's'} pulled.",
+        message=f"{_unit_word(lot.unit_label, int(body.units))} of lot {_lot_name(lot)} pulled.",
     )
 
 
@@ -505,6 +706,108 @@ def undo(db: Session, request_id: str, user_id: Optional[str]) -> dict:
     )
 
 
+# ─── held while on the cart ───────────────────────────────────────────────────
+
+def _held_on_cart(db: Session, item_ids: List[str]) -> List[dict]:
+    """Cart lines whose lot is ON HOLD right now, with the racks they came
+    from — what the worker is told to carry back."""
+    cart = _cart_lines(db, item_ids)
+    held = []
+    for per_lot in cart.values():
+        for line in per_lot.values():
+            if not line["is_held"]:
+                continue
+            names = _row_names(db, line["row_ids"])
+            held.append({
+                "material_lot_id": line["material_lot_id"],
+                "lot_code": line["lot_code"],
+                "vendor_lot": line["vendor_lot"],
+                "lot_name": line["lot_name"],
+                "hold_reason": line["hold_reason"],
+                "unit_label": line["unit_label"],
+                "units": line["units"],
+                "open_units": line["open_units"],
+                "quantity": line["quantity"],
+                "racks": [names.get(r, r) for r in line["row_ids"]],
+            })
+    return held
+
+
+def _held_words(h: dict) -> str:
+    parts = []
+    if h["units"]:
+        parts.append(_unit_word(h["unit_label"], h["units"]))
+    if h["open_units"]:
+        parts.append(f"{_unit_word(h['unit_label'], h['open_units'])} (open)")
+    return " + ".join(parts) or _unit_word(h["unit_label"], 0)
+
+
+def _held_message(held: List[dict]) -> str:
+    lines = []
+    for h in held:
+        reason = f" ({h['hold_reason']})" if h.get("hold_reason") else ""
+        where = ", ".join(h["racks"]) if h.get("racks") else "the rack they came from"
+        lines.append(
+            f"Lot {h['lot_name']} went ON HOLD{reason} while {_held_words(h)} "
+            f"were on the cart. They cannot be staged — put them back on {where}."
+        )
+    return " ".join(lines) + " Nothing was submitted."
+
+
+def return_held(db: Session, request_id: str, user_id: Optional[str]) -> dict:
+    """Put every on-cart unit of a HELD lot back on the rack it came from.
+
+    Each pending pull of a held lot gets the same compensating event an undo
+    writes, so the racks have the units back (still held — the hold is on the
+    lot, wherever its drums sit) and the cart no longer carries them."""
+    sr = db.query(StagingRequest).filter(StagingRequest.id == request_id).first()
+    if not sr:
+        raise NotFoundError("Staging request", request_id)
+    item_ids = [i.id for i in sr.items]
+    held = _held_on_cart(db, item_ids)
+    if not held:
+        return {
+            "status": "nothing_held",
+            "message": "Nothing on the cart is on hold.",
+            "short_items": [], "staging_item_ids": [],
+            "request_status": sr.status, "held_lots": [],
+        }
+    held_ids = {h["material_lot_id"] for h in held}
+    lots = {
+        lot.id: lot
+        for lot in db.query(MaterialLot).filter(MaterialLot.id.in_(held_ids)).all()
+    }
+    for ev in _pending_events(db, item_ids):
+        if ev.material_lot_id not in held_ids:
+            continue
+        lps.apply_delta(
+            db, lots[ev.material_lot_id], ev.storage_row_id,
+            event_type=lps.EVENT_STAGED,
+            full_units_delta=-int(ev.full_units_delta or 0),
+            open_units_delta=-int(ev.open_units_delta or 0),
+            open_qty_delta=-float(ev.qty_delta or 0),
+            actor_id=user_id,
+            ref_type=REF_TYPE_PULL_UNDO,
+            ref_id=ev.ref_id,
+            reason="Put back: lot went on hold while on the cart",
+            idempotency_key=f"undo:{ev.id}",
+        )
+        ev.reason_code = "undone"
+    db.commit()
+    message = " ".join(
+        f"{_held_words(h)} of lot {h['lot_name']} back on "
+        f"{', '.join(h['racks']) or 'the rack it came from'} (still on hold)."
+        for h in held
+    )
+    return {
+        "status": "returned",
+        "message": message,
+        "short_items": [], "staging_item_ids": [],
+        "request_status": sr.status,
+        "held_lots": held,
+    }
+
+
 # ─── submit ───────────────────────────────────────────────────────────────────
 
 def submit(
@@ -532,6 +835,22 @@ def submit(
             "status": "nothing_to_submit",
             "message": "No scans waiting to be submitted for this request.",
             "short_items": [], "staging_item_ids": [], "request_status": sr.status,
+        }
+
+    # A lot that went ON HOLD while its units were on the cart must not be
+    # staged — production would consume held stock with nobody told (PART 3,
+    # B3: a drum pulled before the hold was staged, then 292 lb of it used).
+    # Nothing is written; the worker puts those units back (return_held) and
+    # submits the rest.
+    held = _held_on_cart(db, list(items_by_id.keys()))
+    if held:
+        return {
+            "status": "lot_held",
+            "message": _held_message(held),
+            "warning": None,
+            "short_items": [], "staging_item_ids": [],
+            "request_status": sr.status,
+            "held_lots": held,
         }
 
     # Aggregate per (item, lot): sealed units, open qty, and the rows drawn

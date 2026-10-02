@@ -7,17 +7,28 @@ import ScannerLayout from './ScannerLayout';
 import NetworkStatus from './NetworkStatus';
 import ScanFeedback from './ScanFeedback';
 import { playErrorTone, playSuccessTone } from '../../utils/scannerFeedback';
-import { removeScan } from '../../utils/scanQueue';
+import {
+  isServerFault, isUnreachableError, listScans, noteReachability, probeServer, removeScan,
+  SERVER_FAULT_MESSAGE,
+} from '../../utils/scanQueue';
 import { useScanQueueCore } from '../../hooks/useScanQueue';
 import { decodeLotPayload, formatCalendarDate } from '../../utils/labelPayload';
 import { newIdempotencyKey, resolveRow } from '../../api/lotReceivingApi';
 import { useGunRacks } from '../../hooks/useGunRacks';
-import { rackFillLabel } from '../../utils/truckReceiving';
+import {
+  PULL_LIST_CACHE_KEY, pullHistoryCacheKey, pullRequestCacheKey, readCached, saveCached,
+} from '../../utils/gunCache';
+import {
+  cartSummary, formatQty, itemForLot, lotDisplayName, openPullUnit, perScanUnit,
+  progressLine, pullStatusLabel, queuedByItem, queuedRowMessage, rackFillText,
+  submitBlockReason, unitsWords,
+} from '../../utils/stagingPull';
+import { formatTime } from '../../utils/dateUtils';
 import OfflineBanner from './OfflineBanner';
 import {
   apiErrorMessage, getStagingPullRequest, listStagingPullRequests,
-  requestIdFromEndpoint, stagingPullScanEndpoint, submitStagingPull,
-  undoStagingPull,
+  requestIdFromEndpoint, returnHeldStagingPull, stagingPullScanEndpoint,
+  submitStagingPull, undoStagingPull,
 } from '../../api/stagingPullApi';
 import { useAppData } from '../../context/AppDataContext';
 import './ScannerIngredientReceiveFlow.css';
@@ -33,21 +44,26 @@ import './ScannerStagingPullFlow.css';
  *
  * Everything structural is inherited from ScannerLotReceiveFlow, deliberately:
  * wedge input cleared FIRST unconditionally; re-entrancy guard via a ref; the
- * submit button NEVER disabled while busy (a disabled default button stops
- * Enter submitting, which silently swallows gun triggers); focus watchdog
- * suspended while a dialog is open; needs_confirm rendered as an INLINE amber
- * banner, parked in a pending[] array and replayed with the SAME idempotency
- * key + allow_mismatch=true (here the question is FEFO-advisory: the worker
- * scanned a lot that is not the oldest — legal, said out loud, never blocked);
+ * scan button NEVER disabled while busy (a disabled default button stops Enter
+ * submitting, which silently swallows gun triggers); focus watchdog suspended
+ * while a dialog is open; needs_confirm rendered as an INLINE amber banner,
+ * parked in a pending[] array and replayed with the SAME idempotency key +
+ * allow_mismatch=true (here the question is FEFO-advisory: the worker scanned a
+ * lot that is not the oldest — legal, said out loud, never blocked);
  * server-truth counters with a pending-queue overlay.
  *
  * Every scan outcome is an HTTP 200 with a `status` discriminator — scanQueue
  * treats anything that is not no-response/5xx/408/429 as terminal, so a soft
- * question asked as a 4xx would be a lost scan.
+ * question asked as a 4xx would be a lost scan. A scan the server keeps
+ * crashing on while it is otherwise up is parked as NEEDS ATTENTION (Retry /
+ * Discard on this screen) instead of reading "OFFLINE" forever (PART 3, B1).
  */
 
 const HISTORY_LIMIT = 40;
 const LOCATION_STORAGE_KEY = 'sunberry-staging-pull-location';
+// Re-read the request (FEFO chips, held lots) this long after the last pull
+// settles — one fetch per burst of scans, not one per drum (PART 3, U1).
+const DETAIL_REFRESH_MS = 800;
 
 // Terminal per-scan outcomes: show, sound the error tone, drop the scan.
 const TERMINAL_SCAN_STATUSES = ['unknown_lot', 'wrong_product', 'lot_held', 'not_enough'];
@@ -59,6 +75,19 @@ const isTerminal = (err) => {
   const status = err?.response?.status;
   if (!status) return false;
   return status < 500 && status !== 408 && status !== 429;
+};
+
+/**
+ * Is the SERVER gone, or did it just fail this one call? No response or a
+ * gateway 502-504 is gone. A plain 500 asks /health: a live server that
+ * crashed on one request must not turn the gun "OFFLINE" (PART 3, B1).
+ */
+const serverIsDown = async (err) => {
+  if (!isUnreachableError(err)) return false;
+  const status = err?.response?.status;
+  if (status && ![502, 503, 504].includes(status)) return !(await probeServer());
+  noteReachability(false);
+  return true;
 };
 
 const readSavedLocation = () => {
@@ -84,10 +113,7 @@ const saveLocation = (locationId, subLocationId) => {
 // ─── Offline scan queue ──────────────────────────────────────────────────────
 // A thin adapter over the shared engine in hooks/useScanQueue.js — one storage
 // key, one retry policy, one drain loop, one definition of "are we connected",
-// shared with every other flow on the gun. This file used to carry its own copy
-// of that loop (the shared hook did not forward `endpoint`), and the copy went
-// stale: it kept the `if (!online) return` gate on navigator.onLine that could
-// strand a whole shift of scans on a gun whose online event never fired.
+// shared with every other flow on the gun.
 const usePullScanQueue = (onSettled) => {
   const settledRef = useRef(onSettled);
   useEffect(() => { settledRef.current = onSettled; }, [onSettled]);
@@ -119,6 +145,8 @@ const usePullScanQueue = (onSettled) => {
     send,
     drain: core.syncNow,
     retry: core.retry,
+    retryItem: core.retryItem,
+    discard: core.discard,
   };
 };
 
@@ -129,12 +157,13 @@ const RequestListView = () => {
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [staleSince, setStaleSince] = useState(null);
 
   // The list screen keeps draining, so backing out of a request mid-cart does
   // not strand queued scans.
   const onQueueSettled = useCallback(() => {}, []);
   const {
-    online, queue, drain, retry, syncing, lastSyncError,
+    online, queue, drain, retry, syncing, lastSyncError, discard,
   } = usePullScanQueue(onQueueSettled);
 
   const mine = useMemo(
@@ -147,12 +176,36 @@ const RequestListView = () => {
   const load = useCallback(() => {
     setLoading(true);
     return listStagingPullRequests()
-      .then((data) => { setRequests(Array.isArray(data) ? data : []); setError(''); })
-      .catch((err) => setError(errorText(err, 'Could not load pull requests')))
+      .then((data) => {
+        const list = Array.isArray(data) ? data : [];
+        setRequests(list);
+        setError('');
+        setStaleSince(null);
+        saveCached(PULL_LIST_CACHE_KEY, list);
+        noteReachability(true);
+      })
+      .catch(async (err) => {
+        const down = await serverIsDown(err);
+        const cached = down ? readCached(PULL_LIST_CACHE_KEY) : null;
+        if (cached) {
+          setRequests(cached.data || []);
+          setStaleSince(cached.savedAt);
+          setError('');
+        } else if (down) {
+          setError('The gun cannot reach the server, and the pull list is not saved on this gun yet. '
+            + 'It loads by itself as soon as the gun is back online.');
+        } else {
+          setError(errorText(err, 'Could not load pull requests'));
+        }
+      })
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  // Back online with a saved copy (or nothing) on screen: load the real list.
+  useEffect(() => {
+    if (online && (staleSince || error)) load();
+  }, [online]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <ScannerLayout
@@ -167,11 +220,13 @@ const RequestListView = () => {
           syncing={syncing}
           lastSyncError={lastSyncError}
           onRetry={retry}
+          onDropFailed={discard}
           onForceSync={drain}
         />
       )}
     >
       <div className="sir-list">
+        <OfflineBanner online={online} queued={pendingCount} staleSince={staleSince} what="list" />
         {loading && <p className="sir-muted">Loading…</p>}
         {error && <div className="sir-error"><AlertTriangle size={16} /> {error}</div>}
 
@@ -193,17 +248,17 @@ const RequestListView = () => {
               <span className="sir-card-number">
                 {request.product_name || request.production_batch_uid}
               </span>
-              <span className="sir-card-status">{request.status}</span>
+              <span className="sir-card-status">{pullStatusLabel(request.status)}</span>
             </div>
             <div className="sir-card-meta">
-              {request.formula_name || 'Formula unknown'}
-              {' · '}{formatCalendarDate(request.production_date)}
+              {request.formula_name ? `${request.formula_name} · ` : ''}
+              {request.production_date ? `Production ${formatCalendarDate(request.production_date)}` : 'No production date'}
               <br />
-              <strong>
-                {request.fulfilled_qty} of {request.needed_qty} staged
-              </strong>
-              {request.pending_qty > 0 ? ` · ${request.pending_qty} on cart` : ''}
-              {' · '}{request.item_count} items
+              <strong>{progressLine(request)}</strong>
+              {request.pending_qty > 0
+                ? ` · ${formatQty(request.pending_qty)}${request.unit ? ` ${request.unit}` : ''} on cart`
+                : ''}
+              {' · '}{request.item_count} {request.item_count === 1 ? 'item' : 'items'}
             </div>
           </button>
         ))}
@@ -223,19 +278,48 @@ const RequestView = ({ requestId }) => {
 
   const [request, setRequest] = useState(null);
   const [items, setItems] = useState([]);
+  const itemsRef = useRef([]);
+  useEffect(() => { itemsRef.current = items; }, [items]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  // Set while the request on screen is the copy saved on this gun (a reload
+  // with no wifi — PART 3, B9), not a fresh one from the server.
+  const [staleSince, setStaleSince] = useState(null);
 
   // Sticky rack context — the rack being pulled FROM. Not persisted across a
   // reload: a rack restored from storage is a guessed location.
   const [row, setRow] = useState(null);
-  // Saved on the gun, with how full each rack is (U10) — the offline barcode
-  // fallback needs the list after a reload with no wifi too (U1).
-  const { rows, setRows, fill: rackFill, refreshFill } = useGunRacks();
+  // Saved on the gun, with how full each rack is — the offline barcode
+  // fallback needs the list after a reload with no wifi too.
+  const {
+    rows, setRows, fill: rackFill, fillByUnit, fillSavedAt, refreshFill,
+  } = useGunRacks();
   const rowsRef = useRef([]);
   useEffect(() => { rowsRef.current = rows; }, [rows]);
 
-  const [history, setHistory] = useState([]);
+  // Recent pulls survive a reload (PART 3, B9: empty after the reconnect reload).
+  const [history, setHistory] = useState(
+    () => readCached(pullHistoryCacheKey(requestId))?.data || [],
+  );
+  useEffect(() => {
+    saveCached(pullHistoryCacheKey(requestId), history.slice(0, HISTORY_LIMIT));
+  }, [history, requestId]);
+  // Rows restored from the gun whose scan is no longer queued settled while
+  // this screen was closed; a FEFO question asked then can no longer be
+  // answered. Say so instead of "Sending…" forever.
+  useEffect(() => {
+    const queuedKeys = new Set(listScans().map((it) => it.idempotency_key));
+    setHistory((prev) => prev.map((h) => {
+      if (h.state === 'pending' && !queuedKeys.has(h.key)) {
+        return { ...h, state: 'sent', message: 'Sent while this screen was closed — the counts above are the server’s.' };
+      }
+      if (h.state === 'confirm') {
+        return { ...h, state: 'error', message: 'Not pulled — the older-lot question was not answered. Scan it again if you need it.' };
+      }
+      return h;
+    }));
+  }, []);
+
   const [scanInput, setScanInput] = useState('');
   const [manualKeyboard, setManualKeyboard] = useState(false);
   const [feedback, setFeedback] = useState(null);
@@ -246,10 +330,14 @@ const RequestView = ({ requestId }) => {
   const [rowPicker, setRowPicker] = useState(false);
   const [rowQuery, setRowQuery] = useState('');
   // HOW MANY UNITS ONE SCAN MEANS. Default 1 — one drum per trigger-pull.
+  // Back to 1 on a new product or a new rack (PART 3, U1: it stayed at 9).
   const [perScan, setPerScan] = useState(1);
-  // True once the worker sets the multiplier by hand — an explicit choice
-  // must never be overridden by the lot-packing auto-seed below.
-  const perScanTouched = useRef(false);
+  const perScanRef = useRef(1);
+  useEffect(() => { perScanRef.current = perScan; }, [perScan]);
+  // The container word of the last lot pulled — "Each scan is 1 bag".
+  const [lastUnitLabel, setLastUnitLabel] = useState(null);
+  const lastItemIdRef = useRef(null);
+  const packingHinted = useRef(new Set());
   // Armed for exactly ONE scan, then auto-resets: pulling a part-used drum is
   // the exception, and a toggle that stays on would book every following full
   // drum as an open one.
@@ -264,6 +352,8 @@ const RequestView = ({ requestId }) => {
   const [locationId, setLocationId] = useState(saved.locationId || '');
   const [subLocationId, setSubLocationId] = useState(saved.subLocationId || '');
   const [submitConfirm, setSubmitConfirm] = useState(null);
+  // A lot went ON HOLD with units on the cart: submit stopped (PART 3, B3).
+  const [heldStop, setHeldStop] = useState(null);
 
   const inputRef = useRef(null);
 
@@ -306,12 +396,72 @@ const RequestView = ({ requestId }) => {
     }));
   }, []);
 
+  // ── Load ───────────────────────────────────────────────────────────────────
+  const takeRequest = useCallback((data) => {
+    if (!data) return;
+    setRequest(data);
+    setItems(Array.isArray(data.items) ? data.items : []);
+    setStaleSince(null);
+    saveCached(pullRequestCacheKey(requestId), data);
+  }, [requestId]);
+
+  const loadRequest = useCallback(() => {
+    setLoading(true);
+    return getStagingPullRequest(requestId)
+      .then((data) => { takeRequest(data); setLoadError(''); noteReachability(true); })
+      .catch(async (err) => {
+        // No wifi on a reload: show the request as this gun last saw it, with
+        // the queue on top — never just "status code 500" (PART 3, B9).
+        const down = await serverIsDown(err);
+        const cached = down ? readCached(pullRequestCacheKey(requestId)) : null;
+        if (cached) {
+          setRequest((prev) => prev || cached.data);
+          setItems((prev) => (prev.length ? prev : (cached.data?.items || [])));
+          setStaleSince(cached.savedAt);
+          setLoadError('');
+        } else if (down) {
+          setLoadError(
+            'The gun cannot reach the server, and this pull is not saved on this gun yet. '
+            + 'It opens by itself as soon as the gun is back online.',
+          );
+        } else {
+          setLoadError(errorText(err, 'Could not load this request'));
+        }
+      })
+      .finally(() => setLoading(false));
+  }, [requestId, takeRequest]);
+
+  useEffect(() => { loadRequest(); }, [loadRequest]);
+
+  // A quiet re-read after pulls: fresh FEFO chips, held lots, cart lines.
+  const refreshTimer = useRef(null);
+  const refreshDetail = useCallback(() => {
+    clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => {
+      getStagingPullRequest(requestId)
+        .then((data) => { takeRequest(data); setLoadError(''); })
+        .catch(() => { /* keep what is on screen; the queue tells the network story */ });
+    }, DETAIL_REFRESH_MS);
+  }, [requestId, takeRequest]);
+  useEffect(() => () => clearTimeout(refreshTimer.current), []);
+
+  // Remember the staging location across visits.
+  useEffect(() => {
+    if (locationId) saveLocation(locationId, subLocationId);
+  }, [locationId, subLocationId]);
+
   // ── Queue result handling ──────────────────────────────────────────────────
   const onScanSettled = useCallback((item, response, error) => {
     // The queue is shared with every other flow; only touch what this request sent.
     if (item.endpoint !== endpointRef.current) return;
 
     if (error) {
+      // Parked by the queue: the server is up but could not record THIS scan.
+      if (isServerFault(item)) {
+        patchHistory(item.idempotency_key, { state: 'attention', message: SERVER_FAULT_MESSAGE });
+        showError('A scan needs attention — the server could not record it. Retry or Discard it on this screen.');
+        return;
+      }
       if (!isTerminal(error)) return; // transient — leave it queued
       removeScan(item.id);
       const message = errorText(error, 'Scan rejected');
@@ -326,7 +476,9 @@ const RequestView = ({ requestId }) => {
     // comes back, so the pending[] entry kept here is the only remaining
     // handle on that scan, and several can be in flight back to back.
     if (response.status === 'needs_confirm') {
-      patchHistory(item.idempotency_key, { state: 'confirm', message: response.message });
+      patchHistory(item.idempotency_key, {
+        state: 'confirm', message: response.message, vendorLot: response.vendor_lot || undefined,
+      });
       setFefoConfirm((prev) => {
         const pending = {
           // The SAME idempotency key is replayed with allow_mismatch, so a
@@ -334,11 +486,12 @@ const RequestView = ({ requestId }) => {
           payload: item.payload,
           idempotencyKey: item.idempotency_key,
           rowId: item.payload?.storage_row_id,
-          rowName: rowNameFor(item.payload?.storage_row_id),
+          rowName: rowNameFor(item.payload?.storage_row_id) || item.payload?.row_name_hint,
           lotCode: response.lot_code || item.payload?.code,
+          vendorLot: response.vendor_lot,
         };
         if (!prev) {
-          return { message: response.message, warning: response.warning || '', pending: [pending] };
+          return { message: response.message, pending: [pending] };
         }
         if (prev.pending.some((p) => p.idempotencyKey === pending.idempotencyKey)) return prev;
         return { ...prev, pending: [...prev.pending, pending] };
@@ -348,8 +501,11 @@ const RequestView = ({ requestId }) => {
     }
 
     if (TERMINAL_SCAN_STATUSES.includes(response.status)) {
-      patchHistory(item.idempotency_key, { state: 'error', message: response.message });
+      patchHistory(item.idempotency_key, {
+        state: 'error', message: response.message, vendorLot: response.vendor_lot || undefined,
+      });
       showError(response.message);
+      if (response.status === 'lot_held') refreshDetail();
       return;
     }
 
@@ -358,31 +514,53 @@ const RequestView = ({ requestId }) => {
       state: 'ok',
       message: response.message,
       ingredientName: response.ingredient_name,
+      vendorLot: response.vendor_lot || undefined,
       lotCode: response.lot_code || undefined,
       units: response.units ?? undefined,
+      unitLabel: response.unit_label || undefined,
     });
-    // Seed the multiplier from the lot's own packing. Receiving prefills 50
-    // for a 50-per-pallet lot; this flow started at 1, so pulling a wrapped
-    // pallet booked ONE bag unless the worker remembered to key 50 by hand
-    // (2026-09-29 audit, bags finding 12). Only while untouched and still at
-    // the default, and never retroactively - the toast names what this scan
-    // actually booked.
-    const upp = Number(response.units_per_pallet || 0);
-    if (upp > 1 && !perScanTouched.current && perScan === 1 && !item.payload?.pull_open) {
-      setPerScan(upp);
-      showInfo(`This lot packs ${upp} per pallet - each scan now pulls ${upp}. This scan pulled ${response.units ?? 1}.`);
+    if (response.unit_label) setLastUnitLabel(response.unit_label);
+    refreshDetail();
+
+    // A new product with the multiplier above 1: this scan already pulled N
+    // of it — say so, and put the multiplier back to 1 for the next one.
+    const prevItem = lastItemIdRef.current;
+    lastItemIdRef.current = response.item_id || prevItem;
+    if (prevItem && response.item_id && response.item_id !== prevItem
+        && perScanRef.current > 1 && !item.payload?.pull_open) {
+      setPerScan(1);
+      showInfo(`${response.message} New product — each scan is back to 1. Press Undo if that was too many.`);
+      return;
     }
-    if (response.warning) {
+
+    // Packing hint, never an automatic multiplier: a wrapped pallet of 40 bags
+    // wears the same sticker as one bag, so the worker decides (and the
+    // multiplier resets by itself on the next product).
+    const upp = Number(response.units_per_pallet || 0);
+    if (upp > 1 && perScanRef.current === 1 && !item.payload?.pull_open
+        && !packingHinted.current.has(response.lot_code)) {
+      packingHinted.current.add(response.lot_code);
       playSuccessTone();
-      showInfo(response.warning);
+      showInfo(`${response.message} This lot packs ${upp} per pallet — for a whole pallet, set "Each scan" to ${upp}.`);
       return;
     }
     showSuccess(response.message || 'Pulled');
-  }, [applyCounts, patchHistory, rowNameFor, showError, showInfo, showSuccess, perScan]);
+  }, [applyCounts, patchHistory, rowNameFor, showError, showInfo, showSuccess, refreshDetail]);
 
   const {
-    online, queue, send, drain, retry, syncing, lastSyncError,
+    online, queue, send, drain, retry, retryItem, discard, syncing, lastSyncError,
   } = usePullScanQueue(onScanSettled);
+
+  // Back online: a saved copy or an error on screen is replaced by the real
+  // request, and the counts re-read — no manual reload (PART 3, B9).
+  const prevOnline = useRef(online);
+  useEffect(() => {
+    const was = prevOnline.current;
+    prevOnline.current = online;
+    if (!online) return;
+    if (staleSince || (loadError && !request)) loadRequest();
+    else if (was === false) refreshDetail();
+  }, [online]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Derived queue counts, scoped to this request ───────────────────────────
   const myItems = useMemo(
@@ -393,43 +571,43 @@ const RequestView = ({ requestId }) => {
     () => myItems.filter((it) => it.state === 'pending'),
     [myItems],
   );
+  const attentionItems = useMemo(
+    () => myItems.filter((it) => isServerFault(it)),
+    [myItems],
+  );
   const failedCount = useMemo(
     () => myItems.filter((it) => it.state === 'failed').length,
     [myItems],
   );
-  // UNITS, not queue items. The client cannot map a queued lot code to an item
-  // (that is the server's job), so the overlay is a whole-cart unit count:
-  // quantities update per item when each scan settles.
-  const queuedUnits = useMemo(
-    () => pendingItems.reduce((n, it) => n + (Number(it.payload?.units) || 1), 0),
-    [pendingItems],
-  );
+  // Queued pulls per line, matched by lot code offline (B9: "On cart" ignored them).
+  const queued = useMemo(() => queuedByItem(items, pendingItems), [items, pendingItems]);
+  // What this gun has pulled off each rack but not yet sent.
+  const queuedOffRow = useMemo(() => {
+    const out = {};
+    pendingItems.forEach((it) => {
+      const rid = it.payload?.storage_row_id;
+      if (!rid || it.payload?.pull_open) return;
+      out[rid] = (out[rid] || 0) + (Number(it.payload?.units) || 1);
+    });
+    return out;
+  }, [pendingItems]);
 
-  const onCartQty = useMemo(
-    () => items.reduce((n, it) => n + (Number(it.pending_qty) || 0), 0),
+  const cartLines = useMemo(() => cartSummary(items), [items]);
+  const heldOnCart = useMemo(
+    () => items.flatMap((it) => (it.cart_lots || []).filter((l) => l.is_held)),
     [items],
   );
   const dialogOpen = !!rowPicker;
 
-  // ── Load ───────────────────────────────────────────────────────────────────
-  const loadRequest = useCallback(() => {
-    setLoading(true);
-    return getStagingPullRequest(requestId)
-      .then((data) => {
-        setRequest(data);
-        setItems(Array.isArray(data.items) ? data.items : []);
-        setLoadError('');
-      })
-      .catch((err) => setLoadError(errorText(err, 'Could not load this request')))
-      .finally(() => setLoading(false));
-  }, [requestId]);
-
-  useEffect(() => { loadRequest(); }, [loadRequest]);
-
-  // Remember the staging location across visits.
-  useEffect(() => {
-    if (locationId) saveLocation(locationId, subLocationId);
-  }, [locationId, subLocationId]);
+  // "Each scan is 1 bag": the last lot pulled, else what the open lines are in.
+  const scanUnitLabel = useMemo(() => {
+    if (lastUnitLabel) return lastUnitLabel;
+    const open = items.filter((it) => (it.remaining_qty ?? 0) > 0);
+    const labels = [...new Set(open.map((it) => it.unit_label).filter(Boolean))];
+    return labels.length === 1 ? labels[0] : null;
+  }, [lastUnitLabel, items]);
+  const openUnit = useMemo(() => openPullUnit(items), [items]);
+  useEffect(() => { if (!openUnit && pullOpen) setPullOpen(false); }, [openUnit, pullOpen]);
 
   // ── Keyboard-wedge focus watchdog ──────────────────────────────────────────
   useEffect(() => {
@@ -451,34 +629,53 @@ const RequestView = ({ requestId }) => {
   }, [manualKeyboard, dialogOpen]);
 
   // ── Rack context ───────────────────────────────────────────────────────────
-  const adoptRow = useCallback((resolved) => {
+  const adoptRow = useCallback((resolved, { offline = false } = {}) => {
+    const changed = !row || row.id !== resolved.id;
     setRow(resolved);
     setRows((prev) => (prev.some((r) => r.id === resolved.id) ? prev : [...prev, resolved]));
     setRowPicker(false);
-    showSuccess(`→ ${resolved.name}`);
-  }, [showSuccess, setRows]);
+    // A new rack is usually the next product: the multiplier goes back to 1.
+    if (changed && perScanRef.current > 1) {
+      setPerScan(1);
+      playSuccessTone();
+      setFeedback({ kind: 'info', message: `→ ${resolved.name}. Each scan is back to 1.` });
+      return;
+    }
+    showSuccess(`→ ${resolved.name}${offline ? ' (from the rack list saved on this gun)' : ''}`);
+  }, [row, showSuccess, setRows]);
 
   /**
-   * Ask the SERVER what rack a code is. Returns `{ row, error }`:
-   *   row set    → resolved, adopt it
-   *   error set  → the server named a problem; show it verbatim, never guess
-   *   both null  → not a rack; the caller may treat the token as a lot code
+   * Ask the SERVER what rack a code is. Returns `{ row, error, offline }`:
+   *   row set      → resolved (from the server, or the saved list offline)
+   *   error set    → the server named a problem; show it verbatim, never guess
+   *   offline      → the server could not be asked and the saved list has no
+   *                  such barcode — the caller must NOT treat it as a lot
+   *   none of them → not a rack; the caller may treat the token as a lot code
    */
   const resolveRowCode = useCallback(async (code) => {
-    if (!online) {
-      // Offline: exact BARCODE equality against the cached list. Barcodes are
-      // unique; names are deliberately not matched — row names are NOT unique,
-      // and that fuzzy path pulls from the wrong barn.
+    // Offline: exact BARCODE equality against the cached list. Barcodes are
+    // unique; names are deliberately not matched — row names are NOT unique,
+    // and that fuzzy path pulls from the wrong barn.
+    const fromCache = () => {
       const upper = code.toUpperCase();
       const hit = rowsRef.current.find((r) => (r.barcode || '').toUpperCase() === upper);
-      return { row: hit || null, error: null };
-    }
+      return { row: hit || null, error: null, offline: !hit, cached: !!hit };
+    };
+    if (!online) return fromCache();
     try {
       return { row: await resolveRow(code), error: null };
     } catch (err) {
       const status = err?.response?.status;
       if (status === 404) return { row: null, error: null }; // simply not a rack
-      if (!err?.response) return { row: null, error: null }; // dropped mid-scan
+      // Dropped mid-scan: the rack label must still work from the saved list
+      // — PART 3 B9: it used to do nothing and keep the OLD rack.
+      if (isUnreachableError(err)) {
+        if (await serverIsDown(err)) return fromCache();
+        return {
+          row: null,
+          error: 'The server could not check that rack code. Scan it again, or press Change and pick the rack.',
+        };
+      }
       return { row: null, error: errorText(err, 'Could not resolve that rack') };
     }
   }, [online]);
@@ -495,7 +692,7 @@ const RequestView = ({ requestId }) => {
 
   // ── Record one pull ────────────────────────────────────────────────────────
   const recordPull = useCallback((code, {
-    displayCode, allowMismatch = false, reuseKey, intoRow, payloadOverride,
+    displayCode, vendorLot, allowMismatch = false, reuseKey, intoRow, payloadOverride,
   } = {}) => {
     // `intoRow` / `payloadOverride` pin the FEFO replay to exactly what was
     // parked — the sticky rack and the toggles may have moved on since.
@@ -506,23 +703,31 @@ const RequestView = ({ requestId }) => {
         : 'Not pulled — scan a rack first (offline, so pick the rack from the list).');
       return;
     }
+    const lotName = lotDisplayName({ vendorLot, lotCode: displayCode || code });
     const payload = payloadOverride || {
       code,
       storage_row_id: target.id,
       units: perScan,
       pull_open: pullOpen,
+      // Hints for this gun only (the server ignores them): which line a
+      // queued sticker belongs to offline, and what the network panel calls it.
+      lot_code_hint: displayCode || code,
+      vendor_lot_hint: vendorLot || null,
+      row_name_hint: target.name,
+      display: `${pullOpen ? 'Open ' : ''}${perScan > 1 ? `${perScan} × ` : ''}${lotName} ← ${target.name}`,
     };
     if (allowMismatch) payload.allow_mismatch = true;
     const item = send(requestId, endpoint, payload, reuseKey);
     const entry = {
       key: item.idempotency_key,
       lotCode: displayCode || payload.code,
+      vendorLot: vendorLot || undefined,
       rowId: target.id,
       rowName: target.name,
       units: payload.units || 1,
       pullOpen: !!payload.pull_open,
       state: 'pending',
-      message: 'Queued',
+      message: queuedRowMessage(online),
     };
     setHistory((prev) => [
       entry,
@@ -553,7 +758,7 @@ const RequestView = ({ requestId }) => {
 
     // A versioned envelope (`SB2|lot_code|lot|bbd`) is unambiguously a sticker.
     if (decoded && !decoded.bare) {
-      recordPull(raw, { displayCode: decoded.lotCode });
+      recordPull(raw, { displayCode: decoded.lotCode, vendorLot: decoded.vendorLot });
       return;
     }
     if (!decoded) {
@@ -566,13 +771,22 @@ const RequestView = ({ requestId }) => {
     scanInFlight.current = true;
     setBusy(true);
     try {
-      const { row: found, error } = await resolveRowCode(raw);
-      if (found) { adoptRow(found); return; }
-      if (error) { showError(error); return; }
+      const { row: found, error, offline, cached } = await resolveRowCode(raw);
+      if (found) { adoptRow(found, { offline: cached }); return; }
+      if (error) { logRefusal(raw, error); return; }
+      if (offline) {
+        // A known lot code of this request is still a pull; anything else
+        // might be a rack this gun has not saved — never pull it "from" the
+        // old rack by guess (PART 3, B9).
+        const lineFor = itemForLot(itemsRef.current, { lotCode: raw });
+        if (lineFor && row) { recordPull(raw); return; }
+        logRefusal(raw, `Offline — "${raw}" is not a rack saved on this gun, so the rack was NOT changed`
+          + `${row ? ` (still ${row.name})` : ''}. At a new rack? Press ${row ? 'Change' : 'Pick rack'} and choose it. `
+          + 'Pull drums by scanning their 2D sticker.');
+        return;
+      }
       if (!row) {
-        logRefusal(raw, online
-          ? 'Not a known rack — scan a rack barcode before any drum.'
-          : 'Offline — that code is not in the cached rack list. Pick the rack from the list.');
+        logRefusal(raw, 'Not a known rack — scan a rack barcode before any drum.');
         return;
       }
       recordPull(raw);
@@ -580,7 +794,7 @@ const RequestView = ({ requestId }) => {
       scanInFlight.current = false;
       setBusy(false);
     }
-  }, [scanInput, recordPull, resolveRowCode, adoptRow, row, online, showError, logRefusal]);
+  }, [scanInput, recordPull, resolveRowCode, adoptRow, row, showError, logRefusal]);
 
   // ── FEFO confirm ───────────────────────────────────────────────────────────
   const confirmFefo = useCallback(() => {
@@ -590,6 +804,7 @@ const RequestView = ({ requestId }) => {
     fefoConfirm.pending.forEach((p) => {
       recordPull(p.payload.code, {
         displayCode: p.lotCode,
+        vendorLot: p.vendorLot,
         allowMismatch: true,
         reuseKey: p.idempotencyKey, // same key -> replay, not a second pull
         intoRow: { id: p.rowId, name: p.rowName },
@@ -607,6 +822,21 @@ const RequestView = ({ requestId }) => {
     setFefoConfirm(null);
   }, [fefoConfirm, patchHistory]);
 
+  // ── Needs attention: one parked scan ───────────────────────────────────────
+  const retryParked = useCallback((it) => {
+    patchHistory(it.idempotency_key, { state: 'pending', message: queuedRowMessage(online) });
+    retryItem(it.id);
+  }, [retryItem, patchHistory, online]);
+
+  const discardParked = useCallback((it) => {
+    discard(it.id);
+    patchHistory(it.idempotency_key, {
+      state: 'error',
+      message: 'Discarded — nothing was booked. Put it back on the rack, or scan it again.',
+    });
+    showInfo('Scan discarded — nothing was booked for it.');
+  }, [discard, patchHistory, showInfo]);
+
   // ── Undo ───────────────────────────────────────────────────────────────────
   const handleUndo = useCallback(async () => {
     if (pendingItems.length > 0) {
@@ -620,15 +850,22 @@ const RequestView = ({ requestId }) => {
         showInfo(result.message);
       } else {
         applyCounts(result);
-        setHistory((prev) => prev.slice(1));
+        setHistory((prev) => {
+          const i = prev.findIndex((h) => h.state === 'ok');
+          if (i < 0) return prev;
+          const next = [...prev];
+          next[i] = { ...next[i], state: 'error', message: 'Undone — back on the rack' };
+          return next;
+        });
         showSuccess(result.message);
+        refreshDetail();
       }
     } catch (err) {
       showError(errorText(err, 'Could not undo'));
     } finally {
       setBusy(false);
     }
-  }, [requestId, pendingItems.length, applyCounts, showError, showInfo, showSuccess]);
+  }, [requestId, pendingItems.length, applyCounts, showError, showInfo, showSuccess, refreshDetail]);
 
   // ── Submit to staging ──────────────────────────────────────────────────────
   const handleSubmit = useCallback(async (confirmed = false) => {
@@ -647,6 +884,14 @@ const RequestView = ({ requestId }) => {
         staging_sub_location_id: subLocationId || null,
         confirmed,
       });
+      if (result.status === 'lot_held') {
+        // Nothing was written. The held units must go back first.
+        setSubmitConfirm(null);
+        setHeldStop(result);
+        showError(result.message);
+        refreshDetail();
+        return;
+      }
       if (result.status === 'needs_confirm') {
         setSubmitConfirm(result);
         return;
@@ -658,11 +903,29 @@ const RequestView = ({ requestId }) => {
       }
       navigate('/forklift/staging-pull');
     } catch (err) {
-      showError(errorText(err, 'Could not submit this pull.'));
+      const down = await serverIsDown(err);
+      showError(down
+        ? 'Not submitted — the gun cannot reach the server. Nothing was changed; submit again when it is back.'
+        : errorText(err, 'Could not submit this pull.'));
     } finally {
       setBusy(false);
     }
-  }, [requestId, pendingItems.length, locationId, subLocationId, navigate, showError, showInfo]);
+  }, [requestId, pendingItems.length, locationId, subLocationId, navigate, showError, showInfo, refreshDetail]);
+
+  const handleReturnHeld = useCallback(async () => {
+    setBusy(true);
+    try {
+      const result = await returnHeldStagingPull(requestId);
+      setHeldStop(null);
+      if (result.status === 'returned') showSuccess(result.message);
+      else showInfo(result.message);
+      refreshDetail();
+    } catch (err) {
+      showError(errorText(err, 'Could not put the held units back.'));
+    } finally {
+      setBusy(false);
+    }
+  }, [requestId, refreshDetail, showError, showInfo, showSuccess]);
 
   /**
    * Racks for the manual picker, in two groups. SORTED, never filtered: drum
@@ -694,6 +957,15 @@ const RequestView = ({ requestId }) => {
     [locationId, subLocationMap],
   );
 
+  const blockReason = submitBlockReason({
+    online,
+    queuedCount: pendingItems.length,
+    attentionCount: attentionItems.length,
+    panelOpen: submitPanel,
+    locationId,
+    busy,
+  });
+
   const netStatus = (
     <NetworkStatus
       online={online}
@@ -702,21 +974,30 @@ const RequestView = ({ requestId }) => {
       syncing={syncing}
       lastSyncError={lastSyncError}
       onRetry={retry}
+      onDropFailed={discard}
       onForceSync={drain}
     />
   );
 
-  if (loading) {
+  if (loading && !request) {
     return (
       <ScannerLayout title="Staging Pull" showBack onBack={() => navigate('/forklift/staging-pull')}>
         <p className="sir-muted">Loading…</p>
       </ScannerLayout>
     );
   }
-  if (loadError) {
+  if (loadError && !request) {
     return (
-      <ScannerLayout title="Staging Pull" showBack onBack={() => navigate('/forklift/staging-pull')}>
-        <div className="sir-error"><AlertTriangle size={16} /> {loadError}</div>
+      <ScannerLayout
+        title="Staging Pull"
+        showBack
+        onBack={() => navigate('/forklift/staging-pull')}
+        headerExtra={netStatus}
+      >
+        <div className="sir-session">
+          <OfflineBanner online={online} queued={pendingItems.length} />
+          <div className="sir-error"><AlertTriangle size={16} /> {loadError}</div>
+        </div>
       </ScannerLayout>
     );
   }
@@ -724,9 +1005,14 @@ const RequestView = ({ requestId }) => {
   const historyIcon = (entry) => {
     if (entry.state === 'pending') return <Clock size={16} color="#b45309" />;
     if (entry.state === 'error') return <X size={16} color="#dc2626" />;
+    if (entry.state === 'attention') return <AlertTriangle size={16} color="#dc2626" />;
     if (entry.state === 'confirm') return <AlertTriangle size={16} color="#b45309" />;
     return <Check size={16} color="#16a34a" />;
   };
+
+  const entryLot = (entry) => (entry.ingredientName
+    ? `${entry.ingredientName} · ${lotDisplayName(entry)}`
+    : lotDisplayName(entry));
 
   return (
     <ScannerLayout
@@ -736,7 +1022,12 @@ const RequestView = ({ requestId }) => {
       headerExtra={netStatus}
     >
       <div className="sir-session">
-        <OfflineBanner online={online} queued={pendingItems.length} />
+        <OfflineBanner
+          online={online}
+          queued={pendingItems.length}
+          staleSince={staleSince}
+          what="pull"
+        />
         <div className="sir-meta">
           <span>{request?.product_name}</span>
           {request?.formula_name && (
@@ -745,17 +1036,61 @@ const RequestView = ({ requestId }) => {
               <span>{request.formula_name}</span>
             </>
           )}
-          <span className="sir-meta-sep">·</span>
-          <span>{formatCalendarDate(request?.production_date)}</span>
+          {request?.production_date && (
+            <>
+              <span className="sir-meta-sep">·</span>
+              <span>Production {formatCalendarDate(request.production_date)}</span>
+            </>
+          )}
         </div>
+
+        {/* Scans the server could not record while it was otherwise up —
+            Retry or Discard, never an endless "OFFLINE" (PART 3, B1). */}
+        {attentionItems.length > 0 && (
+          <div className="spf-attention" role="alert">
+            <strong>
+              <AlertTriangle size={16} />
+              {' '}
+              {attentionItems.length === 1
+                ? '1 scan needs attention'
+                : `${attentionItems.length} scans need attention`}
+            </strong>
+            {attentionItems.map((it) => (
+              <div key={it.id} className="spf-attention-row">
+                <div className="spf-attention-text">
+                  <span className="spf-attention-what">{it.payload?.display || it.payload?.code}</span>
+                  <span>{it.lastError || SERVER_FAULT_MESSAGE}</span>
+                  {it.errorDetail && (
+                    <small className="spf-attention-detail">
+                      For the office: {String(it.errorDetail).slice(0, 140)}
+                    </small>
+                  )}
+                </div>
+                <div className="spf-attention-actions">
+                  <button type="button" className="sir-btn sir-btn--warn" onClick={() => retryParked(it)}>
+                    Retry
+                  </button>
+                  <button type="button" className="sir-btn sir-btn--ghost" onClick={() => discardParked(it)}>
+                    Discard
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* What to pull, item by item, with the FEFO suggestion as ADVICE. */}
         <div className="spf-items">
           {items.map((item) => {
             const suggestion = item.suggestion;
             const topRack = suggestion?.racks?.[0];
-            const unitLabel = suggestion?.unit_label || 'units';
+            const unitLabel = suggestion?.unit_label || item.unit_label || 'unit';
             const done = (item.remaining_qty ?? 0) <= 0;
+            const queuedHere = queued.byItem[item.id] || [];
+            const stagedWords = unitsWords(item.staged_units);
+            const cartWords = unitsWords(item.pending_units);
+            const queuedWords = unitsWords(queuedHere);
+            const heldCart = (item.cart_lots || []).filter((l) => l.is_held);
             return (
               <div key={item.id} className={`spf-item${done ? ' spf-item--done' : ''}`}>
                 <div className="spf-item-head">
@@ -763,18 +1098,38 @@ const RequestView = ({ requestId }) => {
                   <span className="spf-item-sid">{item.sid}</span>
                 </div>
                 <div className="spf-item-nums">
-                  <span><strong>{item.quantity_needed}</strong> {item.unit} needed</span>
-                  <span><strong>{item.quantity_fulfilled}</strong> staged</span>
-                  <span><strong>{item.pending_qty}</strong> on cart</span>
+                  <span><strong>{formatQty(item.quantity_needed)}</strong> {item.unit} needed</span>
+                  <span>
+                    <strong>{formatQty(item.quantity_fulfilled)}</strong> staged
+                    {stagedWords ? ` (${stagedWords})` : ''}
+                  </span>
+                  <span>
+                    <strong>{formatQty(item.pending_qty)}</strong> on cart
+                    {cartWords ? ` (${cartWords})` : ''}
+                    {queuedWords ? ` + ${queuedWords} waiting to send` : ''}
+                  </span>
                 </div>
+                {(item.held_lots || []).map((h) => (
+                  <div key={h.lot_code} className="spf-held">
+                    ON HOLD: lot {h.lot_name}
+                    {h.hold_reason ? ` (${h.hold_reason})` : ''}
+                    {h.units ? ` — ${unitsWords([{ unit_label: h.unit_label, units: h.units }])} on racks` : ''}
+                    . Do not pull it.
+                  </div>
+                ))}
+                {heldCart.map((l) => (
+                  <div key={`cart-${l.lot_code}`} className="spf-held">
+                    {unitsWords([l])} of lot {l.lot_name} on the cart went ON HOLD — it cannot be staged.
+                  </div>
+                ))}
                 {suggestion && !done && (
                   <div className="spf-suggest">
                     <span className="spf-suggest-line">
                       FEFO: lot {suggestion.lot_number}
                       {suggestion.expiration_date
-                        ? ` (${formatCalendarDate(suggestion.expiration_date)})` : ''}
+                        ? ` (best by ${formatCalendarDate(suggestion.expiration_date)})` : ''}
                       {topRack
-                        ? ` — Rack: ${topRack.storage_row_name} (${topRack.available_units} ${unitLabel})`
+                        ? ` — Rack: ${topRack.storage_row_name} (${unitsWords([{ unit_label: unitLabel, units: topRack.available_units }]) || 0})`
                         : ''}
                     </span>
                     {suggestion.racks?.length > 0 && (
@@ -823,7 +1178,7 @@ const RequestView = ({ requestId }) => {
               <div className="sir-warn-detail">
                 {fefoConfirm.pending.length > 1
                   ? `${fefoConfirm.pending.length} scans are waiting on your answer.`
-                  : (fefoConfirm.warning || 'Pull it anyway, or put it back and take the FEFO lot.')}
+                  : 'Pull it anyway, or put it back and take the older lot.'}
               </div>
               <div className="sir-warn-actions">
                 <button type="button" className="sir-btn sir-btn--warn" onClick={confirmFefo}>
@@ -855,7 +1210,7 @@ const RequestView = ({ requestId }) => {
             <button
               type="button"
               className="spf-units-btn"
-              onClick={() => { perScanTouched.current = true; setPerScan((v) => Math.max(1, v - 1)); }}
+              onClick={() => setPerScan((v) => Math.max(1, v - 1))}
               aria-label="Fewer units per scan"
             >
               −
@@ -867,7 +1222,6 @@ const RequestView = ({ requestId }) => {
               value={perScan}
               onChange={(e) => {
                 const n = parseInt(e.target.value, 10);
-                perScanTouched.current = true;
                 setPerScan(Number.isFinite(n) && n > 0 ? n : 1);
               }}
               aria-label="Units per scan"
@@ -875,19 +1229,22 @@ const RequestView = ({ requestId }) => {
             <button
               type="button"
               className="spf-units-btn"
-              onClick={() => { perScanTouched.current = true; setPerScan((v) => v + 1); }}
+              onClick={() => setPerScan((v) => v + 1)}
               aria-label="More units per scan"
             >
               +
             </button>
+            <span className="spf-units-label">{perScanUnit(perScan, scanUnitLabel)}</span>
           </div>
-          <button
-            type="button"
-            className={`spf-open-btn${pullOpen ? ' is-on' : ''}`}
-            onClick={() => setPullOpen((v) => !v)}
-          >
-            {pullOpen ? 'Next scan: OPEN drum' : 'Pull open drum'}
-          </button>
+          {openUnit && (
+            <button
+              type="button"
+              className={`spf-open-btn${pullOpen ? ' is-on' : ''}`}
+              onClick={() => setPullOpen((v) => !v)}
+            >
+              {pullOpen ? `Next scan: OPEN ${openUnit}` : `Pull open ${openUnit}`}
+            </button>
+          )}
         </div>
 
         <form onSubmit={handleScanSubmit} className="sir-form">
@@ -919,7 +1276,7 @@ const RequestView = ({ requestId }) => {
             <h3>Recent pulls</h3>
             {pendingItems.length > 0 && (
               <span className="sir-history-pending">
-                {pendingItems.length} queued · {queuedUnits} units
+                {pendingItems.length} waiting to send
               </span>
             )}
           </div>
@@ -928,16 +1285,20 @@ const RequestView = ({ requestId }) => {
               Scan the rack, then scan the lot sticker on every drum you lift.
             </p>
           ) : history.map((entry) => (
-            <div key={entry.key} className={`sir-history-item sir-history-item--${entry.state}`}>
+            <div key={entry.key} className={`sir-history-item sir-history-item--${entry.state === 'attention' ? 'error' : entry.state}`}>
               {historyIcon(entry)}
               <div className="sir-history-body">
                 <span className="sir-history-serial">
-                  {entry.refused ? 'Not pulled' : `+${entry.units || 1}`}
+                  {entry.refused
+                    ? 'Not pulled'
+                    : `+${unitsWords([{ unit_label: entry.unitLabel || 'unit', units: entry.units || 1 }])}`}
                   {entry.pullOpen ? ' (open)' : ''}
-                  {entry.ingredientName ? ` · ${entry.ingredientName}` : ` · ${entry.lotCode}`}
+                  {` · ${entryLot(entry)}`}
                 </span>
                 {entry.state !== 'ok' && entry.message && (
-                  <span className="sir-history-msg">{entry.message}</span>
+                  <span className="sir-history-msg">
+                    {entry.state === 'pending' ? queuedRowMessage(online) : entry.message}
+                  </span>
                 )}
               </div>
               <span className="sir-history-row">{entry.rowName}</span>
@@ -958,6 +1319,30 @@ const RequestView = ({ requestId }) => {
           </button>
         </div>
 
+        {/* A lot went ON HOLD while on the cart: those units go back, the
+            rest can be staged (PART 3, B3). Red — this one is not legal. */}
+        {(heldStop || heldOnCart.length > 0) && (
+          <div className="spf-held-stop" role="alert">
+            <AlertTriangle size={18} />
+            <div>
+              <strong>
+                {heldStop?.message
+                  || `${heldOnCart.map((l) => `${unitsWords([l])} of lot ${l.lot_name}`).join(', ')} on the cart went ON HOLD. It cannot be staged — put it back on its rack.`}
+              </strong>
+              <div className="sir-warn-actions">
+                <button
+                  type="button"
+                  className="sir-btn sir-btn--warn"
+                  onClick={handleReturnHeld}
+                  disabled={busy || !online}
+                >
+                  I put them back — update the racks
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* A short cart ASKS. Inline, amber — short is legal, and colouring a
             legal outcome red trains people to click past it. */}
         {submitConfirm && (
@@ -965,16 +1350,6 @@ const RequestView = ({ requestId }) => {
             <AlertTriangle size={18} />
             <div>
               <strong>{submitConfirm.message}</strong>
-              {(submitConfirm.short_items || []).length > 0 && (
-                <div className="sir-warn-detail">
-                  Short: {submitConfirm.short_items.map((s) => (
-                    typeof s === 'string' ? s : (s.ingredient_name || s.name || '')
-                  )).filter(Boolean).join(', ') || `${submitConfirm.short_items.length} items`}
-                </div>
-              )}
-              {submitConfirm.warning && (
-                <div className="sir-warn-detail">{submitConfirm.warning}</div>
-              )}
               <div className="sir-warn-actions">
                 <button
                   type="button"
@@ -1000,6 +1375,17 @@ const RequestView = ({ requestId }) => {
             steals focus leaves the gun scanning into the void. */}
         {submitPanel && (
           <div className="spf-submit-panel">
+            {cartLines.length > 0 && (
+              <div className="spf-cart-summary">
+                <span className="spf-submit-label">On the cart</span>
+                {cartLines.map((l) => (
+                  <span key={l.id}><strong>{l.name}</strong> — {l.text}</span>
+                ))}
+                {queued.unmatched > 0 && (
+                  <span>+ {queued.unmatched} more waiting to send</span>
+                )}
+              </div>
+            )}
             <span className="spf-submit-label">Stage the cart at</span>
             <select
               className="spf-select"
@@ -1033,12 +1419,13 @@ const RequestView = ({ requestId }) => {
             if (!submitPanel) { setSubmitPanel(true); return; }
             handleSubmit(false);
           }}
-          disabled={busy || pendingItems.length > 0 || (submitPanel && !locationId)}
+          disabled={!!blockReason}
         >
-          {submitPanel
-            ? `Submit ${onCartQty > 0 ? `${onCartQty} on cart ` : ''}to staging`
-            : 'Submit to staging…'}
+          {submitPanel ? 'Submit the cart to staging' : 'Submit to staging…'}
         </button>
+        {blockReason && !busy && (
+          <p className="spf-block-reason">{blockReason}</p>
+        )}
 
         <button
           type="button"
@@ -1061,6 +1448,9 @@ const RequestView = ({ requestId }) => {
             <p className="sir-dialog-hint">
               Scanning the rack label is faster and cannot pick the wrong one.
               This is for when the label is damaged.
+              {!online && fillSavedAt
+                ? ` Offline: counts as of ${formatTime(new Date(fillSavedAt).toISOString())}, minus what this gun has pulled since.`
+                : ''}
             </p>
             <input
               type="text"
@@ -1077,8 +1467,10 @@ const RequestView = ({ requestId }) => {
                     <div className="sir-dialog-group">{group.label}</div>
                   )}
                   {group.rows.map((r) => {
-                    // "11/12 drums", not just "12 drums" (U10).
-                    const fillLabel = rackFillLabel(r, rackFill[r.id] || 0);
+                    // Per container word: "3 drums · 12 bags", never "15 units".
+                    const fillLabel = rackFillText(
+                      r, fillByUnit[r.id], rackFill[r.id] || 0, queuedOffRow[r.id] || 0,
+                    );
                     return (
                       <button
                         key={r.id}

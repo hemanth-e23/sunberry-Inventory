@@ -33,6 +33,12 @@
 //       about a minute of outage — which made a worker's scans look lost, P05).
 //       It backs off on its own instead, and comes straight back the moment
 //       anything gets through.
+//       BUT a 500 while the server is otherwise UP (another item got through
+//       this pass, or /health answers) is the server refusing THIS scan — a
+//       bug, not an outage. The gun stays online, and after
+//       PARK_AFTER_SERVER_ERRORS tries the item is parked `failed` with
+//       failKind 'error' ("needs attention": Retry / Discard). It used to read
+//       OFFLINE forever with no way out but editing localStorage (PART 3, B1).
 //
 //   terminal error (other 4xx — closed session, validation)
 //       Parked as `failed` immediately for the operator to resolve.
@@ -240,6 +246,47 @@ export const isUnreachableError = (err) => {
   return err.response.status >= 500;
 };
 
+/**
+ * A scan the server keeps failing on while it answers everything else is not
+ * an outage. After this many 500s for one item, with the server otherwise up,
+ * it is parked for a person (Retry / Discard) — one automatic retry first, so
+ * a one-off hiccup clears by itself.
+ */
+export const PARK_AFTER_SERVER_ERRORS = 2;
+
+/** What the worker reads for a parked server fault. Plain words, no codes. */
+export const SERVER_FAULT_MESSAGE = 'The server could not record this scan. '
+  + 'This is a fault on the server, not the wifi — the gun is online. '
+  + 'Nothing was booked for it. Retry, or Discard and put it back.';
+
+/**
+ * Does the server itself answer? `/health` never touches the database, so a
+ * live server answers it even while one request crashes. No response, or a
+ * 5xx (a dev proxy for a dead backend answers 500), is "not there".
+ */
+const serverAnswersHealth = async () => {
+  try {
+    await apiClient.get('/health', { timeout: 8000 });
+    return true;
+  } catch (err) {
+    return !isUnreachableError(err);
+  }
+};
+
+/** A scan parked because the server faulted on it (not a refusal, not an outage). */
+export const isServerFault = (it) => it?.state === 'failed' && it?.failKind === 'error';
+
+/** Send one parked scan again — the worker's Retry on a "needs attention" row. */
+export const retryScan = (id) => {
+  updateScan(id, {
+    state: 'pending', failKind: null, lastError: null, errorDetail: null,
+    serverErrors: 0, nextAttemptAt: null,
+  });
+};
+
+/** Drop one scan — the worker's Discard. Nothing was booked for a parked scan. */
+export const discardScan = (id) => removeScan(id);
+
 /** Server answered but wants us to try again later. */
 const isServerError = (err) => {
   const s = err?.response?.status;
@@ -320,7 +367,8 @@ export const drainScanQueue = async ({ onItemResult, force = false } = {}) => {
   let lastError = null;
   let anySent = false;
   let anyAnswered = false; // the server itself spoke (2xx or a 4xx refusal)
-  let anyDown = false;     // something said "cannot reach" (transport / 5xx)
+  let anyDown = false;     // something said "cannot reach" (transport / 502-504)
+  const faulted = [];      // items a plain 5xx came back for, this pass
 
   try {
     while (true) {
@@ -374,7 +422,10 @@ export const drainScanQueue = async ({ onItemResult, force = false } = {}) => {
           // Keep it pending — never give up on it — but move on to the rest of
           // the queue. One bad scan must not hold up the 25 good ones behind it.
           const serverErrors = (next.serverErrors || 0) + 1;
-          if (err?.response?.status >= 500) anyDown = true;
+          // A plain 500 is ambiguous: a dev proxy standing in for a dead
+          // server, or a live server that cannot take THIS item. Decided after
+          // the pass (see below), never by the status alone.
+          if (err?.response?.status >= 500) faulted.push({ id: next.id, serverErrors, err });
           updateScan(next.id, {
             serverErrors,
             lastError,
@@ -397,6 +448,42 @@ export const drainScanQueue = async ({ onItemResult, force = false } = {}) => {
         updateScan(next.id, { state: 'failed', failKind: 'terminal', lastError });
         failed.push({ item: next, error: err });
         safeCallback(onItemResult, next, null, err);
+      }
+    }
+
+    // ── 500s: is the server down, or did it refuse THESE scans? ──────────────
+    // Browser test PART 3 B1: one scan the server crashed on (a code bug, not
+    // an outage) turned the whole gun "OFFLINE — cannot reach the server"
+    // while every other call worked, retried forever, and could only be
+    // cleared by editing localStorage. Ask: did anything else get an answer
+    // this pass, or does /health answer? If yes, the server is up — the gun is
+    // online, and a scan that keeps failing is parked as NEEDS ATTENTION with
+    // Retry / Discard, instead of hiding behind an OFFLINE banner.
+    if (faulted.length > 0) {
+      const serverUp = anyAnswered || (!anyDown && await serverAnswersHealth());
+      if (serverUp) {
+        reachable = true;
+        anyAnswered = true;
+        faulted
+          .filter((f) => f.serverErrors >= PARK_AFTER_SERVER_ERRORS)
+          .forEach((f) => {
+            const patch = {
+              state: 'failed',
+              failKind: 'error',
+              lastError: SERVER_FAULT_MESSAGE,
+              errorDetail: errorText(f.err),
+              nextAttemptAt: null,
+            };
+            updateScan(f.id, patch);
+            const parked = readAll().find((it) => it.id === f.id);
+            if (parked) {
+              failed.push({ item: parked, error: f.err });
+              safeCallback(onItemResult, parked, null, f.err);
+            }
+          });
+        lastError = null;
+      } else {
+        anyDown = true;
       }
     }
   } finally {

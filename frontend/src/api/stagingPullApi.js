@@ -41,6 +41,13 @@ export const undoStagingPull = (requestId) =>
   unwrap(apiClient.post(`/staging-pull/requests/${requestId}/undo`));
 
 /**
+ * Put on-cart units of a lot that went ON HOLD back on their racks. Submit
+ * answers `lot_held` (nothing written) while any are on the cart (PART 3, B3).
+ */
+export const returnHeldStagingPull = (requestId) =>
+  unwrap(apiClient.post(`/staging-pull/requests/${requestId}/return-held`));
+
+/**
  * Hand the cart over to staging.
  *
  * Returns `needs_confirm` with the short lines named when the pull is short —

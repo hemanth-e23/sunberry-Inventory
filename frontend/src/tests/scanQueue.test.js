@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 
 vi.mock('../api/client', () => ({
-  default: { post: vi.fn() },
+  default: { post: vi.fn(), get: vi.fn() },
 }));
 
 import apiClient from '../api/client';
@@ -16,8 +16,12 @@ import {
   drainScanQueue,
   enqueueScan,
   getConnectivity,
+  discardScan,
   isUnreachableError,
   listScans,
+  PARK_AFTER_SERVER_ERRORS,
+  retryScan,
+  SERVER_FAULT_MESSAGE,
   noteReachability,
   retryFailedScans,
   updateScan,
@@ -39,6 +43,10 @@ const queueScan = (licence) => enqueueScan({
 beforeEach(() => {
   __resetScanQueueForTests();
   apiClient.post.mockReset();
+  apiClient.get.mockReset();
+  // Default: /health is a dead backend behind the dev proxy (a plain 500), so
+  // a 500 everywhere still reads as an outage unless a test says otherwise.
+  apiClient.get.mockRejectedValue(httpError(500));
 });
 
 describe('drainScanQueue', () => {
@@ -250,6 +258,80 @@ describe('drainScanQueue', () => {
     });
 
     expect(result.sent).toHaveLength(2);
+    expect(listScans()).toHaveLength(0);
+  });
+});
+
+describe('a scan the server keeps failing on while it is up (PART 3, B1)', () => {
+  it('stays online and parks the scan as needs-attention after one retry', async () => {
+    queueScan('A');
+    apiClient.post.mockRejectedValue(httpError(500));
+    apiClient.get.mockResolvedValue({ data: { status: 'healthy' } });
+    const seen = [];
+    const onItemResult = (item, resp, err) => seen.push([item.state, item.failKind, !!err]);
+
+    const first = await drainScanQueue({ force: true, onItemResult });
+    expect(first.reachable).toBe(true);                 // never "OFFLINE"
+    expect(getConnectivity().reachable).toBe(true);
+    expect(listScans()[0].state).toBe('pending');        // one automatic retry
+
+    const second = await drainScanQueue({ force: true, onItemResult });
+    expect(PARK_AFTER_SERVER_ERRORS).toBe(2);
+    const [item] = listScans();
+    expect(item.state).toBe('failed');
+    expect(item.failKind).toBe('error');
+    expect(item.lastError).toBe(SERVER_FAULT_MESSAGE);
+    expect(item.errorDetail).toBe('boom 500');
+    expect(second.reachable).toBe(true);
+    expect(second.failed).toHaveLength(1);
+    // The flow is told the scan is parked, so its row can say so.
+    expect(seen.at(-1)).toEqual(['failed', 'error', true]);
+
+    // Parked means parked: background passes do not keep hammering it.
+    apiClient.post.mockClear();
+    await drainScanQueue({ force: true });
+    expect(apiClient.post).not.toHaveBeenCalled();
+  });
+
+  it('counts another scan getting through as proof the server is up', async () => {
+    queueScan('A');
+    queueScan('B');
+    apiClient.post.mockImplementation((_url, body) => (
+      body.licence_number === 'A'
+        ? Promise.reject(httpError(500))
+        : Promise.resolve({ data: { status: 'ok' } })
+    ));
+    await drainScanQueue({ force: true });
+    queueScan('C'); // the worker keeps scanning; C gets through
+    await drainScanQueue({ force: true });
+    expect(apiClient.get).not.toHaveBeenCalled();
+    expect(listScans().map((i) => [i.payload.licence_number, i.failKind])).toEqual([['A', 'error']]);
+    expect(getConnectivity().reachable).toBe(true);
+  });
+
+  it('a 500 everywhere with /health down is still an outage — nothing parked', async () => {
+    queueScan('A');
+    apiClient.post.mockRejectedValue(httpError(500));
+    for (let i = 0; i < 5; i += 1) await drainScanQueue({ force: true });
+    expect(listScans()[0].state).toBe('pending');
+    expect(getConnectivity().reachable).toBe(false);
+  });
+
+  it('Retry sends a parked scan again; Discard drops it', async () => {
+    const a = queueScan('A');
+    const b = queueScan('B');
+    updateScan(a.id, { state: 'failed', failKind: 'error', lastError: SERVER_FAULT_MESSAGE });
+    updateScan(b.id, { state: 'failed', failKind: 'error', lastError: SERVER_FAULT_MESSAGE });
+    apiClient.post.mockResolvedValue({ data: { status: 'ok' } });
+
+    // Not revived by itself — it needs a person.
+    await drainScanQueue({ force: true });
+    expect(apiClient.post).not.toHaveBeenCalled();
+
+    retryScan(a.id);
+    discardScan(b.id);
+    const result = await drainScanQueue({ force: true });
+    expect(result.sent.map((s) => s.item.payload.licence_number)).toEqual(['A']);
     expect(listScans()).toHaveLength(0);
   });
 });

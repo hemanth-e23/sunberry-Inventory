@@ -50,4 +50,11 @@ export const truckCacheKey = (orderId) => `truck:${orderId}`;
 export const TRUCK_LIST_CACHE_KEY = 'trucks';
 export const RACKS_CACHE_KEY = 'racks';
 export const RACK_FILL_CACHE_KEY = 'rack-fill';
+export const RACK_FILL_UNITS_CACHE_KEY = 'rack-fill-units';
 export const sessionCacheKey = (receiptId) => `session:${receiptId}`;
+// Staging pull (browser test PART 3, B9): the open-pull list, one request as
+// the gun last saw it, and that request's Recent pulls (which used to vanish
+// on every reload).
+export const PULL_LIST_CACHE_KEY = 'pulls';
+export const pullRequestCacheKey = (requestId) => `pull:${requestId}`;
+export const pullHistoryCacheKey = (requestId) => `pull-history:${requestId}`;

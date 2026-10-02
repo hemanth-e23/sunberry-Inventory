@@ -1875,17 +1875,27 @@ def rack_fill(db: Session, *, warehouse_id: Optional[str] = None) -> list:
     """Units on each rack right now, for the gun's rack picker ("11/12 drums",
     browser test U10). Same sum the rack-full prompt uses (`_row_fill`)."""
     total = func.sum(LotPlacement.full_units + LotPlacement.open_units)
-    query = db.query(LotPlacement.storage_row_id, total).group_by(LotPlacement.storage_row_id)
+    # Per container word too: a rack holding drums AND bags read "15 units
+    # here" on the gun's picker (browser test PART 3, B9). `units` stays the
+    # plain total every existing reader uses; `by_unit` is additive.
+    query = (
+        db.query(LotPlacement.storage_row_id, MaterialLot.unit_label, total)
+        .join(MaterialLot, MaterialLot.id == LotPlacement.material_lot_id)
+        .group_by(LotPlacement.storage_row_id, MaterialLot.unit_label)
+    )
     if warehouse_id:
         query = query.filter(or_(
             LotPlacement.warehouse_id == warehouse_id,
             LotPlacement.warehouse_id.is_(None),
         ))
-    return [
-        {"storage_row_id": row_id, "units": int(units or 0)}
-        for row_id, units in query.all()
-        if row_id and units
-    ]
+    rows: dict = {}
+    for row_id, label, units in query.all():
+        if not row_id or not units:
+            continue
+        entry = rows.setdefault(row_id, {"storage_row_id": row_id, "units": 0, "by_unit": []})
+        entry["units"] += int(units)
+        entry["by_unit"].append({"unit_label": label or "unit", "units": int(units)})
+    return list(rows.values())
 
 
 def _line_for_lot(order: IngredientIntake, lot: MaterialLot) -> Optional[IntakeLot]:

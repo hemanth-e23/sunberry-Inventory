@@ -39,6 +39,11 @@ class StagingPullScanResponse(BaseModel):
     ingredient_name: Optional[str] = None
     lot_code: Optional[str] = None
     vendor_lot: Optional[str] = None
+    # The lot's own container word and packing, so the gun can say "Each scan
+    # is 1 bag" and seed its multiplier for wrapped pallets. These were
+    # computed by the service but dropped by this model until 2026-10-02.
+    unit_label: Optional[str] = None
+    units_per_pallet: int = 0
     units: int = 0
     quantity: float = 0.0
 
@@ -55,10 +60,14 @@ class StagingPullSubmitRequest(BaseModel):
 
 
 class StagingPullSubmitResponse(BaseModel):
-    # ok | needs_confirm | nothing_to_submit
+    # ok | needs_confirm | nothing_to_submit | lot_held (a lot went on hold
+    # while on the cart; nothing written) | returned / nothing_held (answers
+    # from return-held)
     status: str
     message: str = ""
     warning: Optional[str] = None
     short_items: List[str] = []
     staging_item_ids: List[str] = []
     request_status: Optional[str] = None
+    # Cart lines of HELD lots: lot_name, units, unit_label, racks, hold_reason.
+    held_lots: List[dict] = []

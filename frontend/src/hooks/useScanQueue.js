@@ -12,6 +12,7 @@
 // reports is what the header chip shows.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  discardScan,
   drainScanQueue,
   enqueueScan,
   getConnectivity,
@@ -20,6 +21,7 @@ import {
   removeScan,
   removeScansForRequest,
   retryFailedScans,
+  retryScan,
   subscribeToConnectivity,
   subscribeToScanQueue,
 } from '../utils/scanQueue';
@@ -129,6 +131,12 @@ export const useScanQueueCore = ({ onItemResult } = {}) => {
     return syncNow();
   }, [syncNow]);
 
+  // One parked scan, from its own "needs attention" row (PART 3, B1).
+  const retryItem = useCallback((id) => {
+    retryScan(id);
+    return syncNow();
+  }, [syncNow]);
+
   return {
     online,
     navigatorOnline,
@@ -143,6 +151,8 @@ export const useScanQueueCore = ({ onItemResult } = {}) => {
     syncNow,
     send,
     retry,
+    retryItem,
+    discard: discardScan,
     dropFailed: removeScan,
     clearRequest: removeScansForRequest,
   };

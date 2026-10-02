@@ -2,9 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { listIngredientRows } from '../api/ingredientIntakeApi';
 import { getRackFill } from '../api/lotReceivingApi';
 import {
-  RACK_FILL_CACHE_KEY, RACKS_CACHE_KEY, readCached, saveCached,
+  RACK_FILL_CACHE_KEY, RACK_FILL_UNITS_CACHE_KEY, RACKS_CACHE_KEY, readCached, saveCached,
 } from '../utils/gunCache';
 import { rackFillMap } from '../utils/truckReceiving';
+import { rackFillUnitsMap } from '../utils/stagingPull';
 
 /**
  * The rack list and how full each rack is, for the gun's scan screens.
@@ -18,6 +19,13 @@ import { rackFillMap } from '../utils/truckReceiving';
 export const useGunRacks = () => {
   const [rows, setRows] = useState(() => readCached(RACKS_CACHE_KEY)?.data || []);
   const [fill, setFill] = useState(() => readCached(RACK_FILL_CACHE_KEY)?.data || {});
+  // Per container word ("3 drums · 12 bags") — PART 3, B9. Additive.
+  const [fillByUnit, setFillByUnit] = useState(
+    () => readCached(RACK_FILL_UNITS_CACHE_KEY)?.data || {},
+  );
+  const [fillSavedAt, setFillSavedAt] = useState(
+    () => readCached(RACK_FILL_CACHE_KEY)?.savedAt || null,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -34,12 +42,18 @@ export const useGunRacks = () => {
   const refreshFill = useCallback(() => getRackFill()
     .then((data) => {
       const map = rackFillMap(data);
+      const byUnit = rackFillUnitsMap(data);
       setFill(map);
+      setFillByUnit(byUnit);
+      setFillSavedAt(Date.now());
       saveCached(RACK_FILL_CACHE_KEY, map);
+      saveCached(RACK_FILL_UNITS_CACHE_KEY, byUnit);
     })
     .catch(() => { /* keep the last fill we saw */ }), []);
 
   useEffect(() => { refreshFill(); }, [refreshFill]);
 
-  return { rows, setRows, fill, refreshFill };
+  return {
+    rows, setRows, fill, fillByUnit, fillSavedAt, refreshFill,
+  };
 };
