@@ -140,7 +140,7 @@ def test_racks_follow_each_delivery(client, plant, db_session):
     if scan["status"] == "needs_confirm":
         scan = s.post(f"/api/staging-pull/requests/{sr['id']}/scan", FK_H, json={
             "code": s.lots["A"]["lot_code"], "storage_row_id": ROW2, "units": 2,
-            "idempotency_key": f"pull-{uuid.uuid4().hex}", "confirmed": True,
+            "idempotency_key": f"pull-{uuid.uuid4().hex}", "allow_mismatch": True,
         }).json()
     assert scan["status"] == "ok", scan
     assert round(scan["quantity"], 2) == 2 * B
