@@ -1425,7 +1425,14 @@ def return_units(
             )
         if per_unit > 0:
             expected = full_units * per_unit + weighed_partial_qty
-            if abs(expected - float(quantity)) > 0.01:
+            # A lot that arrived at different weights per drum (502 and 474)
+            # returns drums whose weight depends on which delivery they came
+            # from; allow that spread rather than refuse a true return
+            # (2026-10-01 PART 3, staging desk note 6).
+            _ids, weights, _order = _lot_receipt_weights(db, lot)
+            known = [w for w in weights.values() if w and w > 0]
+            spread = (max(known) - min(known)) if len(known) > 1 else 0.0
+            if abs(expected - float(quantity)) > 0.01 + full_units * spread:
                 raise ValidationError(
                     f"Return does not add up: {full_units} full × {per_unit} + "
                     f"{weighed_partial_qty} weighed = {round(expected, 3)}, but "
