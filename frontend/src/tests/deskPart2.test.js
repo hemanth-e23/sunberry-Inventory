@@ -107,7 +107,7 @@ describe('form wording (U4, U5, U6)', () => {
   it('explains an over-ask in drums, pounds and why', () => {
     expect(overAskMessage(rack, 4)).toBeNull();
     expect(overAskMessage(rack, 5)).toBe(
-      'QA-D1 has only 4 drums free (2,008 lbs); you asked for 5 drums. Not free: 3 drums on pending transfers.',
+      'QA-D1 has only 4 drums free (2,008 lbs); you asked for 5 drums. Not free: 3 drums on pending requests.',
     );
   });
 

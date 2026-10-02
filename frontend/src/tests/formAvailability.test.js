@@ -104,3 +104,35 @@ describe('one lot, two drum weights (2026-10-01 PART 1 F2)', () => {
     })).toBe('14 drums');
   });
 });
+
+describe('pending requests are reserved as containers (2026-10-02 re-check N1)', () => {
+  // QA-D4 mixes 474s and 502s; two 3-drum requests are pending. Pounds turned
+  // back into drums at the rack average held back "6.2 drums".
+  const rack = lotReceipt('t2', [
+    { rowId: 'd4', cases: 9 * 474 + 9 * 502, units: 18, fullUnits: 18, weightPerUnit: 488 },
+  ], { weightPerContainer: 474 });
+
+  it('holds back exactly the drums asked for', () => {
+    const [entry] = buildEntriesForProduct({
+      productId: 'p1',
+      approvedReceipts: [rack],
+      pendingTransfers: [
+        { status: 'pending', receiptId: 't2', sourceBreakdown: [{ id: 'row-d4', quantity: 1478, units: 3 }] },
+        { status: 'pending', receiptId: 't2', sourceBreakdown: [{ id: 'row-d4', quantity: 1422, units: 3 }] },
+      ],
+    });
+    expect(entry.reservedUnits).toBe(6);
+    expect(describeContainers(entry)).toBe('12 drums');
+  });
+
+  it('a part-drum write-off with no open drum holds back the drum it will open', () => {
+    const [entry] = buildEntriesForProduct({
+      productId: 'p1',
+      approvedReceipts: [rack],
+      pendingTransfers: [
+        { status: 'pending', receiptId: 't2', sourceBreakdown: [{ id: 'row-d4', quantity: 252, units: 0, open_qty: 252 }] },
+      ],
+    });
+    expect(entry.reservedUnits).toBe(1);
+  });
+});

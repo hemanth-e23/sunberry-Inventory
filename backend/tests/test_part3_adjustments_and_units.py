@@ -150,4 +150,53 @@ def test_a_pending_adjustment_holds_its_drums_back(client, plant, db_session):
     })
     assert r.status_code == 400, r.text
     detail = r.json()["detail"]
-    assert "(1 drum)" in detail and "pending requests" in detail, detail
+    # Checked rack by rack, in drums: 4 on the rack, 3 promised.
+    assert "1 free drum" in detail and "pending requests" in detail, detail
+
+
+def test_pending_part_drum_writeoff_reserves_the_drum_it_will_open(client, plant, db_session):
+    """Re-check N4: 1 sealed drum on ROW1, a pending 252 lb write-off of part of
+    it — a transfer of that drum must be refused, not accepted."""
+    s = Story(client, db_session)
+    s.receive_truck("A", VL, "2027-03-01", 1, ROW1, weight=A)
+    carrier = s.lot_receipts("A")[-1]
+    s.post("/api/inventory/adjustments", WH_H, json={
+        "receipt_id": carrier.id, "product_id": PRODUCT, "category_id": CAT,
+        "adjustment_type": "used-in-production", "quantity": 252, "reason": "half",
+        "source_breakdown": [{"id": f"row-{ROW1}", "quantity": 252, "units": 0, "open_qty": 252}],
+    })
+    r = s.post("/api/inventory/transfers", WH_H, ok=False, json={
+        "receipt_id": carrier.id, "to_location_id": LOC, "to_sub_location_id": SUB,
+        "quantity": A, "reason": "x", "transfer_type": "warehouse-transfer",
+        "source_breakdown": [{"id": f"row-{ROW1}", "quantity": A, "units": 1}],
+        "destination_breakdown": [{"id": f"row-{ROW2}", "quantity": A}],
+    })
+    assert r.status_code == 400, r.text
+
+
+def test_writeoff_approved_after_the_rack_changed_records_both_figures(client, plant, db_session):
+    """Re-check N3: submitted at 2×502 + 474; a transfer then takes the 502s;
+    approval books what those 3 drums weigh now and says so on the record."""
+    s, carrier = _mixed_rack(client, db_session)   # ROW3: 2×502 (oldest) + 3×474
+    adj = s.post("/api/inventory/adjustments", WH_H, json={
+        "receipt_id": carrier.id, "product_id": PRODUCT, "category_id": CAT,
+        "adjustment_type": "damage-reduction", "quantity": 1, "reason": "leak",
+        "source_breakdown": [{"id": f"row-{ROW3}", "quantity": 1, "units": 3}],
+    }).json()
+    assert adj["quantity"] == pytest.approx(2 * A + B)
+    t = s.post("/api/inventory/transfers", WH_H, json={
+        "receipt_id": carrier.id, "to_location_id": LOC, "to_sub_location_id": SUB,
+        "quantity": 1, "reason": "x", "transfer_type": "warehouse-transfer",
+        "source_breakdown": [{"id": f"row-{ROW3}", "quantity": 1, "units": 2}],
+        "destination_breakdown": [{"id": f"row-{ROW1}", "quantity": 1}],
+    }).json()
+    assert t["quantity"] == pytest.approx(2 * A)
+    s.post(f"/api/inventory/transfers/{t['id']}/approve", SUP_H)
+    before = _paper(s)
+    s.post(f"/api/inventory/adjustments/{adj['id']}/approve", SUP_H)
+    from app.models import InventoryAdjustment
+    db_session.expire_all()
+    done = db_session.query(InventoryAdjustment).filter(InventoryAdjustment.id == adj["id"]).one()
+    assert done.quantity == pytest.approx(3 * B)
+    assert "rack changed after submit" in done.reason
+    assert _paper(s) == pytest.approx(before - 3 * B)

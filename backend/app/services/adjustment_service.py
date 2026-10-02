@@ -103,7 +103,12 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
                 # Net of open transfers too — the hold gate above no longer
                 # doubles as the "transfer under review" guard.
                 available = pool["available"]
-                if qty > available + 1e-6:
+                # Stated in containers: take_units/take_partial refuse a short
+                # rack in containers; pounds compared lot-wide double-count a
+                # mixed lot's heavy drums (2026-10-02 re-check).
+                stated = breakdown_units(adjustment.source_breakdown)
+                in_units = bool(stated) and all(u is not None for u, _o in stated.values())
+                if qty > available + 1e-6 and not in_units:
                     raise ValidationError(
                         f"Only {available:g} {receipt.unit or 'units'} remain on "
                         f"lot {pool['lot_label']} but this "
@@ -242,6 +247,16 @@ def _apply_row_breakdown_counted(
         # average. Settle the paper to the real pounds so it keeps matching
         # the racks, and record the real figure on the adjustment.
         typed = float(adjustment.quantity or 0)
+        if exact > 0 and abs(exact - typed) > 0.01 and breakdown_units(adjustment.source_breakdown):
+            # Stated in containers, and the rack changed between submit and
+            # approval (another request took the 502s first): the containers
+            # written off weigh what they weigh now. Say so on the record so
+            # the approver's figure and the booked one are both visible
+            # (2026-10-02 re-check, N3).
+            adjustment.reason = (
+                f"{adjustment.reason or ''}\n[Booked at {exact:,.3f} — the rack changed "
+                f"after submit (submitted {typed:,.3f})]"
+            ).strip()
         if exact > 0 and abs(exact - typed) > 0.01:
             if exact > typed:
                 spill_receipt_deduction(db, receipt, exact - typed)

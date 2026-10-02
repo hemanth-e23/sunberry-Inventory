@@ -125,7 +125,9 @@ def create_adjustment(
         # gate above no longer treats a transfer's review lock as a hold.
         pool = transfer_service.lot_scoped_availability(db, receipt)
         cap = pool["available"]
-        if adjustment_data.quantity > cap + 1e-6:
+        stated = transfer_service.breakdown_units(adjustment_data.source_breakdown)
+        stated_in_units = bool(stated) and all(u is not None for u, _o in stated.values())
+        if adjustment_data.quantity > cap + 1e-6 and not stated_in_units:
             q = lambda v: transfer_service.describe_qty(receipt, v)  # noqa: E731
             detail = (
                 f"Adjustment quantity {q(adjustment_data.quantity)} exceeds "

@@ -243,13 +243,22 @@ def _pending_rack_units(db: Session, lot: MaterialLot, receipt_ids: list) -> Dic
         InventoryAdjustment.receipt_id.in_(receipt_ids),
         InventoryAdjustment.status == AdjustmentStatus.PENDING,
     ).all()]
+    open_on_rack = {
+        p.storage_row_id: float(p.open_remaining_qty or 0)
+        for p in lps.placements_for_lot(db, lot.id)
+    }
     for bd in breakdowns:
         stated = breakdown_units(bd)
         rows, _unresolved = resolve_breakdown(db, bd)
         for rid, qty in rows.items():
-            given = stated.get(rid, (None, 0.0))[0]
+            given, open_qty = stated.get(rid, (None, 0.0))
             if given is not None:
                 n = given
+                # A part-drum write-off that cannot come out of an open drum
+                # will OPEN a sealed one — that drum is spoken for too. A
+                # transfer of it was accepted (2026-10-02 re-check, N4).
+                if open_qty > 0 and open_on_rack.get(rid, 0.0) + 1e-6 < open_qty:
+                    n += 1
             else:
                 try:
                     n = lps.row_units_for_quantity(db, lot, rid, float(qty or 0), exact=False)
@@ -474,6 +483,12 @@ def _require_unreserved_coverage(
     """Refuse approval when current stock minus holds minus OTHER in-flight
     transfers no longer covers this one. Measured at LOT scope — the message
     says "lot" and, since 2026-09-29, the number is one too."""
+    stated = breakdown_units(transfer.source_breakdown)
+    if stated and all(u is not None for u, _o in stated.values()):
+        # Stated in containers: the rack moves below refuse a short rack in
+        # containers, while pounds compared lot-wide double-count a mixed
+        # lot's heavy drums across pending requests (2026-10-02 re-check).
+        return
     pool = lot_scoped_availability(db, receipt, exclude_transfer_id=transfer.id)
     if float(transfer.quantity or 0) > pool["available"] + 1e-6:
         causes = []

@@ -151,7 +151,15 @@ const reservedByLotRow = (pendingTransfers, allReceipts) => {
       const rowId = String(b?.id || '').replace(/^row-/, '');
       if (!rowId) continue;
       const key = `${lot}::${rowId}`;
-      out.set(key, (out.get(key) || 0) + (Number(b.quantity) || 0));
+      const cur = out.get(key) || { lbs: 0, units: 0, partial: 0, unitsKnown: true };
+      cur.lbs += Number(b.quantity) || 0;
+      // Requests stated in containers are reserved AS containers — pounds
+      // turned back into drums at a mixed rack's average held back "6.2
+      // drums" for two 3-drum requests (2026-10-02 re-check, N1).
+      if (b.units != null) cur.units += Number(b.units) || 0;
+      else cur.unitsKnown = false;
+      cur.partial += Number(b.open_qty) || 0;
+      out.set(key, cur);
     }
   }
   return out;
@@ -214,9 +222,14 @@ export const buildEntriesForProduct = ({
             ? weightPerContainer
             : (allocUnits > 0 ? grossWeight / allocUnits : 0);
         const heldWeight = Math.min(grossWeight, heldUnits * perUnit);
+        const r = reserved.get(`${receipt.materialLotId || receipt.id}::${a.rowId}`);
+        // A part-drum write-off that the open drum on this rack can't cover
+        // opens a sealed one: that drum is spoken for too.
+        const opensOne = r && r.partial > 0 && r.partial > (Number(a.openQty) || 0) + 1e-6 ? 1 : 0;
+        const reservedUnits = r && r.unitsKnown ? r.units + opensOne : null;
         const reservedWeight = Math.min(
           Math.max(0, grossWeight - heldWeight),
-          reserved.get(`${receipt.materialLotId || receipt.id}::${a.rowId}`) || 0,
+          r ? (reservedUnits != null ? reservedUnits * perUnit : r.lbs) : 0,
         );
         entries.push(makeEntry({
           key: `${receipt.id}::row-${a.rowId}`,
@@ -233,6 +246,7 @@ export const buildEntriesForProduct = ({
           available: Math.max(0, grossWeight - heldWeight - reservedWeight),
           heldUnits,
           reservedWeight,
+          reservedUnits,
           fullUnits: Number(a.fullUnits) || 0,
           openUnits: Number(a.openUnits) || 0,
           openQty: Number(a.openQty) || 0,
@@ -287,8 +301,8 @@ export const buildEntriesForProduct = ({
         sourceId: `row-${receipt.storageRowId}`,
         lotNumber: lot,
         locationLabel: label,
-        available: Math.max(0, total - (reserved.get(`${receipt.id}::${receipt.storageRowId}`) || 0)),
-        reservedWeight: reserved.get(`${receipt.id}::${receipt.storageRowId}`) || 0,
+        available: Math.max(0, total - (reserved.get(`${receipt.id}::${receipt.storageRowId}`)?.lbs || 0)),
+        reservedWeight: reserved.get(`${receipt.id}::${receipt.storageRowId}`)?.lbs || 0,
         rowPallets: Number(receipt.pallets) || 0,
         unit,
         weightPerContainer,
@@ -500,9 +514,11 @@ export const describeContainers = (entry, available = entry.available) => {
   // (2026-10-01). Only what is held or promised is converted, and rounded
   // up — a part-promised drum is not free.
   const withheld = Math.max(0, gross - avail);
-  const fullFree = withheld <= 0.01
-    ? full
-    : Math.max(0, full - Math.ceil((withheld - 0.01) / factor));
+  const fullFree = entry.reservedUnits != null
+    ? Math.max(0, full - (Number(entry.heldUnits) || 0) - entry.reservedUnits)
+    : withheld <= 0.01
+      ? full
+      : Math.max(0, full - Math.ceil((withheld - 0.01) / factor));
   const fmt = (n) => Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
   const storage = entry.unit || 'lbs';
   if (!openFree) return `${fullFree} ${fullFree === 1 ? singularUnit(unit) : unit}`;
@@ -574,8 +590,10 @@ export const overAskMessage = (entry, displayQty) => {
   const held = Number(entry.heldUnits) || 0;
   if (held > 0) reasons.push(`${countWithUnit(held, unit)} on hold`);
   const reserved = Number(entry.reservedWeight) || 0;
-  if (reserved > 0) {
-    reasons.push(`${countWithUnit(containersOf(reserved, factor), unit)} on pending transfers`);
+  if (entry.reservedUnits != null && entry.reservedUnits > 0) {
+    reasons.push(`${countWithUnit(entry.reservedUnits, unit)} on pending requests`);
+  } else if (reserved > 0) {
+    reasons.push(`${countWithUnit(containersOf(reserved, factor), unit)} on pending requests`);
   }
   if (reasons.length) msg += `. Not free: ${reasons.join(', ')}`;
   return `${msg}.`;
@@ -640,4 +658,16 @@ export const containerSplit = (entry, displayQty, partialLbs = 0) => {
   const fraction = qty - units;
   const openQty = Math.round((fraction * factor + Math.max(0, Number(partialLbs) || 0)) * 1000) / 1000;
   return { units, openQty };
+};
+
+
+/** "3 drums on pending requests" — counted when the requests stated containers. */
+export const pendingLabel = (entry) => {
+  if (entry.reservedUnits != null) {
+    return entry.reservedUnits > 0 ? countWithUnit(entry.reservedUnits, entry.displayUnit) : '';
+  }
+  const w = Number(entry.reservedWeight) || 0;
+  return w > 0
+    ? countWithUnit(Math.round((w / (entry.displayFactor || 1)) * 100) / 100, entry.displayUnit)
+    : '';
 };

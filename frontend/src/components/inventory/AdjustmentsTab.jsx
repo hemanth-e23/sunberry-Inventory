@@ -6,7 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary, containerSplit, singularUnit } from '../../utils/rowSources';
+import { buildEntriesForProduct, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary, containerSplit, singularUnit, pendingLabel } from '../../utils/rowSources';
 import RmEntryQtyInput from './RmEntryQtyInput';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
@@ -579,7 +579,7 @@ const AdjustmentsTab = () => {
                               )}
                               {Number(entry.reservedWeight) > 0 && (
                                 <span style={{ color: 'var(--color-text-muted, #6b7280)', fontWeight: 600 }}>
-                                  {' '}· {countWithUnit(Math.round((entry.reservedWeight / (entry.displayFactor || 1)) * 100) / 100, entry.displayUnit)} on pending requests
+                                  {' '}· {pendingLabel(entry)} on pending requests
                                 </span>
                               )}
                             </span>

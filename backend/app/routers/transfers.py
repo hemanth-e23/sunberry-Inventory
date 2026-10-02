@@ -302,9 +302,21 @@ def create_transfer(
         if total is not None:
             transfer_data.source_breakdown = priced
             transfer_data.quantity = total
+            # The destination receives what left the source: the card's "To"
+            # side showed the form's rack-average figure (re-check N8).
+            dest = transfer_data.destination_breakdown or []
+            if len(dest) == 1:
+                transfer_data.destination_breakdown = [{**dest[0], "quantity": total}]
     pool = transfer_service.lot_scoped_availability(db, receipt)
     available = pool["available"]
-    if transfer_data.quantity > available:
+    # A request stated in containers is checked rack by rack in containers
+    # (check_source_racks, below): pounds compared lot-wide double-count a
+    # mixed lot's heavy drums when two requests both price "oldest first"
+    # (2026-10-02 re-check, N3/N4 tests).
+    stated_in_units = bool(transfer_service.breakdown_units(transfer_data.source_breakdown)) and all(
+        u is not None for u, _o in transfer_service.breakdown_units(transfer_data.source_breakdown).values()
+    )
+    if transfer_data.quantity > available and not stated_in_units:
         q = lambda v: transfer_service.describe_qty(receipt, v)  # noqa: E731
         detail = (
             f"Requested {q(transfer_data.quantity)} but only "
