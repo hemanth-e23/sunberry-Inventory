@@ -1282,11 +1282,11 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
         # see that one was asked for and refused (browser test PART 2, U11).
         # No rejection timestamp is stored; the request time stands in, and the
         # rejecter's name is already in the reason ("[Rejected by …]: …").
-        rejected = db.query(InventoryTransfer).filter(
+        rejected_transfers = db.query(InventoryTransfer).filter(
             InventoryTransfer.receipt_id == r.id,
             InventoryTransfer.status == TransferStatus.REJECTED.value,
         ).order_by(InventoryTransfer.submitted_at).all()
-        for t in rejected:
+        for t in rejected_transfers:
             label = "Shipped Out" if t.transfer_type == "shipped-out" else (
                 (t.transfer_type or "transfer").replace("-", " ").title()
             )

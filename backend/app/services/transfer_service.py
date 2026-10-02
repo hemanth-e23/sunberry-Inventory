@@ -1049,9 +1049,15 @@ def approve_transfer(db: Session, transfer: InventoryTransfer, current_user) -> 
         else:
             receipt.quantity = max(0, receipt.quantity - transfer.quantity)
     else:
-        if transfer.to_location_id:
+        # A lot-tracked receipt's place is its racks (placements), and a move
+        # rarely takes all of it: relabelling the receipt with every
+        # destination called a whole delivery "QA Quarantine" after 2 of its
+        # 14 drums went there (2026-10-01 PART 2, B5). Only untracked material
+        # keeps the receipt-level location as its record.
+        tracked = (not finished) and lps.is_counted_lot(db, receipt.material_lot_id)
+        if transfer.to_location_id and not tracked:
             receipt.location_id = transfer.to_location_id
-        if transfer.to_sub_location_id:
+        if transfer.to_sub_location_id and not tracked:
             receipt.sub_location_id = transfer.to_sub_location_id
 
         # Rebuild allocation from live pallet data (pallet-licence internal transfer)
