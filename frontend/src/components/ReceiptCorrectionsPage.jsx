@@ -78,7 +78,16 @@ const ReceiptCorrectionsPage = () => {
     // Save the corrected fields, then move the receipt back into the approval
     // queue via the dedicated resubmit endpoint. Both calls are checked — on
     // failure we keep the detail view open so the corrections aren't lost.
-    const upd = await updateReceipt(selectedReceipt.id, { ...draft });
+    // receipt_date is the moment the truck was received. The date input only
+    // carries the day, so sending it back unchanged rewrote the time to
+    // midnight UTC (the evening before, in Eastern). Send it only when the
+    // user actually picked a different day; the server keeps the original
+    // time of day either way.
+    const changes = { ...draft };
+    if ((changes.receiptDate || '') === (selectedReceipt.receiptDate || '')) {
+      delete changes.receiptDate;
+    }
+    const upd = await updateReceipt(selectedReceipt.id, changes);
     if (upd && upd.success === false) {
       addToast(upd.message || upd.error || 'Failed to save corrections.', 'error');
       setSaving(false);

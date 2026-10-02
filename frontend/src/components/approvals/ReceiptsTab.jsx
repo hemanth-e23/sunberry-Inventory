@@ -1180,6 +1180,11 @@ const ReceiptsTab = ({
             <p className="muted">
               Please provide a reason for rejecting this receipt. This action cannot be undone.
             </p>
+            <p className="muted">
+              Anything the forklift already scanned in for this receipt is taken back off
+              the racks automatically, with your reason recorded. If some of it has been
+              moved or used since, the reject is refused and says which rack.
+            </p>
             <div className="form-group">
               <label>
                 <span>Rejection Reason</span>

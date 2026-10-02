@@ -1,7 +1,7 @@
 from typing import Optional, List
 from datetime import datetime
 from pydantic import Field
-from app.schemas.base import BaseSchema, CalendarDate
+from app.schemas.base import BaseSchema, CalendarDate, CalendarDateTime
 
 
 class ReceiptAllocationBase(BaseSchema):
@@ -93,7 +93,10 @@ class ReceiptUpdate(BaseSchema):
     # figure with a fallback of 40 that `row_allocation._cpp` reads on the
     # legacy path, and overloading it would silently corrupt that arithmetic.
     units_per_pallet: Optional[int] = None
-    receipt_date: Optional[datetime] = None
+    # Accepts a bare YYYY-MM-DD from a date input (coerced to midnight UTC);
+    # the router then keeps the original time of day — see
+    # receipt_service.corrected_receipt_date.
+    receipt_date: CalendarDateTime = None
     production_date: Optional[datetime] = None
     expiration_date: Optional[datetime] = None
     cases_per_pallet: Optional[int] = None

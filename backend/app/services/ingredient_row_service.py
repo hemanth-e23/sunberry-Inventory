@@ -242,6 +242,9 @@ def list_rows(
                 continue
         selected.append(row)
 
+    superseded = superseded_default_row_ids(db, [r.id for r in selected])
+    selected = [r for r in selected if r.id not in superseded]
+
     counts = _container_counts(db, [r.id for r in selected])
     return [_row_payload(r, counts.get(r.id, 0)) for r in selected]
 
@@ -268,6 +271,7 @@ def resolve_row(db: Session, current_user, code: Optional[str]) -> dict:
             raise ValidationError(
                 f"Row {match.name} is deactivated — pick an active row."
             )
+        _refuse_superseded_default(db, match)
         counts = _container_counts(db, [match.id])
         payload = _row_payload(match, counts.get(match.id, 0))
         payload["resolved_by"] = "barcode"
@@ -289,6 +293,7 @@ def resolve_row(db: Session, current_user, code: Optional[str]) -> dict:
 
     if len(name_matches) == 1:
         row = name_matches[0]
+        _refuse_superseded_default(db, row)
         counts = _container_counts(db, [row.id])
         payload = _row_payload(row, counts.get(row.id, 0))
         payload["resolved_by"] = "name"
@@ -412,12 +417,7 @@ def ensure_default_row(db: Session, sub_location: SubLocation, current_user) -> 
     if not getattr(sub_location, "storage_unit", None):
         return None   # a pallet room — rows are created by hand, as before
 
-    existing = (
-        db.query(StorageRow.id)
-        .filter(StorageRow.sub_location_id == sub_location.id)
-        .first()
-    )
-    if existing:
+    if _room_row_ids(db, sub_location.id, active_only=False):
         return None
 
     row = StorageRow(
@@ -451,4 +451,131 @@ def ensure_default_row(db: Session, sub_location: SubLocation, current_user) -> 
         # assign-barcodes can be re-run. Failing room setup over it is not.
         pass
 
+    return row
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Default rows that a room has outgrown (browser test 2026-10-01, F6)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# A default row stands in for the room ONLY while the room has no racks of its
+# own — that is its whole reason to exist (see ensure_default_row). The common
+# setup order is "mark the room as Drums, then add its racks": the default row
+# is minted at the first step, and once QA-D1..D4 exist it is a phantom rack
+# named after the room — listed first on the gun's "Pick a rack", printed on
+# the label sheet, shown empty in By Location, and invisible in Master Data's
+# freshly-loaded tree. A worker could put drums on a rack that does not exist.
+#
+# So, once a room has a real rack:
+#   * the default row is RETIRED (is_active=False) the moment a rack is added
+#     or the room is edited — visible in Master Data as an Inactive row. (An
+#     admin who wants it as a real rack alongside the others renames it; a
+#     row not named after its room is just a rack.)
+#   * and, for rooms set up before this fix, list_rows / resolve_row treat it as
+#     gone at read time.
+# Never while it holds stock: a row with drums on it is a real place, however
+# it got there, and hiding it would hide the drums. It retires once emptied.
+
+def _room_row_ids(db: Session, sub_location_id: str, active_only: bool = True) -> List[str]:
+    """Every row in a room — hung off the sub-location directly or off one of
+    its storage areas."""
+    area_ids = [
+        a for (a,) in db.query(StorageArea.id)
+        .filter(StorageArea.sub_location_id == sub_location_id).all()
+    ]
+    q = db.query(StorageRow.id)
+    cond = StorageRow.sub_location_id == sub_location_id
+    if area_ids:
+        cond = cond | StorageRow.storage_area_id.in_(area_ids)
+    q = q.filter(cond)
+    if active_only:
+        q = q.filter(StorageRow.is_active.isnot(False))
+    return [r for (r,) in q.all()]
+
+
+def is_default_shaped(row: StorageRow, sub: Optional[SubLocation]) -> bool:
+    """The shape ensure_default_row creates: hung straight off the room, named
+    after it."""
+    if sub is None or row.storage_area_id is not None or row.sub_location_id != sub.id:
+        return False
+    return (row.name or "").strip().casefold() == (sub.name or "").strip().casefold()
+
+
+def _rows_holding_stock(db: Session, row_ids: List[str]) -> set:
+    if not row_ids:
+        return set()
+    from app.models import LotPlacement
+
+    held = {
+        r for (r,) in db.query(LotPlacement.storage_row_id)
+        .filter(
+            LotPlacement.storage_row_id.in_(row_ids),
+            (LotPlacement.full_units > 0) | (LotPlacement.open_units > 0),
+        ).distinct().all()
+    }
+    held |= set(_container_counts(db, row_ids).keys())
+    for row in db.query(StorageRow).filter(StorageRow.id.in_(row_ids)).all():
+        if (row.occupied_pallets or 0) > 0:
+            held.add(row.id)
+    return held
+
+
+def superseded_default_row_ids(db: Session, row_ids: Optional[List[str]] = None) -> set:
+    """Ids of default rows whose room now has a real rack and which hold
+    nothing. Restricted to `row_ids` when given."""
+    q = (
+        db.query(StorageRow)
+        .options(joinedload(StorageRow.sub_location))
+        .filter(StorageRow.sub_location_id.isnot(None), StorageRow.storage_area_id.is_(None))
+    )
+    if row_ids is not None:
+        if not row_ids:
+            return set()
+        q = q.filter(StorageRow.id.in_(row_ids))
+    candidates = [r for r in q.all() if is_default_shaped(r, r.sub_location)]
+    out = []
+    for row in candidates:
+        siblings = [rid for rid in _room_row_ids(db, row.sub_location_id) if rid != row.id]
+        if siblings:
+            out.append(row.id)
+    if not out:
+        return set()
+    return set(out) - _rows_holding_stock(db, out)
+
+
+def _refuse_superseded_default(db: Session, row: StorageRow) -> None:
+    if row.id not in superseded_default_row_ids(db, [row.id]):
+        return
+    racks = sorted(
+        (r.name or r.id) for r in db.query(StorageRow).filter(
+            StorageRow.id.in_([i for i in _room_row_ids(db, row.sub_location_id) if i != row.id])
+        ).all()
+    )
+    listed = ", ".join(racks[:6]) + ("…" if len(racks) > 6 else "")
+    raise ValidationError(
+        f"\"{row.name}\" is the room, not a rack — it has racks of its own "
+        f"({listed}). Scan or pick one of those."
+    )
+
+
+def retire_default_row(db: Session, sub_location: Optional[SubLocation]) -> Optional[StorageRow]:
+    """Deactivate the room's default row once the room has a real rack and the
+    default row holds nothing. Returns the retired row, or None."""
+    if sub_location is None:
+        return None
+    ids = superseded_default_row_ids(
+        db,
+        [
+            r.id for r in db.query(StorageRow).filter(
+                StorageRow.sub_location_id == sub_location.id,
+                StorageRow.storage_area_id.is_(None),
+                StorageRow.is_active.isnot(False),
+            ).all()
+            if is_default_shaped(r, sub_location)
+        ],
+    )
+    if not ids:
+        return None
+    row = db.query(StorageRow).filter(StorageRow.id.in_(ids)).first()
+    row.is_active = False
     return row

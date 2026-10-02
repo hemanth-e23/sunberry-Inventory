@@ -18,9 +18,16 @@ from app.services.report_builders import (
     build_vendor_receipts_report,
     build_cycle_count_report,
     build_reconciliation_report,
+    report_timezone,
 )
 
 router = APIRouter()
+
+
+def _report_tz(db: Session, user) -> str:
+    """Whose calendar the start/end dates mean: the warehouse being viewed,
+    else the viewer's own warehouse (see report_timezone)."""
+    return report_timezone(db, warehouse_filter(user), getattr(user, "warehouse_id", None))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,6 +51,7 @@ def point_in_time_snapshot(
     try:
         return build_point_in_time_snapshot(
             db,
+            tz=_report_tz(db, current_user),
             as_of_date=as_of_date,
             warehouse_id=warehouse_filter(current_user),
             product_id=product_id,
@@ -76,6 +84,7 @@ def activity_ledger(
     try:
         return build_activity_ledger(
             db,
+            tz=_report_tz(db, current_user),
             start_date=start_date,
             end_date=end_date,
             product_id=product_id,
@@ -106,6 +115,7 @@ def shipments_report(
     """
     return build_shipments_report(
         db,
+        tz=_report_tz(db, current_user),
         warehouse_id=warehouse_filter(current_user),
         start_date=start_date,
         end_date=end_date,
@@ -147,6 +157,7 @@ def movement_ledger(
     """Chronological list of all events for a specific product."""
     return build_movement_ledger(
         db,
+        tz=_report_tz(db, current_user),
         product_id=product_id,
         start_date=start_date,
         end_date=end_date,
@@ -183,6 +194,7 @@ def holds_report(
     """All hold and release actions in the date range."""
     return build_holds_report(
         db,
+        tz=_report_tz(db, current_user),
         warehouse_id=warehouse_filter(current_user),
         start_date=start_date,
         end_date=end_date,
@@ -229,6 +241,7 @@ def expiry_alerts(
     """Active inventory grouped by expiry urgency."""
     return build_expiry_alerts(
         db,
+        tz=_report_tz(db, current_user),
         warehouse_id=warehouse_filter(current_user),
         days_ahead=days_ahead,
         include_expired=include_expired,
@@ -253,6 +266,7 @@ def adjustments_report(
     """All approved adjustments with full audit detail."""
     return build_adjustments_report(
         db,
+        tz=_report_tz(db, current_user),
         warehouse_id=warehouse_filter(current_user),
         start_date=start_date,
         end_date=end_date,
@@ -276,6 +290,7 @@ def vendor_receipts_report(
     """Receipts grouped by vendor (vendor is optional on receipts)."""
     return build_vendor_receipts_report(
         db,
+        tz=_report_tz(db, current_user),
         warehouse_id=warehouse_filter(current_user),
         start_date=start_date,
         end_date=end_date,

@@ -372,22 +372,10 @@ def approve_gate_and_place(db: Session, receipt: Receipt, *, actor_id=None):
                 f"{scanned} {word} scanned but the forklift has not submitted the "
                 "receiving session yet. Approval waits for the forklift's submit."
             )
-        expected = _expected_units_for_approval(receipt)
-        if expected is None or scanned != expected:
-            w = float(receipt.weight_per_container or 0)
-            if w > 0:
-                receipt.quantity = float(scanned) * w
-            elif expected and float(receipt.quantity or 0) > 0:
-                receipt.quantity = float(receipt.quantity) * scanned / expected
-            else:
-                receipt.quantity = float(scanned)
-            receipt.container_count = float(scanned)
-            receipt.note = (
-                f"{receipt.note or ''}\n[Approval correction: booked at the "
-                f"{scanned} {word} the forklift scanned"
-                + (f"; paperwork said {expected}" if expected else "")
-                + "]"
-            ).strip()
+        # Usually a no-op by now: the forklift's Finish already booked the
+        # scanned count (F9). It still runs for scans that landed after Finish
+        # and for sessions finished before that change.
+        book_scanned_count(db, receipt, lot=lot, stage="Approval correction")
         return lot
 
     expected = _expected_units_for_approval(receipt)
@@ -413,6 +401,177 @@ def approve_gate_and_place(db: Session, receipt: Receipt, *, actor_id=None):
             "Enter the count for every row (or scan the units in) before approving."
         )
     return lot
+
+
+def book_scanned_count(
+    db: Session,
+    receipt: Receipt,
+    *,
+    lot: Optional[MaterialLot] = None,
+    stage: str = "Approval correction",
+) -> bool:
+    """Make the receipt's quantity and container count say what was SCANNED.
+
+    The one rule, shared by Finish and by approval. Scanned units are live stock
+    the moment they are scanned, so a receipt still carrying the paperwork
+    figure misleads everything that reads `receipt.quantity` until somebody
+    approves it (browser test 2026-10-01, F9: 80 bags on paper, 70 on the
+    rack). Finish books the count; approval then finds nothing to correct,
+    which is what keeps approval idempotent.
+
+    Returns True when something changed. A receipt with no scans is left
+    alone: that is a logged receipt, and its paperwork is all there is.
+    """
+    scanned = int(session_counts(db, receipt).get("total") or 0)
+    if scanned <= 0:
+        return False
+    expected = _expected_units_for_approval(receipt)
+    if expected is not None and scanned == expected:
+        return False
+    if lot is None and receipt.material_lot_id:
+        lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    word = unit_word(lot, scanned)
+    w = float(receipt.weight_per_container or 0)
+    if w > 0:
+        receipt.quantity = float(scanned) * w
+    elif expected and float(receipt.quantity or 0) > 0:
+        receipt.quantity = float(receipt.quantity) * scanned / expected
+    else:
+        receipt.quantity = float(scanned)
+    receipt.container_count = float(scanned)
+    receipt.note = (
+        f"{receipt.note or ''}\n[{stage}: booked at the "
+        f"{scanned} {word} the forklift scanned"
+        + (f"; paperwork said {expected}" if expected else "")
+        + "]"
+    ).strip()
+    return True
+
+
+def reverse_receiving_for_reject(
+    db: Session,
+    receipt: Receipt,
+    *,
+    actor_id: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> int:
+    """Take a rejected line's scanned units back off the racks. Returns units removed.
+
+    Rejecting the paperwork of a line whose drums were already scanned in used
+    to be refused with "have the forklift undo the scans", which is impossible
+    once the truck is finished because the truck leaves the gun (browser test
+    2026-10-01, F8). The supervisor's reject now reverses the receiving events
+    itself: one compensating ledger event per lot and rack, on the same
+    `receiving` ref so the session nets to zero, with the reason recorded.
+
+    Refuses, and changes nothing, when the units cannot honestly be taken
+    back: anything of that lot has left that rack since the first scan of this
+    receipt (moved, staged, used; drums of one lot are interchangeable, so the
+    system cannot tell whose left), the rack holds fewer than were scanned, or
+    some of them are on a per-rack QA hold.
+    """
+    events = (
+        db.query(LotPlacementEvent)
+        .filter(
+            LotPlacementEvent.ref_type == REF_TYPE_RECEIVING,
+            LotPlacementEvent.ref_id == receipt.id,
+        )
+        .order_by(LotPlacementEvent.seq)
+        .all()
+    )
+    if not events:
+        return 0
+
+    net: dict = {}
+    first_seq: dict = {}
+    for ev in events:
+        key = (ev.material_lot_id, ev.storage_row_id)
+        net[key] = net.get(key, 0) + int(ev.full_units_delta or 0)
+        first_seq.setdefault(key, int(ev.seq or 0))
+    net = {k: n for k, n in net.items() if n > 0}
+    if not net:
+        return 0
+
+    lots = {
+        l.id: l for l in db.query(MaterialLot)
+        .filter(MaterialLot.id.in_({k[0] for k in net})).all()
+    }
+    rows = {
+        r.id: r for r in db.query(StorageRow)
+        .filter(StorageRow.id.in_({k[1] for k in net})).all()
+    }
+
+    problems = []
+    for (lot_id, row_id), n in net.items():
+        lot = lots.get(lot_id)
+        row = rows.get(row_id)
+        rack = row.name if row else row_id
+        word = unit_word(lot, n)
+        left_since = (
+            db.query(LotPlacementEvent)
+            .filter(
+                LotPlacementEvent.material_lot_id == lot_id,
+                LotPlacementEvent.storage_row_id == row_id,
+                LotPlacementEvent.seq > first_seq[(lot_id, row_id)],
+                LotPlacementEvent.full_units_delta < 0,
+                # Receiving corrections (a removed scan, a rack recount) only
+                # take back that truck's own scans; anything else that took
+                # units off is a move, a pull or a use.
+                or_(
+                    LotPlacementEvent.ref_type.is_(None),
+                    LotPlacementEvent.ref_type != REF_TYPE_RECEIVING,
+                ),
+            )
+            .order_by(LotPlacementEvent.seq)
+            .first()
+        )
+        placement = (
+            db.query(LotPlacement)
+            .filter(
+                LotPlacement.material_lot_id == lot_id,
+                LotPlacement.storage_row_id == row_id,
+            )
+            .first()
+        )
+        on_rack = int(placement.full_units or 0) if placement else 0
+        held = int(getattr(placement, "held_units", 0) or 0) if placement else 0
+        label = (lot.vendor_lot_number or lot.lot_code) if lot else lot_id
+        if left_since is not None:
+            what = (left_since.event_type or "moved").replace("_", " ")
+            problems.append(
+                f"{rack}: lot {label} has been {what} off this rack since it was scanned in"
+            )
+        elif on_rack < n:
+            problems.append(
+                f"{rack}: only {on_rack} of the {n} {word} scanned in are still there"
+            )
+        elif on_rack - n < held:
+            problems.append(
+                f"{rack}: {held} {unit_word(lot, held)} there are on QA hold; release the hold first"
+            )
+    if problems:
+        raise ValidationError(
+            "Cannot reject: some of this line's scanned units have moved or been "
+            "used since they were received, so they cannot be taken back "
+            "automatically. " + "; ".join(problems) + ". Approve it and adjust "
+            "instead, or correct the racks first."
+        )
+
+    note = f"Receipt rejected: {reason}" if reason else "Receipt rejected"
+    removed = 0
+    for (lot_id, row_id), n in net.items():
+        lps.apply_delta(
+            db, lots[lot_id], row_id,
+            event_type=lps.EVENT_ADJUSTED,
+            full_units_delta=-n,
+            actor_id=actor_id,
+            ref_type=REF_TYPE_RECEIVING,
+            ref_id=receipt.id,
+            reason=note[:500],
+            reason_code="receipt_rejected",
+        )
+        removed += n
+    return removed
 
 
 def _unit_label_for(db: Session, receipt: Receipt) -> str:
@@ -717,6 +876,9 @@ def submit_session(
 
     receipt.forklift_submitted_at = datetime.now(timezone.utc)
     receipt.forklift_submitted_by = user_id
+    # The scanned units are already live stock; the receipt says so now, not
+    # at approval (F9).
+    book_scanned_count(db, receipt, stage="Finished")
 
     return {
         "status": "submitted",
@@ -2301,6 +2463,11 @@ def truck_finish(
         if receipt and not receipt.forklift_submitted_at:
             receipt.forklift_submitted_at = now
             receipt.forklift_submitted_by = user_id
+        if receipt and receipt.status in (ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED):
+            # Scanned stock is live now; the receipt carries the scanned count
+            # from here on, not the BOL's (F9). The line keeps the paperwork
+            # figure in `expected_count` for the approval card.
+            book_scanned_count(db, receipt, stage="Truck finished")
     db.flush()
     return {
         "status": "submitted",

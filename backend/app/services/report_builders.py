@@ -6,7 +6,7 @@ warehouse_id, then returns a plain dict ready for the router to return as JSON.
 """
 
 from typing import List, Optional
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -23,6 +23,7 @@ from app.enums import (
 from app.constants import CATEGORY_FINISHED
 from app.services.availability import container_qty_for_product
 from app.utils.calendar_dates import calendar_day
+from app.utils.warehouse_time import DEFAULT_WAREHOUSE_TIMEZONE, warehouse_timezone, zone
 
 # A ship-out order counts as a COMPLETED shipment for display reports once it's
 # an approved legacy ad-hoc order OR a scheduled order whose BOL was generated
@@ -86,13 +87,64 @@ def _ship_dt(t):
 # Low-level lookup helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def parse_dt_start(d: str) -> datetime:
+# A report day is the WAREHOUSE's day, not UTC's. Before 2026-10 these helpers
+# pinned both ends to UTC midnight, so in an America/New_York plant anything
+# that happened after 8 PM (EDT) fell into "tomorrow": a truck received at
+# 20:13 vanished from today's Activity Ledger and Vendor Receipts.
+#
+# Only INSTANT columns (receipt_date, approved_at, ship timestamps) go through
+# these. Calendar fields (best-by, FG production_date, cycle-count count_date)
+# are stored as the typed day and are filtered as such — never shifted.
+DEFAULT_REPORT_TIMEZONE = DEFAULT_WAREHOUSE_TIMEZONE
+_zone = zone
+
+
+def report_timezone(db: Session, warehouse_id: Optional[str] = None,
+                    fallback_warehouse_id: Optional[str] = None) -> str:
+    """The timezone whose calendar days a report's date filters mean.
+
+    The filtered warehouse's timezone; else the viewer's own warehouse (a
+    corporate user looking at "All Warehouses"); else, if every active
+    warehouse agrees on one timezone, that one; else the Warehouse default.
+    """
+    for wid in (warehouse_id, fallback_warehouse_id):
+        tz = warehouse_timezone(db, wid)
+        if tz:
+            return tz
+    zones = {
+        z for (z,) in db.query(Warehouse.timezone)
+        .filter(Warehouse.is_active.isnot(False)).distinct().all() if z
+    }
+    if len(zones) == 1:
+        return zones.pop()
+    return DEFAULT_REPORT_TIMEZONE
+
+
+def parse_dt_start(d: str, tz_name: Optional[str] = None) -> datetime:
+    """First instant of local day `d` (YYYY-MM-DD) in `tz_name`, as UTC."""
+    day = datetime.strptime(d, "%Y-%m-%d")
+    return day.replace(tzinfo=_zone(tz_name)).astimezone(timezone.utc)
+
+
+def parse_dt_end(d: str, tz_name: Optional[str] = None) -> datetime:
+    """Last instant of local day `d` in `tz_name`, as UTC (inclusive bound)."""
+    day = datetime.strptime(d, "%Y-%m-%d")
+    nxt = (day + timedelta(days=1)).replace(tzinfo=_zone(tz_name))
+    return nxt.astimezone(timezone.utc) - timedelta(microseconds=1)
+
+
+def parse_calendar_start(d: str) -> datetime:
+    """Start of a CALENDAR day (stored as midnight UTC) — no zone shift."""
     return datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
 
-def parse_dt_end(d: str) -> datetime:
+def parse_calendar_end(d: str) -> datetime:
     dt = datetime.strptime(d, "%Y-%m-%d")
     return dt.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+
+
+def local_today(tz_name: Optional[str] = None):
+    return datetime.now(_zone(tz_name)).date()
 
 
 def product_info(db: Session, product_id: Optional[str]):
@@ -374,8 +426,9 @@ def build_point_in_time_snapshot(
     product_id: Optional[str] = None,
     category_id: Optional[str] = None,
     category_type: Optional[str] = None,
+    tz: Optional[str] = None,
 ) -> dict:
-    as_of_dt = parse_dt_end(as_of_date)
+    as_of_dt = parse_dt_end(as_of_date, tz or report_timezone(db, warehouse_id))
 
     query = db.query(Receipt).filter(
         Receipt.receipt_date <= as_of_dt,
@@ -443,9 +496,11 @@ def build_activity_ledger(
     product_id: Optional[str] = None,
     category_id: Optional[str] = None,
     category_type: Optional[str] = None,
+    tz: Optional[str] = None,
 ) -> dict:
-    start_dt = parse_dt_start(start_date)
-    end_dt = parse_dt_end(end_date)
+    tz = tz or report_timezone(db)
+    start_dt = parse_dt_start(start_date, tz)
+    end_dt = parse_dt_end(end_date, tz)
 
     # Collect all product_ids with activity in range
     product_ids: set = set()
@@ -617,6 +672,7 @@ def build_shipments_report(
     end_date: Optional[str] = None,
     product_id: Optional[str] = None,
     order_number: Optional[str] = None,
+    tz: Optional[str] = None,
 ) -> dict:
     order_number = (order_number or "").strip()
     # Ship timestamp works for both flows: legacy approved orders stamp
@@ -639,9 +695,11 @@ def build_shipments_report(
         query = query.filter(InventoryTransfer.order_number.ilike(f"%{order_number}%"))
     else:
         if start_date:
-            query = query.filter(ship_ts >= parse_dt_start(start_date))
+            query = query.filter(ship_ts >= parse_dt_start(
+                start_date, tz or report_timezone(db, warehouse_id)))
         if end_date:
-            query = query.filter(ship_ts <= parse_dt_end(end_date))
+            query = query.filter(ship_ts <= parse_dt_end(
+                end_date, tz or report_timezone(db, warehouse_id)))
 
     transfers = query.order_by(ship_ts.desc()).all()
 
@@ -864,13 +922,15 @@ def build_movement_ledger(
     product_id: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    tz: Optional[str] = None,
 ) -> dict:
     pname, pcode = product_info(db, product_id)
     receipts = db.query(Receipt).filter(Receipt.product_id == product_id).all()
     receipt_ids = [r.id for r in receipts]
 
-    start_dt = parse_dt_start(start_date) if start_date else None
-    end_dt = parse_dt_end(end_date) if end_date else None
+    tz = tz or report_timezone(db)
+    start_dt = parse_dt_start(start_date, tz) if start_date else None
+    end_dt = parse_dt_end(end_date, tz) if end_date else None
 
     events = []
 
@@ -1435,16 +1495,18 @@ def build_holds_report(
     end_date: Optional[str] = None,
     action: Optional[str] = None,
     product_id: Optional[str] = None,
+    tz: Optional[str] = None,
 ) -> dict:
+    tz = tz or report_timezone(db, warehouse_id)
     query = db.query(InventoryHoldAction).filter(
         InventoryHoldAction.status == HoldStatus.APPROVED
     )
     if warehouse_id:
         query = query.filter(InventoryHoldAction.warehouse_id == warehouse_id)
     if start_date:
-        query = query.filter(InventoryHoldAction.approved_at >= parse_dt_start(start_date))
+        query = query.filter(InventoryHoldAction.approved_at >= parse_dt_start(start_date, tz))
     if end_date:
-        query = query.filter(InventoryHoldAction.approved_at <= parse_dt_end(end_date))
+        query = query.filter(InventoryHoldAction.approved_at <= parse_dt_end(end_date, tz))
     if action and action != "all":
         query = query.filter(InventoryHoldAction.action == action)
 
@@ -1507,9 +1569,9 @@ def build_finished_goods_report(
     if warehouse_id:
         query = query.filter(Receipt.warehouse_id == warehouse_id)
     if start_date:
-        query = query.filter(Receipt.production_date >= parse_dt_start(start_date))
+        query = query.filter(Receipt.production_date >= parse_calendar_start(start_date))
     if end_date:
-        query = query.filter(Receipt.production_date <= parse_dt_end(end_date))
+        query = query.filter(Receipt.production_date <= parse_calendar_end(end_date))
     if product_id:
         query = query.filter(Receipt.product_id == product_id)
 
@@ -1575,6 +1637,7 @@ def build_expiry_alerts(
     include_expired: bool = True,
     product_id: Optional[str] = None,
     category_type: Optional[str] = None,
+    tz: Optional[str] = None,
 ) -> dict:
     query = db.query(Receipt).filter(
         Receipt.quantity > 0,
@@ -1592,13 +1655,16 @@ def build_expiry_alerts(
 
     receipts = query.order_by(Receipt.expiration_date.asc()).all()
 
-    today = datetime.now(timezone.utc)
+    # Calendar arithmetic: the best-by DAY against the warehouse's TODAY.
+    # Subtracting instants made a lot expiring tomorrow read "expired" after
+    # 8 PM Eastern (UTC had already rolled over) and "0 days" all afternoon.
+    today = local_today(tz or report_timezone(db, warehouse_id))
     rows = []
     for r in receipts:
         if not r.expiration_date:
             continue
         exp_dt = r.expiration_date
-        days_until = (exp_dt - today).days
+        days_until = (date.fromisoformat(calendar_day(exp_dt)) - today).days
 
         if not include_expired and days_until < 0:
             continue
@@ -1658,16 +1724,18 @@ def build_adjustments_report(
     end_date: Optional[str] = None,
     adjustment_type: Optional[str] = None,
     product_id: Optional[str] = None,
+    tz: Optional[str] = None,
 ) -> dict:
+    tz = tz or report_timezone(db, warehouse_id)
     query = db.query(InventoryAdjustment).filter(
         InventoryAdjustment.status == AdjustmentStatus.APPROVED
     )
     if warehouse_id:
         query = query.filter(InventoryAdjustment.warehouse_id == warehouse_id)
     if start_date:
-        query = query.filter(InventoryAdjustment.approved_at >= parse_dt_start(start_date))
+        query = query.filter(InventoryAdjustment.approved_at >= parse_dt_start(start_date, tz))
     if end_date:
-        query = query.filter(InventoryAdjustment.approved_at <= parse_dt_end(end_date))
+        query = query.filter(InventoryAdjustment.approved_at <= parse_dt_end(end_date, tz))
     if adjustment_type and adjustment_type != "all":
         query = query.filter(InventoryAdjustment.adjustment_type == adjustment_type)
     if product_id:
@@ -1731,14 +1799,16 @@ def build_vendor_receipts_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     vendor_id: Optional[str] = None,
+    tz: Optional[str] = None,
 ) -> dict:
+    tz = tz or report_timezone(db, warehouse_id)
     query = db.query(Receipt)
     if warehouse_id:
         query = query.filter(Receipt.warehouse_id == warehouse_id)
     if start_date:
-        query = query.filter(Receipt.receipt_date >= parse_dt_start(start_date))
+        query = query.filter(Receipt.receipt_date >= parse_dt_start(start_date, tz))
     if end_date:
-        query = query.filter(Receipt.receipt_date <= parse_dt_end(end_date))
+        query = query.filter(Receipt.receipt_date <= parse_dt_end(end_date, tz))
     if vendor_id:
         if vendor_id == "none":
             query = query.filter(Receipt.vendor_id.is_(None))

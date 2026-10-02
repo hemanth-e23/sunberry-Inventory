@@ -487,6 +487,10 @@ export const LocationProvider = ({ children }) => {
           };
         }),
       );
+      // Typing a room can create its default row (or retire it when the room
+      // already has racks); reload so the tree shows the rows that really
+      // exist rather than "No rows in this sub-location".
+      fetchLocations();
     } catch (error) {
       console.error('Error updating sub-location storage unit:', error);
       throw error;
@@ -590,6 +594,9 @@ export const LocationProvider = ({ children }) => {
           };
         }),
       );
+      // The server may have retired the room's default row now that a real
+      // rack exists; reload so Master Data shows it as Inactive.
+      fetchLocations();
       return newRow;
     } catch (error) {
       console.error('Error adding sub-location row:', error);

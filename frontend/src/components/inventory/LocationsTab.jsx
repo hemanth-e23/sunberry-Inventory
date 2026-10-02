@@ -81,6 +81,12 @@ const buildTree = ({ locationsTree, storageAreas, receipts, productsById }) => {
       subById[sub.id] = subNode;
 
       for (const row of (sub.rows || [])) {
+        // A deactivated rack holding nothing is not a place to look; this is
+        // also how a room's retired default row (F6) stays off the board.
+        if (row.active === false && !(Number(row.liveUnits) > 0)
+            && !(Number(row.occupiedCases) > 0) && !(Number(row.occupiedPallets) > 0)) {
+          continue;
+        }
         const rowNode = makeNode(
           row.id,
           row.name,

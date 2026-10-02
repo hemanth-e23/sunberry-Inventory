@@ -6,6 +6,7 @@ from app.models import Receipt, PalletLicence, StorageRow
 from app.enums import ReceiptStatus, PalletStatus
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE
+from app.utils.warehouse_time import as_aware_utc, warehouse_timezone, zone
 
 
 def _free_storage_row_occupancy(db: Session, receipt: Receipt) -> None:
@@ -87,28 +88,29 @@ def reject_receipt(db: Session, receipt: Receipt, reason: str, current_user) -> 
     if receipt.status not in (ReceiptStatus.RECORDED, ReceiptStatus.REVIEWED):
         raise ValidationError("Receipt is not in a state that can be rejected")
 
-    # Scans are physical placements; rejecting the paperwork would leave the
-    # scanned drums as stock with a rejected paper trail (audit I7). Undo the
-    # scans on the gun first, then reject.
-    from app.services import lot_receiving_service
-
-    scanned = int(lot_receiving_service.session_counts(db, receipt).get("total") or 0)
-    if scanned > 0:
-        raise ValidationError(
-            f"{scanned} unit(s) of this receipt are already scanned onto "
-            "racks. Have the forklift undo the scans before rejecting, or "
-            "approve and adjust instead."
-        )
-
     if current_user.role == ROLE_WAREHOUSE and receipt.submitted_by == str(current_user.id):
         raise ForbiddenError(
             "You cannot reject your own receipts. Only other users' receipts can be rejected."
         )
 
+    # Scans are physical placements; rejecting the paperwork must not leave the
+    # scanned drums as stock with a rejected paper trail (audit I7). Before
+    # 2026-10 this refused and told the forklift to undo the scans, which is
+    # impossible once the truck is finished (browser test F8). The reject now
+    # takes them back off the racks through the ledger itself, and still
+    # refuses when any of them have moved or been used since.
+    from app.services import lot_receiving_service
+
+    removed = lot_receiving_service.reverse_receiving_for_reject(
+        db, receipt, actor_id=str(current_user.id), reason=reason,
+    )
+
     _free_storage_row_occupancy(db, receipt)
 
     receipt.status = ReceiptStatus.REJECTED
     receipt.note = f"{receipt.note or ''}\n[Rejected by {current_user.name}]: {reason}".strip()
+    if removed:
+        receipt.note += f"\n[Reject took {removed} scanned unit(s) back off the racks]"
 
     db.query(PalletLicence).filter(PalletLicence.receipt_id == receipt.id).update(
         {"status": PalletStatus.CANCELLED}, synchronize_session=False
@@ -138,3 +140,48 @@ def send_back_receipt(db: Session, receipt: Receipt, reason: str, current_user) 
     )
 
     return receipt
+
+
+def corrected_receipt_date(db: Session, receipt: Receipt, new_value):
+    """What `receipt_date` should become when a correction posts one.
+
+    `receipt_date` is an INSTANT (when the truck was received), but the
+    corrections form edits it through a date input, so what arrives is a bare
+    day — midnight UTC once the client or schema has parsed it. Writing that
+    back verbatim moved an 8:12 PM EDT receipt to 00:00 UTC — 8 PM the evening
+    BEFORE in Eastern — and it showed as received the previous day everywhere
+    (browser test 2026-10-01, F4).
+
+    Rules:
+      * A full timestamp (anything but exactly midnight UTC) was set on
+        purpose — keep it.
+      * A bare day that is the receipt's own day (as the warehouse sees it, or
+        as the UTC/as-loaded readings show it — the form pre-fills from one of
+        those) is "unchanged": keep the original instant.
+      * A different bare day is a deliberate re-date: that day, at the original
+        local time of day in the warehouse's timezone.
+      * None never wipes a received timestamp.
+    """
+    original = receipt.receipt_date
+    if new_value is None:
+        return original
+    if original is None:
+        return new_value
+    nv = as_aware_utc(new_value)
+    if (nv.hour, nv.minute, nv.second, nv.microsecond) != (0, 0, 0, 0):
+        return new_value
+
+    typed = nv.date()
+    tz = zone(warehouse_timezone(db, receipt.warehouse_id))
+    orig_utc = as_aware_utc(original)
+    orig_local = orig_utc.astimezone(tz)
+    same_day = {orig_local.date(), orig_utc.date(), original.date()}
+    if typed in same_day:
+        return original
+
+    redated = datetime(
+        typed.year, typed.month, typed.day,
+        orig_local.hour, orig_local.minute, orig_local.second, orig_local.microsecond,
+        tzinfo=tz,
+    )
+    return redated.astimezone(timezone.utc)

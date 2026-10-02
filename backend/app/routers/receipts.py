@@ -425,6 +425,11 @@ def update_receipt(
         )
 
     update_data = receipt_update.dict(exclude_unset=True)
+    if "receipt_date" in update_data:
+        # A date-only correction must not move the received instant (F4).
+        update_data["receipt_date"] = receipt_service.corrected_receipt_date(
+            db, receipt, update_data["receipt_date"]
+        )
     for field, value in update_data.items():
         setattr(receipt, field, value)
 

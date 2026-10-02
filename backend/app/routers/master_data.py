@@ -401,6 +401,8 @@ def update_sub_location(
     # rack picker lists ROWS, so a room with none never appeared in it, and
     # nothing on screen said why. Give it one row named after itself.
     ingredient_row_service.ensure_default_row(db, sub_location, current_user)
+    # ...and once the room has racks of its own, that stand-in goes (F6).
+    ingredient_row_service.retire_default_row(db, sub_location)
 
     db.commit()
     db.refresh(sub_location)
@@ -560,6 +562,19 @@ def create_storage_row(
     
     db_row = StorageRow(**model_kwargs(row_data, StorageRow))
     db.add(db_row)
+    db.flush()
+
+    # A real rack now exists in this room, so the room's default row (the
+    # stand-in for "the room is one open space") is a phantom — retire it
+    # unless it holds stock. Browser test 2026-10-01, F6.
+    room_id = db_row.sub_location_id
+    if not room_id and db_row.storage_area_id:
+        area = db.query(StorageArea).filter(StorageArea.id == db_row.storage_area_id).first()
+        room_id = area.sub_location_id if area else None
+    if room_id:
+        room = db.query(SubLocation).filter(SubLocation.id == room_id).first()
+        ingredient_row_service.retire_default_row(db, room)
+
     db.commit()
     db.refresh(db_row)
     return db_row
