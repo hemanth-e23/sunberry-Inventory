@@ -10,8 +10,12 @@ import { playErrorTone, playSuccessTone } from '../../utils/scannerFeedback';
 import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 import { removeScan } from '../../utils/scanQueue';
 import { decodeLotPayload } from '../../utils/labelPayload';
-import { createDoubleFireGuard, formatUnitTotals } from '../../utils/truckReceiving';
+import {
+  createDoubleFireGuard, describeRecountDiff, formatUnitTotals, lineMismatchNote,
+  overScanTitle, parseLooseQty, scanUnitsBadge, truckUnitWords, unitCount,
+} from '../../utils/truckReceiving';
 import { isTerminal, useLotScanQueue } from '../../hooks/useLotScanQueue';
+import { useScanFocusKeeper } from '../../hooks/useScanFocusKeeper';
 import {
   apiErrorMessage, getTruck, listReceivingSessions, listTrucks, locateTruck,
   newIdempotencyKey, orderIdFromTruckEndpoint, receiptIdFromEndpoint, resolveRow,
@@ -71,6 +75,9 @@ const TruckListView = () => {
   const [scanInput, setScanInput] = useState('');
   const [choices, setChoices] = useState(null);
   const [feedback, setFeedback] = useState(null);
+  // The last refusal stays on screen: a 2-second flash was easy to miss, and
+  // a scan that "did nothing" is exactly what the browser test reported (F7).
+  const [notice, setNotice] = useState('');
   const inputRef = useRef(null);
 
   // The list keeps the queue draining, so backing out mid-truck strands nothing.
@@ -96,6 +103,15 @@ const TruckListView = () => {
   useEffect(() => {
     if (!choices) inputRef.current?.focus();
   }, [choices, loading]);
+  // The first scan after the list loaded went nowhere (F7a): nothing put focus
+  // back once it was lost. The keeper does, and catches a scan typed at <body>.
+  useScanFocusKeeper(inputRef, !choices);
+
+  const refuse = useCallback((message) => {
+    playErrorTone();
+    setNotice(message);
+    setFeedback({ kind: 'error', message });
+  }, []);
 
   // Scanning any drum opens the truck it is on — the worker does not have to
   // find the right card first.
@@ -106,21 +122,26 @@ const TruckListView = () => {
     if (!raw) return;
     const decoded = decodeLotPayload(raw);
     const code = decoded?.lotCode || raw;
+    setNotice('');
     try {
       const result = await locateTruck(code);
       if (result.trucks?.length === 1) {
         navigate(`/forklift/lot-receiving/truck/${result.trucks[0].order_id}`);
       } else if (result.trucks?.length > 1) {
         setChoices(result);
+      } else if (result.status === 'unknown_lot' && (!decoded || decoded.bare)) {
+        // A bare code that is no lot may be a rack label scanned too early.
+        const rack = await resolveRow(raw).catch(() => null);
+        refuse(rack
+          ? `${rack.name} is a rack. Open a truck first (scan any sticker on it, or tap it below), then scan the rack.`
+          : result.message || 'No lot with this sticker has been checked in yet.');
       } else {
-        playErrorTone();
-        setFeedback({ kind: 'error', message: result.message || 'That drum is not on any truck being received.' });
+        refuse(result.message || 'That sticker is not on any truck being received.');
       }
     } catch (err) {
-      playErrorTone();
-      setFeedback({ kind: 'error', message: errorText(err, 'Could not look that drum up') });
+      refuse(errorText(err, 'Could not look that sticker up'));
     }
-  }, [scanInput, navigate]);
+  }, [scanInput, navigate, refuse]);
 
   return (
     <ScannerLayout
@@ -146,7 +167,7 @@ const TruckListView = () => {
             type="text"
             value={scanInput}
             onChange={(e) => setScanInput(e.target.value)}
-            placeholder="Scan any drum to open its truck…"
+            placeholder="Scan any sticker to open its truck…"
             className="sir-input"
             autoComplete="off"
             autoCapitalize="characters"
@@ -158,6 +179,11 @@ const TruckListView = () => {
           </button>
         </form>
 
+        {notice && (
+          <div className="sir-error" role="alert">
+            <AlertTriangle size={16} /> {notice}
+          </div>
+        )}
         {loading && <p className="sir-muted">Loading…</p>}
         {error && <div className="sir-error"><AlertTriangle size={16} /> {error}</div>}
 
@@ -193,7 +219,7 @@ const TruckListView = () => {
                 {Object.entries(products).map(([name, p]) => (
                   <div key={name} className="sir-truck-product">
                     <span>{name}{p.lots > 1 ? ` (${p.lots} lots)` : ''}</span>
-                    <strong>{p.scanned} of {p.expected} {p.unit}</strong>
+                    <strong>{p.scanned} of {unitCount(p.expected, p.unit)}</strong>
                   </div>
                 ))}
               </div>
@@ -217,7 +243,7 @@ const TruckListView = () => {
               {session.vendor_lot ? `Lot ${session.vendor_lot}` : 'Lot unknown'}
               {' · sticker '}{session.lot_code}
               <br />
-              <strong>{session.scanned_count} of {session.expected_count} {session.count_unit}</strong>
+              <strong>{session.scanned_count} of {unitCount(session.expected_count, session.count_unit)}</strong>
             </div>
           </button>
         ))}
@@ -290,6 +316,12 @@ const TruckView = ({ orderId }) => {
   const doubleFire = useRef(createDoubleFireGuard(1000));
   // One-shot: the NEXT scan is a single loose bag on a pallet-stickered lot.
   const [single, setSingle] = useState(false);
+  // "Loose units: [qty]" — N singles of one lot onto the rack in one step, for
+  // a broken pallet. 30 loose bags were 30 tap-refocus-scan cycles (F12).
+  const [loose, setLoose] = useState(null);
+  // A refusal the worker must acknowledge — an unknown sticker or a closed
+  // truck. A list row alone was missed (F13).
+  const [stop, setStop] = useState(null);
 
   // Parked scans waiting on the worker. Kept here because the queue forgets an
   // item the moment its 200 arrives, and a "please confirm" IS a 200.
@@ -343,7 +375,13 @@ const TruckView = ({ orderId }) => {
       patchHistory(item.idempotency_key, { state: 'confirm', message: response.message });
       setOverConfirm((prev) => (
         prev.some((p) => p.idempotencyKey === parked.idempotencyKey)
-          ? prev : [...prev, { ...parked, message: response.message }]
+          ? prev
+          : [...prev, {
+            ...parked,
+            message: response.message,
+            units: response.units || item.payload?.est_units || 1,
+            countUnit: response.count_unit,
+          }]
       ));
       playErrorTone();
       return;
@@ -357,7 +395,14 @@ const TruckView = ({ orderId }) => {
           rowId: response.row_id || item.payload?.storage_row_id,
           rowName: response.row_name || '',
         };
-        if (!prev) return { rowName: entry.rowName, detail: response.warning_detail || '', pending: [entry] };
+        if (!prev) {
+          return {
+            rowName: entry.rowName,
+            question: response.message || '',
+            detail: response.warning_detail || '',
+            pending: [entry],
+          };
+        }
         if (prev.pending.some((p) => p.idempotencyKey === entry.idempotencyKey)) return prev;
         return { ...prev, pending: [...prev.pending, entry] };
       });
@@ -367,6 +412,14 @@ const TruckView = ({ orderId }) => {
 
     if (response.status !== 'ok') {
       patchHistory(item.idempotency_key, { state: 'error', message: response.message });
+      if (response.status === 'unknown_lot' || response.status === 'truck_closed') {
+        playErrorTone();
+        setStop({
+          title: response.status === 'unknown_lot' ? 'Not expected on this truck' : 'This truck is finished',
+          message: response.message,
+        });
+        return;
+      }
       showError(response.message);
       return;
     }
@@ -380,6 +433,7 @@ const TruckView = ({ orderId }) => {
       text: `${lotLabel} → ${response.row_name}`,
       count: `${response.line_scanned_count} of ${response.line_expected_count}`,
       product: response.product_name,
+      badge: scanUnitsBadge(response.units, response.count_unit || hitLine?.unit_label),
     };
     setLastHit(hit);
     patchHistory(item.idempotency_key, {
@@ -389,6 +443,7 @@ const TruckView = ({ orderId }) => {
       rowName: response.row_name,
       count: response.row_line_count,
       units: response.units,
+      unit: response.count_unit || hitLine?.unit_label,
     });
     if (response.flag) {
       playSuccessTone();
@@ -417,7 +472,11 @@ const TruckView = ({ orderId }) => {
       return { ...line, shown: line.scanned_count + pendingUnits };
     });
   }, [truck, pendingItems]);
-  const hasPalletised = lines.some((l) => (l.units_per_pallet || 0) > 1);
+  const palletLines = useMemo(() => lines.filter((l) => (l.units_per_pallet || 0) > 1), [lines]);
+  const hasPalletised = palletLines.length > 0;
+  // The truck's own words: a truck of bags and boxes is never told about drums.
+  const words = useMemo(() => truckUnitWords(lines), [lines]);
+  const mismatch = lineMismatchNote(lines, { countKey: 'shown' });
 
   // ── Load ───────────────────────────────────────────────────────────────────
   const loadTruck = useCallback(() => {
@@ -448,26 +507,17 @@ const TruckView = ({ orderId }) => {
     return () => clearInterval(id);
   }, [showInfo]);
 
-  const dialogOpen = !!(rowPicker || recount || removeOpen || overConfirm.length || finishState);
+  const finishAsking = finishState?.status === 'needs_confirm' || finishState?.status === 'needs_reason';
+  const dialogOpen = !!(rowPicker || recount || removeOpen || overConfirm.length
+    || finishAsking || loose || stop);
 
   // ── Keyboard-wedge focus ───────────────────────────────────────────────────
   useEffect(() => {
     if (manualKeyboard || dialogOpen) return undefined;
     const id = requestAnimationFrame(() => inputRef.current?.focus());
     return () => cancelAnimationFrame(id);
-  }, [manualKeyboard, dialogOpen, feedback, row, loading]);
-
-  useEffect(() => {
-    if (manualKeyboard || dialogOpen) return undefined;
-    const onFocusOut = () => {
-      setTimeout(() => {
-        const active = document.activeElement;
-        if (!active || active === document.body) inputRef.current?.focus();
-      }, 50);
-    };
-    document.addEventListener('focusout', onFocusOut);
-    return () => document.removeEventListener('focusout', onFocusOut);
-  }, [manualKeyboard, dialogOpen]);
+  }, [manualKeyboard, dialogOpen, feedback, row, loading, single]);
+  useScanFocusKeeper(inputRef, !manualKeyboard && !dialogOpen);
 
   // ── Recount ────────────────────────────────────────────────────────────────
   const openRecount = useCallback((rowId, summary = truck) => {
@@ -523,16 +573,29 @@ const TruckView = ({ orderId }) => {
     }
   }, [online]);
 
-  // ── Drum scan ──────────────────────────────────────────────────────────────
-  const recordDrum = useCallback((lotCode) => {
+  // A scan that is NOT put away still gets a row in Recent scans. A refusal
+  // shown only as a 2-second flash read as "the gun ignored me" (F7b).
+  const logRefusal = useCallback((label, message) => {
+    showError(message);
+    setHistory((prev) => [
+      { key: newIdempotencyKey(), label, rowName: '—', state: 'error', message },
+      ...prev,
+    ].slice(0, HISTORY_LIMIT));
+  }, [showError]);
+
+  // ── Unit scan ──────────────────────────────────────────────────────────────
+  // `forceSingle` books one loose unit whatever the toggle says (loose entry).
+  const recordDrum = useCallback((lotCode, { forceSingle = false } = {}) => {
     const target = rowRef.current;
+    const line = (truck?.lines || []).find((l) => sameCode(l.lot_code, lotCode));
+    const label = line?.vendor_lot ? `Lot ${line.vendor_lot}` : lotCode;
     if (!target) {
-      showError('Scan a rack first — a drum is never placed by guess.');
-      return;
+      logRefusal(label, `Not put away — scan the rack first. A ${words.one} is never placed by guess.`);
+      return null;
     }
     lastActivity.current = Date.now();
-    const line = (truck?.lines || []).find((l) => sameCode(l.lot_code, lotCode));
-    const estUnits = single ? 1 : Math.max(1, Number(line?.units_per_pallet) || 1);
+    const isSingle = forceSingle || single;
+    const estUnits = isSingle ? 1 : Math.max(1, Number(line?.units_per_pallet) || 1);
     const payload = {
       lot_code: lotCode,
       storage_row_id: target.id,
@@ -540,21 +603,23 @@ const TruckView = ({ orderId }) => {
       lot_code_resolved: lotCode,
       est_units: estUnits,
     };
-    if (single) payload.single = true;
-    setSingle(false);
+    if (isSingle) payload.single = true;
+    if (!forceSingle) setSingle(false);
     const item = send(orderId, endpoint, payload);
     setHistory((prev) => [
       {
         key: item.idempotency_key,
-        label: line?.vendor_lot ? `Lot ${line.vendor_lot}` : lotCode,
+        label,
         rowName: target.name,
         units: estUnits,
+        unit: line?.unit_label,
         state: 'pending',
         message: 'Queued',
       },
       ...prev.filter((h) => h.key !== item.idempotency_key),
     ].slice(0, HISTORY_LIMIT));
-  }, [truck, single, send, orderId, endpoint, showError]);
+    return item;
+  }, [truck, single, send, orderId, endpoint, logRefusal, words.one]);
 
   // Replays a parked scan with the worker's answer on it, under the SAME key.
   const resend = useCallback((parked, extra) => {
@@ -571,7 +636,7 @@ const TruckView = ({ orderId }) => {
     if (!raw) return;
     if (doubleFire.current(raw)) return;   // trigger bounce, not a second drum
     if (scanInFlight.current) {
-      showError('Still resolving the last rack — scan that drum again.');
+      showError(`Still resolving the last rack — scan that ${words.one} again.`);
       return;
     }
 
@@ -592,7 +657,7 @@ const TruckView = ({ orderId }) => {
       if (found) { adoptRow(found); return; }
       if (error) { showError(error); return; }
       if (!rowRef.current) {
-        showError('Not a known rack. Scan a rack barcode before any drum.');
+        logRefusal(raw, `Not a known rack — scan the rack first, then any ${words.one}.`);
         return;
       }
       recordDrum(raw);
@@ -600,19 +665,45 @@ const TruckView = ({ orderId }) => {
       scanInFlight.current = false;
       setBusy(false);
     }
-  }, [scanInput, recordDrum, resolveRowCode, adoptRow, showError]);
+  }, [scanInput, recordDrum, resolveRowCode, adoptRow, showError, logRefusal, words.one]);
 
   // ── Confirms ───────────────────────────────────────────────────────────────
-  const answerOver = useCallback((yes) => {
+  const answerOver = useCallback((yes, { all = false } = {}) => {
     const [first, ...rest] = overConfirm;
     if (!first) return;
-    if (yes) {
-      resend(first, { confirm_over: true });
-    } else {
-      patchHistory(first.idempotencyKey, { state: 'error', message: 'Not put away — you said no.' });
-    }
-    setOverConfirm(rest);
+    // "All" answers every waiting scan the same way — loose units booked in one
+    // step can park several at once.
+    (all ? overConfirm : [first]).forEach((parked) => {
+      if (yes) resend(parked, { confirm_over: true });
+      else patchHistory(parked.idempotencyKey, { state: 'error', message: 'Not put away — you said no.' });
+    });
+    setOverConfirm(all ? [] : rest);
   }, [overConfirm, resend, patchHistory]);
+
+  // ── Loose units ────────────────────────────────────────────────────────────
+  const openLoose = useCallback(() => {
+    if (!rowRef.current) {
+      logRefusal('Loose units', `Not booked — scan the rack first. A ${words.one} is never placed by guess.`);
+      return;
+    }
+    const preferred = palletLines.find((l) => l.line_id === lastHit?.lineId) || palletLines[0];
+    setLoose({ lineId: preferred?.line_id || '', qty: '', error: '' });
+  }, [palletLines, lastHit, logRefusal, words.one]);
+
+  const bookLoose = useCallback(() => {
+    if (!loose) return;
+    const line = palletLines.find((l) => l.line_id === loose.lineId);
+    const { qty, error } = parseLooseQty(loose.qty);
+    if (!line) { setLoose((prev) => ({ ...prev, error: 'Pick the lot.' })); return; }
+    if (error) { setLoose((prev) => ({ ...prev, error })); return; }
+    // N separate single scans, each under its own idempotency key: a lost
+    // response replays one bag, never the batch.
+    for (let i = 0; i < qty; i += 1) {
+      if (!recordDrum(line.lot_code, { forceSingle: true })) break;
+    }
+    setLoose(null);
+    showInfo(`${unitCount(qty, line.unit_label)} of lot ${line.vendor_lot || line.lot_code} queued as loose.`);
+  }, [loose, palletLines, recordDrum, showInfo]);
 
   const confirmOverfill = useCallback(() => {
     (rowFull?.pending || []).forEach((p) => resend(p, { allow_overfill: true }));
@@ -620,12 +711,27 @@ const TruckView = ({ orderId }) => {
   }, [rowFull, resend]);
 
   // ── Recount submit ─────────────────────────────────────────────────────────
-  const submitRecount = useCallback(async () => {
+  const submitRecount = useCallback(async ({ confirmed = false } = {}) => {
     if (!recount) return;
     const counts = recount.items.map((item) => ({
       line_id: item.line_id,
       actual: Math.max(0, parseInt(item.agreed === true ? item.scanned : item.actual, 10) || 0),
     }));
+    // The count wins on the server, so a typo silently took stock off the
+    // rack (F11). A count that disagrees with the scans is read back first.
+    const questions = recount.items
+      .map((item, i) => {
+        const q = describeRecountDiff({
+          scanned: item.scanned, actual: counts[i].actual, unitLabel: item.count_unit,
+        });
+        // Several lots on one rack: say which one each question is about.
+        return q && recount.items.length > 1 ? `Lot ${item.vendor_lot || item.lot_code}: ${q}` : q;
+      })
+      .filter(Boolean);
+    if (questions.length && !confirmed) {
+      setRecount((prev) => ({ ...prev, confirming: questions }));
+      return;
+    }
     setBusy(true);
     try {
       const result = await truckRecount(orderId, { storage_row_id: recount.rowId, counts });
@@ -649,7 +755,7 @@ const TruckView = ({ orderId }) => {
   }, [recount, orderId, finishState, nextRecount, showError, showInfo, showSuccess]);
 
   // ── Remove ─────────────────────────────────────────────────────────────────
-  const removeOne = useCallback(async (line, rowId, rowName) => {
+  const removeOne = useCallback(async (line, rowId, rowName, { single: oneLoose = false } = {}) => {
     if (pendingItems.length) {
       showError('Wait for queued scans to sync first.');
       return;
@@ -660,14 +766,18 @@ const TruckView = ({ orderId }) => {
         line_id: line.line_id,
         storage_row_id: rowId,
         idempotency_key: newIdempotencyKey(),
+        single: oneLoose,
       });
       setTruck(result.truck);
       setLastHit(null);
       if (result.status === 'removed') {
         showSuccess(result.message);
         setHistory((prev) => [{
-          key: newIdempotencyKey(), label: `−${result.units} ${line.lot_code}`, rowName,
-          state: 'ok', message: result.message,
+          key: newIdempotencyKey(),
+          label: `−${unitCount(result.units, line.unit_label)} · Lot ${line.vendor_lot || line.lot_code}`,
+          rowName,
+          state: 'ok',
+          message: result.message,
         }, ...prev].slice(0, HISTORY_LIMIT));
       } else {
         showError(result.message);
@@ -736,14 +846,9 @@ const TruckView = ({ orderId }) => {
     (line.rows || []).filter((r) => r.count > 0).map((r) => ({ line, row: r }))
   )), [lines]);
 
-  if (loading) {
-    return (
-      <ScannerLayout title="Receiving" showBack onBack={() => navigate('/forklift/lot-receiving')}>
-        <p className="sir-muted">Loading…</p>
-      </ScannerLayout>
-    );
-  }
-  if (loadError) {
+  // No "Loading…" screen in place of the scan box: a scan fired while the
+  // truck loads must land somewhere visible (F7a).
+  if (loadError && !truck) {
     return (
       <ScannerLayout title="Receiving" showBack onBack={() => navigate('/forklift/lot-receiving')}>
         <div className="sir-error"><AlertTriangle size={16} /> {loadError}</div>
@@ -783,7 +888,11 @@ const TruckView = ({ orderId }) => {
           {truck?.bol && <><span className="sir-meta-sep">·</span><span>BOL {truck.bol}</span></>}
           <span className="sir-meta-sep">·</span>
           <span>{formatUnitTotals(truck?.totals)}</span>
+          {/* The total can hide lot A over and lot B short (F15). */}
+          {mismatch && <span className="sir-truck-mismatch">· {mismatch}</span>}
         </div>
+
+        {loading && !truck && <p className="sir-muted">Loading truck…</p>}
 
         {closed && (
           <div className="sir-error"><AlertTriangle size={16} /> This truck is finished. See the office to change it.</div>
@@ -799,7 +908,7 @@ const TruckView = ({ orderId }) => {
           ) : (
             <div className="sir-rowbanner-text">
               <span className="sir-rowbanner-name">Scan a rack</span>
-              <span className="sir-rowbanner-path">No location set — drums are blocked</span>
+              <span className="sir-rowbanner-path">No location set — {words.many} are blocked</span>
             </div>
           )}
           <button type="button" className="sir-rowbanner-btn" onClick={() => setRowPicker(true)}>
@@ -811,7 +920,7 @@ const TruckView = ({ orderId }) => {
           <div className="sir-warn">
             <AlertTriangle size={18} />
             <div>
-              <strong>{rowFull.rowName || 'This rack'} is full by the system.</strong>
+              <strong>{rowFull.question || `${rowFull.rowName || 'This rack'} is at its capacity — load past it?`}</strong>
               <div className="sir-warn-detail">
                 {rowFull.pending.length > 1
                   ? `${rowFull.pending.length} scans are waiting on your answer.`
@@ -839,7 +948,7 @@ const TruckView = ({ orderId }) => {
             type="text"
             value={scanInput}
             onChange={(e) => setScanInput(e.target.value)}
-            placeholder={row ? 'Scan any drum (or a new rack)…' : 'Scan the rack barcode…'}
+            placeholder={row ? `Scan any ${words.one} (or a new rack)…` : 'Scan the rack barcode…'}
             className="sir-input"
             autoComplete="off"
             autoCapitalize="characters"
@@ -858,19 +967,48 @@ const TruckView = ({ orderId }) => {
         </button>
 
         {hasPalletised && (
-          <button
-            type="button"
-            className={`sir-btn ${single ? 'sir-btn--warn' : 'sir-btn--ghost'}`}
-            onClick={() => setSingle((v) => !v)}
-          >
-            {single ? 'Next scan: ONE loose bag/box' : 'Next scan is a single loose bag/box?'}
-          </button>
+          <div className="sir-perscan">
+            <span className="sir-perscan-label">Next pallet sticker</span>
+            <div className="sir-perscan-opts">
+              {/* onMouseDown preventDefault: a tap must not take focus off the
+                  scan box, or the next trigger pull goes nowhere (F12). */}
+              <button
+                type="button"
+                className={`sir-perscan-btn${single ? '' : ' is-on'}`}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => setSingle(false)}
+              >
+                <strong>Pallet</strong>
+                <span>whole pallet</span>
+              </button>
+              <button
+                type="button"
+                className={`sir-perscan-btn${single ? ' is-on' : ''}`}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => setSingle((v) => !v)}
+              >
+                <strong>1</strong>
+                <span>one loose {words.one}</span>
+              </button>
+            </div>
+            <button
+              type="button"
+              className="sir-btn sir-btn--ghost sir-loose-btn"
+              onClick={openLoose}
+              disabled={closed}
+            >
+              Loose…
+            </button>
+          </div>
         )}
 
         {lastHit && (
-          <div className="sir-truck-lasthit">
+          <div className={`sir-truck-lasthit${lastHit.badge?.pallet ? ' is-pallet' : ''}`}>
             <Check size={22} />
             <div>
+              <span className={`sir-units-badge${lastHit.badge?.pallet ? ' sir-units-badge--pallet' : ''}`}>
+                {lastHit.badge?.text}
+              </span>
               <strong>{lastHit.text}</strong>
               <span>{lastHit.product} · {lastHit.count}</span>
             </div>
@@ -898,6 +1036,13 @@ const TruckView = ({ orderId }) => {
                     {line.expected_count === 0 && ' · NOT ON PAPERWORK'}
                     {line.is_held && ' · ON HOLD'}
                   </span>
+                  {(line.units_per_pallet || 0) > 1 && (
+                    <span className={`sir-truck-perscan${single ? ' is-single' : ''}`}>
+                      {single
+                        ? `Next scan = 1 ${singularUnit(line.unit_label || line.count_unit)}`
+                        : `1 scan = ${unitCount(line.units_per_pallet, line.unit_label || line.count_unit)}`}
+                    </span>
+                  )}
                 </div>
                 <div className="sir-truck-line-count">
                   <strong>{line.shown}</strong>
@@ -914,12 +1059,20 @@ const TruckView = ({ orderId }) => {
             {pendingItems.length > 0 && <span className="sir-history-pending">{pendingItems.length} queued</span>}
           </div>
           {history.length === 0 ? (
-            <p className="sir-muted">Scan the rack, then any drum you put in it — in any order.</p>
+            <p className="sir-muted">Scan the rack, then any {words.one} you put in it — in any order.</p>
           ) : history.map((entry) => (
             <div key={entry.key} className={`sir-history-item sir-history-item--${entry.state}`}>
               {historyIcon(entry)}
               <div className="sir-history-body">
                 <span className="sir-history-serial">
+                  {entry.units > 0 && entry.state !== 'error' && (() => {
+                    const badge = scanUnitsBadge(entry.units, entry.unit);
+                    return (
+                      <span className={`sir-units-badge${badge.pallet ? ' sir-units-badge--pallet' : ''}`}>
+                        {badge.text}
+                      </span>
+                    );
+                  })()}
                   {entry.label}
                   {entry.count != null ? ` · ${entry.count} in rack` : ''}
                 </span>
@@ -952,14 +1105,15 @@ const TruckView = ({ orderId }) => {
         </div>
 
         {finishState?.status === 'needs_confirm' && (
-          <div className="sir-warn">
-            <AlertTriangle size={18} />
-            <div>
-              <strong>The counts do not match the paperwork.</strong>
+          <div className="sir-overlay" role="dialog" aria-modal="true">
+            <div className="sir-dialog sir-dialog--tall">
+              <AlertTriangle size={36} color="#b45309" />
+              <h3>The counts do not match the paperwork</h3>
               <ul className="sir-truck-difflist">
                 {finishState.lines.map((l) => (
                   <li key={l.line_id}>
-                    {l.product_name} · lot {l.vendor_lot || l.lot_code}: {l.scanned_count} of {l.expected_count}
+                    Lot {l.vendor_lot || l.lot_code} · {l.product_name}: {l.scanned_count} of
+                    {' '}{unitCount(l.expected_count, l.unit_label || l.count_unit)}
                     {' '}({l.difference > 0 ? `+${l.difference}` : l.difference})
                   </li>
                 ))}
@@ -977,10 +1131,10 @@ const TruckView = ({ orderId }) => {
         )}
 
         {finishState?.status === 'needs_reason' && (
-          <div className="sir-warn">
-            <AlertTriangle size={18} />
-            <div>
-              <strong>This truck is short. Why?</strong>
+          <div className="sir-overlay" role="dialog" aria-modal="true">
+            <div className="sir-dialog sir-dialog--tall">
+              <AlertTriangle size={36} color="#b45309" />
+              <h3>This truck is short. Why?</h3>
               <div className="sir-truck-reasons">
                 {SHORT_REASONS.map((r) => (
                   <button
@@ -1045,22 +1199,62 @@ const TruckView = ({ orderId }) => {
         <div className="sir-overlay" role="dialog" aria-modal="true">
           <div className="sir-dialog">
             <AlertTriangle size={36} color="#b45309" />
-            <h3>Stop — check this drum</h3>
+            <h3>{overScanTitle(overConfirm[0])}</h3>
             <p className="sir-dialog-hint sir-truck-question">{overConfirm[0].message}</p>
             {overConfirm.length > 1 && (
               <p className="sir-muted">{overConfirm.length - 1} more waiting after this one.</p>
             )}
             <button type="button" className="sir-btn sir-btn--warn" onClick={() => answerOver(true)}>
-              Yes, put it away
+              {overConfirm[0].units > 1
+                ? `Yes, put away ${unitCount(overConfirm[0].units, overConfirm[0].countUnit)}`
+                : 'Yes, put it away'}
             </button>
             <button type="button" className="sir-btn sir-btn--ghost" onClick={() => answerOver(false)}>
               No — that was a mistake
+            </button>
+            {overConfirm.length > 1 && (
+              <>
+                <button type="button" className="sir-btn sir-btn--warn" onClick={() => answerOver(true, { all: true })}>
+                  Yes to all {overConfirm.length}
+                </button>
+                <button type="button" className="sir-btn sir-btn--ghost" onClick={() => answerOver(false, { all: true })}>
+                  No to all {overConfirm.length}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {recount && recount.confirming && !overConfirm.length && (
+        <div className="sir-overlay" role="dialog" aria-modal="true">
+          <div className="sir-dialog">
+            <AlertTriangle size={36} color="#b45309" />
+            <h3>Check {recount.rowName} again</h3>
+            {recount.confirming.map((q, i) => (
+              <p key={i} className="sir-dialog-hint sir-truck-question">{q}</p>
+            ))}
+            <p className="sir-muted">Your count replaces what was scanned, and the office sees the difference.</p>
+            <button
+              type="button"
+              className="sir-btn sir-btn--warn"
+              disabled={busy}
+              onClick={() => submitRecount({ confirmed: true })}
+            >
+              Confirm my count
+            </button>
+            <button
+              type="button"
+              className="sir-btn sir-btn--ghost"
+              onClick={() => setRecount((prev) => ({ ...prev, confirming: null }))}
+            >
+              Recount
             </button>
           </div>
         </div>
       )}
 
-      {recount && !overConfirm.length && (
+      {recount && !recount.confirming && !overConfirm.length && (
         <div className="sir-overlay" role="dialog" aria-modal="true">
           <div className="sir-dialog sir-dialog--tall">
             <h3>Count {recount.rowName}</h3>
@@ -1073,8 +1267,7 @@ const TruckView = ({ orderId }) => {
                   <strong>{item.product_name}</strong>
                   <span>Lot {item.vendor_lot || '—'} · sticker {item.lot_code}</span>
                   <span className="sir-truck-recount-q">
-                    Scanned <b>{item.scanned}</b>{' '}
-                    {item.scanned === 1 ? singularUnit(item.count_unit) : item.count_unit} here. Is that right?
+                    Scanned <b>{unitCount(item.scanned, item.count_unit)}</b> here. Is that right?
                   </span>
                   <div className="sir-warn-actions">
                     <button
@@ -1119,7 +1312,7 @@ const TruckView = ({ orderId }) => {
               type="button"
               className="sir-btn sir-btn--warn"
               disabled={busy || recount.items.some((x) => x.agreed === null || (x.agreed === false && x.actual === ''))}
-              onClick={submitRecount}
+              onClick={() => submitRecount()}
             >
               Save count
             </button>
@@ -1142,21 +1335,103 @@ const TruckView = ({ orderId }) => {
               Pick the lot and rack you scanned by mistake. One tap takes one scan off.
             </p>
             <div className="sir-dialog-list">
-              {scannedPlaces.map(({ line, row: r }) => (
-                <button
-                  key={`${line.line_id}-${r.storage_row_id}`}
-                  type="button"
-                  className="sir-dialog-row"
-                  disabled={busy}
-                  onClick={() => removeOne(line, r.storage_row_id, r.storage_row_name)}
-                >
-                  <strong>−1 · {line.lot_code} @ {r.storage_row_name}</strong>
-                  <span>{line.product_name} · {r.count} {pluralizeUnit(line.unit_label || 'unit')} there now</span>
-                </button>
-              ))}
+              {scannedPlaces.map(({ line, row: r }) => {
+                const unit = line.unit_label || line.count_unit || 'unit';
+                const perPallet = Math.min(r.count, line.units_per_pallet || 1);
+                const lotName = `Lot ${line.vendor_lot || line.lot_code}`;
+                const detail = `${line.product_name} · sticker ${line.lot_code} · ${unitCount(r.count, unit)} there now`;
+                return (
+                  <React.Fragment key={`${line.line_id}-${r.storage_row_id}`}>
+                    <button
+                      type="button"
+                      className="sir-dialog-row"
+                      disabled={busy}
+                      onClick={() => removeOne(line, r.storage_row_id, r.storage_row_name)}
+                    >
+                      <strong>
+                        −{perPallet > 1 ? `${unitCount(perPallet, unit)} (pallet)` : 1} · {lotName} @ {r.storage_row_name}
+                      </strong>
+                      <span>{detail}</span>
+                    </button>
+                    {perPallet > 1 && (
+                      <button
+                        type="button"
+                        className="sir-dialog-row"
+                        disabled={busy}
+                        onClick={() => removeOne(line, r.storage_row_id, r.storage_row_name, { single: true })}
+                      >
+                        <strong>−1 loose {singularUnit(unit)} · {lotName} @ {r.storage_row_name}</strong>
+                        <span>{detail}</span>
+                      </button>
+                    )}
+                  </React.Fragment>
+                );
+              })}
             </div>
             <button type="button" className="sir-btn sir-btn--ghost" onClick={() => setRemoveOpen(false)}>
               Done
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loose && (
+        <div className="sir-overlay" role="dialog" aria-modal="true">
+          <div className="sir-dialog sir-dialog--tall">
+            <h3>Loose units onto {row?.name || 'this rack'}</h3>
+            <p className="sir-dialog-hint">
+              For a broken pallet: each one is booked as a single loose unit of the lot you pick.
+            </p>
+            <div className="sir-dialog-list">
+              {palletLines.map((line) => (
+                <button
+                  key={line.line_id}
+                  type="button"
+                  className={`sir-dialog-row${loose.lineId === line.line_id ? ' is-selected' : ''}`}
+                  onClick={() => setLoose((prev) => ({ ...prev, lineId: line.line_id, error: '' }))}
+                >
+                  <strong>Lot {line.vendor_lot || line.lot_code}</strong>
+                  <span>{line.product_name} · {pluralizeUnit(singularUnit(line.unit_label || line.count_unit))}</span>
+                </button>
+              ))}
+            </div>
+            <input
+              type="number"
+              inputMode="numeric"
+              min="1"
+              className="sir-dialog-input"
+              value={loose.qty}
+              onChange={(e) => setLoose((prev) => ({ ...prev, qty: e.target.value, error: '' }))}
+              onKeyDown={(e) => { if (e.key === 'Enter') bookLoose(); }}
+              placeholder="How many loose?"
+              autoFocus
+            />
+            {loose.error && <div className="sir-error"><AlertTriangle size={16} /> {loose.error}</div>}
+            <button type="button" className="sir-btn sir-btn--warn" onClick={bookLoose} disabled={busy}>
+              {(() => {
+                const line = palletLines.find((l) => l.line_id === loose.lineId);
+                const { qty } = parseLooseQty(loose.qty);
+                return qty && line
+                  ? `Book ${unitCount(qty, line.unit_label || line.count_unit)} loose`
+                  : 'Book loose';
+              })()}
+            </button>
+            <button type="button" className="sir-btn sir-btn--ghost" onClick={() => setLoose(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {stop && (
+        <div className="sir-overlay" role="dialog" aria-modal="true">
+          <div className="sir-dialog">
+            <X size={36} color="#dc2626" />
+            <h3>{stop.title}</h3>
+            <p className="sir-dialog-hint sir-truck-question">{stop.message}</p>
+            {/* No autoFocus: the next scan's Enter must not dismiss this unread. */}
+            <button type="button" className="sir-btn sir-btn--warn" onClick={() => setStop(null)}>
+              OK — nothing was put away
             </button>
           </div>
         </div>

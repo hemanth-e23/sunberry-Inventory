@@ -219,6 +219,36 @@ class TestScanRouting:
         assert _scan(db_session, order, code, allow_overfill=True)["line_scanned_count"] == 50
         assert _scan(db_session, order, code, allow_overfill=True, single=True)["line_scanned_count"] == 51
 
+    def test_a_pallet_scan_over_the_paperwork_says_what_it_adds(self, db_session, recv_seed):
+        # Browser test F13: "Is there really another bag?" for a +40 pallet scan.
+        line = _line(lot="BG-2", count=50)
+        line.update({"unit_label": "bag", "units_per_pallet": 40})
+        order = _truck(db_session, [line])
+        code = _lot_code(db_session, order, "BG-2")
+        _scan(db_session, order, code, allow_overfill=True)
+        asked = _scan(db_session, order, code, allow_overfill=True)
+        assert asked["status"] == "needs_confirm_over"
+        assert asked["units"] == 40 and asked["count_unit"] == "bags"
+        assert "adds 40 bags" in asked["message"]
+        assert "pallet of 40 bags" in asked["message"]
+        assert "drum" not in asked["message"]
+
+    def test_product_names_are_shown_as_stored(self, db_session, recv_seed):
+        # Browser test F13: .title() printed "Qa Mango Puree" / "Ascorbic Acid (Sb)".
+        from app.models import Product
+        db_session.query(Product).filter(Product.id == PRODUCT).one().name = "QA Mango Puree (SB)"
+        order = _truck(db_session, [_line(lot="MG-1", count=1)])
+        code = _lot_code(db_session, order, "MG-1")
+        _scan(db_session, order, code)
+        asked = _scan(db_session, order, code)
+        assert "QA Mango Puree (SB)" in asked["message"]
+
+    def test_an_unknown_sticker_says_it_is_not_expected_here(self, db_session, recv_seed):
+        order = _truck(db_session, [_line()])
+        out = _scan(db_session, order, "NOT-A-LOT")
+        assert order.intake_number in out["message"]
+        assert "not one of ours" not in out["message"]
+
 
 class TestRemoveAndRecount:
     def test_remove_takes_that_lot_off_that_rack_once(self, db_session, recv_seed):
@@ -329,6 +359,16 @@ class TestFinishAndApprove:
         code = _lot_code(db_session, order, "MG-1")
         assert _scan(db_session, order, code)["status"] == "truck_closed"
         assert lrs.open_trucks(db_session, warehouse_id=WH) == []
+
+    def test_locating_a_finished_trucks_sticker_says_it_is_finished(self, db_session, recv_seed):
+        # Browser test F7c: the list did nothing at all for this sticker.
+        order = self._received(db_session)
+        lrs.truck_finish(db_session, order=order, user_id=USER)
+        located = lrs.locate_truck(db_session, _lot_code(db_session, order, "MG-1"), warehouse_id=WH)
+        assert located["status"] == "truck_finished"
+        assert located["trucks"] == []
+        assert "already finished" in located["message"]
+        assert order.intake_number in located["message"]
 
     def test_approve_needs_the_truck_finished(self, db_session, recv_seed):
         order = self._received(db_session)

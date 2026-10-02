@@ -10,10 +10,12 @@ import { playErrorTone, playSuccessTone } from '../../utils/scannerFeedback';
 import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 import { removeScan } from '../../utils/scanQueue';
 import { isTerminal, useLotScanQueue } from '../../hooks/useLotScanQueue';
+import { useScanFocusKeeper } from '../../hooks/useScanFocusKeeper';
 import { decodeLotPayload } from '../../utils/labelPayload';
+import { scanUnitsBadge } from '../../utils/truckReceiving';
 import {
   apiErrorMessage, getReceivingSession,
-  lotScanEndpoint, resolveRow, submitReceivingSession,
+  lotScanEndpoint, newIdempotencyKey, resolveRow, submitReceivingSession,
   undoLastScan,
 } from '../../api/lotReceivingApi';
 import { listIngredientRows } from '../../api/ingredientIntakeApi';
@@ -197,6 +199,7 @@ const SessionView = ({ receiptId }) => {
         if (!prev) {
           return {
             rowName: pending.rowName,
+            question: response.message || '',
             detail: response.warning_detail || '',
             pending: [pending],
           };
@@ -266,6 +269,7 @@ const SessionView = ({ receiptId }) => {
   const expected = session?.expected_count || 0;
   const totalScanned = serverScanned + pendingNew;
   const unit = session?.count_unit || 'units';
+  const oneUnit = singularUnit(unit) || 'unit';
   const rowCount = row ? (serverRowCounts[row.id] || 0) + pendingForRow : 0;
   const remaining = Math.max(0, expected - totalScanned);
 
@@ -324,19 +328,18 @@ const SessionView = ({ receiptId }) => {
     if (manualKeyboard || dialogOpen) return undefined;
     const id = requestAnimationFrame(() => inputRef.current?.focus());
     return () => cancelAnimationFrame(id);
-  }, [manualKeyboard, dialogOpen, feedback, row, loading]);
+  }, [manualKeyboard, dialogOpen, feedback, row, loading, perScan]);
+  useScanFocusKeeper(inputRef, !manualKeyboard && !dialogOpen);
 
-  useEffect(() => {
-    if (manualKeyboard || dialogOpen) return undefined;
-    const onFocusOut = () => {
-      setTimeout(() => {
-        const active = document.activeElement;
-        if (!active || active === document.body) inputRef.current?.focus();
-      }, 50);
-    };
-    document.addEventListener('focusout', onFocusOut);
-    return () => document.removeEventListener('focusout', onFocusOut);
-  }, [manualKeyboard, dialogOpen]);
+  // A scan that is NOT put away still gets a row in Recent scans — a flash
+  // alone read as "the gun ignored me" (browser test F7b).
+  const logRefusal = useCallback((lotCode, message) => {
+    showError(message);
+    setHistory((prev) => [
+      { key: newIdempotencyKey(), lotCode, rowName: '—', units: 0, state: 'error', refused: true, message },
+      ...prev,
+    ].slice(0, HISTORY_LIMIT));
+  }, [showError]);
 
   // ── Rack context ───────────────────────────────────────────────────────────
   const adoptRow = useCallback((resolved) => {
@@ -382,9 +385,9 @@ const SessionView = ({ receiptId }) => {
     if (!target) {
       // The server enforces this too; blocking here saves the trip and, offline,
       // is the only thing standing between a drum and a guess.
-      showError(online
-        ? 'Scan a rack first — a drum is never placed by guess.'
-        : 'Scan a rack first — offline, so pick the rack from the list.');
+      logRefusal(lotCode, online
+        ? `Not put away — scan the rack first. A ${oneUnit} is never placed by guess.`
+        : 'Not put away — scan the rack first (offline, so pick the rack from the list).');
       return;
     }
     const payload = { lot_code: lotCode, storage_row_id: target.id };
@@ -409,7 +412,7 @@ const SessionView = ({ receiptId }) => {
       // reconciled to rather than the live one.
       ...prev.filter((h) => h.key !== entry.key),
     ].slice(0, HISTORY_LIMIT));
-  }, [row, online, send, receiptId, endpoint, perScan, showError]);
+  }, [row, online, send, receiptId, endpoint, perScan, logRefusal, oneUnit]);
 
   const handleScanSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
@@ -428,7 +431,7 @@ const SessionView = ({ receiptId }) => {
     // drum is recorded twice and one is never recorded, with no error.
     setScanInput('');
     if (scanInFlight.current) {
-      showError('Still resolving the last rack — scan that drum again.');
+      showError(`Still resolving the last rack — scan that ${oneUnit} again.`);
       return;
     }
 
@@ -454,8 +457,8 @@ const SessionView = ({ receiptId }) => {
       if (found) { adoptRow(found); return; }
       if (error) { showError(error); return; }
       if (!row) {
-        showError(online
-          ? 'Not a known rack. Scan a rack barcode before any drum.'
+        logRefusal(raw, online
+          ? `Not a known rack — scan the rack first, then any ${oneUnit}.`
           : 'Offline — that code is not in the cached rack list. Pick the rack from the list.');
         return;
       }
@@ -464,7 +467,7 @@ const SessionView = ({ receiptId }) => {
       scanInFlight.current = false;
       setBusy(false);
     }
-  }, [scanInput, recordUnit, resolveRowCode, adoptRow, row, online, showError]);
+  }, [scanInput, recordUnit, resolveRowCode, adoptRow, row, online, showError, logRefusal, oneUnit]);
 
   // ── Over-fill confirm ──────────────────────────────────────────────────────
   const confirmOverfill = useCallback(() => {
@@ -646,7 +649,7 @@ const SessionView = ({ receiptId }) => {
           ) : (
             <div className="sir-rowbanner-text">
               <span className="sir-rowbanner-name">Scan a rack</span>
-              <span className="sir-rowbanner-path">No location set — drums are blocked</span>
+              <span className="sir-rowbanner-path">No location set — {unit} are blocked</span>
             </div>
           )}
           <button type="button" className="sir-rowbanner-btn" onClick={() => setRowPicker(true)}>
@@ -661,7 +664,7 @@ const SessionView = ({ receiptId }) => {
           <div className="sir-warn">
             <AlertTriangle size={18} />
             <div>
-              <strong>{rowFull.rowName || 'This rack'} is full by the system.</strong>
+              <strong>{rowFull.question || `${rowFull.rowName || 'This rack'} is at its capacity — load past it?`}</strong>
               <div className="sir-warn-detail">
                 {rowFull.pending?.length > 1
                   ? `${rowFull.pending.length} scans are waiting on your answer.`
@@ -702,9 +705,12 @@ const SessionView = ({ receiptId }) => {
           <div className="sir-perscan">
             <span className="sir-perscan-label">Each scan is</span>
             <div className="sir-perscan-opts">
+              {/* onMouseDown preventDefault: a tap must not take focus off the
+                  scan box, or the next trigger pull goes nowhere (F12). */}
               <button
                 type="button"
                 className={`sir-perscan-btn${perScan === session.units_per_pallet ? ' is-on' : ''}`}
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={() => setPerScan(session.units_per_pallet)}
               >
                 <strong>{session.units_per_pallet}</strong>
@@ -713,6 +719,7 @@ const SessionView = ({ receiptId }) => {
               <button
                 type="button"
                 className={`sir-perscan-btn${perScan === 1 ? ' is-on' : ''}`}
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={() => setPerScan(1)}
               >
                 <strong>1</strong>
@@ -728,7 +735,7 @@ const SessionView = ({ receiptId }) => {
             type="text"
             value={scanInput}
             onChange={(e) => setScanInput(e.target.value)}
-            placeholder={row ? 'Scan a drum (or a new rack)…' : 'Scan the rack barcode…'}
+            placeholder={row ? `Scan a ${oneUnit} (or a new rack)…` : 'Scan the rack barcode…'}
             className="sir-input"
             autoComplete="off"
             autoCapitalize="characters"
@@ -802,7 +809,7 @@ const SessionView = ({ receiptId }) => {
           </div>
           {history.length === 0 ? (
             <p className="sir-muted">
-              Scan the rack, then scan a drum for every one you put in it.
+              Scan the rack, then scan a {oneUnit} for every one you put in it.
             </p>
           ) : history.map((entry) => (
             <div key={entry.key} className={`sir-history-item sir-history-item--${entry.state}`}>
@@ -811,7 +818,15 @@ const SessionView = ({ receiptId }) => {
                 {/* No serial to show — every sticker is identical. What a worker
                     can actually check against the pile is the running count. */}
                 <span className="sir-history-serial">
-                  +{entry.units || 1}
+                  {entry.refused ? `Not put away · ${entry.lotCode}` : (() => {
+                    // A pallet scan (+50) must not look like a single (+1).
+                    const badge = scanUnitsBadge(entry.units, unit);
+                    return (
+                      <span className={`sir-units-badge${badge.pallet ? ' sir-units-badge--pallet' : ''}`}>
+                        {badge.text}
+                      </span>
+                    );
+                  })()}
                   {entry.count != null ? ` · ${entry.count} in rack` : ''}
                 </span>
                 {entry.state !== 'ok' && entry.message && (

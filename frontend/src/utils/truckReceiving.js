@@ -1,7 +1,7 @@
 // Small pure helpers for truck receiving (2026-10), shared by the gun, the desk
 // and the approvals page. Pure so they can be tested without rendering anything.
 
-import { pluralizeUnit } from './rowSources';
+import { pluralizeUnit, singularUnit } from './rowSources';
 
 /**
  * A scanner trigger that bounces reads the same sticker twice within a few
@@ -59,6 +59,103 @@ export const formatUnitTotals = (totals = [], { scannedKey = 'scanned' } = {}) =
   (totals || [])
     .map((t) => `${number(t[scannedKey])} of ${number(t.expected)} ${pluralizeUnit(t.unit || 'unit')}`)
     .join(' · ');
+
+/** "1 drum", "12 drums", "3 boxes" — never "1 drums" or "boxs". */
+export const unitCount = (n, label = 'unit') => {
+  const one = singularUnit(label || 'unit') || 'unit';
+  return `${number(n)} ${Number(n) === 1 ? one : pluralizeUnit(one)}`;
+};
+
+const joinWords = (words, conjunction) => {
+  if (words.length <= 1) return words[0] || '';
+  return `${words.slice(0, -1).join(', ')} ${conjunction} ${words[words.length - 1]}`;
+};
+
+/**
+ * The truck's own unit words, for every "scan a drum" the gun says. A truck of
+ * bags and boxes was told "drums are blocked" and "Scan any drum" (browser test
+ * F15). `{ one: 'bag or box', many: 'bags and boxes' }`.
+ */
+export const truckUnitWords = (lines = []) => {
+  const seen = [];
+  (lines || []).forEach((line) => {
+    const word = singularUnit(line?.unit_label || line?.count_unit || '');
+    if (word && !seen.includes(word)) seen.push(word);
+  });
+  if (!seen.length) return { one: 'unit', many: 'units' };
+  return {
+    one: joinWords(seen, 'or'),
+    many: joinWords(seen.map(pluralizeUnit), 'and'),
+  };
+};
+
+/**
+ * Per-line mismatch the truck total hides. "22 of 22 drums" while lot A is 9 of
+ * 8 and lot B 13 of 14 reads as done (browser test F15). The sum can only hide
+ * a difference when some line is OVER, so that is when this speaks.
+ * `countKey` picks the live count ('shown' on the gun, with queued scans).
+ */
+export const lineMismatchNote = (lines = [], { countKey = 'scanned_count' } = {}) => {
+  let over = 0;
+  let short = 0;
+  (lines || []).forEach((line) => {
+    const got = Number(line?.[countKey] ?? line?.scanned_count) || 0;
+    const want = Number(line?.expected_count) || 0;
+    if (got > want) over += 1;
+    else if (got < want) short += 1;
+  });
+  if (!over) return '';
+  const parts = [`${over} ${over === 1 ? 'line' : 'lines'} over`];
+  if (short) parts.push(`${short} short`);
+  return parts.join(', ');
+};
+
+/**
+ * The question asked before a rack count that disagrees with the scans is
+ * booked — a wrong recount silently removed stock (browser test F11).
+ * Null when they agree.
+ */
+export const describeRecountDiff = ({ scanned, actual, unitLabel }) => {
+  const s = Number(scanned) || 0;
+  const a = Number(actual) || 0;
+  if (s === a) return null;
+  const diff = Math.abs(s - a);
+  const what = unitCount(diff, unitLabel);
+  return a < s
+    ? `You scanned ${s}, you counted ${a} — ${what} missing?`
+    : `You scanned ${s}, you counted ${a} — ${what} more than scanned?`;
+};
+
+/** Title of the over-the-paperwork stop: the line's own unit, and what it adds. */
+export const overScanTitle = ({ units, countUnit }) => {
+  const n = Number(units) || 1;
+  if (n > 1) return `Stop — this scan adds ${unitCount(n, countUnit)}`;
+  return `Stop — check this ${singularUnit(countUnit || 'unit') || 'unit'}`;
+};
+
+/**
+ * "+40 bags · pallet" vs "+1 bag". A box sticker scanned in pallet mode must
+ * look different from a single at a glance (browser test F12).
+ */
+export const scanUnitsBadge = (units, label) => {
+  const n = Math.max(1, Number(units) || 1);
+  return { text: `+${unitCount(n, label)}${n > 1 ? ' · pallet' : ''}`, pallet: n > 1 };
+};
+
+export const MAX_LOOSE_UNITS = 500;
+
+/**
+ * Parse the "loose units" quantity. Whole numbers 1..MAX only — each one is
+ * booked as its own single scan with its own idempotency key.
+ */
+export const parseLooseQty = (raw) => {
+  const text = String(raw ?? '').trim();
+  if (!/^\d+$/.test(text)) return { qty: 0, error: 'Type how many loose ones (a whole number).' };
+  const qty = parseInt(text, 10);
+  if (qty < 1) return { qty: 0, error: 'Type at least 1.' };
+  if (qty > MAX_LOOSE_UNITS) return { qty: 0, error: `At most ${MAX_LOOSE_UNITS} at a time.` };
+  return { qty, error: '' };
+};
 
 /** What the approval card says for one flag. */
 export const describeFlag = (flag) => {

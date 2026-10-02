@@ -11,7 +11,7 @@ import { pluralizeUnit } from '../../utils/rowSources';
 import { removeScan } from '../../utils/scanQueue';
 import { useScanQueueCore } from '../../hooks/useScanQueue';
 import { decodeLotPayload, formatCalendarDate } from '../../utils/labelPayload';
-import { resolveRow } from '../../api/lotReceivingApi';
+import { newIdempotencyKey, resolveRow } from '../../api/lotReceivingApi';
 import { listIngredientRows } from '../../api/ingredientIntakeApi';
 import {
   apiErrorMessage, getStagingPullRequest, listStagingPullRequests,
@@ -490,6 +490,16 @@ const RequestView = ({ requestId }) => {
     }
   }, [online]);
 
+  // A scan that is NOT pulled still gets a row in Recent scans — a flash alone
+  // read as "the gun ignored me" (browser test F7b).
+  const logRefusal = useCallback((lotCode, message) => {
+    showError(message);
+    setHistory((prev) => [
+      { key: newIdempotencyKey(), lotCode, rowName: '—', units: 0, state: 'error', refused: true, message },
+      ...prev,
+    ].slice(0, HISTORY_LIMIT));
+  }, [showError]);
+
   // ── Record one pull ────────────────────────────────────────────────────────
   const recordPull = useCallback((code, {
     displayCode, allowMismatch = false, reuseKey, intoRow, payloadOverride,
@@ -498,9 +508,9 @@ const RequestView = ({ requestId }) => {
     // parked — the sticky rack and the toggles may have moved on since.
     const target = intoRow || row;
     if (!target) {
-      showError(online
-        ? 'Scan a rack first — a pull is never placed by guess.'
-        : 'Scan a rack first — offline, so pick the rack from the list.');
+      logRefusal(displayCode || code, online
+        ? 'Not pulled — scan a rack first. A pull is never placed by guess.'
+        : 'Not pulled — scan a rack first (offline, so pick the rack from the list).');
       return;
     }
     const payload = payloadOverride || {
@@ -530,7 +540,7 @@ const RequestView = ({ requestId }) => {
     ].slice(0, HISTORY_LIMIT));
     // Armed for one scan only.
     if (!payloadOverride && pullOpen) setPullOpen(false);
-  }, [row, online, send, requestId, endpoint, perScan, pullOpen, showError]);
+  }, [row, online, send, requestId, endpoint, perScan, pullOpen, logRefusal]);
 
   const handleScanSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
@@ -567,8 +577,8 @@ const RequestView = ({ requestId }) => {
       if (found) { adoptRow(found); return; }
       if (error) { showError(error); return; }
       if (!row) {
-        showError(online
-          ? 'Not a known rack. Scan a rack barcode before any drum.'
+        logRefusal(raw, online
+          ? 'Not a known rack — scan a rack barcode before any drum.'
           : 'Offline — that code is not in the cached rack list. Pick the rack from the list.');
         return;
       }
@@ -577,7 +587,7 @@ const RequestView = ({ requestId }) => {
       scanInFlight.current = false;
       setBusy(false);
     }
-  }, [scanInput, recordPull, resolveRowCode, adoptRow, row, online, showError]);
+  }, [scanInput, recordPull, resolveRowCode, adoptRow, row, online, showError, logRefusal]);
 
   // ── FEFO confirm ───────────────────────────────────────────────────────────
   const confirmFefo = useCallback(() => {
@@ -928,7 +938,7 @@ const RequestView = ({ requestId }) => {
               {historyIcon(entry)}
               <div className="sir-history-body">
                 <span className="sir-history-serial">
-                  +{entry.units || 1}
+                  {entry.refused ? 'Not pulled' : `+${entry.units || 1}`}
                   {entry.pullOpen ? ' (open)' : ''}
                   {entry.ingredientName ? ` · ${entry.ingredientName}` : ` · ${entry.lotCode}`}
                 </span>

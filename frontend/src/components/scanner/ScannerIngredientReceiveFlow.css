@@ -1021,3 +1021,30 @@
 }
 .sir-truck-recount span { font-size: 0.85rem; color: #4b5563; }
 .sir-truck-recount-q { font-size: 0.95rem !important; color: #111 !important; }
+
+/* Browser test PART 1 (2026-10-01). A pallet scan (+40) must look nothing like
+   a single (+1): a box sticker read in pallet mode was only caught by the
+   over-paperwork stop (F12). */
+.sir-units-badge {
+  display: inline-block;
+  margin-right: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: #111;
+  font-size: 0.78rem;
+  font-weight: 800;
+  vertical-align: middle;
+}
+.sir-units-badge--pallet { background: #b45309; color: white; }
+.sir-truck-lasthit .sir-units-badge { font-size: 0.95rem; margin-bottom: 0.2rem; }
+.sir-truck-lasthit.is-pallet { background: #fffbeb; border-color: #b45309; color: #78350f; }
+
+.sir-truck-mismatch { color: #b45309; font-weight: 800; }
+
+.sir-truck-line-main .sir-truck-perscan { font-size: 0.78rem; font-weight: 700; color: #92400e; }
+.sir-truck-line-main .sir-truck-perscan.is-single { color: #b45309; }
+
+.sir-perscan .sir-loose-btn { flex-shrink: 0; width: auto; margin: 0; padding: 0.55rem 0.8rem; }
+
+.sir-dialog-row.is-selected { border-color: #b45309; background: #fffbeb; }

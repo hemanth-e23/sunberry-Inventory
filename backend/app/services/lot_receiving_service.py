@@ -89,6 +89,15 @@ def unit_word(lot: Optional[MaterialLot], count: int = 2) -> str:
     return pluralize_unit(label)
 
 
+# What a sticker with no lot behind it means. It is not "not one of ours":
+# the usual case is a real supplier lot whose truck was not checked in yet, or
+# the supplier's own barcode scanned instead of ours (browser test F13).
+UNKNOWN_STICKER_MESSAGE = (
+    "No lot with this sticker has been checked in or received yet. Scan the "
+    "sticker the office printed, or ask the office."
+)
+
+
 # ─── lot resolution ───────────────────────────────────────────────────────────
 
 def ensure_lot_for_receipt(
@@ -556,7 +565,7 @@ def scan_unit(
         return _scan_payload(
             db, receipt, None, None,
             status="unknown_lot",
-            message="That sticker is not one of ours. Check it and scan again.",
+            message=UNKNOWN_STICKER_MESSAGE,
         )
 
     if lot.is_held:
@@ -603,7 +612,7 @@ def scan_unit(
         return _scan_payload(
             db, receipt, lot, row,
             status="needs_confirm",
-            message=f"{row.name} is full by the system. Load into it anyway?",
+            message=_rack_full_question(db, row),
             warning=warning,
             warning_detail=warning_detail,
         )
@@ -814,14 +823,30 @@ def _row_capacity_warning(db: Session, row: StorageRow, incoming: int = 1):
     a rack at 40 of 60 took 50 more without a word (2026-09-29 audit, bags
     finding 5). Still a prompt, never a gate.
     """
+    fill = _row_fill(db, row)
+    if fill is None:
+        return (None, None)
+    on_hand, capacity, unit = fill
+    after = on_hand + max(1, int(incoming or 1))
+    if after <= capacity:
+        return (None, None)
+    return (
+        "row_full",
+        f"{row.name} would hold {after} of {capacity} "
+        f"{pluralize_unit(unit)} after this scan.",
+    )
+
+
+def _row_fill(db: Session, row: StorageRow):
+    """(on_hand, capacity, storage unit) for a rack whose room states a unit
+    capacity, else None."""
     from app.models import SubLocation
 
     if not row.sub_location_id:
-        return (None, None)
+        return None
     sub = db.query(SubLocation).filter(SubLocation.id == row.sub_location_id).first()
     if not sub or not sub.storage_unit or not sub.unit_capacity:
-        return (None, None)
-
+        return None
     on_hand = (
         db.query(
             func.coalesce(func.sum(LotPlacement.full_units + LotPlacement.open_units), 0)
@@ -829,14 +854,18 @@ def _row_capacity_warning(db: Session, row: StorageRow, incoming: int = 1):
         .filter(LotPlacement.storage_row_id == row.id)
         .scalar()
     )
-    after = int(on_hand or 0) + max(1, int(incoming or 1))
-    if after <= int(sub.unit_capacity):
-        return (None, None)
-    return (
-        "row_full",
-        f"{row.name} would hold {after} of {sub.unit_capacity} "
-        f"{pluralize_unit(sub.storage_unit)} after this scan.",
-    )
+    return int(on_hand or 0), int(sub.unit_capacity), sub.storage_unit
+
+
+def _rack_full_question(db: Session, row: StorageRow) -> str:
+    """'QA-D3 holds 12 drums — load past its capacity?' The old 'is full by
+    the system' read as a fault in the software (browser test F13)."""
+    fill = _row_fill(db, row)
+    if fill is None:
+        return f"{row.name} is at its capacity — load past it?"
+    on_hand, _capacity, unit = fill
+    word = unit if on_hand == 1 else pluralize_unit(unit)
+    return f"{row.name} holds {on_hand} {word} — load past its capacity?"
 
 
 def _scan_payload(
@@ -1511,9 +1540,12 @@ def _truck_open(order: IngredientIntake) -> bool:
 
 def _lot_words(db: Session, lot: MaterialLot) -> str:
     """'Banana Puree lot E2E-B1' — what is printed big on the drum, which is
-    what the worker reads. Our sticker code is a long machine string."""
+    what the worker reads. Our sticker code is a long machine string.
+
+    The product name exactly as stored: `.title()` turned "QA Mango Puree"
+    into "Qa Mango Puree" and "(SB)" into "(Sb)" (browser test F13)."""
     product = db.query(Product).filter(Product.id == lot.product_id).first()
-    name = (product.name.title() if product and product.name else "").strip()
+    name = (product.name if product and product.name else "").strip()
     number = lot.vendor_lot_number or lot.lot_code
     return f"{name} lot {number}".strip()
 
@@ -1927,7 +1959,11 @@ def truck_scan(
     if lot is None:
         return _truck_payload(
             db, order, status="unknown_lot",
-            message="That sticker is not one of ours. Check it and scan again.",
+            message=(
+                f"No lot with this sticker is expected on {order.intake_number} — "
+                "it has not been checked in or received yet. Scan the sticker the "
+                "office printed, or ask the office."
+            ),
         )
 
     row = db.query(StorageRow).filter(StorageRow.id == storage_row_id).first()
@@ -1965,11 +2001,17 @@ def truck_scan(
         scanned = int(session_counts(db, receipt)["total"] or 0)
         expected = int(line.expected_count or 0)
         if scanned + units > expected and not confirm_over:
+            # Say what THIS scan adds, in the line's own unit: a pallet sticker
+            # is +40 bags, and "is there really another bag?" hid that (F13).
+            question = (
+                f"Is there really another full pallet of {units} {word}?"
+                if units > 1 else f"Is there really another {word}?"
+            )
             return _truck_payload(
                 db, order, status="needs_confirm_over", line=line, lot=lot, row=row, units=units,
                 message=(
                     f"Paperwork says {expected} {unit_word(lot, expected)} of {what}; "
-                    f"this would make {scanned + units}. Is there really another {unit_word(lot, 1)}?"
+                    f"this scan adds {units} {word} and would make {scanned + units}. {question}"
                 ),
             )
 
@@ -1977,7 +2019,7 @@ def truck_scan(
     if warning and not allow_overfill:
         return _truck_payload(
             db, order, status="needs_confirm", line=line, lot=lot, row=row, units=units,
-            message=f"{row.name} is full by the system. Load into it anyway?",
+            message=_rack_full_question(db, row),
             warning=warning, warning_detail=warning_detail,
         )
 
@@ -2323,7 +2365,7 @@ def locate_truck(db: Session, code: str, *, warehouse_id: Optional[str] = None) 
     """A drum scanned on the truck list -> the open truck(s) carrying its lot."""
     lot = resolve_lot_code(db, code)
     if lot is None:
-        return {"status": "unknown_lot", "message": "That sticker is not one of ours.", "trucks": []}
+        return {"status": "unknown_lot", "message": UNKNOWN_STICKER_MESSAGE, "trucks": []}
     query = (
         db.query(IngredientIntake)
         .join(IntakeLot, IntakeLot.intake_id == IngredientIntake.id)
@@ -2339,6 +2381,34 @@ def locate_truck(db: Session, code: str, *, warehouse_id: Optional[str] = None) 
     if warehouse_id:
         query = query.filter(IngredientIntake.warehouse_id == warehouse_id)
     orders = query.distinct().all()
+    if not orders:
+        # A sticker from a truck the gun already finished used to do nothing at
+        # all on the list (browser test F7c). Say which truck, and that it is shut.
+        finished = (
+            db.query(IngredientIntake)
+            .join(IntakeLot, IntakeLot.intake_id == IngredientIntake.id)
+            .filter(
+                IntakeLot.material_lot_id == lot.id,
+                IntakeLot.receipt_id.isnot(None),
+                IngredientIntake.is_incoming_order == True,  # noqa: E712
+                IngredientIntake.is_deleted == False,  # noqa: E712
+                IngredientIntake.forklift_submitted_at.isnot(None),
+            )
+        )
+        if warehouse_id:
+            finished = finished.filter(IngredientIntake.warehouse_id == warehouse_id)
+        finished = finished.order_by(IngredientIntake.forklift_submitted_at.desc()).first()
+        if finished:
+            return {
+                "status": "truck_finished",
+                "message": (
+                    f"That truck is already finished — {finished.intake_number} "
+                    f"(lot {lot.vendor_lot_number or lot.lot_code}) was closed on the gun. "
+                    "See the office to change it."
+                ),
+                "lot_code": lot.lot_code,
+                "trucks": [],
+            }
     vendors = {
         v.id: v.name
         for v in db.query(Vendor).filter(Vendor.id.in_({o.vendor_id for o in orders if o.vendor_id})).all()
@@ -2346,7 +2416,8 @@ def locate_truck(db: Session, code: str, *, warehouse_id: Optional[str] = None) 
     return {
         "status": "ok" if orders else "no_truck",
         "message": (
-            "" if orders else f"Lot {lot.lot_code} is not on any truck being received."
+            "" if orders
+            else f"Lot {lot.vendor_lot_number or lot.lot_code} is not on any truck being received."
         ),
         "lot_code": lot.lot_code,
         "trucks": [
