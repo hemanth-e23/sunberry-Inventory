@@ -117,6 +117,16 @@ def _get_location_names(db: Session, staging_item, receipt) -> tuple:
     return loc_name, sub_loc_name
 
 
+def _return_unit_weight(si, receipt, lot):
+    """Per-container weight the Return dialog splits at: the STAGED drums'
+    own weight (the server checks the split at the same figure), else the
+    lot's. Mixed 474/502 lots were refused as "does not add up"."""
+    if lot is None:
+        return None
+    return staging_service.staged_unit_weight(si, receipt) or (
+        float(lot.weight_per_unit) if lot.weight_per_unit else None)
+
+
 def _detail_extras(db: Session, si: StagingItem, receipt) -> dict:
     """What the Mark Used / Return dialogs need beyond the weights: the hold
     (PART 3, B3 — consuming a held lot is refused, so the dialog says so up
@@ -449,7 +459,7 @@ def get_staging_details(db: Session, request_id: str, item_id: str) -> dict:
             "status": si.status,
             "staged_at": si.staged_at.isoformat() if si.staged_at else None,
             "is_counted": is_counted,
-            "weight_per_unit": float(lot.weight_per_unit) if lot and lot.weight_per_unit else None,
+            "weight_per_unit": _return_unit_weight(si, receipt, lot),
             "weight_unit": lot.weight_unit if lot else None,
             "unit_label": lot.unit_label if lot else None,
             "original_storage_row_id": si.original_storage_row_id,
@@ -585,13 +595,17 @@ def _recredit_rack_on_return(
             "Returning a counted lot needs a rack — pick the row the "
             "material physically went back to."
         )
+    per_unit = staging_service.return_split_unit_weight(
+        db, lot, staging_item, receipt,
+        quantity=quantity, full_units=full_units, weighed_partial_qty=weighed_partial_qty,
+    )
     lps.return_units(
         db, lot,
         quantity=quantity,
         to_row_id=row_id,
         full_units=full_units,
         weighed_partial_qty=weighed_partial_qty,
-        per_unit_weight=float(receipt.weight_per_container or 0),
+        per_unit_weight=per_unit,
         ref_type="staging",
         ref_id=staging_item.id,
         reason="Returned from staging",
@@ -1592,7 +1606,7 @@ async def get_close_out_data(db: Session, request_id: str) -> dict:
                 "sub_location_name": sub_loc_name,
                 "quantity_staged": si.quantity_staged,
                 "is_counted": is_counted,
-                "weight_per_unit": float(lot.weight_per_unit) if lot and lot.weight_per_unit else None,
+                "weight_per_unit": _return_unit_weight(si, receipt, lot),
                 "weight_unit": lot.weight_unit if lot else None,
                 "unit_label": lot.unit_label if lot else None,
                 "original_storage_row_id": si.original_storage_row_id,

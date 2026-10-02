@@ -364,6 +364,28 @@ def test_lot_trace_gun_pull_has_a_date_and_every_rack(story, db_session):
     assert origins == {ROW1: 1, ROW2: 1}
 
 
+# ── follow-up: whole-drum return on a mixed-weight lot ────────────────────────
+
+def test_whole_drum_return_on_a_mixed_lot_adds_up(story, db_session):
+    """A 502 drum pulled while the lot's carrier receipt is the 474 truck came
+    back as "does not add up" (1 × 474 != 502). The split is now checked at the
+    staged drums' own weight."""
+    s = story
+    sr = _request(s, needed=A)
+    _gun_pull(s, sr["id"], ROW1, 1)
+    sub = _gun_submit(s, sr["id"])
+    item_id = _item_id(db_session, sr["id"])
+    (si_id,) = sub["staging_item_ids"]
+    details = s.get(f"/api/service/staging-requests/{sr['id']}/items/{item_id}/staging-details", SUP_H)
+    assert details["staging_items"][0]["weight_per_unit"] == pytest.approx(A)
+    before = _units(db_session, s).get(ROW1, 0)
+    s.post(f"/api/service/staging-requests/{sr['id']}/items/{item_id}/return", SUP_H, json={
+        "staging_item_id": si_id, "quantity": A, "to_storage_row_id": ROW1,
+        "full_units": 1, "weighed_partial_qty": 0,
+    })
+    assert _units(db_session, s)[ROW1] == before + 1
+
+
 # ── G5 ────────────────────────────────────────────────────────────────────────
 
 def test_adjustments_report_has_the_recipient(story, db_session):

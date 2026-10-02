@@ -56,6 +56,59 @@ def settle_status(staging_item: StagingItem) -> str:
     return status
 
 
+def staged_unit_weight(staging_item: StagingItem, receipt: Optional[Receipt] = None) -> float:
+    """What one container of THIS staging item weighs: staged lbs ÷ containers.
+
+    A return splits its weight into full drums + a weighed remainder at this
+    figure. The receipt's weight was wrong for mixed-weight lots — a 474 lb
+    drum pulled for a request pinned to the 502 truck came back as
+    "does not add up" (browser test PART 3, follow-up). Falls back to the
+    receipt's own figure when the container count is unknown (legacy)."""
+    units = float(staging_item.pallets_staged or 0)
+    staged = float(staging_item.quantity_staged or 0)
+    if units > 0 and staged > 0 and float(units).is_integer():
+        return staged / units
+    return float(getattr(receipt, "weight_per_container", 0) or 0)
+
+
+def return_split_unit_weight(
+    db: Session,
+    lot: MaterialLot,
+    staging_item: StagingItem,
+    receipt: Optional[Receipt],
+    *,
+    quantity: float,
+    full_units: Optional[int] = None,
+    weighed_partial_qty: Optional[float] = None,
+) -> float:
+    """Per-drum weight a return's full/weighed split is checked at.
+
+    No split given: the staged drums' own weight (`staged_unit_weight`).
+    Split given: the weight that makes it add up, provided that is a weight a
+    drum of THIS lot really has — between its lightest and heaviest delivery.
+    One staging item can hold a 502 and a 474 (average 488); returning the
+    474 whole is "1 full = 474" and must be accepted, while "1 full = 900"
+    is still refused by `return_units`' own arithmetic check."""
+    default = staged_unit_weight(staging_item, receipt) or float(lot.weight_per_unit or 0)
+    full = int(full_units or 0)
+    if full_units is None or full <= 0:
+        return default
+    implied = (float(quantity) - float(weighed_partial_qty or 0)) / full
+    weights = [
+        float(w) for (w,) in db.query(Receipt.weight_per_container).filter(
+            Receipt.material_lot_id == lot.id,
+            Receipt.weight_per_container.isnot(None),
+        ).all() if w and float(w) > 0
+    ]
+    if lot.weight_per_unit:
+        weights.append(float(lot.weight_per_unit))
+    if default:
+        weights.append(default)
+    if weights and min(weights) - 0.01 <= implied <= max(weights) + 0.01:
+        return implied
+    return default
+
+
 def held_lot_message(db: Session, receipt: Receipt, *, verb: str = "used in production") -> Optional[str]:
     """Why this receipt's material may not be consumed, or None.
 
@@ -1137,7 +1190,7 @@ def return_staging_item(db: Session, staging_item: StagingItem, request, current
                     db, lot,
                     quantity=float(request.quantity),
                     to_row_id=request.to_storage_row_id,
-                    per_unit_weight=float(receipt.weight_per_container or 0),
+                    per_unit_weight=staged_unit_weight(staging_item, receipt),
                     ref_type="staging",
                     ref_id=staging_item.id,
                     reason="Returned from staging",
