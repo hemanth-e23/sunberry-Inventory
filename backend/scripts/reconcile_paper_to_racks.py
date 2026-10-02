@@ -18,10 +18,18 @@ WHAT IT DOES, per lot-tracked lot with placements
                        -> moves the paper by the difference and records an
                           approved stock correction saying why
 
-Lots on QA hold are reported, not touched.
+Lots on QA hold are reported, not touched. Lots with NO weight per unit
+(packaging counted in cases, lots flagged for review) are reported and never
+touched: their racks price at 0 lb, so "racks 0 lb" would read as a write-off
+of all their stock (seen in production, 2026-10-02).
 
-    python3.9 scripts/reconcile_paper_to_racks.py            # report only
-    python3.9 scripts/reconcile_paper_to_racks.py --write    # apply
+NOTHING IS APPLIED WITHOUT NAMING THE LOT. In production a rack can be the
+wrong side (racks exactly DOUBLE the books on some lots — an old approval
+bug double-counted racks), so each lot is checked by a person first and then
+fixed by name:
+
+    python3.9 scripts/reconcile_paper_to_racks.py                         # report
+    python3.9 scripts/reconcile_paper_to_racks.py --write --lot 26/138    # fix one
 """
 
 import argparse
@@ -41,7 +49,13 @@ from app.services.transfer_service import lot_scoped_availability  # noqa: E402
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--write", action="store_true", help="apply (default: report only)")
+    parser.add_argument("--lot", action="append", default=[],
+                        help="vendor lot to fix (repeatable); --write does nothing without it")
     args = parser.parse_args()
+    chosen = {x.strip().upper() for x in args.lot}
+    if args.write and not chosen:
+        print("--write needs at least one --lot <vendor lot>, after checking that lot by hand.")
+        return
 
     db = SessionLocal()
     try:
@@ -62,10 +76,16 @@ def main():
             if lot.is_held:
                 print(f"skip   {label}: on QA hold")
                 continue
+            if not float(lot.weight_per_unit or 0):
+                units = sum(int(p.full_units or 0) + int(p.open_units or 0) for p in placements)
+                print(f"skip   {label}: no weight per unit ({units} {lot.unit_label or 'units'} on racks) — "
+                      "cannot compare in lbs; check by hand")
+                continue
+            apply_this = args.write and label.upper() in chosen
             if not receipts:
                 print(f"found  {label}: {racks:,.2f} lb on racks, no receipt — create one")
                 fixes += 1
-                if args.write:
+                if apply_this:
                     sync_paper_to_count(
                         db, lot, 0.0, racks, storage_row_id=placements[0].storage_row_id,
                         user_id=None, warehouse_id=lot.warehouse_id,
@@ -85,7 +105,7 @@ def main():
                 continue
             print(f"books  {label}: books {books_on_racks:,.2f} vs racks {racks:,.2f} lb ({diff:+,.2f})")
             fixes += 1
-            if args.write:
+            if apply_this:
                 sync_paper_to_count(
                     db, lot, books_on_racks, racks, storage_row_id=placements[0].storage_row_id,
                     user_id=None, warehouse_id=lot.warehouse_id,
