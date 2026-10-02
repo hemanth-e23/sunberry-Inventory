@@ -1361,13 +1361,19 @@ def known_lot_weights(
         if not weights and lot.weight_per_unit:
             weights = [{"weight_per_unit": float(lot.weight_per_unit),
                         "weight_unit": lot.weight_unit or "lbs", "deliveries": 1}]
-        if weights:
+        # A HELD lot is reported even with no weight on file: the desk warns
+        # "B-0910 is on hold — drums received will be held" before check-in
+        # (browser test PART 2, U9). Receiving it is still allowed — the drums
+        # book into the hold and the truck card flags them.
+        if weights or lot.is_held:
             out.append({
                 "lot_id": lot.id,
                 "lot_code": lot.lot_code,
                 "vendor_lot": lot.vendor_lot_number,
                 "unit_label": lot.unit_label,
                 "weights": weights,
+                "is_held": bool(lot.is_held),
+                "hold_reason": lot.hold_reason if lot.is_held else None,
             })
     return {"lots": out}
 

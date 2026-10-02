@@ -169,6 +169,16 @@ export const buildEntriesForProduct = ({
   if (!productId) return [];
 
   const reserved = reservedByLotRow(pendingTransfers, allReceipts || approvedReceipts);
+  // Units per pallet, per lot. The lot's rack picture rides on ONE receipt
+  // (`project_lot`), which need not be the delivery that recorded the pallet
+  // size, so read it from any receipt of the lot.
+  const uppByLot = new Map();
+  for (const r of (allReceipts || approvedReceipts)) {
+    const upp = Number(r?.unitsPerPallet || 0);
+    if (r?.materialLotId && upp > 1) {
+      uppByLot.set(r.materialLotId, Math.max(uppByLot.get(r.materialLotId) || 0, upp));
+    }
+  }
   const entries = [];
   const matching = approvedReceipts.filter(
     (r) => r.productId === productId && Number(r.quantity || 0) > 0,
@@ -232,6 +242,10 @@ export const buildEntriesForProduct = ({
           // receipt's single figure misread the second (2026-10-01).
           rackUnitWeight: Number(a.weightPerUnit) || 0,
           rowPallets: Number(a.pallets) || 0,
+          // Bags/boxes that ride a pallet: lets the forms offer "N pallets"
+          // as a quick entry (N x this) beside loose units.
+          unitsPerPallet: (receipt.materialLotId && uppByLot.get(receipt.materialLotId))
+            || (Number(receipt.unitsPerPallet) > 1 ? Number(receipt.unitsPerPallet) : 0),
           unit,
           weightPerContainer,
           containerUnit,
@@ -493,4 +507,117 @@ export const describeContainers = (entry, available = entry.available) => {
   const storage = entry.unit || 'lbs';
   if (!openFree) return `${fullFree} ${fullFree === 1 ? singularUnit(unit) : unit}`;
   return `${fullFree} full + ${openFree} open (${fmt(openQty)} ${storage})`;
+};
+
+
+// ─── Display helpers for the Transfer / Adjustment forms ────────────────────
+
+const fmtNum = (n, digits = 2) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: digits });
+
+/** "1 drum", "12 bags", "3 boxes": the count decides the grammar. */
+export const countWithUnit = (n, unit) => {
+  const num = Number(n) || 0;
+  const one = singularUnit(unit || 'unit');
+  return `${fmtNum(num)} ${Math.abs(num - 1) < 1e-9 ? one : pluralizeUnit(one)}`;
+};
+
+/** A weight in containers, rounded when it is (nearly) a whole number. */
+const containersOf = (weight, factor) => {
+  const v = Number(weight || 0) / (Number(factor) || 1);
+  return Math.abs(v - Math.round(v)) < 0.01 ? Math.round(v) : Math.round(v * 100) / 100;
+};
+
+/**
+ * How many containers can be taken off this rack right now, by the same rule
+ * as `describeContainers` (holds and pending transfers come off sealed
+ * containers first). Falls back to available / factor for material with no
+ * container split.
+ */
+export const freeContainers = (entry) => {
+  const factor = Number(entry.displayFactor) || 1;
+  const full = Number(entry.fullUnits) || 0;
+  const open = Number(entry.openUnits) || 0;
+  const avail = Math.max(0, Number(entry.available) || 0);
+  if (!(factor > 1) || (full + open) === 0) return containersOf(avail, factor);
+  const gross = Number(entry.grossWeight) || avail;
+  const openQty = Number(entry.openQty) || 0;
+  const openFree = open > 0 && avail >= openQty - 0.01 ? open : 0;
+  const withheld = Math.max(0, gross - avail);
+  const fullFree = withheld <= 0.01 ? full : Math.max(0, full - Math.ceil((withheld - 0.01) / factor));
+  return fullFree + openFree;
+};
+
+/** Short rack name for messages: the last part of "Barn / Room / QA-D1". */
+const rackName = (entry) => {
+  const parts = String(entry.locationLabel || '').split(' / ');
+  return parts[parts.length - 1] || 'this rack';
+};
+
+/**
+ * Plain-words reason a typed amount is more than a rack can give, or null
+ * when it fits. Replaces the browser's bare "Value must be less than or equal
+ * to 4" bubble with containers, pounds and WHY (browser test PART 2, U5).
+ */
+export const overAskMessage = (entry, displayQty) => {
+  const qty = Number(displayQty || 0);
+  if (!(qty > 0)) return null;
+  const factor = Number(entry.displayFactor) || 1;
+  if (qty * factor <= Number(entry.available || 0) + 0.01) return null;
+  const unit = entry.displayUnit || entry.unit || 'units';
+  const storage = entry.unit || 'lbs';
+  const free = freeContainers(entry);
+  const showWeight = singularUnit(unit) !== singularUnit(storage);
+  let msg = `${rackName(entry)} has only ${countWithUnit(free, unit)} free`;
+  if (showWeight) msg += ` (${fmtNum(entry.available, 0)} ${storage})`;
+  msg += `; you asked for ${countWithUnit(qty, unit)}`;
+  const reasons = [];
+  const held = Number(entry.heldUnits) || 0;
+  if (held > 0) reasons.push(`${countWithUnit(held, unit)} on hold`);
+  const reserved = Number(entry.reservedWeight) || 0;
+  if (reserved > 0) {
+    reasons.push(`${countWithUnit(containersOf(reserved, factor), unit)} on pending transfers`);
+  }
+  if (reasons.length) msg += `. Not free: ${reasons.join(', ')}`;
+  return `${msg}.`;
+};
+
+/**
+ * Header totals for the breakdown. "On hand" is what physically sits on the
+ * racks (held and promised included); "available" is what can be taken now.
+ * The header used to print the available figure as "on hand": "0 lbs on
+ * hand" for a held lot (browser test PART 2, U6).
+ */
+export const stockSummary = (entries = []) => {
+  let onHand = 0;
+  let available = 0;
+  let onHandUnits = 0;
+  let availableUnits = 0;
+  const units = new Set();
+  let allCounted = entries.length > 0;
+  for (const e of entries) {
+    const avail = Number(e.available) || 0;
+    const gross = Number(e.grossWeight) > 0
+      ? Number(e.grossWeight)
+      : avail + (Number(e.reservedWeight) || 0);
+    onHand += gross;
+    available += avail;
+    units.add(singularUnit(e.displayUnit || e.unit || ''));
+    const containers = (Number(e.fullUnits) || 0) + (Number(e.openUnits) || 0);
+    if (containers > 0 && Number(e.displayFactor) > 1) {
+      onHandUnits += containers;
+      availableUnits += freeContainers(e);
+    } else {
+      allCounted = false;
+    }
+  }
+  const storage = entries[0]?.unit || 'units';
+  const unit = units.size === 1 ? [...units][0] : null;
+  const part = (count, weight) => (allCounted && unit && unit !== singularUnit(storage)
+    ? `${countWithUnit(count, unit)} (${fmtNum(weight)} ${storage})`
+    : `${fmtNum(weight)} ${storage}`);
+  return {
+    onHand,
+    available,
+    text: `On hand ${part(onHandUnits, onHand)} · available ${part(availableUnits, available)}`,
+  };
 };

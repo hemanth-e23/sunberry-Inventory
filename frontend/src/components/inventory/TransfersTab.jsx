@@ -6,7 +6,8 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct, rowCapacityInfo, containersFreed, describeContainers } from '../../utils/rowSources';
+import { buildEntriesForProduct, rowCapacityInfo, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary } from '../../utils/rowSources';
+import RmEntryQtyInput from './RmEntryQtyInput';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
@@ -284,8 +285,6 @@ const TransfersTab = () => {
     });
   }, [rmForm.productId, approvedReceipts, storageAreas, locations, subLocationMap, inventoryTransfers, receipts]);
 
-  const rmEntriesAvailStorage = rmEntries.reduce((s, e) => s + e.available, 0);
-
   // ─── RM: submit ──────────────────────────────────────────────────────────────
   const handleRmSubmit = async (event) => {
     event.preventDefault();
@@ -336,7 +335,7 @@ const TransfersTab = () => {
         return;
       }
       if (p.storageQty > p.entry.available + 0.01) {
-        setRmError(`${p.entry.locationLabel}: ${p.displayQty.toLocaleString()} ${p.entry.displayUnit} > ${(p.entry.available / p.entry.displayFactor).toLocaleString()} avail.`);
+        setRmError(`Lot ${p.entry.lotNumber}: ${overAskMessage(p.entry, p.displayQty)}`);
         return;
       }
     }
@@ -618,15 +617,16 @@ const TransfersTab = () => {
                   .map(e => e.displayUnit)
               );
               const containerNote = unitLabels.size === 1 && [...unitLabels][0] !== summaryUnit
-                ? ` (${pickedUnits.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${[...unitLabels][0]})`
+                ? ` (${countWithUnit(pickedUnits, [...unitLabels][0])})`
                 : '';
+              const summary = stockSummary(rmEntries);
               return (
                 <div className="panel" style={{ marginTop: 8 }}>
                   <div className="panel-header horizontal">
                     <strong>Source Breakdown</strong>
                     <span className="muted small">
                       Moving {pickedStorage.toLocaleString()} {summaryUnit}{containerNote}
-                      {' · '}{rmEntriesAvailStorage.toLocaleString()} {summaryUnit} on hand
+                      {' · '}{summary.text}
                     </span>
                   </div>
                   <p className="muted small" style={{ margin: '4px 0 8px' }}>
@@ -653,12 +653,12 @@ const TransfersTab = () => {
                               {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
                               {Number(entry.heldUnits) > 0 && (
                                 <span style={{ color: 'var(--color-danger, #b91c1c)', fontWeight: 600 }}>
-                                  {' '}· {entry.heldUnits} on hold
+                                  {' '}· {countWithUnit(entry.heldUnits, entry.displayUnit)} on hold
                                 </span>
                               )}
                               {Number(entry.reservedWeight) > 0 && (
                                 <span style={{ color: 'var(--color-text-muted, #6b7280)', fontWeight: 600 }}>
-                                  {' '}· {(entry.reservedWeight / (entry.displayFactor || 1)).toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} on pending transfers
+                                  {' '}· {countWithUnit(Math.round((entry.reservedWeight / (entry.displayFactor || 1)) * 100) / 100, entry.displayUnit)} on pending transfers
                                 </span>
                               )}
                               {notOnRackCount && (
@@ -667,15 +667,11 @@ const TransfersTab = () => {
                                 </span>
                               )}
                             </span>
-                            <input
-                              type="number"
-                              min="0"
-                              max={availDisp}
-                              step="any"
+                            <RmEntryQtyInput
+                              entry={entry}
+                              value={dispQty}
                               disabled={notOnRackCount || availDisp <= 0}
-                              value={notOnRackCount || availDisp <= 0 ? '' : dispQty}
-                              onChange={(e) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
-                              placeholder="0"
+                              onChange={(v) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: v }))}
                             />
                           </label>
                           {/* NO pallet input for a counted lot. The footprint is DERIVED

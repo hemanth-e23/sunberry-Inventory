@@ -2,7 +2,8 @@ import React, { useState, useMemo } from "react";
 import { Printer } from "lucide-react";
 import { formatDateTime as formatDate } from "../../utils/dateUtils";
 import { formatUserName } from "../../utils/userDisplay";
-import { CATEGORY_TYPES } from '../../constants';
+import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
+import { lotCountsByRow } from '../../utils/countRacks';
 import { apiErrorMessage, printSessionLabels } from "../../api/lotReceivingApi";
 import { useToast } from "../../context/ToastContext";
 import { useAppData } from "../../context/AppDataContext";
@@ -156,12 +157,27 @@ const RecentEntriesTab = ({
           // blank for barrels, 50 for bags.
           unitLabel: singularUnit(receipt.containerUnit || 'unit'),
           unitsPerPallet: receipt.unitsPerPallet || null,
+          materialLotId: receipt.materialLotId || null,
+          // Already on the racks: the dialog says these are the same code as
+          // the containers already received (browser test PART 2, U3).
+          reprint: receipt.status === RECEIPT_STATUS.APPROVED
+            || receipt.status === RECEIPT_STATUS.DEPLETED,
+          // A rejected receipt brought nothing in; nothing to sticker.
           canPrint:
             category?.type !== CATEGORY_TYPES.FINISHED &&
+            receipt.status !== RECEIPT_STATUS.REJECTED &&
             Number(receipt.containerCount) > 0,
         };
       });
   }, [receipts, productsById, categoriesById, userLookup, recentSearch, recentStatusFilter, recentTypeFilter, getReceiptLocations]);
+
+  // Containers of the asked-for lot on the racks now, from the lot's projected
+  // rack picture. 0 when unknown — the dialog then offers this delivery's count.
+  const askingOnHand = useMemo(() => {
+    if (!asking?.materialLotId) return 0;
+    const byRow = lotCountsByRow(receipts, asking.materialLotId);
+    return Object.values(byRow).reduce((s, c) => s + c.full + c.open, 0);
+  }, [asking, receipts]);
 
   return (
     <section className="panel">
@@ -309,7 +325,9 @@ const RecentEntriesTab = ({
           unitLabel: asking.unitLabel,
           unitsPerPallet: asking.unitsPerPallet,
           totalUnits: asking.stickerCount,
+          onHandUnits: askingOnHand,
         }}
+        reprint={!!asking?.reprint}
         onCancel={() => setAsking(null)}
         onConfirm={handlePrint}
       />

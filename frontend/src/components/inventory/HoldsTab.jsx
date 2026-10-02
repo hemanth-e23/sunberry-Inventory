@@ -8,6 +8,7 @@ import PalletPicker from './PalletPicker';
 import apiClient from '../../api/client';
 import { formatDateTime } from '../../utils/dateUtils';
 import { formatUserName } from '../../utils/userDisplay';
+import { sortHoldsNewestFirst } from '../../utils/holdHistory';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, HOLD_STATUS, RECEIPT_STATUS } from '../../constants';
 
@@ -274,8 +275,12 @@ const HoldsTab = () => {
   };
 
   // ─── Recent hold history ──────────────────────────────────────────────────
+  // Newest first BY TIME. The list mixes orders — the server sends newest
+  // first, a new submission is appended at the end — so reversing it showed
+  // the four OLDEST actions after a reload, and the B-0910 lot hold and its
+  // release never appeared (browser test PART 2, U11).
   const recentHolds = useMemo(
-    () => inventoryHoldActions.slice().reverse().slice(0, 4),
+    () => sortHoldsNewestFirst(inventoryHoldActions).slice(0, 6),
     [inventoryHoldActions]
   );
 

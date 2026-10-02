@@ -19,27 +19,41 @@ import { pluralizeUnit } from '../../utils/rowSources';
  * different in the middle band, so scanning either resolves to the same lot. A
  * bag does not become different material by coming off a pallet.
  *
- * For a lot with no `unitsPerPallet` there is only one possible answer, so this
- * collapses to a plain confirmation rather than asking a question with one
- * option.
+ * For a lot with no `unitsPerPallet` (drums), the worker still chooses HOW
+ * MANY: one torn sticker must not mean printing a whole delivery's worth
+ * (browser test PART 2, U3). The choices are every container on this
+ * delivery, every container of the lot on the racks now (`onHandUnits`, when
+ * known), or a typed number — 1 by default, for a torn or lost sticker.
+ *
+ * `reprint` says the material is already received: the dialog then states
+ * plainly that these are the SAME code as the containers already on the racks,
+ * so nobody reads a reprint as new stock.
  */
-const PrintStickersDialog = ({ lot, open, onCancel, onConfirm, busy = false }) => {
+const defaultStickerChoice = ({ palletised, reprint, onHandUnits }) => {
+  if (palletised) return 'pallet';
+  if (reprint && Number(onHandUnits) > 0) return 'onhand';
+  return 'all';
+};
+
+const PrintStickersDialog = ({ lot, open, onCancel, onConfirm, busy = false, reprint = false }) => {
   const unitLabel = lot?.unitLabel || 'unit';
   const perPallet = Number(lot?.unitsPerPallet) || 0;
   const totalUnits = Math.max(0, Math.round(Number(lot?.totalUnits) || 0));
+  const onHandUnits = Math.max(0, Math.round(Number(lot?.onHandUnits) || 0));
   const palletised = perPallet > 1;
   const palletCount = palletised ? Math.ceil(totalUnits / perPallet) : 0;
+  const initialChoice = defaultStickerChoice({ palletised, reprint, onHandUnits });
 
-  const [choice, setChoice] = useState(palletised ? 'pallet' : 'all');
+  const [choice, setChoice] = useState(initialChoice);
   const [someCount, setSomeCount] = useState(perPallet || 1);
 
   // Re-seed when the dialog is opened for a different lot — otherwise the
   // previous lot's choice and count persist into the next print run.
   useEffect(() => {
     if (!open) return;
-    setChoice(palletised ? 'pallet' : 'all');
+    setChoice(initialChoice);
     setSomeCount(perPallet || 1);
-  }, [open, palletised, perPallet, lot?.lotCode]);
+  }, [open, initialChoice, perPallet, lot?.lotCode]);
 
   if (!open) return null;
 
@@ -49,7 +63,9 @@ const PrintStickersDialog = ({ lot, open, onCancel, onConfirm, busy = false }) =
       ? { count: palletCount, scope: 'pallet' }
       : choice === 'all'
         ? { count: totalUnits, scope: 'unit' }
-        : { count: Math.max(0, Math.round(Number(someCount) || 0)), scope: 'unit' };
+        : choice === 'onhand'
+          ? { count: onHandUnits, scope: 'unit' }
+          : { count: Math.max(0, Math.round(Number(someCount) || 0)), scope: 'unit' };
 
   const option = (value, heading, detail) => (
     <label
@@ -131,8 +147,64 @@ const PrintStickersDialog = ({ lot, open, onCancel, onConfirm, busy = false }) =
           </label>
         </>
       ) : (
-        <p style={{ fontSize: '0.875rem', color: '#374151' }}>
-          {plural(totalUnits, `${unitLabel} sticker`)} — one for every {unitLabel}.
+        <>
+          {reprint && onHandUnits > 0 && option(
+            'onhand',
+            `${plural(onHandUnits, `${unitLabel} sticker`)}`,
+            `One for every ${unitLabel} of this lot on the racks now.`,
+          )}
+          {(!reprint || onHandUnits !== totalUnits || onHandUnits === 0) && option(
+            'all',
+            `${plural(totalUnits, `${unitLabel} sticker`)}`,
+            reprint
+              ? `One for every ${unitLabel} on this delivery.`
+              : `One for every ${unitLabel}.`,
+          )}
+          <label
+            style={{
+              display: 'flex', gap: 10, alignItems: 'center', padding: '10px 12px',
+              border: `1px solid ${choice === 'some' ? '#4caf50' : '#e5e7eb'}`,
+              background: choice === 'some' ? '#f0fdf4' : 'transparent',
+              borderRadius: 8, cursor: 'pointer',
+            }}
+          >
+            <input
+              type="radio"
+              checked={choice === 'some'}
+              onChange={() => setChoice('some')}
+            />
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={someCount}
+              aria-label={`How many ${unitLabel} stickers`}
+              // The box already shows 1; touching it is choosing it.
+              onFocus={() => setChoice('some')}
+              onChange={(e) => { setChoice('some'); setSomeCount(e.target.value); }}
+              style={{ width: 80, padding: '4px 8px' }}
+            />
+            <span>
+              <span style={{ fontWeight: 600 }}>{pluralizeUnit(unitLabel)} — choose how many</span>
+              <span style={{ display: 'block', fontSize: '0.8rem', color: '#6b7280' }}>
+                To replace a torn or lost sticker.
+              </span>
+            </span>
+          </label>
+        </>
+      )}
+
+      {reprint && (
+        <p
+          role="note"
+          style={{
+            marginTop: 12, padding: '8px 10px', borderRadius: 6,
+            background: '#eff6ff', color: '#1e3a8a', fontSize: '0.85rem',
+          }}
+        >
+          These are the <strong>same code</strong> as the {pluralizeUnit(unitLabel)} already
+          received{lot?.lotCode ? ` (lot ${lot.lotCode})` : ''}. A reprint only replaces a
+          sticker; it does not add stock, and scanning it finds the same lot.
         </p>
       )}
 

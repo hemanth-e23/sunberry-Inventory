@@ -17,7 +17,7 @@ import LotLabelPrint from '../ingredient/LotLabelPrint';
 import '../OutgoingDashboard.css';
 import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
 import {
-  countOf, isAwaitingApproval, lotLookupKey, missingLineDetails, weightMismatchWarning,
+  countOf, heldLotWarning, isAwaitingApproval, lotLookupKey, missingLineDetails, weightMismatchWarning,
 } from '../../utils/incomingLines';
 
 /**
@@ -258,6 +258,11 @@ const IncomingTab = () => {
     knownWeights[lotLookupKey(query)], typed, { vendorLot: query.vendor_lot, unit },
   );
 
+  /** "B-0910 is on hold — drums received will be held." (PART 2, U9), or null. */
+  const holdWarning = (query, unit) => heldLotWarning(
+    knownWeights[lotLookupKey(query)], { vendorLot: query.vendor_lot, unit },
+  );
+
   const startCreate = () => {
     setForm({
       vendor_id: '',
@@ -335,10 +340,10 @@ const IncomingTab = () => {
     const isWalkIn = Boolean(form.walkIn);
     const totalUnits = lines.reduce((sum, l) => sum + Number(l.expected_count || 0), 0);
     const weightNotes = lines
-      .map((l) => weightWarning(
-        { product_id: l.product_id, vendor_id: form.vendor_id, vendor_lot: l.vendor_lot, bbd: l.bbd },
-        l.weight_per_unit, l.unit_label,
-      ))
+      .flatMap((l) => {
+        const q = { product_id: l.product_id, vendor_id: form.vendor_id, vendor_lot: l.vendor_lot, bbd: l.bbd };
+        return [holdWarning(q, l.unit_label), weightWarning(q, l.weight_per_unit, l.unit_label)];
+      })
       .filter(Boolean);
     const ok = await confirm(
       withWarnings(
@@ -545,10 +550,22 @@ const IncomingTab = () => {
     const weightNotes = startForm.lines
       .map((d) => weightWarning(draftQuery(d), d.weight_per_unit, d.line.unit_label))
       .filter(Boolean);
-    if (weightNotes.length) {
+    // A lot on QA hold: allowed, the units book straight into the hold — but
+    // the desk is told before the truck is checked in (PART 2, U9).
+    const holdNotes = startForm.lines
+      .map((d) => holdWarning(draftQuery(d), d.line.unit_label))
+      .filter(Boolean);
+    if (weightNotes.length || holdNotes.length) {
       const ok = await confirm(
-        withWarnings('Check the weight per unit against the paperwork before checking in.', weightNotes),
-        { title: 'Different weight than before', confirmLabel: 'It is correct — check in' },
+        withWarnings(
+          weightNotes.length
+            ? 'Check the weight per unit against the paperwork before checking in.'
+            : 'A lot on this truck is on QA hold.',
+          [...holdNotes, ...weightNotes],
+        ),
+        weightNotes.length
+          ? { title: 'Different weight than before', confirmLabel: 'It is correct — check in' }
+          : { title: 'Lot on hold', confirmLabel: 'Check in — keep it held' },
       );
       if (!ok) return;
     }
@@ -1264,6 +1281,7 @@ const IncomingTab = () => {
                       />
                     </label>
                   </div>
+                  <WeightNote text={holdWarning(draftQuery(draft), unit)} />
                   <WeightNote text={weightWarning(draftQuery(draft), draft.weight_per_unit, unit)} />
                 </fieldset>
               );
@@ -1558,6 +1576,12 @@ const IncomingTab = () => {
                     placeholder="500"
                   />
                 </label>
+                <WeightNote
+                  text={holdWarning(
+                    { product_id: line.product_id, vendor_id: form.vendor_id, vendor_lot: line.vendor_lot, bbd: line.bbd },
+                    line.unit_label,
+                  )}
+                />
                 <WeightNote
                   text={weightWarning(
                     { product_id: line.product_id, vendor_id: form.vendor_id, vendor_lot: line.vendor_lot, bbd: line.bbd },

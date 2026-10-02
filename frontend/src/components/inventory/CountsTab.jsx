@@ -13,6 +13,7 @@ import {
   listLotsOnHand, listUnlabelledLots, previewZeroOut, printLotLabels, runZeroOut,
 } from '../../api/lotReceivingApi';
 import { listIngredientRows } from '../../api/ingredientIntakeApi';
+import { countRackOptions, countWording, describeCount, lotCountsByRow } from '../../utils/countRacks';
 import '../MasterDataPage.css';
 
 /**
@@ -62,7 +63,7 @@ const emptyEntry = () => ({
 });
 
 const CountsTab = () => {
-  const { products, vendors, categories } = useAppData();
+  const { products, vendors, categories, receipts } = useAppData();
   const { user } = useAuth();
   const { addToast } = useToast();
   const { confirm } = useConfirm();
@@ -105,6 +106,25 @@ const CountsTab = () => {
       .filter((p) => WEIGHED.has(typeById.get(p.categoryId || p.category_id)))
       .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
   }, [products, categories]);
+
+  // What the system holds for the chosen lot, rack by rack — shown BEFORE the
+  // counter types, so a recount reads "system says 18 bags; I found 16"
+  // (browser test PART 2, U8).
+  const lotCounts = useMemo(
+    () => (mode === 'set' ? lotCountsByRow(receipts, entry.material_lot_id) : {}),
+    [mode, receipts, entry.material_lot_id],
+  );
+  const rackOptions = useMemo(
+    () => countRackOptions(rows, {
+      unitLabel: entry.unit_label,
+      currentRowIds: Object.keys(lotCounts),
+    }),
+    [rows, entry.unit_label, lotCounts],
+  );
+  const wording = countWording(entry.unit_label);
+  const currentOnRack = mode === 'set' && entry.storage_row_id
+    ? (lotCounts[entry.storage_row_id] || { full: 0, open: 0, openQty: 0 })
+    : null;
 
   const load = useCallback(async () => {
     try {
@@ -192,7 +212,7 @@ const CountsTab = () => {
         setLastEntry({ ...result, unit_label: result.unit_label, counted: true });
         addToast(
           result.variance === 0
-            ? `${result.counted_units} ${result.unit_label}s — matches the system`
+            ? `${result.counted_units} ${countWording(result.unit_label).many} — matches the system`
             : `${result.counted_units} counted, system said ${result.system_units}`
               + ` (${result.variance > 0 ? '+' : ''}${result.variance})`,
           result.variance === 0 ? 'success' : 'warning',
@@ -224,7 +244,7 @@ const CountsTab = () => {
       // are cleared, which is the pair that actually changes as you walk a barn.
       setEntry((prev) => ({ ...prev, storage_row_id: '', full_units: '', open_units: '', open_remaining_qty: '' }));
       addToast(
-        `${result.full_units} ${result.unit_label}s in ${result.storage_row_name} · ${result.lot_code}`,
+        `${result.full_units} ${countWording(result.unit_label).many} in ${result.storage_row_name} · ${result.lot_code}`,
         'success',
       );
       await load();
@@ -284,7 +304,7 @@ const CountsTab = () => {
           <div className="panel-title">
             <h2><Package size={18} /> Record a count</h2>
             <span className="muted">
-              One entry per lot per rack. Count whole {entry.unit_label}s — pounds
+              One entry per lot per rack. Count whole {wording.many} — pounds
               are worked out from them, never the other way round.
             </span>
           </div>
@@ -333,6 +353,9 @@ const CountsTab = () => {
                     material_lot_id: e.target.value,
                     product_id: lot?.product_id || entry.product_id,
                     unit_label: lot?.unit_label || entry.unit_label,
+                    // The rack list depends on the lot; a rack picked for the
+                    // previous lot is not a rack this one is on.
+                    storage_row_id: '',
                   });
                 }}
               >
@@ -403,8 +426,11 @@ const CountsTab = () => {
               onChange={(e) => setEntry({ ...entry, storage_row_id: e.target.value })}
             >
               <option value="">—</option>
-              {rows.map((r) => (
-                <option key={r.id} value={r.id}>{r.name} · {r.path}</option>
+              {rackOptions.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name} · {r.path}
+                  {lotCounts[r.id] ? ` · system: ${describeCount(lotCounts[r.id], entry.unit_label)}` : ''}
+                </option>
               ))}
             </select>
           </label>
@@ -422,7 +448,14 @@ const CountsTab = () => {
             </select>
           </label>
           <label>
-            <span>{mode === 'set' ? 'How many are actually there' : 'How many sealed'}</span>
+            <span>
+              {mode === 'set' ? `How many sealed ${wording.many} are actually there` : `How many sealed ${wording.many}`}
+              {currentOnRack && (
+                <span className="muted">
+                  {' '}system says {describeCount(currentOnRack, entry.unit_label)}
+                </span>
+              )}
+            </span>
             {/* text + inputMode, never type="number": a number input edits itself
                     when the wheel passes over it, so scrolling the form silently
                     changes a figure somebody typed. */}
@@ -434,7 +467,7 @@ const CountsTab = () => {
                 const v = e.target.value;
                 if (v === '' || /^\d+$/.test(v)) setEntry({ ...entry, full_units: v });
               }}
-              placeholder="31"
+              placeholder={currentOnRack ? String(currentOnRack.full) : '31'}
             />
           </label>
           <label style={mode === 'set' ? { display: 'none' } : undefined}>
@@ -454,7 +487,7 @@ const CountsTab = () => {
               SUM across them — attributing it to one specific drum is exactly the
               per-item identity this model exists to avoid. */}
           <label>
-            <span>Opened <span className="muted">partials, usually in a cooler</span></span>
+            <span>{wording.openedLabel} <span className="muted">{wording.openedHint}</span></span>
             <input
               type="text"
               inputMode="numeric"
@@ -466,7 +499,7 @@ const CountsTab = () => {
             />
           </label>
           <label>
-            <span>Left in them <span className="muted">total across the opened ones</span></span>
+            <span>{wording.leftLabel} <span className="muted">total weight across them</span></span>
             <input
               type="text"
               inputMode="decimal"
@@ -490,7 +523,7 @@ const CountsTab = () => {
             <span className="muted">
               {lastEntry.counted ? (
                 <>
-                  Counted {lastEntry.counted_units} {lastEntry.unit_label}s in{' '}
+                  Counted {lastEntry.counted_units} {countWording(lastEntry.unit_label).many} in{' '}
                   {lastEntry.storage_row_name} — system said {lastEntry.system_units}
                   {lastEntry.variance !== 0 && (
                     <strong style={{ color: '#b45309' }}>
@@ -500,7 +533,7 @@ const CountsTab = () => {
                 </>
               ) : (
                 <>
-                  Last: {lastEntry.full_units} {lastEntry.unit_label}s in{' '}
+                  Last: {lastEntry.full_units} {countWording(lastEntry.unit_label).many} in{' '}
                   {lastEntry.storage_row_name} ({lastEntry.derived_weight}{' '}
                   {lastEntry.weight_unit || ''}) · {lastEntry.lot_code}
                 </>

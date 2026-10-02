@@ -130,6 +130,10 @@ const LotTraceReport = () => {
                 const isShipped = event.event_type === "shipped-out" || event.event_type === "inter-warehouse-transfer";
                 const isTransfer = event.event_type === "warehouse-transfer" || event.event_type === "staging";
                 const isHold = event.event_type?.startsWith("hold-");
+                // A refused request moved nothing; listed so a recall reader
+                // sees it was asked for and turned down (PART 2, U11).
+                const isRejected = event.direction === "rejected";
+                const hasTo = Boolean(event.to_location) || (event.to_rows || []).length > 0;
                 const dotClass = isReceived ? "timeline-dot--received"
                   : isShipped ? "timeline-dot--shipped"
                   : isTransfer ? "timeline-dot--transfer"
@@ -142,7 +146,12 @@ const LotTraceReport = () => {
                       {/* Row 1: event name + qty + date */}
                       <div className="timeline-event-header">
                         <strong className={`timeline-event-name ${dotClass}`}>{event.event}</strong>
-                        {event.qty > 0 && event.direction !== "none" && (
+                        {isRejected && (
+                          <span className="timeline-qty-badge tqb--rejected" style={{ textDecoration: "line-through", opacity: 0.7 }}>
+                            {formatNumber(event.qty)} {receipt.unit} · not moved
+                          </span>
+                        )}
+                        {event.qty > 0 && event.direction !== "none" && !isRejected && (
                           // Direction comes from the server: a rack move or a
                           // staging pull is not stock leaving, so it gets no
                           // minus sign (one truck's timeline summed to -4,518).
@@ -157,7 +166,7 @@ const LotTraceReport = () => {
                       </div>
 
                       {/* Row 2: location movement with row details */}
-                      {(event.from_location || event.to_location || (event.from_rows || []).length > 0) && (
+                      {(event.from_location || hasTo || (event.from_rows || []).length > 0) && (
                         <div className="timeline-location-block">
                           {(event.from_location || (event.from_rows || []).length > 0) && (
                             <div className="timeline-loc-side">
@@ -177,13 +186,15 @@ const LotTraceReport = () => {
                               )}
                             </div>
                           )}
-                          {(event.from_location || (event.from_rows || []).length > 0) && event.to_location && (
+                          {(event.from_location || (event.from_rows || []).length > 0) && hasTo && (
                             <span className="loc-arrow">→</span>
                           )}
-                          {event.to_location && (
+                          {hasTo && (
                             <div className="timeline-loc-side">
                               <span className="loc-direction-label">To</span>
-                              <span className="loc-chip loc-chip--to">{event.to_location}</span>
+                              {event.to_location && (
+                                <span className="loc-chip loc-chip--to">{event.to_location}</span>
+                              )}
                               {(event.to_rows || []).length > 0 && (
                                 <div className="loc-rows">
                                   {event.to_rows.map((r, i) => (

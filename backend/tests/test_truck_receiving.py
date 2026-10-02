@@ -510,6 +510,40 @@ class TestKnownLotWeights:
         )
         assert out["lots"] == []
 
+    def test_a_held_lot_says_so(self, db_session, recv_seed):
+        """PART 2 U9: walk-in / check-in warn that drums received will be held."""
+        _truck(db_session, [_line(lot="MG-1", count=2)])
+        lot = db_session.query(MaterialLot).filter(MaterialLot.product_id == PRODUCT).one()
+        out = lrs.known_lot_weights(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR, vendor_lot="MG-1", bbd=BBD,
+        )
+        assert out["lots"][0]["is_held"] is False
+        assert out["lots"][0]["hold_reason"] is None
+
+        lot.is_held = True
+        lot.hold_reason = "positive swab"
+        db_session.flush()
+        out = lrs.known_lot_weights(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR, vendor_lot="MG-1", bbd=BBD,
+        )
+        assert out["lots"][0]["is_held"] is True
+        assert out["lots"][0]["hold_reason"] == "positive swab"
+
+    def test_a_held_lot_with_no_weight_on_file_is_still_reported(self, db_session, recv_seed):
+        _truck(db_session, [_line(lot="MG-1", count=2)])
+        lot = db_session.query(MaterialLot).filter(MaterialLot.product_id == PRODUCT).one()
+        lot.is_held = True
+        lot.weight_per_unit = None
+        for r in db_session.query(Receipt).filter(Receipt.material_lot_id == lot.id):
+            r.weight_per_container = None
+        db_session.flush()
+        out = lrs.known_lot_weights(
+            db_session, product_id=PRODUCT, vendor_id=VENDOR, vendor_lot="MG-1", bbd=BBD,
+        )
+        assert len(out["lots"]) == 1
+        assert out["lots"][0]["weights"] == []
+        assert out["lots"][0]["is_held"] is True
+
     def test_the_endpoint_answers_the_desk(self, client, api_seed, wh_headers):
         order = _make_order(client, wh_headers)
         _start(client, wh_headers, order)
@@ -527,3 +561,54 @@ class TestKnownLotWeights:
             params={"product_id": "x", "vendor_lot": "y"},
         )
         assert res.status_code == 403
+
+
+class TestLotTraceArrivalsAndRejections:
+    """Browser test PART 2, U11: every delivery shows the rack it arrived on, and
+    rejected transfers are listed (marked rejected, nothing moved)."""
+
+    def test_a_truck_delivery_shows_its_arrival_rack_and_room(self, db_session, recv_seed):
+        from app.services.report_builders import build_lot_trace
+
+        order = _truck(db_session, [_line(lot="MG-1", count=2)])
+        code = _lot_code(db_session, order, "MG-1")
+        _scan(db_session, order, code, row=ROW_1)
+        _scan(db_session, order, code, row=ROW_2)
+        db_session.flush()
+
+        trace = build_lot_trace(db_session, "MG-1")
+        received = [
+            ev for r in trace["receipts"] for ev in r["timeline"]
+            if ev["event_type"] == "received"
+        ]
+        assert len(received) == 1
+        ev = received[0]
+        # The truck receipt has no location of its own; the room comes from the
+        # racks the gun used.
+        assert ev["to_location"] == "Plant A › Drum Barn"
+        assert sorted(r["row"] for r in ev["to_rows"]) == ["A-01", "A-02"]
+
+    def test_a_rejected_transfer_is_listed_as_rejected(self, db_session, recv_seed):
+        from app.models import InventoryTransfer
+        from app.services.report_builders import build_lot_trace
+
+        order = _truck(db_session, [_line(lot="MG-1", count=2)])
+        receipt_id = order.lots[0].receipt_id
+        db_session.add(InventoryTransfer(
+            id="xfer-rej-1", receipt_id=receipt_id, quantity=500.0, unit="lbs",
+            transfer_type="warehouse-transfer", status="rejected",
+            reason="move\n[Rejected by Sup]: wrong rack",
+            source_breakdown=[{"id": f"row-{ROW_1}", "quantity": 500.0}],
+            destination_breakdown=[{"id": f"row-{ROW_2}", "quantity": 500.0}],
+            requested_by=USER,
+        ))
+        db_session.flush()
+
+        trace = build_lot_trace(db_session, "MG-1")
+        events = [ev for r in trace["receipts"] for ev in r["timeline"]]
+        rejected = [ev for ev in events if ev["event_type"] == "transfer-rejected"]
+        assert len(rejected) == 1
+        assert rejected[0]["direction"] == "rejected"
+        assert rejected[0]["event"] == "Warehouse Transfer (rejected)"
+        assert rejected[0]["qty"] == 500.0
+        assert "wrong rack" in rejected[0]["notes"]

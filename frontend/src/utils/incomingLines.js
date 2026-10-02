@@ -56,6 +56,22 @@ export const weightMismatchWarning = (known, typed, { vendorLot, unit } = {}) =>
 };
 
 /**
+ * "B-0910 is on hold — drums received will be held." (browser test PART 2, U9)
+ *
+ * `known` is the `/lots/known-weights` answer, which also says whether the lot
+ * is held. Receiving a held lot is allowed — the units book straight into the
+ * hold and the truck card flags them — so this warns, never blocks.
+ */
+export const heldLotWarning = (known, { vendorLot, unit } = {}) => {
+  const held = (known?.lots || []).find((lot) => lot.is_held);
+  if (!held) return null;
+  const lotName = vendorLot || held.vendor_lot || held.lot_code || 'This lot';
+  const word = pluralizeUnit(singularUnit(String(unit || held.unit_label || 'unit')));
+  const why = held.hold_reason ? ` (${held.hold_reason})` : '';
+  return `${lotName} is on hold${why} — ${word} received will be held.`;
+};
+
+/**
  * The gun has finished this truck and it is waiting for an approver. The order's
  * status stays `receiving` until approval, so the card read RECEIVING long after
  * the forklift was done (F15). Older trucks were finished line by line, so a

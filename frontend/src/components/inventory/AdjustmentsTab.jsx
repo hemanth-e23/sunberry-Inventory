@@ -6,7 +6,8 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct, containersFreed, describeContainers } from '../../utils/rowSources';
+import { buildEntriesForProduct, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary } from '../../utils/rowSources';
+import RmEntryQtyInput from './RmEntryQtyInput';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
 
@@ -109,10 +110,20 @@ const AdjustmentsTab = () => {
     [categoryGroups, productCategories]
   );
 
-  const rmAvailableCategories = productCategories.filter(cat => {
-    if (!rmForm.categoryGroupId) return false;
-    return cat.parentId === rmForm.categoryGroupId && cat.type !== CATEGORY_TYPES.FINISHED;
-  });
+  // Sub-categories grouped under their group heading, for one <optgroup> picker.
+  const rmCategoryOptions = useMemo(() => {
+    const sortByName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''));
+    return rmCategoryGroups
+      .map(g => ({
+        id: g.id,
+        name: g.name,
+        categories: productCategories
+          .filter(c => c.parentId === g.id && c.type !== CATEGORY_TYPES.FINISHED)
+          .sort(sortByName),
+      }))
+      .filter(g => g.categories.length > 0)
+      .sort(sortByName);
+  }, [rmCategoryGroups, productCategories]);
 
   const rmAvailableProducts = products.filter(p => p.categoryId === rmForm.categoryId);
 
@@ -153,8 +164,6 @@ const AdjustmentsTab = () => {
     if (v !== undefined) return Math.max(0, Number(v) || 0);
     return suggestedPalletsOut(entry, displayQty);
   };
-
-  const rmEntriesAvailStorage = rmEntries.reduce((s, e) => s + e.available, 0);
 
   // ─── FG: load pallets ────────────────────────────────────────────────────────
   const loadFgPallets = async (productId) => {
@@ -254,7 +263,7 @@ const AdjustmentsTab = () => {
         return;
       }
       if (p.storageQty > p.entry.available + 0.01) {
-        setRmError(`${p.entry.locationLabel}: ${p.displayQty.toLocaleString()} ${p.entry.displayUnit} > ${(p.entry.available / p.entry.displayFactor).toLocaleString()} ${p.entry.displayUnit} avail.`);
+        setRmError(`Lot ${p.entry.lotNumber}: ${overAskMessage(p.entry, p.displayQty)}`);
         return;
       }
     }
@@ -458,29 +467,29 @@ const AdjustmentsTab = () => {
             <h3>Raw Materials & Packaging Adjustment</h3>
             <p className="muted small">Select a lot and enter the quantity to remove.</p>
 
+            {/* ONE picker of material categories, grouped under their company
+                heading. Asking for the company ("Sunberry / Arizona") first and
+                the actual category second read as a category list that
+                started with company names (browser test PART 2, U11). */}
             <label>
               <span>Category</span>
               <select
-                value={rmForm.categoryGroupId}
-                onChange={e => setRmForm(prev => ({ ...prev, categoryGroupId: e.target.value, categoryId: '', productId: '', receiptId: '' }))}
+                value={rmForm.categoryId}
+                onChange={e => {
+                  const cat = productCategories.find(c => c.id === e.target.value);
+                  setRmForm(prev => ({ ...prev, categoryGroupId: cat?.parentId || '', categoryId: e.target.value, productId: '', receiptId: '' }));
+                  setRmEntrySelections({});
+                  setRmPalletSelections({});
+                }}
               >
                 <option value="">Select category</option>
-                {rmCategoryGroups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                {rmCategoryOptions.map(group => (
+                  <optgroup key={group.id} label={group.name}>
+                    {group.categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </optgroup>
+                ))}
               </select>
             </label>
-
-            {rmAvailableCategories.length > 0 && (
-              <label>
-                <span>Sub-Category</span>
-                <select
-                  value={rmForm.categoryId}
-                  onChange={e => setRmForm(prev => ({ ...prev, categoryId: e.target.value, productId: '', receiptId: '' }))}
-                >
-                  <option value="">Select sub-category</option>
-                  {rmAvailableCategories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </label>
-            )}
 
             {rmAvailableProducts.length > 0 && (
               <label>
@@ -517,15 +526,16 @@ const AdjustmentsTab = () => {
                   .map(e => e.displayUnit)
               );
               const containerNote = unitLabels.size === 1 && [...unitLabels][0] !== summaryUnit
-                ? ` (${pickedUnits.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${[...unitLabels][0]})`
+                ? ` (${countWithUnit(pickedUnits, [...unitLabels][0])})`
                 : '';
+              const summary = stockSummary(rmEntries);
               return (
                 <div className="panel" style={{ marginTop: 8 }}>
                   <div className="panel-header horizontal">
                     <strong>Source Breakdown</strong>
                     <span className="muted small">
                       Removing {pickedStorage.toLocaleString()} {summaryUnit}{containerNote}
-                      {' · '}{rmEntriesAvailStorage.toLocaleString()} {summaryUnit} on hand
+                      {' · '}{summary.text}
                     </span>
                   </div>
                   <p className="muted small" style={{ margin: '4px 0 8px' }}>
@@ -548,28 +558,24 @@ const AdjustmentsTab = () => {
                               {showStorageHint && ` (${entry.available.toLocaleString()} ${entry.unit})`}
                               {Number(entry.heldUnits) > 0 && (
                                 <span style={{ color: 'var(--color-danger, #b91c1c)', fontWeight: 600 }}>
-                                  {' '}· {entry.heldUnits} on hold
+                                  {' '}· {countWithUnit(entry.heldUnits, entry.displayUnit)} on hold
                                 </span>
                               )}
                               {Number(entry.reservedWeight) > 0 && (
                                 <span style={{ color: 'var(--color-text-muted, #6b7280)', fontWeight: 600 }}>
-                                  {' '}· {(entry.reservedWeight / (entry.displayFactor || 1)).toLocaleString(undefined, { maximumFractionDigits: 2 })} {entry.displayUnit} on pending transfers
+                                  {' '}· {countWithUnit(Math.round((entry.reservedWeight / (entry.displayFactor || 1)) * 100) / 100, entry.displayUnit)} on pending transfers
                                 </span>
                               )}
                             </span>
-                            <input
-                              type="number"
-                              min="0"
-                              max={availDisp}
-                              step="any"
-                              // Nothing free here (all on hold or promised to
-                              // transfers): the label above says why. Leaving it
-                              // editable produced the browser's bare "Value must
-                              // be 0." on a held lot.
+                            {/* Nothing free here (all on hold or promised to
+                                transfers): the label above says why. Leaving it
+                                editable produced the browser's bare "Value must
+                                be 0." on a held lot. */}
+                            <RmEntryQtyInput
+                              entry={entry}
+                              value={dispQty}
                               disabled={availDisp <= 0}
-                              value={availDisp <= 0 ? '' : dispQty}
-                              onChange={(e) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: e.target.value }))}
-                              placeholder="0"
+                              onChange={(v) => setRmEntrySelections(prev => ({ ...prev, [entry.key]: v }))}
                             />
                           </label>
                           {/* NO pallet input for a counted lot. The footprint is DERIVED

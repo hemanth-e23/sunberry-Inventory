@@ -1154,6 +1154,7 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
         ).order_by(InterWarehouseTransfer.received_at).all()
 
         init_qty = initial_receipt_qty(r, db)
+        arrival = _arrival_rows(db, r)
 
         timeline = []
         timeline.append({
@@ -1170,8 +1171,12 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             "bol": r.bol,
             "from_location": None,
             "from_rows": [],
-            "to_location": _loc_str(r.location, r.sub_location),
-            "to_rows": _arrival_rows(db, r) or receipt_initial_rows(r, db),
+            # Where the receiving scans actually put it, when the ledger says.
+            # A walk-in or truck receipt carries no location of its own, so
+            # deliveries 1, 3 and 4 of A-0925 showed no arrival at all while
+            # delivery 2 (which had one) did (browser test PART 2, U11).
+            "to_location": _arrival_location(db, arrival) or _loc_str(r.location, r.sub_location),
+            "to_rows": arrival or receipt_initial_rows(r, db),
             "order_number": None,
             "recipient": None,
             "direction": "in",
@@ -1205,6 +1210,40 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
                 # return is the same material somewhere else; showing them as
                 # minus made one truck's timeline sum to -4,518 lb.
                 "direction": "out" if t.transfer_type == "shipped-out" else "move",
+            })
+        # Rejected requests moved nothing, but a recall reader still wants to
+        # see that one was asked for and refused (browser test PART 2, U11).
+        # No rejection timestamp is stored; the request time stands in, and the
+        # rejecter's name is already in the reason ("[Rejected by …]: …").
+        rejected = db.query(InventoryTransfer).filter(
+            InventoryTransfer.receipt_id == r.id,
+            InventoryTransfer.status == TransferStatus.REJECTED.value,
+        ).order_by(InventoryTransfer.submitted_at).all()
+        for t in rejected:
+            label = "Shipped Out" if t.transfer_type == "shipped-out" else (
+                (t.transfer_type or "transfer").replace("-", " ").title()
+            )
+            timeline.append({
+                "event": f"{label} (rejected)",
+                "event_type": "transfer-rejected",
+                "date": t.submitted_at or t.created_at,
+                "qty": round(float(t.quantity or 0), 2),
+                "notes": t.reason or None,
+                "submitted_by": user_name(db, t.requested_by),
+                "submitted_at": t.submitted_at,
+                "approved_by": None,
+                "approved_at": None,
+                "from_location": _loc_str(t.from_location, t.from_sub_location),
+                "from_rows": breakdown_rows(db, t.source_breakdown, r.unit or "cases"),
+                "to_location": _loc_str(t.to_location, t.to_sub_location),
+                "to_rows": breakdown_rows(db, t.destination_breakdown, r.unit or "cases"),
+                "order_number": t.order_number,
+                "purchase_order": None,
+                "bol": None,
+                "recipient": None,
+                # Nothing moved: neither in, out nor a move.
+                "direction": "rejected",
+                "rejected": True,
             })
         for a in adjustments:
             timeline.append({
@@ -1352,10 +1391,35 @@ def _arrival_rows(db: Session, receipt: Receipt) -> list:
         row = db.query(StorageRow).filter(StorageRow.id == row_id).first()
         rows.append({
             "row": row.name if row else row_id,
+            "row_id": row_id,
             "qty": round(units * per, 2) if per else units,
             "unit": unit if per else (getattr(lot, "unit_label", None) or "units"),
         })
     return rows
+
+
+def _arrival_location(db: Session, arrival_rows: list) -> Optional[str]:
+    """"Barn › Room" for the racks a delivery was scanned onto.
+
+    Taken from the racks themselves rather than the receipt's own location
+    fields, which a truck or walk-in receipt never sets and an older one could
+    name a different room from the one the gun actually used. Several rooms are
+    joined with a comma, in first-seen order."""
+    labels: list = []
+    for entry in arrival_rows or []:
+        row_id = entry.get("row_id")
+        row = db.query(StorageRow).filter(StorageRow.id == row_id).first() if row_id else None
+        if row is None:
+            continue
+        sub = row.sub_location
+        loc = sub.location if sub is not None else None
+        if sub is None and row.storage_area is not None:
+            loc = row.storage_area.location
+            sub = row.storage_area.sub_location
+        label = _loc_str(loc, sub)
+        if label and label not in labels:
+            labels.append(label)
+    return ", ".join(labels) or None
 
 
 def _merge_lot_deliveries(db: Session, receipts: list, entries: list) -> list:
