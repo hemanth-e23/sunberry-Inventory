@@ -51,6 +51,13 @@ const CountsApprovalTab = ({ userNameMap = {}, onPendingCountChange }) => {
   };
 
   const reject = async (req) => {
+    // A reject is final for this count — confirm it like an approve (two were
+    // rejected by a stray click in the re-check).
+    const ok = await confirm(
+      `Reject this count of ${req.storage_row_name}? Nothing changes in stock; the counter can count again.`,
+      { title: 'Reject count', confirmLabel: 'Reject count' },
+    );
+    if (!ok) return;
     const reason = 'Rejected by supervisor';
     setBusyId(req.id);
     try {
@@ -79,7 +86,7 @@ const CountsApprovalTab = ({ userNameMap = {}, onPendingCountChange }) => {
               <div>
                 <h3>{req.product_name || 'Unknown product'}</h3>
                 <span className="badge">{isFound ? 'Found stock' : 'Recount'}</span>
-                <span className="badge" style={{ marginLeft: 6 }}>Lot {req.vendor_lot || '—'}</span>
+                {' '}<span className="badge" style={{ marginLeft: 6 }}>Lot {req.vendor_lot || '—'}</span>
               </div>
             </header>
             <dl className="summary-grid">

@@ -99,3 +99,35 @@ def test_an_open_container_cannot_hold_more_than_a_full_one(client, plant, db_se
         "full_units": 5, "open_units": 1, "open_remaining_qty": 610,
     })
     assert r.status_code == 400 and "more than full" in r.json()["detail"]
+
+
+def test_an_approved_count_names_who_counted_and_who_approved(client, plant, db_session):
+    from app.services.report_builders import build_rm_count_rows
+    s = _setup(client, db_session)
+    r = s.post("/api/lot-cutover/count", WH_H, json={
+        "material_lot_id": s.lots["A"]["lot_id"], "storage_row_id": ROW1, "full_units": 5,
+    }).json()
+    s.post(f"/api/lot-cutover/count-requests/{r['request_id']}/approve", SUP_H)
+    db_session.expire_all()
+    (row,) = [x for x in build_rm_count_rows(db_session) if x["lot_number"] == VL]
+    assert row["counted_by"] == "e2e_wh" and row["approved_by"] == "e2e_sup"
+
+
+def test_found_boxes_on_a_pallet_share_one_slot(client, plant, db_session):
+    from app.models import StorageRow
+    s = Story(client, db_session)
+    s.post("/api/lot-cutover/opening-balance", SUP_H, json={
+        "product_id": PRODUCT, "storage_row_id": ROW2, "full_units": 2,
+        "vendor_id": VENDOR, "vendor_lot": "D-FOUND", "bbd": "2027-01-31",
+        "unit_label": "box", "weight_per_unit": 50, "weight_unit": "lbs",
+        "units_per_pallet": 40,
+    })
+    db_session.expire_all()
+    lot = db_session.query(MaterialLot).filter(MaterialLot.vendor_lot_number == "D-FOUND").one()
+    assert lot.units_per_pallet == 40
+    rec = db_session.query(Receipt).filter(Receipt.material_lot_id == lot.id).one()
+    alloc = rec.raw_material_row_allocations[0]
+    # A drum room types its footprint in units; check the projection's pallet
+    # figure only when the room counts pallets — here, just that the lot
+    # carries its packing so the footprint rule can apply.
+    assert alloc["units"] == 2

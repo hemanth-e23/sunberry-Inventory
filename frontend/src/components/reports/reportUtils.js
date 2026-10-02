@@ -146,6 +146,7 @@ export const cycleCountColumns = [
   { label: "Variance", value: (r) => (r.variance != null ? signedQty(r.variance, r.unit) : "—") },
   { label: "Variance %", value: (r) => (r.variance_pct != null ? `${r.variance_pct}%` : "—") },
   { label: "Counted By", value: (r) => r.counted_by || "—" },
+  { label: "Approved By", value: (r) => r.approved_by || "—" },
   { label: "Notes", value: (r) => r.notes || "—" },
 ];
 

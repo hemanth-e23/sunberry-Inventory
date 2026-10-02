@@ -2415,11 +2415,22 @@ def build_rm_count_rows(
             ),
             "unit": pluralize_unit(unit),
             "weight_unit": wunit,
-            "counted_by": user_name(db, e.actor_id),
+            # An approved count: the counter is the one who submitted it; the
+            # event's actor is the approver (2026-10-02 re-check).
+            "counted_by": user_name(db, _count_request_submitter(db, e) or e.actor_id),
+            "approved_by": user_name(db, e.actor_id) if _count_request_submitter(db, e) else None,
             "notes": e.reason or "",
         })
     return out
 
+
+
+def _count_request_submitter(db: Session, event) -> Optional[str]:
+    if event.ref_type != "count_request" or not event.ref_id:
+        return None
+    from app.models import LotCountRequest
+    req = db.query(LotCountRequest).filter(LotCountRequest.id == event.ref_id).first()
+    return req.submitted_by if req else None
 
 def build_cycle_count_report(
     db: Session,

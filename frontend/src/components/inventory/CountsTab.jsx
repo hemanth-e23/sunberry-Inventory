@@ -186,9 +186,10 @@ const CountsTab = () => {
   // Opened / left belong to ONE lot on ONE rack. Carried over, they saved a
   // 55 lb bag lot as "1 open (210 lbs)" (2026-10-02 PART 4, finding 3).
   useEffect(() => {
-    setEntry((prev) => (prev.open_units === '' && prev.open_remaining_qty === ''
+    // The sealed count belongs to that lot and rack too (re-check, U2).
+    setEntry((prev) => (prev.open_units === '' && prev.open_remaining_qty === '' && prev.full_units === ''
       ? prev
-      : { ...prev, open_units: '', open_remaining_qty: '' }));
+      : { ...prev, full_units: '', open_units: '', open_remaining_qty: '' }));
   }, [entry.product_id, entry.material_lot_id, entry.storage_row_id, mode]);
 
   // An opened container cannot hold more than a full one.
@@ -277,6 +278,7 @@ const CountsTab = () => {
         open_units: Number(entry.open_units) || 0,
         open_remaining_qty: Number(entry.open_remaining_qty) || 0,
         weight_per_unit: entry.weight_per_unit === '' ? null : Number(entry.weight_per_unit),
+        units_per_pallet: entry.units_per_pallet ? Number(entry.units_per_pallet) : null,
         vendor_id: entry.vendor_id || null,
         bbd: entry.bbd || null,
       });
@@ -530,6 +532,21 @@ const CountsTab = () => {
               placeholder="500"
             />
           </label>
+          {mode !== 'set' && ['bag', 'box', 'pail', 'case', 'bottle'].includes(String(entry.unit_label || '').replace(/(es|s)$/, '')) && (
+            <label>
+              <span>Per pallet <span className="muted">so loose ones don't each take a pallet slot</span></span>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={entry.units_per_pallet ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === '' || /^\d+$/.test(v)) setEntry({ ...entry, units_per_pallet: v });
+                }}
+                placeholder="40"
+              />
+            </label>
+          )}
           {/* Opened units are counted separately and their remaining weight is a
               SUM across them — attributing it to one specific drum is exactly the
               per-item identity this model exists to avoid. */}
@@ -568,7 +585,13 @@ const CountsTab = () => {
           </button>
           {lastEntry && (
             <span className="muted">
-              {lastEntry.counted ? (
+              {lastEntry.pending ? (
+                <>
+                  Sent for approval: {lastEntry.counted_units ?? lastEntry.full_units}{' '}
+                  {countWording(lastEntry.unit_label).many} in {lastEntry.storage_row_name}
+                  {' '}— stock changes when a supervisor approves.
+                </>
+              ) : lastEntry.counted ? (
                 <>
                   Counted {lastEntry.counted_units} {countWording(lastEntry.unit_label).many} in{' '}
                   {lastEntry.storage_row_name} — system said {lastEntry.system_units}

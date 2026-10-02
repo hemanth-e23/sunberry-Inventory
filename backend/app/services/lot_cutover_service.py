@@ -202,6 +202,8 @@ def create_opening_balance(
     warehouse_id: Optional[str] = None,
     user_id: Optional[str] = None,
     note: Optional[str] = None,
+    units_per_pallet: Optional[int] = None,
+    count_request_id: Optional[str] = None,
 ) -> dict:
     """One (lot, rack) counted by hand. Creates the lot and its placement together.
 
@@ -236,6 +238,7 @@ def create_opening_balance(
         weight_unit=weight_unit,
         warehouse_id=warehouse_id,
         lot_unknown=not bool(vendor_lot),
+        units_per_pallet=units_per_pallet,
     )
     validate_open_containers(lot, open_units, open_remaining_qty, weight_per_unit)
     before_lbs = _row_lbs(db, lot, storage_row_id)
@@ -247,7 +250,8 @@ def create_opening_balance(
         open_units_delta=int(open_units),
         open_qty_delta=float(open_remaining_qty),
         actor_id=user_id,
-        ref_type=REF_TYPE_CUTOVER,
+        ref_type="count_request" if count_request_id else REF_TYPE_CUTOVER,
+        ref_id=count_request_id,
         reason=note or "Opening balance — counted at cutover",
         reason_code="opening_balance",
     )
@@ -284,6 +288,7 @@ def count_row(
     open_remaining_qty: float = 0.0,
     user_id: Optional[str] = None,
     note: Optional[str] = None,
+    count_request_id: Optional[str] = None,
 ) -> dict:
     """A physical count. Sets an ABSOLUTE figure and records the variance.
 
@@ -330,6 +335,8 @@ def count_row(
         open_remaining_qty=open_remaining_qty,
         actor_id=user_id,
         reason=note or "Physical count",
+        ref_type="count_request" if count_request_id else None,
+        ref_id=count_request_id,
     )
     after = lps._lock_placement(db, material_lot_id, storage_row_id)
     row = db.query(StorageRow).filter(StorageRow.id == storage_row_id).first()
@@ -475,7 +482,8 @@ def validate_open_containers(lot, open_units: int, open_qty: float, weight_per_u
         raise ValidationError("Opened containers need the weight left in them.")
     w = float(weight_per_unit or 0) or float(getattr(lot, "weight_per_unit", 0) or 0)
     if w > 0 and open_qty > open_units * w + 0.01:
-        word = pluralize_unit(getattr(lot, "unit_label", None) or "unit")
+        base = (getattr(lot, "unit_label", None) or "unit").rstrip("s")
+        word = base if open_units == 1 else pluralize_unit(base)
         raise ValidationError(
             f"{open_qty:g} {getattr(lot, 'weight_unit', None) or 'lbs'} cannot be left in "
             f"{open_units} opened {word} of {w:g} each — that is more than full."
@@ -627,6 +635,7 @@ def submit_count_request(
         unit_label=fields.get("unit_label") or (lot.unit_label if lot else None),
         weight_per_unit=fields.get("weight_per_unit") or (lot.weight_per_unit if lot else None),
         weight_unit=fields.get("weight_unit") or (lot.weight_unit if lot else None),
+        units_per_pallet=fields.get("units_per_pallet"),
         full_units=int(fields.get("full_units") or 0),
         open_units=int(fields.get("open_units") or 0),
         open_remaining_qty=float(fields.get("open_remaining_qty") or 0),
@@ -675,12 +684,19 @@ def approve_count_request(db: Session, req, approver_id: str) -> dict:
     showed the variance against the figure at submit."""
     if req.status != "pending":
         raise ValidationError(f"This count is already {req.status}.")
-    note = f"{req.note or 'Count'} (counted by {req.submitted_by}, approved)"
+    from app.models import User
+
+    def _name(uid):
+        u = db.query(User).filter(User.id == uid).first() if uid else None
+        return u.name if u else (uid or "?")
+
+    note = f"{req.note or 'Count'} — counted by {_name(req.submitted_by)}, approved by {_name(approver_id)}"
     if req.kind == "recount":
         result = count_row(
             db, material_lot_id=req.material_lot_id, storage_row_id=req.storage_row_id,
             full_units=req.full_units, open_units=req.open_units,
             open_remaining_qty=req.open_remaining_qty, user_id=approver_id, note=note,
+            count_request_id=req.id,
         )
     else:
         result = create_opening_balance(
@@ -690,6 +706,8 @@ def approve_count_request(db: Session, req, approver_id: str) -> dict:
             weight_per_unit=req.weight_per_unit, weight_unit=req.weight_unit,
             open_units=req.open_units, open_remaining_qty=req.open_remaining_qty,
             warehouse_id=req.warehouse_id, user_id=approver_id, note=note,
+            units_per_pallet=req.units_per_pallet,
+            count_request_id=req.id,
         )
     req.status = "approved"
     req.approved_by = approver_id

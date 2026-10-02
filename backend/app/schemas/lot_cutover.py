@@ -56,6 +56,9 @@ class OpeningBalanceRequest(BaseSchema):
     # a cooler row carries opened units and their remaining weight.
     open_units: int = Field(0, ge=0)
     open_remaining_qty: float = Field(0, ge=0)
+    # Bags / boxes that ride a pallet: without it each found box took a whole
+    # pallet slot on the rack (QA-P3 read 5/3 — 2026-10-02 PART 4 re-check).
+    units_per_pallet: Optional[int] = Field(None, ge=1)
     note: Optional[str] = None
     # NO warehouse_id. It is resolved server-side from the caller. Accepting one
     # here let any warehouse user mint stock into another plant's inventory by

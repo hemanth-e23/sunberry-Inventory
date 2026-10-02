@@ -380,6 +380,7 @@ class LotCountRequest(Base):
     unit_label = Column(String(20), nullable=True)
     weight_per_unit = Column(Float, nullable=True)
     weight_unit = Column(String(10), nullable=True)
+    units_per_pallet = Column(Integer, nullable=True)
     # What the counter says is there (recount: absolute; found: added).
     full_units = Column(Integer, nullable=False, default=0)
     open_units = Column(Integer, nullable=False, default=0)

@@ -33,6 +33,7 @@ def upgrade():
         sa.Column('unit_label', sa.String(length=20), nullable=True),
         sa.Column('weight_per_unit', sa.Float(), nullable=True),
         sa.Column('weight_unit', sa.String(length=10), nullable=True),
+        sa.Column('units_per_pallet', sa.Integer(), nullable=True),
         sa.Column('full_units', sa.Integer(), nullable=False, server_default='0'),
         sa.Column('open_units', sa.Integer(), nullable=False, server_default='0'),
         sa.Column('open_remaining_qty', sa.Float(), nullable=False, server_default='0'),

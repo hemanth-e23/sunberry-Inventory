@@ -901,6 +901,8 @@ def set_count(
     actor_id: Optional[str] = None,
     event_type: str = EVENT_COUNTED,
     reason: Optional[str] = None,
+    ref_type: Optional[str] = None,
+    ref_id: Optional[str] = None,
 ) -> LotPlacement:
     """Set a placement to an ABSOLUTE counted figure.
 
@@ -923,6 +925,8 @@ def set_count(
         open_qty_delta=float(open_remaining_qty) - float(placement.open_remaining_qty or 0),
         actor_id=actor_id,
         reason=reason,
+        ref_type=ref_type,
+        ref_id=ref_id,
         allow_negative=True,   # the absolute figure is already validated above
     )
 
