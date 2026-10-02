@@ -59,11 +59,15 @@ def get_staging_items(
         if wh_id:
             query = query.filter(StagingItem.warehouse_id == wh_id)
 
-        if status_filter:
+        if status_filter == "all":
+            # Every staged item, whatever became of it — "All" on Staging
+            # Overview showed only the active ones (browser test PART 3, B8).
+            pass
+        elif status_filter:
             query = query.filter(StagingItem.status == status_filter)
         else:
             # Default: show only active staging items (not fully used or returned)
-            query = query.filter(StagingItem.status.in_(["staged", "partially_used", "partially_returned"]))
+            query = query.filter(StagingItem.status.in_(list(staging_service.ACTIVE_STAGING_STATUSES)))
 
         if product_id:
             query = query.filter(StagingItem.product_id == product_id)
@@ -96,8 +100,13 @@ def get_staging_items(
                         "sub_location_id": receipt.sub_location_id if receipt else None,
                         "unit": getattr(receipt, 'unit', None) or "cases",
                         "pallets": getattr(receipt, 'pallets', None),
-                        "cases_per_pallet": getattr(receipt, 'cases_per_pallet', None)
+                        "cases_per_pallet": getattr(receipt, 'cases_per_pallet', None),
+                        "container_unit": getattr(receipt, 'container_unit', None),
+                        "weight_per_container": getattr(receipt, 'weight_per_container', None),
                     } if receipt else None,
+                    # A held lot cannot be marked used (PART 3, B3) — say so
+                    # on the row instead of only refusing at submit.
+                    "hold_message": staging_service.held_lot_message(db, receipt) if receipt else None,
                     "pallets_staged": getattr(item, 'pallets_staged', None),
                     "pallets_used": getattr(item, 'pallets_used', 0) or 0,
                     "pallets_returned": getattr(item, 'pallets_returned', 0) or 0,

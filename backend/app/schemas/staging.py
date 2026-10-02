@@ -39,6 +39,15 @@ class StagingRack(BaseSchema):
     storage_row_name: str = ""
     available_units: int = 0
     held_units: int = 0
+    # Opened (part-used) containers on this rack and their weighed content.
+    open_units: int = 0
+    open_remaining_qty: float = 0.0
+    # The free sealed containers' real weight, the rack's average per
+    # container, and the next containers' weights in pull order — so the
+    # desk dialog allocates whole drums at exact lbs (browser test PART 3, B5).
+    available_qty: float = 0.0
+    unit_weight: Optional[float] = None
+    unit_weights: List[dict] = []
 
 
 class StagingLotSuggestion(BaseSchema):
@@ -69,6 +78,9 @@ class StagingLotSuggestion(BaseSchema):
     # can actually be taken rather than what is standing there.
     available_units: int = 0
     held_units: int = 0
+    open_units: int = 0
+    open_remaining_qty: float = 0.0
+    already_staged_qty: float = 0.0
     racks: List[StagingRack] = []
 
 
@@ -82,6 +94,11 @@ class StagingLotRequest(BaseSchema):
     # lots the desk pull takes from THIS rack instead of guessing fullest-first
     # — the guess swapped drums between rows until a count found them.
     source_row_id: Optional[str] = None
+    # Counted lots: exactly how many sealed / opened containers come off
+    # `source_row_id`. When given, the staged weight is what those containers
+    # really hold; `quantity` is the dialog's figure for the same drums.
+    full_units: Optional[int] = None
+    open_units: Optional[int] = None
 
 
 class StagingFulfillment(BaseSchema):

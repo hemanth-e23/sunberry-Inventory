@@ -114,6 +114,13 @@ const CloseOutModal = ({
       _itemId: d.item_id,
       lot_number: d.lot_number ?? '—',
       quantity_staged: d.quantity_staged ?? 0,
+      // Hold flag + container counts for the Mark Used dialog (PART 3, B3/U5).
+      is_held: d.is_held,
+      hold_message: d.hold_message,
+      units_staged: d.units_staged,
+      staged_unit_weight: d.staged_unit_weight,
+      unit_label: d.unit_label,
+      weight_unit: d.weight_unit,
     }));
     const groupItem = {
       ingredient_name: row.ingredient_name,
@@ -424,6 +431,7 @@ const CloseOutModal = ({
                     borderRadius: '6px',
                     border: '1px solid #6c757d',
                     background: 'white',
+                    color: '#374151', // a global button colour made this white on white (PART 3, U5)
                     cursor: 'pointer',
                     fontSize: '0.85rem',
                   }}

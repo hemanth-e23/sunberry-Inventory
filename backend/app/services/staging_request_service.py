@@ -24,6 +24,8 @@ from app.enums import ReceiptStatus, AdjustmentStatus, StagingItemStatus, Stagin
 from app.exceptions import NotFoundError, ValidationError
 from app.services.row_allocation import deduct_rm_total
 from app.services import lot_placement_service as lps
+from app.services import staging_service
+from app.utils.warehouse_time import warehouse_timezone, zone
 
 import logging
 from app.utils.calendar_dates import calendar_day
@@ -113,6 +115,28 @@ def _get_location_names(db: Session, staging_item, receipt) -> tuple:
             sub_loc = db.query(SubLocation).filter(SubLocation.id == receipt.sub_location_id).first()
             sub_loc_name = sub_loc.name if sub_loc else ""
     return loc_name, sub_loc_name
+
+
+def _detail_extras(db: Session, si: StagingItem, receipt) -> dict:
+    """What the Mark Used / Return dialogs need beyond the weights: the hold
+    (PART 3, B3 — consuming a held lot is refused, so the dialog says so up
+    front), the container count staged (U5 — drums, not only lbs), and every
+    rack the containers came off (U2)."""
+    hold = staging_service.held_lot_message(db, receipt) if receipt else None
+    # `pallets_staged` is the CONTAINER count for a counted lot and a pallet
+    # count for legacy material — only the former is drums/bags.
+    counted = bool(receipt) and lps.is_counted_lot(db, receipt.material_lot_id)
+    units = si.pallets_staged if counted else None
+    per_unit = None
+    if units and float(units) > 0 and float(si.quantity_staged or 0) > 0:
+        per_unit = round(float(si.quantity_staged) / float(units), 3)
+    return {
+        "is_held": bool(hold),
+        "hold_message": hold,
+        "units_staged": units,
+        "staged_unit_weight": per_unit,
+        "origin_rows": staging_service.staging_item_origin_rows(db, si),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +454,7 @@ def get_staging_details(db: Session, request_id: str, item_id: str) -> dict:
             "unit_label": lot.unit_label if lot else None,
             "original_storage_row_id": si.original_storage_row_id,
             "original_storage_row_name": original_row.name if original_row else None,
+            **_detail_extras(db, si, receipt),
         })
 
     return {
@@ -473,6 +498,12 @@ def mark_request_item_used(
     if not receipt:
         raise NotFoundError("Receipt", staging_item.receipt_id)
 
+    # A QA hold freezes the lot wherever it sits — staging included. 292 lb
+    # of a held lot was marked used with no warning (PART 3, B3).
+    held = staging_service.held_lot_message(db, receipt)
+    if held:
+        raise ValidationError(held)
+
     # Create adjustment record
     adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
     adjustment = InventoryAdjustment(
@@ -504,10 +535,7 @@ def mark_request_item_used(
 
     # Update staging item
     staging_item.quantity_used += quantity
-    if staging_item.quantity_used >= staging_item.quantity_staged - staging_item.quantity_returned:
-        staging_item.status = StagingItemStatus.USED
-    else:
-        staging_item.status = StagingItemStatus.PARTIALLY_USED
+    staging_service.settle_status(staging_item)
     staging_item.used_at = datetime.now(timezone.utc)
 
     db.commit()
@@ -570,6 +598,15 @@ def _recredit_rack_on_return(
     )
 
 
+def _return_breakdown(row_id: Optional[str], quantity: float, *, counted: bool) -> Optional[list]:
+    """The rack a return went back onto, in the transfer's breakdown shape, so
+    the lot trace can say "TO QA-D4" instead of only the barn (PART 3, U2).
+    Only for counted lots, where the rack re-credit really happens."""
+    if not counted or not row_id:
+        return None
+    return [{"id": f"row-{row_id}", "quantity": round(float(quantity), 3)}]
+
+
 def return_request_item(
     db: Session,
     request_id: str,
@@ -604,6 +641,14 @@ def return_request_item(
     if not receipt:
         raise NotFoundError("Receipt", staging_item.receipt_id)
 
+    # ANY active rack of the warehouse, defaulting to the original on the
+    # screen (PART 3, G2). The rack decides the room.
+    to_storage_row_id, to_location_id, to_sub_location_id = staging_service.resolve_return_rack(
+        db, receipt, to_storage_row_id, to_location_id, to_sub_location_id,
+    )
+    if not to_location_id:
+        raise ValidationError("Pick the rack (or the location) the material went back to.")
+
     # Get original transfer to know the staging location
     transfer = db.query(InventoryTransfer).filter(InventoryTransfer.id == staging_item.transfer_id).first()
 
@@ -628,6 +673,10 @@ def return_request_item(
         transfer_type="warehouse-transfer",
         requested_by=None,
         status="completed",
+        destination_breakdown=_return_breakdown(
+            to_storage_row_id or staging_item.original_storage_row_id, quantity,
+            counted=lps.is_counted_lot(db, receipt.material_lot_id),
+        ),
     )
     db.add(return_transfer)
 
@@ -655,8 +704,7 @@ def return_request_item(
 
     # Update staging item
     staging_item.quantity_returned += quantity
-    if staging_item.quantity_returned >= staging_item.quantity_staged - staging_item.quantity_used:
-        staging_item.status = StagingItemStatus.RETURNED if staging_item.quantity_used == 0 else StagingItemStatus.PARTIALLY_RETURNED
+    staging_service.settle_status(staging_item)
     staging_item.returned_at = datetime.now(timezone.utc)
 
     # Update the request item fulfilled quantity (reduce it)
@@ -690,7 +738,16 @@ def undo_staging(
     to_sub_location_id: Optional[str] = None,
     to_storage_row_id: Optional[str] = None,
 ) -> dict:
-    """Undo all staging for a request item — return everything and reset to pending."""
+    """Undo staging for a request item: put back what is STILL in staging.
+
+    Only `staged − used − returned` comes back. What production already used
+    stays booked against the line — the line keeps `fulfilled = used + anything
+    still staged` and is never reset to pending, or production would be asked
+    for material it has already consumed (browser test PART 3, B2: undo of a
+    used ascorbic line reset it to "550 needed · 0 staged" and orphaned the
+    550 lb). A line whose staging is entirely used has nothing to undo and is
+    refused with that reason.
+    """
     item = db.query(StagingRequestItem).filter(
         StagingRequestItem.id == item_id,
         StagingRequestItem.request_id == request_id,
@@ -698,23 +755,29 @@ def undo_staging(
     if not item:
         raise NotFoundError("Staging request item", item_id)
 
-    staging_item_ids = []
-    if item.staging_item_ids:
-        try:
-            staging_item_ids = json.loads(item.staging_item_ids)
-        except (json.JSONDecodeError, TypeError):
-            staging_item_ids = []
-
-    returned_count = 0
+    staging_item_ids = _parse_staging_item_ids(item.staging_item_ids)
+    staging_items = []
     for sid in staging_item_ids:
         si = db.query(StagingItem).filter(StagingItem.id == sid).first()
-        if not si:
-            continue
+        if si:
+            staging_items.append(si)
 
-        available = si.quantity_staged - si.quantity_used - si.quantity_returned
-        if available <= 0:
-            continue
+    def _left(si):
+        return float(si.quantity_staged or 0) - float(si.quantity_used or 0) - float(si.quantity_returned or 0)
 
+    outstanding = [si for si in staging_items if _left(si) > 0.001]
+    used_total = sum(float(si.quantity_used or 0) for si in staging_items)
+    if not outstanding and used_total > 0.001:
+        unit = item.unit or ""
+        raise ValidationError(
+            f"Nothing to undo: all of the {round(used_total, 3):g} {unit} staged for "
+            f"{item.ingredient_name} has already been used in production. Undo only "
+            "returns material still in staging; the used amount stays booked to this request."
+        )
+
+    returned_count = 0
+    for si in outstanding:
+        available = _left(si)
         receipt = db.query(Receipt).filter(Receipt.id == si.receipt_id).first()
         if not receipt:
             continue
@@ -726,21 +789,32 @@ def undo_staging(
         if product and product.quantity_uom:
             unit = product.quantity_uom
 
-        return_transfer_id = f"transfer-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+        counted = lps.is_counted_lot(db, receipt.material_lot_id)
+        # The named rack, else the one the containers came off; any active
+        # rack of the warehouse is accepted (PART 3, G2).
+        row_id, loc_id, sub_id = staging_service.resolve_return_rack(
+            db, receipt,
+            to_storage_row_id or (si.original_storage_row_id if counted else None),
+            to_location_id, to_sub_location_id,
+        )
+        if not loc_id:
+            raise ValidationError("Pick the rack (or the location) the material goes back to.")
+
         return_transfer = InventoryTransfer(
-            id=return_transfer_id,
+            id=staging_service.mint_id("transfer"),
             receipt_id=si.receipt_id,
             warehouse_id=receipt.warehouse_id,
             from_location_id=transfer.to_location_id if transfer else receipt.location_id,
             from_sub_location_id=transfer.to_sub_location_id if transfer else receipt.sub_location_id,
-            to_location_id=to_location_id,
-            to_sub_location_id=to_sub_location_id,
+            to_location_id=loc_id,
+            to_sub_location_id=sub_id,
             quantity=available,
             unit=unit,
             reason=f"Undo staging (request {request_id})",
             transfer_type="warehouse-transfer",
             requested_by=None,
             status="completed",
+            destination_breakdown=_return_breakdown(row_id, available, counted=counted),
         )
         db.add(return_transfer)
 
@@ -749,21 +823,34 @@ def undo_staging(
         _recredit_rack_on_return(
             db, receipt, si,
             quantity=available,
-            storage_row_id=to_storage_row_id,
+            storage_row_id=row_id,
         )
 
-        receipt.location_id = to_location_id
-        receipt.sub_location_id = to_sub_location_id
+        receipt.location_id = loc_id
+        receipt.sub_location_id = sub_id
 
-        si.quantity_returned += available
-        si.status = StagingItemStatus.RETURNED if si.quantity_used == 0 else StagingItemStatus.PARTIALLY_RETURNED
+        si.quantity_returned = float(si.quantity_returned or 0) + available
+        staging_service.settle_status(si)
         si.returned_at = datetime.now(timezone.utc)
         returned_count += 1
 
-    # Reset the request item
-    item.quantity_fulfilled = 0
-    item.status = StagingItemStatus.PENDING
-    item.staging_item_ids = None
+    # What still counts against the line: the used amount (and nothing is
+    # left in staging now). Never more than the line already showed — staging
+    # ids can be shared by sibling lines of one ingredient.
+    kept = sum(max(0.0, float(si.quantity_staged or 0) - float(si.quantity_returned or 0))
+               for si in staging_items)
+    needed = float(item.quantity_needed or 0)
+    item.quantity_fulfilled = round(min(float(item.quantity_fulfilled or 0), kept, needed), 3) \
+        if kept > 0.001 else 0.0
+    if item.quantity_fulfilled <= 0.001:
+        item.quantity_fulfilled = 0.0
+        item.status = StagingItemStatus.PENDING
+        # Nothing of this line was used: it is as if never staged.
+        item.staging_item_ids = None
+    elif item.quantity_fulfilled >= needed - 0.001:
+        item.status = StagingItemStatus.FULFILLED
+    else:
+        item.status = StagingItemStatus.PARTIALLY_FULFILLED
 
     # Update parent request status
     _update_parent_request_status(db, request_id)
@@ -773,6 +860,8 @@ def undo_staging(
         "status": "ok",
         "returned_items": returned_count,
         "item_status": item.status,
+        "quantity_fulfilled": item.quantity_fulfilled,
+        "quantity_used": round(used_total, 3),
     }
 
 
@@ -1076,10 +1165,7 @@ def notify_ingredient_used(
                 consume_receipt_quantity(db, receipt, use_qty)
 
                 si.quantity_used += use_qty
-                if si.quantity_used >= si.quantity_staged - si.quantity_returned:
-                    si.status = "used"
-                else:
-                    si.status = "partially_used"
+                staging_service.settle_status(si)
                 si.used_at = datetime.now(timezone.utc)
 
                 remaining_to_mark -= use_qty
@@ -1312,8 +1398,7 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                     submitted_by=None,
                     approved_by=None,
                 ))
-                avail = si.quantity_staged - si.quantity_used - si.quantity_returned
-                si.status = StagingItemStatus.USED if avail <= 0 else StagingItemStatus.PARTIALLY_USED
+                staging_service.settle_status(si)
                 total_marked += 1
                 continue
 
@@ -1340,10 +1425,7 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
             consume_receipt_quantity(db, receipt, use_qty)
 
             si.quantity_used += use_qty
-            if si.quantity_used >= si.quantity_staged - si.quantity_returned:
-                si.status = "used"
-            else:
-                si.status = "partially_used"
+            staging_service.settle_status(si)
             si.used_at = datetime.now(timezone.utc)
             total_marked += 1
 
@@ -1515,6 +1597,9 @@ async def get_close_out_data(db: Session, request_id: str) -> dict:
                 "unit_label": lot.unit_label if lot else None,
                 "original_storage_row_id": si.original_storage_row_id,
                 "original_storage_row_name": original_row.name if original_row else None,
+                "quantity_used": si.quantity_used,
+                "quantity_returned": si.quantity_returned,
+                **_detail_extras(db, si, receipt),
             })
 
     items_list = []
@@ -1553,6 +1638,25 @@ async def get_close_out_data(db: Session, request_id: str) -> dict:
 # Close Out — complete
 # ---------------------------------------------------------------------------
 
+def request_local_today(db: Session, sr: StagingRequest, now: Optional[datetime] = None) -> date:
+    """Today at the request's warehouse (app/utils/warehouse_time.py).
+
+    A staging request carries no warehouse of its own; the material staged
+    against it does. Falls back to the default plant timezone."""
+    wh_id = None
+    for item in sr.items or []:
+        for si_id in _parse_staging_item_ids(item.staging_item_ids):
+            si = db.query(StagingItem).filter(StagingItem.id == si_id).first()
+            if si is not None and si.warehouse_id:
+                wh_id = si.warehouse_id
+                break
+        if wh_id:
+            break
+    tz = zone(warehouse_timezone(db, wh_id))
+    now = now or datetime.now(timezone.utc)
+    return now.astimezone(tz).date()
+
+
 def close_out_staging_request(db: Session, request_id: str) -> dict:
     """Close out a staging request after reconciliation. All leftovers must be zero."""
     sr = db.query(StagingRequest).options(
@@ -1561,11 +1665,15 @@ def close_out_staging_request(db: Session, request_id: str) -> dict:
     if not sr:
         raise NotFoundError("Staging request", request_id)
 
-    today = date.today()
+    # Close Out opens ON the production day (PART 3, G1 decision): the
+    # leftovers are reconciled at the end of the shift, not the next morning.
+    # "Today" is the warehouse's local day, not the server's.
+    today = request_local_today(db, sr)
     prod_date = sr.production_date
-    if not prod_date or prod_date >= today:
+    if not prod_date or prod_date > today:
         raise ValidationError(
-            "Close out is only available after the production date has passed."
+            "Close out opens on the production day"
+            + (f" ({prod_date.isoformat()})." if prod_date else " — this request has no production date.")
         )
 
     # Verify all leftovers are zero

@@ -167,6 +167,11 @@ class StagingItemStatus(str, Enum):
     PARTIALLY_USED = "partially_used"
     RETURNED = "returned"
     PARTIALLY_RETURNED = "partially_returned"
+    # Nothing left in staging, and both used AND returned (browser test PART 3,
+    # U3): 292 used + 210 returned of a 502 staged drum is closed, not
+    # "partially returned". Partially returned now means some came back and
+    # some is still out.
+    COMPLETED = "completed"
 
 
 class StagingRequestStatus(str, Enum):

@@ -298,7 +298,9 @@ class MarkUsedBody(BaseModel):
 class ReturnBody(BaseModel):
     staging_item_id: str
     quantity: float
-    to_location_id: str
+    # Optional when a rack is named: the rack's own room is the destination
+    # (any active rack of the warehouse — browser test PART 3, G2).
+    to_location_id: Optional[str] = None
     to_sub_location_id: Optional[str] = None
     # Counted lots: the rack the material physically went back to, and the
     # full/weighed-partial split the worker recorded. When the split is
@@ -308,7 +310,7 @@ class ReturnBody(BaseModel):
     weighed_partial_qty: Optional[float] = None
 
 class UndoStageBody(BaseModel):
-    to_location_id: str
+    to_location_id: Optional[str] = None
     to_sub_location_id: Optional[str] = None
     to_storage_row_id: Optional[str] = None
 

@@ -146,7 +146,14 @@ def get_lot_status(
     wh_id = warehouse_filter(current_user)
     if wh_id and receipt.warehouse_id and receipt.warehouse_id != wh_id:
         raise HTTPException(status_code=404, detail="Receipt not found")
-    return lot_status_service.lot_status(db, receipt)
+    status = lot_status_service.lot_status(db, receipt)
+    # Containers already OFF the racks — on a gun cart or out in staging. A
+    # hold freezes racks; these are gone from them, so the form names them
+    # (browser test PART 3, B3: the drum on the cart was never mentioned).
+    from app.services import staging_service
+    if isinstance(status, dict):
+        status = {**status, **staging_service.lot_staging_exposure(db, receipt.material_lot_id)}
+    return status
 
 @router.post("/hold-actions", response_model=InventoryHoldActionSchema)
 def create_hold_action(

@@ -12,6 +12,7 @@ import { sortHoldsNewestFirst } from '../../utils/holdHistory';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, HOLD_STATUS, RECEIPT_STATUS } from '../../constants';
 import { lotTotalText, lotHeldText, lotLocationText } from '../../utils/lotStatus';
+import { onePerLot, offRackText } from '../../utils/holdLots';
 
 const HoldsTab = () => {
   const { addToast } = useToast();
@@ -80,13 +81,15 @@ const HoldsTab = () => {
   }, [products, receipts, categoryLookup]);
 
   // ─── RM/PKG receipts ──────────────────────────────────────────────────────
+  // ONE entry per lot: a hold covers the whole lot, so a lot that came on
+  // four trucks was listed four times (browser test PART 3, U4).
   const rmReceipts = useMemo(() =>
-    receipts.filter(r =>
+    onePerLot(receipts.filter(r =>
       ['approved', 'recorded', 'reviewed'].includes(r.status) &&
       r.quantity > 0 &&
       categoryLookup[r.categoryId]?.type !== CATEGORY_TYPES.FINISHED &&
       categoryLookup[r.categoryId]?.type !== 'group'
-    ),
+    )),
     [receipts, categoryLookup]
   );
 
@@ -474,6 +477,12 @@ const HoldsTab = () => {
                 {lotLocationText(rmLotStatus) && (
                   <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '2px' }}>
                     Where: {lotLocationText(rmLotStatus)}
+                  </div>
+                )}
+                {offRackText(rmLotStatus) && (
+                  <div style={{ fontSize: '13px', color: '#92400e', marginTop: '4px', fontWeight: 600 }}>
+                    Off the racks now: {offRackText(rmLotStatus)}.
+                    {!selectedIsHeld && ' A hold also stops these being used in production.'}
                   </div>
                 )}
               </div>

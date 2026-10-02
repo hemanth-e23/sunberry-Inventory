@@ -3,6 +3,7 @@ import { useAppData } from '../../context/AppDataContext';
 import { useToast } from '../../context/ToastContext';
 import apiClient from '../../api/client';
 import ModalOverlay from './ModalOverlay';
+import { activeRacks } from '../../utils/stagingDesk';
 
 /**
  * ReturnModal
@@ -35,14 +36,23 @@ const ReturnModal = ({
   onSuccess,
   onCloseOutRefresh,
 }) => {
-  const { locations, subLocationMap, storageAreas } = useAppData();
+  const { locations, subLocationMap, locationsTree } = useAppData();
   const { addToast } = useToast();
 
   const hasCounted = (details || []).some((d) => d.is_counted);
 
   const [returnLocation, setReturnLocation] = useState('');
   const [returnSubLocation, setReturnSubLocation] = useState('');
-  const [returnStorageRow, setReturnStorageRow] = useState('');
+  // The rack the containers came off is the default return rack.
+  const originalRowId = useMemo(() => {
+    const withRow = (details || []).find((d) => d.original_storage_row_id);
+    return withRow ? withRow.original_storage_row_id : '';
+  }, [details]);
+  const originalRowName = useMemo(() => {
+    const withRow = (details || []).find((d) => d.original_storage_row_name);
+    return withRow ? withRow.original_storage_row_name : null;
+  }, [details]);
+  const [returnStorageRow, setReturnStorageRow] = useState(originalRowId);
   // Legacy (uncounted) rows: one weight per line, defaulted to everything.
   const [quantities, setQuantities] = useState(() => {
     const qtys = {};
@@ -75,34 +85,14 @@ const ReturnModal = ({
     return subLocationMap[returnLocation] || [];
   }, [returnLocation, subLocationMap]);
 
-  // Racks under the chosen location (directly or via its sub-locations) —
-  // same construction StagingOverview uses.
-  const returnLocationRows = useMemo(() => {
-    if (!returnLocation) return [];
-    const rows = [];
-    (storageAreas || []).forEach((area) => {
-      if (area.locationId === returnLocation) {
-        area.rows?.forEach((row) => {
-          rows.push({ id: row.id, name: `${area.name} / ${row.name}` });
-        });
-      }
-    });
-    (subLocationMap[returnLocation] || []).forEach((sub) => {
-      (storageAreas || []).forEach((area) => {
-        if (area.subLocationId === sub.id) {
-          area.rows?.forEach((row) => {
-            rows.push({ id: row.id, name: `${area.name} / ${row.name}` });
-          });
-        }
-      });
-    });
-    return rows;
-  }, [returnLocation, storageAreas, subLocationMap]);
-
-  const originalRowName = useMemo(() => {
-    const withRow = (details || []).find((d) => d.original_storage_row_name);
-    return withRow ? withRow.original_storage_row_name : null;
-  }, [details]);
+  const racks = useMemo(() => activeRacks(locationsTree), [locationsTree]);
+  const selectedRack = racks.find((r) => r.id === returnStorageRow) || null;
+  // Where the material goes: the rack's own room, else the picked location.
+  // A rack the tree does not list (not loaded yet) still goes: the server
+  // resolves its room from the rack itself.
+  const targetLocation = selectedRack ? selectedRack.locationId : (returnLocation || null);
+  const targetSubLocation = selectedRack ? selectedRack.subLocationId : (returnSubLocation || null);
+  const canSubmit = Boolean(returnStorageRow || targetLocation);
 
   const countedQty = (d) => {
     const split = splits[d.staging_item_id] || {};
@@ -113,8 +103,8 @@ const ReturnModal = ({
   };
 
   const handleReturn = async () => {
-    if (!returnLocation) {
-      setActionError('Please select a return location.');
+    if (!canSubmit) {
+      setActionError(hasCounted ? 'Pick the rack the material went back onto.' : 'Please select a return location.');
       return;
     }
     for (const d of details || []) {
@@ -138,7 +128,7 @@ const ReturnModal = ({
         );
         return;
       }
-      if (qty > 0 && !returnStorageRow && !d.original_storage_row_id) {
+      if (qty > 0 && !returnStorageRow) {
         setActionError('Pick the rack the material physically went back to.');
         return;
       }
@@ -162,8 +152,8 @@ const ReturnModal = ({
             {
               staging_item_id: detail.staging_item_id,
               quantity: Math.round(qty * 1000) / 1000,
-              to_location_id: returnLocation,
-              to_sub_location_id: returnSubLocation || null,
+              to_location_id: targetLocation,
+              to_sub_location_id: targetSubLocation,
               to_storage_row_id: returnStorageRow || null,
               full_units: full,
               weighed_partial_qty: partial,
@@ -177,8 +167,9 @@ const ReturnModal = ({
             {
               staging_item_id: detail.staging_item_id,
               quantity: qty,
-              to_location_id: returnLocation,
-              to_sub_location_id: returnSubLocation || null,
+              to_location_id: targetLocation,
+              to_sub_location_id: targetSubLocation,
+              to_storage_row_id: returnStorageRow || null,
             }
           );
         }
@@ -255,9 +246,13 @@ const ReturnModal = ({
           </div>
         )}
 
-        {/* Return location selector */}
+        {/* Return rack: ANY active rack of the warehouse, defaulting to the
+            one the material came off (browser test PART 3, G2). The rack's
+            own room is where the material goes, so no separate location
+            pick is needed once a rack is chosen. */}
         <div style={{ marginBottom: '1rem' }}>
           <label
+            htmlFor="return-rack"
             style={{
               display: 'block',
               fontWeight: 600,
@@ -265,15 +260,12 @@ const ReturnModal = ({
               fontSize: '0.9rem',
             }}
           >
-            Return to Location *
+            Return to Rack {hasCounted ? '*' : '(optional)'}
           </label>
           <select
-            value={returnLocation}
-            onChange={(e) => {
-              setReturnLocation(e.target.value);
-              setReturnSubLocation('');
-              setReturnStorageRow('');
-            }}
+            id="return-rack"
+            value={returnStorageRow}
+            onChange={(e) => setReturnStorageRow(e.target.value)}
             style={{
               width: '100%',
               padding: '0.5rem',
@@ -282,47 +274,20 @@ const ReturnModal = ({
               fontSize: '0.9rem',
             }}
           >
-            <option value="">Select location</option>
-            {(locations || []).map((loc) => (
-              <option key={loc.id} value={loc.id}>
-                {loc.name}
+            <option value="">{hasCounted ? 'Select rack' : 'No rack — pick a location below'}</option>
+            {racks.map((rack) => (
+              <option key={rack.id} value={rack.id}>
+                {rack.label}{rack.id === originalRowId ? ' (original rack)' : ''}
               </option>
             ))}
           </select>
-          {returnLocation && returnSubLocOptions.length > 0 && (
-            <div style={{ marginTop: '0.5rem' }}>
-              <label
-                style={{
-                  display: 'block',
-                  fontWeight: 500,
-                  marginBottom: '0.3rem',
-                  fontSize: '0.85rem',
-                }}
-              >
-                Sub-location (optional)
-              </label>
-              <select
-                value={returnSubLocation}
-                onChange={(e) => setReturnSubLocation(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  borderRadius: '6px',
-                  border: '1px solid #ccc',
-                  fontSize: '0.9rem',
-                }}
-              >
-                <option value="">None</option>
-                {returnSubLocOptions.map((sub) => (
-                  <option key={sub.id} value={sub.id}>
-                    {sub.name}
-                  </option>
-                ))}
-              </select>
+          {originalRowName && returnStorageRow && returnStorageRow !== originalRowId && (
+            <div style={{ marginTop: '0.3rem', fontSize: '0.75rem', color: '#6c757d' }}>
+              Came off {originalRowName} — returning to a different rack.
             </div>
           )}
-          {hasCounted && returnLocation && (
-            <div style={{ marginTop: '0.5rem' }}>
+          {!selectedRack && !hasCounted && (
+            <div style={{ marginTop: '0.75rem' }}>
               <label
                 style={{
                   display: 'block',
@@ -331,11 +296,14 @@ const ReturnModal = ({
                   fontSize: '0.85rem',
                 }}
               >
-                Return to Rack {originalRowName ? '(optional)' : '*'}
+                Return to Location *
               </label>
               <select
-                value={returnStorageRow}
-                onChange={(e) => setReturnStorageRow(e.target.value)}
+                value={returnLocation}
+                onChange={(e) => {
+                  setReturnLocation(e.target.value);
+                  setReturnSubLocation('');
+                }}
                 style={{
                   width: '100%',
                   padding: '0.5rem',
@@ -344,17 +312,34 @@ const ReturnModal = ({
                   fontSize: '0.9rem',
                 }}
               >
-                <option value="">
-                  {originalRowName
-                    ? `Original rack (${originalRowName})`
-                    : 'Select rack'}
-                </option>
-                {returnLocationRows.map((row) => (
-                  <option key={row.id} value={row.id}>
-                    {row.name}
+                <option value="">Select location</option>
+                {(locations || []).map((loc) => (
+                  <option key={loc.id} value={loc.id}>
+                    {loc.name}
                   </option>
                 ))}
               </select>
+              {returnLocation && returnSubLocOptions.length > 0 && (
+                <select
+                  value={returnSubLocation}
+                  onChange={(e) => setReturnSubLocation(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem',
+                    borderRadius: '6px',
+                    border: '1px solid #ccc',
+                    fontSize: '0.9rem',
+                    marginTop: '0.5rem',
+                  }}
+                >
+                  <option value="">Sub-location (optional)</option>
+                  {returnSubLocOptions.map((sub) => (
+                    <option key={sub.id} value={sub.id}>
+                      {sub.name}
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
           )}
         </div>
@@ -399,9 +384,14 @@ const ReturnModal = ({
                     {d.lot_number}
                   </td>
                   <td style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem' }}>
-                    {[d.location_name, d.sub_location_name]
-                      .filter(Boolean)
-                      .join(' / ') || '—'}
+                    {(d.origin_rows || []).length > 0
+                      // Every rack it came off (PART 3, U2), not one.
+                      ? d.origin_rows
+                          .map((o) => (o.units ? `${o.storage_row_name} (${o.units})` : o.storage_row_name))
+                          .join(', ')
+                      : [d.location_name, d.sub_location_name]
+                          .filter(Boolean)
+                          .join(' / ') || '—'}
                   </td>
                   <td
                     style={{
@@ -553,6 +543,7 @@ const ReturnModal = ({
             borderRadius: '6px',
             border: '1px solid #ccc',
             background: 'white',
+            color: '#374151', // a global button colour made this white on white (PART 3, U5)
             cursor: 'pointer',
             fontSize: '0.9rem',
           }}
@@ -561,12 +552,12 @@ const ReturnModal = ({
         </button>
         <button
           onClick={handleReturn}
-          disabled={submitting || !returnLocation}
+          disabled={submitting || !canSubmit}
           style={{
             padding: '0.5rem 1.5rem',
             borderRadius: '6px',
             border: 'none',
-            backgroundColor: !returnLocation ? '#6c757d' : '#fd7e14',
+            backgroundColor: !canSubmit ? '#6c757d' : '#fd7e14',
             color: 'white',
             cursor: submitting ? 'wait' : 'pointer',
             fontWeight: 600,

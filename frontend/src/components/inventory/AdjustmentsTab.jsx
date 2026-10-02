@@ -10,6 +10,7 @@ import { buildEntriesForProduct, containersFreed, describeContainers, countWithU
 import RmEntryQtyInput from './RmEntryQtyInput';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
+import { adjustmentTypeLabel } from '../../utils/adjustmentTypes';
 
 const ADJUSTMENT_TYPES = [
   { value: 'stock-correction', label: 'Stock Correction' },
@@ -698,7 +699,7 @@ const AdjustmentsTab = () => {
             {recentAdjustments.map(adj => {
               const product = productLookup[adj.productId];
               const isPallet = adj.palletLicenceIds?.length > 0;
-              const typeLabel = ADJUSTMENT_TYPES.find(t => t.value === adj.adjustmentType)?.label || adj.adjustmentType;
+              const typeLabel = ADJUSTMENT_TYPES.find(t => t.value === adj.adjustmentType)?.label || adjustmentTypeLabel(adj.adjustmentType);
               return (
                 <li key={adj.id}>
                   <div className="item-main">

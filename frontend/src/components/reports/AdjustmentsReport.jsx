@@ -3,10 +3,12 @@ import { formatDate } from "../../utils/dateUtils";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
+import { adjustmentTypeLabel } from "../../utils/adjustmentTypes";
 
 const adjTypeOptions = [
   { value: "all", label: "All Types" },
   { value: "production-consumption", label: "Production Consumption" },
+  { value: "used-in-production", label: "Used in Production" },
   { value: "damage-reduction", label: "Damage Reduction" },
   { value: "donation", label: "Donation" },
   { value: "trash-disposal", label: "Trash Disposal" },
@@ -43,13 +45,15 @@ const AdjustmentsReport = ({ productOptions }) => {
 
   const adjCols = [
     { label: "Date", value: (r) => formatDate(r.date) },
-    { label: "Type", value: (r) => r.adjustment_type?.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) },
+    { label: "Type", value: (r) => adjustmentTypeLabel(r.adjustment_type) },
     { label: "Product", value: (r) => r.product_name },
     { label: "Lot #", value: (r) => r.lot_number || "—" },
     { label: "Quantity", value: (r) => `${formatNumber(r.quantity)}${r.unit ? ` ${r.unit}` : ""}` },
     { label: "Qty Before", value: (r) => r.qty_before != null ? formatNumber(r.qty_before) : "—" },
     { label: "Qty After", value: (r) => r.qty_after != null ? formatNumber(r.qty_after) : "—" },
     { label: "Reason", value: (r) => r.reason || "—" },
+    // Who a donation went to (browser test PART 3, G5).
+    { label: "Recipient", value: (r) => r.recipient || "—" },
     // Backend already returns resolved display names here — render directly.
     { label: "Submitted By", value: (r) => r.submitted_by || "—" },
     { label: "Approved By", value: (r) => r.approved_by || "—" },

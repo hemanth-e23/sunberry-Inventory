@@ -3,6 +3,7 @@ import { useAppData } from '../../context/AppDataContext';
 import { useToast } from '../../context/ToastContext';
 import apiClient from '../../api/client';
 import ModalOverlay from './ModalOverlay';
+import { unitsText } from '../../utils/stagingDesk';
 
 /**
  * MarkUsedModal
@@ -34,7 +35,8 @@ const MarkUsedModal = ({
   const [quantities, setQuantities] = useState(() => {
     const qtys = {};
     (details || []).forEach((d) => {
-      qtys[d.staging_item_id] = d.available;
+      // A held lot cannot be consumed (PART 3, B3): nothing pre-filled.
+      qtys[d.staging_item_id] = d.is_held ? 0 : d.available;
     });
     return qtys;
   });
@@ -46,6 +48,17 @@ const MarkUsedModal = ({
   const appliedRowsRef = useRef(new Set());
 
   const handleMarkUsed = async () => {
+    const anyUsable = (details || []).some(
+      (d) => !d.is_held && (parseFloat(quantities[d.staging_item_id]) || 0) > 0
+    );
+    if (!anyUsable) {
+      setActionError(
+        (details || []).some((d) => d.is_held)
+          ? 'Held material cannot be used in production. Release the hold first, or return it to a rack.'
+          : 'Enter how much was used.'
+      );
+      return;
+    }
     setSubmitting(true);
     setActionError('');
     setActionSuccess('');
@@ -54,6 +67,7 @@ const MarkUsedModal = ({
       for (const detail of details || []) {
         const qty = parseFloat(quantities[detail.staging_item_id]) || 0;
         if (qty <= 0) continue;
+        if (detail.is_held) continue;
         if (appliedRowsRef.current.has(detail.staging_item_id)) continue;
 
         const itemId = detail._itemId ?? item.id;
@@ -135,6 +149,23 @@ const MarkUsedModal = ({
           </div>
         )}
 
+        {(details || []).filter((d) => d.is_held).map((d) => (
+          <div
+            key={`hold-${d.staging_item_id}`}
+            role="alert"
+            style={{
+              padding: '0.5rem',
+              backgroundColor: '#fee2e2',
+              color: '#991b1b',
+              borderRadius: '4px',
+              marginBottom: '0.75rem',
+              fontSize: '0.85rem',
+            }}
+          >
+            {d.hold_message || `Lot ${d.lot_number} is ON HOLD and cannot be used.`}
+          </div>
+        ))}
+
         <table
           style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}
         >
@@ -169,9 +200,32 @@ const MarkUsedModal = ({
                   style={{ padding: '0.4rem 0.6rem', fontFamily: 'monospace' }}
                 >
                   {d.lot_number}
+                  {d.is_held && (
+                    <div
+                      style={{
+                        fontFamily: 'inherit',
+                        fontSize: '0.72rem',
+                        fontWeight: 700,
+                        color: '#991b1b',
+                        backgroundColor: '#fee2e2',
+                        borderRadius: '4px',
+                        padding: '2px 6px',
+                        marginTop: '3px',
+                        whiteSpace: 'normal',
+                      }}
+                      title={d.hold_message || ''}
+                    >
+                      ON HOLD — cannot be used
+                    </div>
+                  )}
                 </td>
                 <td style={{ padding: '0.4rem 0.6rem', textAlign: 'right' }}>
-                  {d.quantity_staged}
+                  {Number(d.quantity_staged || 0).toLocaleString()} {d.weight_unit || item.unit || ''}
+                  {unitsText(d.quantity_staged, d) && (
+                    <div style={{ fontSize: '0.72rem', color: '#6c757d' }}>
+                      {unitsText(d.quantity_staged, d)}
+                    </div>
+                  )}
                 </td>
                 <td
                   style={{
@@ -180,7 +234,12 @@ const MarkUsedModal = ({
                     fontWeight: 600,
                   }}
                 >
-                  {d.available}
+                  {Number(d.available || 0).toLocaleString()} {d.weight_unit || item.unit || ''}
+                  {unitsText(d.available, d) && (
+                    <div style={{ fontSize: '0.72rem', color: '#6c757d', fontWeight: 400 }}>
+                      ≈ {unitsText(d.available, d)}
+                    </div>
+                  )}
                 </td>
                 <td
                   style={{
@@ -194,6 +253,8 @@ const MarkUsedModal = ({
                     min="0"
                     max={d.available}
                     step="0.01"
+                    disabled={Boolean(d.is_held)}
+                    aria-label={`Quantity used, lot ${d.lot_number}`}
                     value={quantities[d.staging_item_id] ?? ''}
                     onChange={(e) =>
                       setQuantities((prev) => ({
@@ -237,6 +298,7 @@ const MarkUsedModal = ({
             borderRadius: '6px',
             border: '1px solid #ccc',
             background: 'white',
+            color: '#374151', // a global button colour made this white on white (PART 3, U5)
             cursor: 'pointer',
             fontSize: '0.9rem',
           }}

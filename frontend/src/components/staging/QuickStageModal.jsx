@@ -4,6 +4,13 @@ import { useToast } from '../../context/ToastContext';
 import apiClient from '../../api/client';
 import ModalOverlay from './ModalOverlay';
 import { formatDateKey, formatDateTime, escapeHtml } from '../../utils/dateUtils';
+import {
+  autoAllocate,
+  buildStageLots,
+  describeAllocation,
+  lotAllocationQty,
+  rackAllocationQty,
+} from '../../utils/stagingDesk';
 
 /**
  * QuickStageModal
@@ -31,11 +38,13 @@ const QuickStageModal = ({
   const [modalLocation, setModalLocation] = useState('');
   const [modalSubLocation, setModalSubLocation] = useState('');
   const [lotSuggestions, setLotSuggestions] = useState([]);
+  // Legacy (uncounted) lots: a typed weight per lot.
   const [lotAllocations, setLotAllocations] = useState({});
-  // Which rack the containers physically come off, per lot (audit S8). For
-  // counted lots the backend pulls from THIS rack instead of guessing
-  // fullest-first — the guess swapped drums between rows on paper.
-  const [lotRacks, setLotRacks] = useState({});
+  // Counted lots: WHOLE containers per rack — `{receiptId: {rowId: {full, open}}}`.
+  // The dialog used to allocate "992 lbs" of a 502-lb drum lot and price the
+  // lot at one delivery's weight (browser test PART 3, B5); now each rack's
+  // drums carry their own weight and the pull names its rack (audit S8).
+  const [countedAlloc, setCountedAlloc] = useState({});
   const [loadingLots, setLoadingLots] = useState(false);
   const [submittingStage, setSubmittingStage] = useState(false);
   const [actionError, setActionError] = useState('');
@@ -47,10 +56,22 @@ const QuickStageModal = ({
     return subLocationMap[modalLocation] || [];
   }, [modalLocation, subLocationMap]);
 
-  const totalAllocated = Object.values(lotAllocations).reduce(
-    (s, v) => s + (parseFloat(v) || 0),
-    0
-  );
+  const totalAllocated =
+    lotSuggestions
+      .filter((l) => !l.is_counted)
+      .reduce((s, l) => s + (parseFloat(lotAllocations[l.receipt_id]) || 0), 0) +
+    lotSuggestions
+      .filter((l) => l.is_counted)
+      .reduce((s, l) => s + lotAllocationQty(l, countedAlloc[l.receipt_id]), 0);
+
+  const setRackAlloc = (receiptId, rowId, patch) =>
+    setCountedAlloc((prev) => ({
+      ...prev,
+      [receiptId]: {
+        ...(prev[receiptId] || {}),
+        [rowId]: { full: 0, open: 0, ...((prev[receiptId] || {})[rowId] || {}), ...patch },
+      },
+    }));
   const remaining = item
     ? item.quantity_needed - (item.quantity_fulfilled || 0)
     : 0;
@@ -77,16 +98,10 @@ const QuickStageModal = ({
       const lots = Array.isArray(response.data) ? response.data : [];
       setLotSuggestions(lots);
 
-      // Auto-allocate FEFO
-      const allocs = {};
-      let needed = remaining;
-      for (const lot of lots) {
-        if (needed <= 0) break;
-        const take = Math.min(lot.available_quantity, needed);
-        allocs[lot.receipt_id] = parseFloat(take.toFixed(3));
-        needed -= take;
-      }
-      setLotAllocations(allocs);
+      // Auto-allocate FEFO — whole containers for counted lots.
+      const { counted, legacy } = autoAllocate(lots, remaining);
+      setLotAllocations(legacy);
+      setCountedAlloc(counted);
     } catch (err) {
       console.error('Error fetching lot suggestions:', err);
       setActionError(
@@ -110,34 +125,12 @@ const QuickStageModal = ({
       return;
     }
 
-    const lots = Object.entries(lotAllocations)
-      .filter(([, qty]) => parseFloat(qty) > 0)
-      .map(([receiptId, qty]) => {
-        const suggestion =
-          lotSuggestions.find((s) => s.receipt_id === receiptId) || {};
-        const racks = suggestion.racks || [];
-        // Counted lots pull off a NAMED rack: the picked one, or the lot's
-        // only rack when there is no choice to make.
-        const sourceRowId =
-          lotRacks[receiptId] ||
-          (racks.length === 1 ? racks[0].storage_row_id : null);
-        return {
-          receipt_id: receiptId,
-          quantity: parseFloat(qty),
-          ...(sourceRowId ? { source_row_id: sourceRowId } : {}),
-        };
-      });
+    // One entry per counted (lot, rack) with its exact containers and lbs;
+    // one per legacy lot with its typed weight.
+    const lots = buildStageLots(lotSuggestions, countedAlloc, lotAllocations);
 
     if (lots.length === 0) {
       setActionError('Please allocate quantity to at least one lot.');
-      return;
-    }
-    const missingRack = lots.find((l) => {
-      const s = lotSuggestions.find((x) => x.receipt_id === l.receipt_id) || {};
-      return s.is_counted && (s.racks || []).length > 1 && !l.source_row_id;
-    });
-    if (missingRack) {
-      setActionError('Pick which rack each lot is being pulled from.');
       return;
     }
 
@@ -172,7 +165,7 @@ const QuickStageModal = ({
         items: [
           {
             product_id: item.product_id,
-            quantity_needed: totalAllocated,
+            quantity_needed: Math.round(lots.reduce((s, l) => s + l.quantity, 0) * 1000) / 1000,
             lots,
           },
         ],
@@ -192,13 +185,22 @@ const QuickStageModal = ({
       const pickLines = lots.map((lot) => {
         const suggestion =
           lotSuggestions.find((s) => s.receipt_id === lot.receipt_id) || {};
+        const rack = (suggestion.racks || []).find(
+          (r) => r.storage_row_id === lot.source_row_id
+        );
         const locParts = [
           suggestion.location_name,
           suggestion.sub_location_name,
-          suggestion.storage_row_name,
+          rack ? rack.storage_row_name : suggestion.storage_row_name,
         ].filter(Boolean);
         let containerInfo = '';
-        if (
+        if (lot.full_units != null || lot.open_units != null) {
+          const word = suggestion.unit_label || 'unit';
+          const parts = [];
+          if (lot.full_units) parts.push(`${lot.full_units} ${word}${lot.full_units === 1 ? '' : 's'}`);
+          if (lot.open_units) parts.push(`${lot.open_units} open`);
+          containerInfo = ` (${parts.join(' + ')})`;
+        } else if (
           suggestion.weight_per_container &&
           suggestion.container_unit &&
           suggestion.weight_per_container > 0
@@ -350,6 +352,7 @@ const QuickStageModal = ({
               setModalSubLocation('');
               setLotSuggestions([]);
               setLotAllocations({});
+              setCountedAlloc({});
             }}
             style={{
               width: '100%',
@@ -584,53 +587,6 @@ const QuickStageModal = ({
                               {lot.available_quantity} {lot.unit}
                             </div>
                           ) : null}
-                          {lot.is_counted && (lot.racks || []).length === 1 && (
-                            <div style={{ fontSize: '0.7rem', color: '#0f766e', marginTop: '2px' }}>
-                              <span
-                                style={{
-                                  display: 'inline-block',
-                                  padding: '0 5px',
-                                  borderRadius: '8px',
-                                  backgroundColor: '#ccfbf1',
-                                }}
-                              >
-                                {lot.racks[0].storage_row_name}: {lot.racks[0].available_units}
-                                {lot.racks[0].open_units ? ` +${lot.racks[0].open_units} open` : ''}
-                              </span>
-                            </div>
-                          )}
-                          {lot.is_counted && (lot.racks || []).length > 1 && (
-                            <div style={{ fontSize: '0.7rem', marginTop: '3px' }}>
-                              {/* Which rack is being pulled from (audit S8) —
-                                  without this the system deducted from the
-                                  fullest rack, not the one actually emptied. */}
-                              <select
-                                value={lotRacks[lot.receipt_id] || ''}
-                                onChange={(e) =>
-                                  setLotRacks((prev) => ({
-                                    ...prev,
-                                    [lot.receipt_id]: e.target.value,
-                                  }))
-                                }
-                                style={{
-                                  fontSize: '0.72rem',
-                                  padding: '2px 4px',
-                                  borderRadius: '4px',
-                                  border: '1px solid #99f6e4',
-                                  color: '#0f766e',
-                                  maxWidth: '160px',
-                                }}
-                              >
-                                <option value="">Pulling from rack…</option>
-                                {(lot.racks || []).map((r) => (
-                                  <option key={r.storage_row_id} value={r.storage_row_id}>
-                                    {r.storage_row_name} — {r.available_units}
-                                    {r.open_units ? ` +${r.open_units} open` : ''}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                          )}
                           {(lot.already_staged_qty || 0) > 0.01 && (
                             <div
                               style={{
@@ -649,9 +605,72 @@ const QuickStageModal = ({
                           style={{
                             padding: '0.4rem 0.6rem',
                             textAlign: 'right',
-                            width: '110px',
+                            width: lot.is_counted ? '300px' : '110px',
                           }}
                         >
+                          {lot.is_counted ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end' }}>
+                              {(lot.racks || [])
+                                .filter((r) => (r.available_units || 0) > 0 || (r.open_units || 0) > 0)
+                                .map((r) => {
+                                  const a = (countedAlloc[lot.receipt_id] || {})[r.storage_row_id] || {};
+                                  return (
+                                    <div
+                                      key={r.storage_row_id}
+                                      style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                                    >
+                                      <span style={{ color: '#0f766e', fontWeight: 600 }}>{r.storage_row_name}</span>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        max={r.available_units || 0}
+                                        step="1"
+                                        aria-label={`${lot.unit_label || 'unit'}s from ${r.storage_row_name}`}
+                                        value={a.full ?? 0}
+                                        onChange={(e) => {
+                                          const n = Math.max(0, Math.min(
+                                            Math.floor(Number(e.target.value) || 0),
+                                            r.available_units || 0,
+                                          ));
+                                          setRackAlloc(lot.receipt_id, r.storage_row_id, { full: n });
+                                        }}
+                                        style={{ width: '52px', padding: '2px 4px', borderRadius: '4px', border: '1px solid #ccc', textAlign: 'right' }}
+                                      />
+                                      <span style={{ color: '#6c757d' }}>/ {r.available_units || 0}</span>
+                                      {(r.open_units || 0) > 0 && (
+                                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: '2px', color: '#b45309', margin: 0 }}>
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            max={r.open_units}
+                                            step="1"
+                                            aria-label={`open ${lot.unit_label || 'unit'}s from ${r.storage_row_name}`}
+                                            value={a.open ?? 0}
+                                            onChange={(e) => {
+                                              const n = Math.max(0, Math.min(
+                                                Math.floor(Number(e.target.value) || 0),
+                                                r.open_units,
+                                              ));
+                                              setRackAlloc(lot.receipt_id, r.storage_row_id, { open: n });
+                                            }}
+                                            style={{ width: '40px', padding: '2px 4px', borderRadius: '4px', border: '1px solid #f59e0b', textAlign: 'right' }}
+                                          />
+                                          open
+                                        </label>
+                                      )}
+                                      <span style={{ color: '#495057', minWidth: '70px', textAlign: 'right' }}>
+                                        {rackAllocationQty(r, a).toLocaleString()} {lot.unit || ''}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              {describeAllocation(lot, countedAlloc[lot.receipt_id], lot.unit || 'lbs') && (
+                                <div style={{ fontSize: '0.72rem', fontWeight: 600, color: '#155724' }}>
+                                  {describeAllocation(lot, countedAlloc[lot.receipt_id], lot.unit || 'lbs')}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
                           <input
                             type="number"
                             min="0"
@@ -680,17 +699,29 @@ const QuickStageModal = ({
                               fontSize: '0.85rem',
                             }}
                           />
+                          )}
                         </td>
                         <td
                           style={{ padding: '0.4rem 0.6rem', textAlign: 'center' }}
                         >
                           <button
-                            onClick={() =>
-                              setLotAllocations((prev) => ({
-                                ...prev,
-                                [lot.receipt_id]: lot.available_quantity,
-                              }))
-                            }
+                            onClick={() => {
+                              if (lot.is_counted) {
+                                const all = {};
+                                (lot.racks || []).forEach((r) => {
+                                  all[r.storage_row_id] = {
+                                    full: r.available_units || 0,
+                                    open: r.open_units || 0,
+                                  };
+                                });
+                                setCountedAlloc((prev) => ({ ...prev, [lot.receipt_id]: all }));
+                              } else {
+                                setLotAllocations((prev) => ({
+                                  ...prev,
+                                  [lot.receipt_id]: lot.available_quantity,
+                                }));
+                              }
+                            }}
                             title="Stage full bag/pallet"
                             style={{
                               padding: '2px 6px',
@@ -767,6 +798,7 @@ const QuickStageModal = ({
                 borderRadius: '6px',
                 border: '1px solid #ccc',
                 background: 'white',
+                color: '#374151', // a global button colour made this white on white (PART 3, U5)
                 cursor: 'pointer',
                 fontSize: '0.9rem',
               }}

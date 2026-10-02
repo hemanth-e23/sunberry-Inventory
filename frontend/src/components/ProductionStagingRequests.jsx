@@ -4,7 +4,8 @@ import { useAuth } from '../context/AuthContext';
 import { useAppData } from '../context/AppDataContext';
 import { getDashboardPath } from '../App';
 import apiClient from '../api/client';
-import { formatDate, formatDateKey, formatDateTime, escapeHtml } from '../utils/dateUtils';
+import { formatDate, formatDateKey, formatDateTime, escapeHtml, getTodayDateKey } from '../utils/dateUtils';
+import { closeOutAvailable, isOverdue as isPastProductionDay } from '../utils/stagingDesk';
 import './StagingOverview.css'; // Re-use staging styles
 import { STAGING_ITEM_STATUS, STAGING_REQUEST_STATUS } from '../constants';
 import QuickStageModal from './staging/QuickStageModal';
@@ -695,16 +696,17 @@ const ProductionStagingRequests = () => {
             const trackedGroups = consolidated.filter((g) => g.inventory_tracked !== false);
             const fulfilledCount = trackedGroups.filter((g) => g.allFulfilled).length;
             const totalCount = trackedGroups.length;
-            const isOverdue =
-              sr.production_date &&
-              new Date(sr.production_date + 'T23:59:59') < new Date() &&
-              ![STAGING_REQUEST_STATUS.CLOSED, STAGING_REQUEST_STATUS.CANCELLED].includes(sr.status);
+            const todayKey = getTodayDateKey();
+            const isOpen = ![STAGING_REQUEST_STATUS.CLOSED, STAGING_REQUEST_STATUS.CANCELLED].includes(sr.status);
+            const isOverdue = isOpen && isPastProductionDay(sr.production_date, todayKey);
             const prodDateLabel = sr.production_date
               ? formatDate(sr.production_date + 'T12:00:00')
               : null;
             const hasAnyStaging = consolidated.some((g) => g.anyStagingItems);
             const canDismiss = isOverdue && !hasAnyStaging;
-            const canCloseOut = isOverdue && hasAnyStaging;
+            // Close Out opens ON the production day, in the warehouse's local
+            // day (browser test PART 3, G1) — not only once it has passed.
+            const canCloseOut = isOpen && hasAnyStaging && closeOutAvailable(sr.production_date, todayKey);
 
             return (
               <div key={sr.id} style={{ backgroundColor: 'white', borderRadius: '8px', border: isOverdue ? '2px solid #dc3545' : '1px solid #dee2e6', overflow: 'hidden' }}>

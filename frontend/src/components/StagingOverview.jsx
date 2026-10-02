@@ -5,6 +5,11 @@ import { useAuth } from '../context/AuthContext';
 import { getDashboardPath } from '../App';
 import apiClient from '../api/client';
 import { formatDateTime } from '../utils/dateUtils';
+import {
+  ACTIVE_STAGING_STATUSES,
+  STAGING_ITEM_STATUS_LABELS,
+  stagingItemMatchesFilter,
+} from '../utils/stagingDesk';
 import './Shared.css';
 
 // `pallets_staged` stores the CONTAINER count for counted lots (drums/bags
@@ -28,7 +33,7 @@ const StagingOverview = () => {
   const [stagingItems, setStagingItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [filterStatus, setFilterStatus] = useState('active'); // active, all
+  const [filterStatus, setFilterStatus] = useState('active'); // active, all, or one status
   const [filterProduct, setFilterProduct] = useState('all');
   const [searchTerm, setSearchTerm] = useState('');
 
@@ -82,15 +87,18 @@ const StagingOverview = () => {
 
   useEffect(() => {
     fetchStagingItems();
-  }, [filterStatus]);
+  }, []);
 
   const fetchStagingItems = async () => {
     try {
       setLoading(true);
       setError('');
-      // Never send status_filter='all' — the backend compares it literally and
-      // returns nothing. Fetch everything; 'active' is filtered client-side below.
-      const response = await apiClient.get('/inventory/staging/items');
+      // EVERY staged item; the filter below narrows it. With no status the
+      // server returns only the active ones, which is why "All" showed only
+      // partially-returned items (browser test PART 3, B8).
+      const response = await apiClient.get('/inventory/staging/items', {
+        params: { status_filter: 'all' },
+      });
       
       // Ensure response.data is an array
       if (Array.isArray(response.data)) {
@@ -207,19 +215,8 @@ const StagingOverview = () => {
 
 
   const filteredItems = stagingItems.filter(item => {
-    // Calculate available quantity
-    const available = item.quantity_staged - item.quantity_used - item.quantity_returned;
-
-    // Only the "active" view hides used-up items; "all" must show history
-    // (used / returned items have available <= 0).
-    if (filterStatus === 'active' && available <= 0) {
+    if (!stagingItemMatchesFilter(item, filterStatus)) {
       return false;
-    }
-
-    if (filterStatus === 'active') {
-      if (!['staged', 'partially_used', 'partially_returned'].includes(item.status)) {
-        return false;
-      }
     }
     
     if (filterProduct !== 'all' && item.product_id !== filterProduct) {
@@ -240,11 +237,12 @@ const StagingOverview = () => {
 
   const getStatusBadge = (status) => {
     const badges = {
-      'staged': { label: 'Staged', className: 'status-badge staged' },
-      'partially_used': { label: 'Partially Used', className: 'status-badge partially-used' },
-      'used': { label: 'Used', className: 'status-badge used' },
-      'returned': { label: 'Returned', className: 'status-badge returned' },
-      'partially_returned': { label: 'Partially Returned', className: 'status-badge partially-returned' }
+      'staged': { label: STAGING_ITEM_STATUS_LABELS.staged, className: 'status-badge staged' },
+      'partially_used': { label: STAGING_ITEM_STATUS_LABELS.partially_used, className: 'status-badge partially-used' },
+      'used': { label: STAGING_ITEM_STATUS_LABELS.used, className: 'status-badge used' },
+      'returned': { label: STAGING_ITEM_STATUS_LABELS.returned, className: 'status-badge returned' },
+      'partially_returned': { label: STAGING_ITEM_STATUS_LABELS.partially_returned, className: 'status-badge partially-returned' },
+      'completed': { label: STAGING_ITEM_STATUS_LABELS.completed, className: 'status-badge used' },
     };
     return badges[status] || { label: status, className: 'status-badge' };
   };
@@ -282,8 +280,11 @@ const StagingOverview = () => {
           <label>
             <span>Status:</span>
             <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-              <option value="active">Active (Staged/Partially Used)</option>
+              <option value="active">Active (still in staging)</option>
               <option value="all">All</option>
+              {Object.entries(STAGING_ITEM_STATUS_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
             </select>
           </label>
           
@@ -346,7 +347,7 @@ const StagingOverview = () => {
                 const unit = item.receipt?.unit || receipt?.quantityUnits || 'cases';
                 const available = item.quantity_staged - item.quantity_used - item.quantity_returned;
                 const statusBadge = getStatusBadge(item.status);
-                const canAction = available > 0 && ['staged', 'partially_used', 'partially_returned'].includes(item.status);
+                const canAction = available > 0.001 && ACTIVE_STAGING_STATUSES.includes(item.status);
                 
                 return (
                   <tr key={item.id}>
@@ -359,6 +360,11 @@ const StagingOverview = () => {
                     <td>{formatDateTime(item.staged_at) || '-'}</td>
                     <td>
                       <span className={statusBadge.className}>{statusBadge.label}</span>
+                      {item.hold_message && (
+                        <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#991b1b' }} title={item.hold_message}>
+                          ON HOLD
+                        </div>
+                      )}
                     </td>
                     <td>
                       {canAction && (
@@ -366,6 +372,8 @@ const StagingOverview = () => {
                           <button
                             onClick={() => handleMarkUsed(item)}
                             className="primary-button"
+                            disabled={Boolean(item.hold_message)}
+                            title={item.hold_message || ''}
                             style={{ padding: '0.25rem 0.75rem', fontSize: '0.875rem' }}
                           >
                             Mark Used
@@ -397,6 +405,9 @@ const StagingOverview = () => {
           <div className="modal-overlay" onClick={() => !isSubmitting && setShowMarkUsedModal(false)}>
             <div className="modal-content" onClick={(e) => e.stopPropagation()}>
               <h3>Mark as Used for Production</h3>
+              {selectedItem.hold_message && (
+                <p role="alert" style={{ color: '#991b1b', fontWeight: 600 }}>{selectedItem.hold_message}</p>
+              )}
               <div style={{ marginBottom: '1rem' }}>
                 <p><strong>Product:</strong> {productLookup[selectedItem.product_id]?.name || 'Unknown'}</p>
                 <p><strong>Lot:</strong> {selectedItem.receipt?.lot_number || '-'}</p>

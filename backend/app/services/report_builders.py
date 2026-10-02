@@ -1252,20 +1252,21 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
                 line_qty = float(line_for_this_receipt.cases_picked or 0) if line_for_this_receipt else 0.0
             else:
                 line_qty = float(t.quantity or 0)
+            moved = _staging_move_view(db, t, r.unit or "cases")
             timeline.append({
                 "event": t.transfer_type.replace("-", " ").title(),
                 "event_type": t.transfer_type,
-                "date": _ship_dt(t),
+                "date": moved["date"],
                 "qty": round(line_qty, 2),
                 "notes": t.reason or None,
                 "submitted_by": user_name(db, t.requested_by),
                 "submitted_at": t.submitted_at,
                 "approved_by": user_name(db, t.approved_by or getattr(t, "docs_generated_by", None)),
                 "approved_at": _ship_dt(t),
-                "from_location": _loc_str(t.from_location, t.from_sub_location),
-                "from_rows": breakdown_rows(db, t.source_breakdown, r.unit or "cases"),
-                "to_location": _loc_str(t.to_location, t.to_sub_location),
-                "to_rows": breakdown_rows(db, t.destination_breakdown, r.unit or "cases"),
+                "from_location": moved["from_location"],
+                "from_rows": moved["from_rows"],
+                "to_location": moved["to_location"],
+                "to_rows": moved["to_rows"],
                 "order_number": t.order_number,
                 "ship_out_reason": (
                     ship_out_reason_label(t) if t.transfer_type == "shipped-out" else None
@@ -1422,6 +1423,62 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
             "partial": bool(result) and bool(containers),
         },
     }
+
+
+def _staging_move_view(db: Session, t, unit: str) -> dict:
+    """Date, FROM and TO of one transfer on the lot trace.
+
+    Staging pulls and returns are written straight to "completed" with no
+    approval, so the ship timestamp is empty: the gun pull showed "—" and
+    sorted above Received (PART 3, U2). Their date is when the material was
+    staged (or returned). The gun writes no source breakdown and names the
+    barn only ("TO QA Barn"), so the racks come from the staging item's own
+    pull events — every rack, not just the one recorded as the origin."""
+    date = _ship_dt(t)
+    from_rows = breakdown_rows(db, t.source_breakdown, unit)
+    to_rows = breakdown_rows(db, t.destination_breakdown, unit)
+    from_location = _loc_str(t.from_location, t.from_sub_location)
+    to_location = _loc_str(t.to_location, t.to_sub_location)
+    if t.status != "completed" or t.transfer_type not in ("staging", "warehouse-transfer"):
+        return {"date": date, "from_rows": from_rows, "to_rows": to_rows,
+                "from_location": from_location, "to_location": to_location}
+
+    staged = list(getattr(t, "staging_items", None) or [])
+    if date is None:
+        date = (staged[0].staged_at if staged and staged[0].staged_at else None) \
+            or t.submitted_at or t.created_at
+
+    from_ids = _breakdown_row_ids(t.source_breakdown)
+    if t.transfer_type == "staging" and not from_rows and staged:
+        from app.services.staging_service import staging_item_origin_rows
+
+        origin = []
+        for si in staged:
+            origin.extend(staging_item_origin_rows(db, si))
+        from_rows = [
+            {"row": o["storage_row_name"], "qty": round(float(o["qty"] or 0), 2), "unit": unit,
+             **({"units": o["units"]} if o.get("units") else {})}
+            for o in origin
+        ]
+        from_ids = [o["storage_row_id"] for o in origin]
+    if from_ids:
+        from_location = _arrival_location(db, [{"row_id": i} for i in from_ids]) or from_location
+    to_ids = _breakdown_row_ids(t.destination_breakdown)
+    if to_ids:
+        to_location = _arrival_location(db, [{"row_id": i} for i in to_ids]) or to_location
+    return {"date": date, "from_rows": from_rows, "to_rows": to_rows,
+            "from_location": from_location, "to_location": to_location}
+
+
+def _breakdown_row_ids(breakdown) -> list:
+    out = []
+    for item in breakdown or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("id") or "")
+        if key.startswith("row-"):
+            out.append(key[len("row-"):])
+    return out
 
 
 def _arrival_rows(db: Session, receipt: Receipt) -> list:
@@ -1925,6 +1982,8 @@ def build_adjustments_report(
             "qty_before": a.original_quantity,
             "qty_after": a.new_quantity,
             "reason": a.reason,
+            # Who a donation went to (browser test PART 3, G5).
+            "recipient": a.recipient,
             "submitted_by": user_name(db, a.submitted_by),
             "approved_by": user_name(db, a.approved_by),
         })
