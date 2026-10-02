@@ -19,14 +19,20 @@
 //       The server was never reached. The item stays `pending` and the pass
 //       stops: nothing behind it can go through either, so trying is waste.
 //
-//   server error (5xx / 408 / 429)
-//       The server answered, it just could not take THIS item. The item stays
-//       `pending` but the pass SKIPS IT AND KEEPS GOING. This matters: one
-//       poisoned scan used to freeze every scan queued behind it — the loop
-//       broke on the head item every pass, so a driver could put 26 pallets in
-//       the queue that would never go, no matter how good the wifi got. After
-//       MAX_SERVER_ERROR_ATTEMPTS such attempts the item is parked as `failed`
-//       so it becomes visible instead of silently pending forever.
+//   gateway down (502 / 503 / 504)
+//       A proxy answered for a server that is not there. Treated exactly like a
+//       transport error: stop the pass, keep the item pending.
+//
+//   server error (other 5xx / 408 / 429)
+//       The server (or a dev proxy standing in for a dead one — Vite answers a
+//       plain 500) could not take THIS item. The item stays `pending` but the
+//       pass SKIPS IT AND KEEPS GOING. This matters: one poisoned scan used to
+//       freeze every scan queued behind it. If the server was already known to
+//       be unreachable the pass stops instead — every item would get the same.
+//       Such an item is NEVER parked as failed (it used to be, after 8 tries —
+//       about a minute of outage — which made a worker's scans look lost, P05).
+//       It backs off on its own instead, and comes straight back the moment
+//       anything gets through.
 //
 //   terminal error (other 4xx — closed session, validation)
 //       Parked as `failed` immediately for the operator to resolve.
@@ -46,10 +52,13 @@ const CONNECTIVITY_EVENT = 'sunberry-scan-queue:connectivity';
 // the shift. After this long, a fresh drain is allowed to start anyway.
 const DRAIN_STUCK_MS = 90000;
 
-// How many times a server error (5xx/408/429) may hold an item pending before
-// it is parked as failed. Transport errors never count toward this — a gun off
-// the network for a whole shift must not poison its own queue.
-const MAX_SERVER_ERROR_ATTEMPTS = 8;
+// Per-item back-off after a server error, for the BACKGROUND poll only and
+// only while the server is otherwise answering (a poisoned item must not be
+// hammered every 8 seconds all shift). Capped, never a give-up.
+const ITEM_BACKOFF_MS = [8000, 16000, 30000, 60000, 120000, 300000];
+export const itemBackoffMs = (serverErrors) => ITEM_BACKOFF_MS[
+  Math.min(Math.max(0, (serverErrors || 1) - 1), ITEM_BACKOFF_MS.length - 1)
+];
 
 // Back-off for the BACKGROUND poll only, indexed by consecutive passes that
 // could not reach the server at all. A gun that cannot resolve the API host was
@@ -183,10 +192,31 @@ export const updateScan = (id, patch) => {
   writeAll(items);
 };
 
+/**
+ * A failed item that only failed because the server was not answering — never
+ * one the server REFUSED (4xx). Those come back on their own; only a refusal
+ * needs a person. Items parked by the old "gave up after N tries" rule are
+ * recognised by their text so a gun upgraded mid-outage recovers too.
+ */
+const isRevivable = (it) => it.state === 'failed'
+  && (it.failKind === 'server' || /gave up after \d+ tries/.test(it.lastError || ''));
+
+export const reviveServerFailures = () => {
+  const items = readAll();
+  if (!items.some(isRevivable)) return 0;
+  let n = 0;
+  writeAll(items.map((it) => {
+    if (!isRevivable(it)) return it;
+    n += 1;
+    return { ...it, state: 'pending', failKind: null, serverErrors: 0, nextAttemptAt: null };
+  }));
+  return n;
+};
+
 export const retryFailedScans = () => {
   const items = readAll().map((it) => (
     it.state === 'failed'
-      ? { ...it, state: 'pending', lastError: null, serverErrors: 0 }
+      ? { ...it, state: 'pending', lastError: null, serverErrors: 0, nextAttemptAt: null }
       : it
   ));
   writeAll(items);
@@ -194,6 +224,21 @@ export const retryFailedScans = () => {
 
 /** No response at all: offline, DNS, timeout, CORS. The server was not reached. */
 const isTransportError = (err) => !err || !err.response;
+
+/** A proxy answering for a server that is not there. */
+const isGatewayDown = (err) => [502, 503, 504].includes(err?.response?.status);
+
+/**
+ * "The gun cannot reach the server", for what the worker is TOLD. A dropped
+ * connection and any 5xx read the same on the floor: the tester's outage (the
+ * backend stopped behind the dev proxy) came back as 500s, and the screen said
+ * "Request failed with status code 500" with no truck on it (P08).
+ */
+export const isUnreachableError = (err) => {
+  if (!err) return false;
+  if (!err.response) return true;
+  return err.response.status >= 500;
+};
 
 /** Server answered but wants us to try again later. */
 const isServerError = (err) => {
@@ -260,6 +305,10 @@ export const drainScanQueue = async ({ onItemResult, force = false } = {}) => {
   drainInFlight = true;
   drainStartedAt = Date.now();
   setConnectivity({ syncing: true });
+  // Anything held back only by an outage goes again — the worker must never
+  // have to find "Retry failed" after the wifi comes back (P09).
+  reviveServerFailures();
+  const wasUnreachable = connectivity.reachable === false;
 
   const sent = [];
   const failed = [];
@@ -269,11 +318,20 @@ export const drainScanQueue = async ({ onItemResult, force = false } = {}) => {
   let skipped = 0;
   let reachable = connectivity.reachable;
   let lastError = null;
+  let anySent = false;
+  let anyAnswered = false; // the server itself spoke (2xx or a 4xx refusal)
+  let anyDown = false;     // something said "cannot reach" (transport / 5xx)
 
   try {
     while (true) {
       const items = readAll();
-      const next = items.find((it) => it.state === 'pending' && !attempted.has(it.id));
+      // An item in its own back-off waits for the background poll — unless a
+      // person asked, or the server was down and this is the pass that finds
+      // out whether it is back (then everything goes, in order).
+      const now = Date.now();
+      const due = (it) => force || wasUnreachable || anySent
+        || !it.nextAttemptAt || it.nextAttemptAt <= now;
+      const next = items.find((it) => it.state === 'pending' && !attempted.has(it.id) && due(it));
       if (!next) break;
       attempted.add(next.id);
 
@@ -291,6 +349,8 @@ export const drainScanQueue = async ({ onItemResult, force = false } = {}) => {
           { ...next.payload, idempotency_key: next.idempotency_key },
         );
         reachable = true;
+        anySent = true;
+        anyAnswered = true;
         lastError = null;
         sent.push({ item: next, response: resp.data });
         removeScan(next.id);
@@ -299,47 +359,51 @@ export const drainScanQueue = async ({ onItemResult, force = false } = {}) => {
       } catch (err) {
         lastError = errorText(err);
 
-        if (isTransportError(err)) {
+        if (isTransportError(err) || isGatewayDown(err)) {
           // Server never answered — everything behind this item would fail the
           // same way. Stop the pass; the item stays pending for the next one.
+          if (isTransportError(err)) lastError = 'Cannot reach the server (no connection)';
           reachable = false;
+          anyDown = true;
           updateScan(next.id, { lastError });
           safeCallback(onItemResult, next, null, err);
           break;
         }
 
-        // From here on the server DID answer, so the network itself is fine.
-        reachable = true;
-
         if (isServerError(err)) {
+          // Keep it pending — never give up on it — but move on to the rest of
+          // the queue. One bad scan must not hold up the 25 good ones behind it.
           const serverErrors = (next.serverErrors || 0) + 1;
-          if (serverErrors >= MAX_SERVER_ERROR_ATTEMPTS) {
-            // Stop retrying quietly — park it where the operator can see it.
-            updateScan(next.id, {
-              state: 'failed',
-              serverErrors,
-              lastError: `${lastError} (gave up after ${serverErrors} tries)`,
-            });
-            failed.push({ item: next, error: err });
-          } else {
-            // Keep it pending, but move on to the rest of the queue. One bad
-            // scan must not hold up the 25 good ones behind it.
-            updateScan(next.id, { serverErrors, lastError });
-            skipped += 1;
-          }
+          if (err?.response?.status >= 500) anyDown = true;
+          updateScan(next.id, {
+            serverErrors,
+            lastError,
+            nextAttemptAt: Date.now() + itemBackoffMs(serverErrors),
+          });
+          skipped += 1;
           safeCallback(onItemResult, next, null, err);
+          // Already known to be down and still down: the rest would get the
+          // same answer. Stop rather than walk the whole queue every pass.
+          if (wasUnreachable && !anyAnswered) break;
           continue;
         }
 
+        // From here on the server itself answered, so it is reachable.
+        reachable = true;
+        anyAnswered = true;
+
         // Terminal error — server rejected (e.g., session closed, validation).
         // Park the item as failed so the operator can decide what to do.
-        updateScan(next.id, { state: 'failed', lastError });
+        updateScan(next.id, { state: 'failed', failKind: 'terminal', lastError });
         failed.push({ item: next, error: err });
         safeCallback(onItemResult, next, null, err);
       }
     }
   } finally {
     drainInFlight = false;
+    // Nothing got through and something said "down": unreachable, as far as the
+    // worker is concerned, even if a proxy technically answered.
+    if (anyDown && !anyAnswered) reachable = false;
     if (reachable === false) {
       // Nothing answered. Slow the background poll down, step by step.
       const step = TRANSPORT_BACKOFF_MS[
@@ -373,6 +437,46 @@ export const drainScanQueue = async ({ onItemResult, force = false } = {}) => {
     reachable,
     lastError,
   };
+};
+
+/**
+ * Something other than the queue learned whether the server is there — a direct
+ * call (load the truck, remove a scan, finish) failing or succeeding. Feeds the
+ * same connectivity the header and the OFFLINE banner read, so a remove that
+ * could not reach the server turns the screen offline at once.
+ */
+export const noteReachability = (reachable, lastError = null) => {
+  if (reachable) {
+    if (connectivity.reachable === true) return;
+    consecutiveUnreachable = 0;
+    nextPollAllowedAt = 0;
+    setConnectivity({ reachable: true, lastError: null, retryDelayMs: 0 });
+  } else {
+    setConnectivity({
+      reachable: false,
+      lastError: lastError || connectivity.lastError || 'Cannot reach the server',
+    });
+  }
+};
+
+/**
+ * With nothing queued, nothing measures the connection — an OFFLINE banner
+ * would stay up forever. A cheap GET answers "is it back?".
+ */
+export const probeServer = async () => {
+  try {
+    await apiClient.get('/health', { timeout: 8000 });
+    noteReachability(true);
+    return true;
+  } catch (err) {
+    if (isUnreachableError(err)) {
+      noteReachability(false);
+      return false;
+    }
+    // Any other answer (401, 404…) means a server is there.
+    noteReachability(true);
+    return true;
+  }
 };
 
 /** Drop items belonging to a request id (e.g., when the session is closed). */

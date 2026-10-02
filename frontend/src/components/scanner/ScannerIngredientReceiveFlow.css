@@ -1048,3 +1048,57 @@
 .sir-perscan .sir-loose-btn { flex-shrink: 0; width: auto; margin: 0; padding: 0.55rem 0.8rem; }
 
 .sir-dialog-row.is-selected { border-color: #b45309; background: #fffbeb; }
+
+/* ── Offline (browser test U1) ─────────────────────────────────────────────── */
+
+.sir-offline {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin: 0 0 0.6rem;
+  padding: 0.7rem 0.85rem;
+  background: #7f1d1d;
+  color: #fff;
+  border-radius: 10px;
+}
+.sir-offline > div { display: flex; flex-direction: column; gap: 0.15rem; }
+.sir-offline strong { font-size: 1rem; font-weight: 800; letter-spacing: 0.01em; }
+.sir-offline span { font-size: 0.85rem; line-height: 1.35; }
+.sir-offline-stale { opacity: 0.85; font-style: italic; }
+
+.sir-finish-why { margin: 0.3rem 0 0; text-align: center; color: #92400e; }
+
+/* ── Held lot on the gun (U9) ──────────────────────────────────────────────── */
+
+.sir-hold-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  align-self: flex-start;
+  margin-bottom: 0.25rem;
+  padding: 0.2rem 0.55rem;
+  background: #c2410c;
+  color: #fff;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+.sir-hold-badge--inline { margin: 0 0 0 0.4rem; font-size: 0.72rem; }
+.sir-truck-line.is-held { border-color: #c2410c; background: #fff7ed; }
+
+/* ── Rack fill in the picker (U10) ─────────────────────────────────────────── */
+
+.sir-rack-fill {
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.45rem;
+  background: #ecfdf5;
+  color: #065f46;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.sir-rack-fill.is-full { background: #fee2e2; color: #991b1b; }
+
+.sir-link-row { display: flex; gap: 0.4rem; }
+.sir-link-row .sir-link { flex: 1; }

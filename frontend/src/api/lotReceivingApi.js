@@ -137,6 +137,9 @@ export const printLotLabels = (lotId, count, { scope = 'unit' } = {}) =>
 export const receivedInto = (productId) =>
   unwrap(apiClient.get('/lot-receiving/received-into', { params: { product_id: productId } }));
 
+/** Units on each rack right now, for the gun's rack picker ("11/12 drums"). */
+export const getRackFill = () => unwrap(apiClient.get('/lot-receiving/rack-fill'));
+
 export const resolveRow = (code) =>
   unwrap(apiClient.get('/lot-receiving/resolve-row', { params: { code } }));
 

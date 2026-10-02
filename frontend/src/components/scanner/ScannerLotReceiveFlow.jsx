@@ -6,19 +6,26 @@ import {
 import ScannerLayout from './ScannerLayout';
 import NetworkStatus from './NetworkStatus';
 import ScanFeedback from './ScanFeedback';
+import OfflineBanner from './OfflineBanner';
 import { playErrorTone, playSuccessTone } from '../../utils/scannerFeedback';
-import { pluralizeUnit, singularUnit } from '../../utils/rowSources';
-import { removeScan } from '../../utils/scanQueue';
+import { singularUnit } from '../../utils/rowSources';
+import {
+  isUnreachableError, noteReachability, probeServer, removeScan,
+} from '../../utils/scanQueue';
 import { isTerminal, useLotScanQueue } from '../../hooks/useLotScanQueue';
 import { useScanFocusKeeper } from '../../hooks/useScanFocusKeeper';
+import { useGunRacks } from '../../hooks/useGunRacks';
 import { decodeLotPayload } from '../../utils/labelPayload';
-import { scanUnitsBadge } from '../../utils/truckReceiving';
+import { readCached, saveCached, sessionCacheKey } from '../../utils/gunCache';
+import {
+  needsPalletCheck, offlineMessage, palletCheckKey, queuedScanLabel, rackFillLabel,
+  scanUnitsBadge, unitCount,
+} from '../../utils/truckReceiving';
 import {
   apiErrorMessage, getReceivingSession,
   lotScanEndpoint, newIdempotencyKey, resolveRow, submitReceivingSession,
   undoLastScan,
 } from '../../api/lotReceivingApi';
-import { listIngredientRows } from '../../api/ingredientIntakeApi';
 import './ScannerIngredientReceiveFlow.css';
 
 /**
@@ -70,7 +77,16 @@ import './ScannerIngredientReceiveFlow.css';
 
 const HISTORY_LIMIT = 40;
 
-const errorText = (err, fallback) => apiErrorMessage(err, fallback);
+// A dropped connection and a 5xx read the same on the floor (browser test U1).
+const errorText = (err, fallback) => (
+  isUnreachableError(err)
+    ? `${fallback} — the gun cannot reach the server.`
+    : apiErrorMessage(err, fallback)
+);
+
+const reportFailure = (err) => {
+  if (isUnreachableError(err)) noteReachability(false);
+};
 
 // ─── Session ─────────────────────────────────────────────────────────────────
 
@@ -83,13 +99,21 @@ const SessionView = ({ receiptId }) => {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  // The line as saved on this gun, shown when a reload finds no wifi (U1).
+  const [staleSince, setStaleSince] = useState(null);
+  // An action that needs the server (finish, undo) and could not reach it —
+  // kept on screen, not a 2-second flash.
+  const [actionNotice, setActionNotice] = useState('');
+  // The pallet-or-bag question (U2) and the (rack) answers already given.
+  const [palletAsk, setPalletAsk] = useState(null);
+  const palletConfirmed = useRef(new Set());
 
   // Sticky rack context. Deliberately NOT persisted across a reload: a rack
   // restored from storage is a guessed location, and under lot identity a wrong
   // rack cannot be untangled afterwards — every drum on both racks wears the
   // same sticker, so nobody can work out later which pile was which.
   const [row, setRow] = useState(null);
-  const [rows, setRows] = useState([]);
+  const { rows, setRows, fill: rackFill, refreshFill } = useGunRacks();
   const rowsRef = useRef([]);
   useEffect(() => { rowsRef.current = rows; }, [rows]);
 
@@ -107,6 +131,8 @@ const SessionView = ({ receiptId }) => {
   // synchronously by the very next submit, before React re-renders.
   const scanInFlight = useRef(false);
   const [rowFull, setRowFull] = useState(null);
+  const rowFullRef = useRef(null);
+  useEffect(() => { rowFullRef.current = rowFull; }, [rowFull]);
   const [rowPicker, setRowPicker] = useState(false);
   // Set when finishing a line whose count disagrees with the paperwork. Holds
   // the server's wording of the difference so the worker is told WHAT
@@ -289,39 +315,76 @@ const SessionView = ({ receiptId }) => {
       .map(([id, count]) => ({ id, count, name: names[id] || id }))
       .sort((a, b) => b.count - a.count);
   }, [serverRowCounts, session, rows, row]);
-  const dialogOpen = !!rowPicker;
+  const dialogOpen = !!(rowPicker || palletAsk);
 
   // ── Load ───────────────────────────────────────────────────────────────────
+  const applySession = useCallback((data) => {
+    setSession(data);
+    // Palletised material starts on the pallet multiplier; individually
+    // stickered material stays at 1 and never shows the control.
+    setPerScan(data.units_per_pallet && data.units_per_pallet > 1
+      ? data.units_per_pallet : 1);
+    setServerScanned(data.scanned_count || 0);
+    const counts = {};
+    (data.rows || []).forEach((b) => { counts[b.storage_row_id] = b.count; });
+    setServerRowCounts(counts);
+  }, []);
+
   const loadSession = useCallback(() => {
     setLoading(true);
     return getReceivingSession(receiptId)
       .then((data) => {
-        setSession(data);
-        // Palletised material starts on the pallet multiplier; individually
-        // stickered material stays at 1 and never shows the control.
-        setPerScan(data.units_per_pallet && data.units_per_pallet > 1
-          ? data.units_per_pallet : 1);
-        setServerScanned(data.scanned_count || 0);
-        const counts = {};
-        (data.rows || []).forEach((b) => { counts[b.storage_row_id] = b.count; });
-        setServerRowCounts(counts);
+        applySession(data);
+        saveCached(sessionCacheKey(receiptId), data);
+        setStaleSince(null);
         setLoadError('');
+        noteReachability(true);
       })
-      .catch((err) => setLoadError(errorText(err, 'Could not load this session')))
+      .catch((err) => {
+        reportFailure(err);
+        // No wifi on a reload: the line as this gun last saw it (U1).
+        const cached = isUnreachableError(err) ? readCached(sessionCacheKey(receiptId)) : null;
+        if (cached) {
+          applySession(cached.data);
+          setStaleSince(cached.savedAt);
+          setLoadError('');
+        } else if (isUnreachableError(err)) {
+          setLoadError(
+            'The gun cannot reach the server, and this line is not saved on this gun yet. '
+            + 'It opens by itself as soon as the gun is back online.',
+          );
+        } else {
+          setLoadError(errorText(err, 'Could not load this session'));
+        }
+      })
       .finally(() => setLoading(false));
-  }, [receiptId]);
+  }, [receiptId, applySession]);
 
   useEffect(() => { loadSession(); }, [loadSession]);
 
-  // Row list: the manual picker and the offline barcode fallback both read from
-  // this one cached list.
+  // Back online with a saved copy (or nothing) on screen: load the real one.
   useEffect(() => {
-    let cancelled = false;
-    listIngredientRows()
-      .then((data) => { if (!cancelled) setRows(Array.isArray(data) ? data : []); })
-      .catch(() => { if (!cancelled) setRows([]); });
-    return () => { cancelled = true; };
-  }, []);
+    if (online && (staleSince || loadError)) loadSession();
+  }, [online]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the saved copy current with every count the server confirms, so a
+  // reload offline shows what was really booked, not the count at opening.
+  useEffect(() => {
+    if (!session || staleSince) return;
+    const names = {};
+    (session.rows || []).forEach((b) => { names[b.storage_row_id] = b.storage_row_name; });
+    rowsRef.current.forEach((r) => { if (!names[r.id]) names[r.id] = r.name; });
+    saveCached(sessionCacheKey(receiptId), {
+      ...session,
+      scanned_count: serverScanned,
+      rows: Object.entries(serverRowCounts).map(([id, count]) => ({
+        storage_row_id: id, storage_row_name: names[id] || id, count,
+      })),
+    });
+  }, [session, staleSince, serverScanned, serverRowCounts, receiptId]);
+
+  // Back online: the actions that needed the server can be tried again.
+  useEffect(() => { if (online) setActionNotice(''); }, [online]);
 
   // ── Keyboard-wedge focus, same idiom as the pallet gun ─────────────────────
   useEffect(() => {
@@ -343,12 +406,17 @@ const SessionView = ({ receiptId }) => {
 
   // ── Rack context ───────────────────────────────────────────────────────────
   const adoptRow = useCallback((resolved) => {
+    // Scans still waiting on the full-rack question were never booked; moving
+    // on must not leave them looking like "+1" in Recent scans (U10).
+    (rowFullRef.current?.pending || []).forEach((p) => patchHistory(p.idempotencyKey, {
+      state: 'error', refused: true, message: 'Not put away — you moved to another rack. Scan it again here.',
+    }));
     setRow(resolved);
     setRows((prev) => (prev.some((r) => r.id === resolved.id) ? prev : [...prev, resolved]));
     setRowFull(null);
     setRowPicker(false);
     showSuccess(`→ ${resolved.name}`);
-  }, [showSuccess]);
+  }, [showSuccess, patchHistory, setRows]);
 
   /**
    * Ask the SERVER what rack a code is. Returns `{ row, error }`:
@@ -358,27 +426,33 @@ const SessionView = ({ receiptId }) => {
    *   both null  → not a rack; the caller may treat the token as a lot code
    */
   const resolveRowCode = useCallback(async (code) => {
-    if (!online) {
-      // Offline: exact BARCODE equality against the list cached when the session
-      // opened. Barcodes are unique, so an exact hit is unambiguous. Names are
-      // deliberately not matched — row names are NOT unique, and that is the
-      // fuzzy path that puts drums in the wrong barn.
+    // Offline: exact BARCODE equality against the list saved on the gun.
+    // Barcodes are unique, so an exact hit is unambiguous. Names are
+    // deliberately not matched — row names are NOT unique, and that is the
+    // fuzzy path that puts drums in the wrong barn.
+    const fromCache = () => {
       const upper = code.toUpperCase();
       const hit = rowsRef.current.find((r) => (r.barcode || '').toUpperCase() === upper);
       return { row: hit || null, error: null };
-    }
+    };
+    if (!online) return fromCache();
     try {
       return { row: await resolveRow(code), error: null };
     } catch (err) {
       const status = err?.response?.status;
       if (status === 404) return { row: null, error: null }; // simply not a rack
-      if (!err?.response) return { row: null, error: null }; // dropped mid-scan
+      // Dropped mid-scan: a rack label still works from the saved list.
+      if (isUnreachableError(err)) { reportFailure(err); return fromCache(); }
       return { row: null, error: errorText(err, 'Could not resolve that rack') };
     }
   }, [online]);
 
   // ── Unit scan ──────────────────────────────────────────────────────────────
-  const recordUnit = useCallback((lotCode, { allowOverfill = false, reuseKey, intoRow } = {}) => {
+  // `units` overrides the per-scan setting (the pallet-or-bag answer, or the
+  // over-fill replay of what was originally scanned).
+  const recordUnit = useCallback((lotCode, {
+    allowOverfill = false, reuseKey, intoRow, units, palletChecked = false,
+  } = {}) => {
     // `intoRow` pins the rack explicitly. Used by the over-fill replay, where
     // the rack the confirm was raised for may no longer be the sticky one.
     const target = intoRow || row;
@@ -390,8 +464,32 @@ const SessionView = ({ receiptId }) => {
         : 'Not put away — scan the rack first (offline, so pick the rack from the list).');
       return;
     }
-    const payload = { lot_code: lotCode, storage_row_id: target.id };
-    if (perScan > 1) payload.units = perScan;
+    const n = Math.max(1, Number(units) || perScan);
+    // U2: a pallet and a bag of this lot wear the same code. The first
+    // pallet-sized scan onto a rack that has none of it yet asks which it was.
+    const alreadyThere = (serverRowCounts[target.id] || 0) > 0
+      || pendingItems.some((it) => it.payload?.storage_row_id === target.id);
+    if (!reuseKey && !palletChecked && !alreadyThere && needsPalletCheck({
+      unitsPerScan: n, confirmed: palletConfirmed.current, lineId: receiptId, rowId: target.id,
+    })) {
+      playErrorTone();
+      setPalletAsk({ lotCode, row: target, units: n });
+      return;
+    }
+    const payload = {
+      lot_code: lotCode,
+      storage_row_id: target.id,
+      // Display-only, for the queue panel; the server ignores it.
+      display: queuedScanLabel({
+        productName: session?.product_name,
+        vendorLot: session?.vendor_lot,
+        lotCode,
+        rowName: target.name,
+        units: n,
+        unit: oneUnit,
+      }),
+    };
+    if (n > 1) payload.units = n;
     if (allowOverfill) payload.allow_overfill = true;
     const item = send(receiptId, endpoint, payload, reuseKey);
     const entry = {
@@ -399,7 +497,7 @@ const SessionView = ({ receiptId }) => {
       lotCode,
       rowId: target.id,
       rowName: target.name,
-      units: perScan,
+      units: n,
       state: 'pending',
       message: 'Queued',
     };
@@ -412,7 +510,8 @@ const SessionView = ({ receiptId }) => {
       // reconciled to rather than the live one.
       ...prev.filter((h) => h.key !== entry.key),
     ].slice(0, HISTORY_LIMIT));
-  }, [row, online, send, receiptId, endpoint, perScan, logRefusal, oneUnit]);
+  }, [row, online, send, receiptId, endpoint, perScan, logRefusal, oneUnit, serverRowCounts,
+    pendingItems, session]);
 
   const handleScanSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
@@ -483,6 +582,7 @@ const SessionView = ({ receiptId }) => {
         allowOverfill: true,
         reuseKey: p.idempotencyKey,  // same key -> replay, not a second drum
         intoRow: { id: p.rowId, name: p.rowName },
+        units: Number(p.payload?.units) || 1, // what was scanned, not today's setting
       });
     });
     setRowFull(null);
@@ -500,11 +600,31 @@ const SessionView = ({ receiptId }) => {
    * happen; refusing either would teach drivers to make the number fit rather
    * than report what they counted.
    */
-  const handleSubmit = useCallback(async (confirmed = false) => {
+  // Finish and Undo need the server. Neither is queued: an undo replayed later
+  // could take off a scan the worker has since re-made, and a remove made
+  // offline used to vanish without a word (B7). Both say so instead.
+  const needsServer = useCallback(async (what) => {
     if (pendingItems.length > 0) {
-      showError('Wait for queued scans to sync before finishing.');
-      return;
+      setActionNotice(online
+        ? `${what}: ${pendingItems.length} scan(s) are still sending. Try again in a moment.`
+        : `${what}: the gun is offline. ${pendingItems.length} scan(s) are saved on this gun `
+          + 'and send by themselves when it is back — then try again.');
+      playErrorTone();
+      if (online) drain();
+      return false;
     }
+    // "Offline" may be a stale browser flag: ask the server once before refusing.
+    if (!online && !(await probeServer())) {
+      setActionNotice(offlineMessage(`${what} — not done`));
+      playErrorTone();
+      return false;
+    }
+    setActionNotice('');
+    return true;
+  }, [pendingItems.length, online, drain]);
+
+  const handleSubmit = useCallback(async (confirmed = false) => {
+    if (!(await needsServer('Cannot finish yet'))) return;
     setBusy(true);
     try {
       const result = await submitReceivingSession(receiptId, { confirmed });
@@ -515,17 +635,16 @@ const SessionView = ({ receiptId }) => {
       setSubmitConfirm(null);
       navigate('/forklift/lot-receiving');
     } catch (err) {
-      showError(apiErrorMessage(err, 'Could not finish this line.'));
+      reportFailure(err);
+      if (isUnreachableError(err)) setActionNotice(offlineMessage('Line NOT finished'));
+      else showError(apiErrorMessage(err, 'Could not finish this line.'));
     } finally {
       setBusy(false);
     }
-  }, [receiptId, pendingItems.length, navigate, showError]);
+  }, [receiptId, navigate, showError, needsServer]);
 
   const handleUndo = useCallback(async () => {
-    if (pendingItems.length > 0) {
-      showError('Wait for queued scans to sync before undoing.');
-      return;
-    }
+    if (!(await needsServer('Cannot undo yet'))) return;
     setBusy(true);
     try {
       const result = await undoLastScan(receiptId);
@@ -542,11 +661,51 @@ const SessionView = ({ receiptId }) => {
         showSuccess(result.message);
       }
     } catch (err) {
-      showError(errorText(err, 'Could not undo'));
+      reportFailure(err);
+      // Never a count change that did not happen: the counters only move on
+      // the server's answer, so here they stay exactly as they were.
+      if (isUnreachableError(err)) setActionNotice(offlineMessage('NOT undone'));
+      else showError(errorText(err, 'Could not undo'));
     } finally {
       setBusy(false);
     }
-  }, [receiptId, pendingItems.length, showError, showInfo, showSuccess]);
+  }, [receiptId, showError, showInfo, showSuccess, needsServer]);
+
+  // "Pick another rack" (or dismissing the full-rack question): the parked
+  // scans booked nothing, so Recent scans must not keep a "+1" for them (U10).
+  const dropParked = useCallback((reason) => {
+    (rowFull?.pending || []).forEach((p) => patchHistory(p.idempotencyKey, {
+      state: 'error', refused: true, message: reason,
+    }));
+    setRowFull(null);
+  }, [rowFull, patchHistory]);
+
+  const openRackPicker = useCallback(() => {
+    setRowPicker(true);
+    refreshFill();
+  }, [refreshFill]);
+
+  const queuedByRack = useMemo(() => {
+    const out = {};
+    pendingItems.forEach((it) => {
+      const id = it.payload?.storage_row_id;
+      if (id) out[id] = (out[id] || 0) + (Number(it.payload?.units) || 1);
+    });
+    return out;
+  }, [pendingItems]);
+
+  const answerPallet = useCallback((isPallet) => {
+    const ask = palletAsk;
+    setPalletAsk(null);
+    if (!ask) return;
+    if (isPallet) {
+      palletConfirmed.current.add(palletCheckKey(receiptId, ask.row.id));
+      recordUnit(ask.lotCode, { units: ask.units, palletChecked: true, intoRow: ask.row });
+    } else {
+      recordUnit(ask.lotCode, { units: 1, palletChecked: true, intoRow: ask.row });
+      showInfo(`Booked 1 ${oneUnit}. More single ones? Switch "Each scan is" to 1.`);
+    }
+  }, [palletAsk, receiptId, recordUnit, showInfo, oneUnit]);
 
   /**
    * Racks for the manual picker, in two groups.
@@ -590,16 +749,22 @@ const SessionView = ({ receiptId }) => {
     />
   );
 
-  if (loading) {
+  if (loading && !session) {
     return (
       <ScannerLayout title="Receiving" showBack onBack={() => navigate('/forklift/lot-receiving')}>
         <p className="sir-muted">Loading…</p>
       </ScannerLayout>
     );
   }
-  if (loadError) {
+  if (loadError && !session) {
     return (
-      <ScannerLayout title="Receiving" showBack onBack={() => navigate('/forklift/lot-receiving')}>
+      <ScannerLayout
+        title="Receiving"
+        showBack
+        onBack={() => navigate('/forklift/lot-receiving')}
+        headerExtra={netStatus}
+      >
+        <OfflineBanner online={online} queued={pendingItems.length} />
         <div className="sir-error"><AlertTriangle size={16} /> {loadError}</div>
       </ScannerLayout>
     );
@@ -652,10 +817,12 @@ const SessionView = ({ receiptId }) => {
               <span className="sir-rowbanner-path">No location set — {unit} are blocked</span>
             </div>
           )}
-          <button type="button" className="sir-rowbanner-btn" onClick={() => setRowPicker(true)}>
+          <button type="button" className="sir-rowbanner-btn" onClick={openRackPicker}>
             {row ? 'Change' : 'Pick rack'}
           </button>
         </div>
+
+        <OfflineBanner online={online} queued={pendingItems.length} staleSince={staleSince} what="line" />
 
         {/* A full rack ASKS. Rendered inline rather than as a modal, deliberately:
             a dialog that steals focus and does not give it back leaves the driver
@@ -680,7 +847,10 @@ const SessionView = ({ receiptId }) => {
                   <button
                     type="button"
                     className="sir-btn sir-btn--ghost"
-                    onClick={() => { setRowFull(null); setRowPicker(true); }}
+                    onClick={() => {
+                      dropParked('Not put away — you chose another rack. Scan it again at the new rack.');
+                      openRackPicker();
+                    }}
                   >
                     Pick another rack
                   </button>
@@ -690,7 +860,7 @@ const SessionView = ({ receiptId }) => {
             <button
               type="button"
               className="sir-warn-dismiss"
-              onClick={() => setRowFull(null)}
+              onClick={() => dropParked('Not put away — the full-rack question was dismissed.')}
               aria-label="Dismiss"
             >
               <X size={16} />
@@ -830,7 +1000,11 @@ const SessionView = ({ receiptId }) => {
                   {entry.count != null ? ` · ${entry.count} in rack` : ''}
                 </span>
                 {entry.state !== 'ok' && entry.message && (
-                  <span className="sir-history-msg">{entry.message}</span>
+                  <span className="sir-history-msg">
+                    {entry.state === 'pending' && !online
+                      ? 'Saved on this gun — sends when back online'
+                      : entry.message}
+                  </span>
                 )}
               </div>
               <span className="sir-history-row">{entry.rowName}</span>
@@ -841,16 +1015,23 @@ const SessionView = ({ receiptId }) => {
         <div className="sir-actions">
           {/* Undo is first-class because identical stickers make client-side
               dedupe impossible: the gun cannot tell a second drum from the same
-              drum read twice, so the worker needs a way to say so. */}
+              drum read twice, so the worker needs a way to say so.
+              Not disabled while scans are queued or offline: the tap says why. */}
           <button
             type="button"
             className="sir-btn sir-btn--ghost"
             onClick={handleUndo}
-            disabled={busy || pendingItems.length > 0}
+            disabled={busy}
           >
             <RotateCcw size={16} /> Undo last scan
           </button>
         </div>
+
+        {actionNotice && (
+          <div className="sir-error" role="alert">
+            <AlertTriangle size={16} /> {actionNotice}
+          </div>
+        )}
 
         {/* A count that disagrees with the paperwork ASKS. Inline, not a modal,
             for the same reason the full-rack warning is: a dialog that steals
@@ -891,7 +1072,7 @@ const SessionView = ({ receiptId }) => {
           type="button"
           className="sir-submit"
           onClick={() => handleSubmit(false)}
-          disabled={busy || pendingItems.length > 0}
+          disabled={busy}
         >
           {remaining > 0
             ? `Finish — ${remaining} ${unit} still expected`
@@ -935,20 +1116,28 @@ const SessionView = ({ receiptId }) => {
                   {rackGroups.length > 1 && (
                     <div className="sir-dialog-group">{group.label}</div>
                   )}
-                  {group.rows.map((r) => (
-                    <button
-                      key={r.id}
-                      type="button"
-                      className="sir-dialog-row"
-                      onClick={() => adoptRow(r)}
-                    >
-                      <strong>{r.name}</strong>
-                      <span>
-                        {r.path || ''}
-                        {r.storage_unit ? ` · ${r.unit_capacity || 0} ${pluralizeUnit(r.storage_unit)}` : ''}
-                      </span>
-                    </button>
-                  ))}
+                  {group.rows.map((r) => {
+                    // "11/12 drums", not just "12 drums" (U10).
+                    const fillLabel = rackFillLabel(r, (rackFill[r.id] || 0) + (queuedByRack[r.id] || 0));
+                    return (
+                      <button
+                        key={r.id}
+                        type="button"
+                        className="sir-dialog-row"
+                        onClick={() => adoptRow(r)}
+                      >
+                        <strong>
+                          {r.name}
+                          {fillLabel.text && (
+                            <span className={`sir-rack-fill${fillLabel.full ? ' is-full' : ''}`}>
+                              {fillLabel.text}
+                            </span>
+                          )}
+                        </strong>
+                        <span>{r.path || ''}</span>
+                      </button>
+                    );
+                  })}
                 </React.Fragment>
               ))}
               {rackMatchCount === 0 && <p className="sir-muted">No racks match.</p>}
@@ -959,6 +1148,33 @@ const SessionView = ({ receiptId }) => {
               onClick={() => setRowPicker(false)}
             >
               Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {palletAsk && (
+        <div className="sir-overlay" role="dialog" aria-modal="true">
+          <div className="sir-dialog">
+            <AlertTriangle size={36} color="#b45309" />
+            <h3>Pallet sticker, or one {oneUnit}?</h3>
+            <p className="sir-dialog-hint sir-truck-question">
+              Onto {palletAsk.row.name}. A pallet and a single {oneUnit} wear the same
+              code — check the word on the sticker. Asked once per rack.
+            </p>
+            {/* No autoFocus: the gun's next Enter must not answer this. */}
+            <button type="button" className="sir-btn sir-btn--warn" onClick={() => answerPallet(true)}>
+              PALLET sticker — book {unitCount(palletAsk.units, oneUnit)}
+            </button>
+            <button type="button" className="sir-btn sir-btn--warn" onClick={() => answerPallet(false)}>
+              One {oneUnit} — book 1
+            </button>
+            <button
+              type="button"
+              className="sir-btn sir-btn--ghost"
+              onClick={() => { setPalletAsk(null); showInfo('Nothing booked.'); }}
+            >
+              Cancel — book nothing
             </button>
           </div>
         </div>

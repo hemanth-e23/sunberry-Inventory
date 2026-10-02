@@ -612,3 +612,55 @@ class TestLotTraceArrivalsAndRejections:
         assert rejected[0]["event"] == "Warehouse Transfer (rejected)"
         assert rejected[0]["qty"] == 500.0
         assert "wrong rack" in rejected[0]["notes"]
+
+
+class TestTypedVendorLot:
+    """A drum with no sticker: the worker types the vendor lot printed on it
+    (browser test G3). It resolves within THIS truck, and two lines sharing it
+    are asked about, never guessed."""
+
+    def test_the_vendor_lot_books_onto_its_line(self, db_session, recv_seed):
+        order = _truck(db_session, [_line(lot="MG-1", count=2), _line(lot="MG-2", count=2)])
+        out = _scan(db_session, order, " mg-2 ", idempotency_key="typed-vendor-01")
+        assert out["status"] == "ok", out["message"]
+        by_lot = {l["vendor_lot"]: l for l in out["truck"]["lines"]}
+        assert by_lot["MG-2"]["scanned_count"] == 1
+        assert by_lot["MG-1"]["scanned_count"] == 0
+
+    def test_two_lines_with_that_lot_ask_which(self, db_session, recv_seed):
+        order = _truck(db_session, [
+            _line(lot="MG-1", count=2), _line(product=OTHER_PRODUCT, lot="MG-1", count=2),
+        ])
+        assert len(order.lots) == 2
+        out = _scan(db_session, order, "MG-1")
+        assert out["status"] == "ambiguous_lot"
+        assert "No sticker?" in out["message"]
+        assert all(l["scanned_count"] == 0 for l in out["truck"]["lines"])
+
+    def test_a_vendor_lot_not_on_this_truck_is_still_unknown(self, db_session, recv_seed):
+        order = _truck(db_session, [_line(lot="MG-1")])
+        out = _scan(db_session, order, "ZZ-404")
+        assert out["status"] == "unknown_lot"
+        assert "ZZ-404" in out["message"]
+
+    def test_the_truck_list_finds_a_truck_by_vendor_lot(self, db_session, recv_seed):
+        order = _truck(db_session, [_line(lot="MG-1")])
+        located = lrs.locate_truck(db_session, "mg-1", warehouse_id=WH)
+        assert located["status"] == "ok"
+        assert [t["order_id"] for t in located["trucks"]] == [order.id]
+        assert located["lot_code"] == _lot_code(db_session, order, "MG-1")
+
+
+class TestRackFill:
+    def test_rack_fill_counts_what_is_on_each_rack(self, db_session, recv_seed):
+        order = _truck(db_session, [_line(lot="MG-1", count=5)])
+        code = _lot_code(db_session, order, "MG-1")
+        _scan(db_session, order, code, idempotency_key="fill-scan-0001")
+        _scan(db_session, order, code, idempotency_key="fill-scan-0002")
+        fill = {r["storage_row_id"]: r["units"] for r in lrs.rack_fill(db_session, warehouse_id=WH)}
+        assert fill.get(ROW_1) == 2
+
+    def test_the_gun_can_read_rack_fill(self, client, api_seed, fk_headers):
+        res = client.get("/api/lot-receiving/rack-fill", headers=fk_headers)
+        assert res.status_code == 200, res.text
+        assert isinstance(res.json()["rows"], list)

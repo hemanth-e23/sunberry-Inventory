@@ -1839,6 +1839,55 @@ def _line_receipt(db: Session, line: IntakeLot) -> Optional[Receipt]:
     return db.query(Receipt).filter(Receipt.id == line.receipt_id).first()
 
 
+def _vendor_lot_token(code: Optional[str]) -> str:
+    """A hand-typed vendor lot, normalised — or '' for anything that is an
+    SB envelope (those carry our own code and are resolved elsewhere)."""
+    token = (code or "").strip().upper()
+    return "" if (not token or "|" in token) else token
+
+
+def _line_vendor_lot(db: Session, line: IntakeLot) -> str:
+    vendor = (line.vendor_lot or "").strip()
+    if not vendor and line.material_lot_id:
+        lot = db.query(MaterialLot).filter(MaterialLot.id == line.material_lot_id).first()
+        vendor = (lot.vendor_lot_number or "").strip() if lot else ""
+    return vendor.upper()
+
+
+def _lines_for_vendor_lot(db: Session, order: IngredientIntake, code: Optional[str]) -> list:
+    """Checked-in lines of this truck whose VENDOR lot is `code`.
+
+    The vendor lot is what is printed big on the drum, so it is what a worker
+    types when the sticker is torn off (browser test G3). Only ever matched
+    inside one truck — vendor lots are not unique across vendors — and two
+    lines sharing it is reported, never resolved by guess.
+    """
+    token = _vendor_lot_token(code)
+    if not token:
+        return []
+    return [
+        line for line in order.lots or []
+        if line.receipt_id and line.material_lot_id and _line_vendor_lot(db, line) == token
+    ]
+
+
+def rack_fill(db: Session, *, warehouse_id: Optional[str] = None) -> list:
+    """Units on each rack right now, for the gun's rack picker ("11/12 drums",
+    browser test U10). Same sum the rack-full prompt uses (`_row_fill`)."""
+    total = func.sum(LotPlacement.full_units + LotPlacement.open_units)
+    query = db.query(LotPlacement.storage_row_id, total).group_by(LotPlacement.storage_row_id)
+    if warehouse_id:
+        query = query.filter(or_(
+            LotPlacement.warehouse_id == warehouse_id,
+            LotPlacement.warehouse_id.is_(None),
+        ))
+    return [
+        {"storage_row_id": row_id, "units": int(units or 0)}
+        for row_id, units in query.all()
+        if row_id and units
+    ]
+
+
 def _line_for_lot(order: IngredientIntake, lot: MaterialLot) -> Optional[IntakeLot]:
     for line in order.lots or []:
         if line.material_lot_id == lot.id and line.receipt_id:
@@ -2228,12 +2277,31 @@ def truck_scan(
 
     lot = resolve_lot_code(db, lot_code)
     if lot is None:
+        # A drum whose sticker is gone: the worker types the VENDOR lot printed
+        # on the drum. Resolve it within THIS truck only (browser test G3).
+        matches = _lines_for_vendor_lot(db, order, lot_code)
+        if len(matches) > 1:
+            products = db.query(Product).filter(
+                Product.id.in_({l.product_id for l in matches})
+            ).all()
+            names = ", ".join(sorted({p.name or "?" for p in products})) or "several products"
+            return _truck_payload(
+                db, order, status="ambiguous_lot",
+                message=(
+                    f"Lot {lot_code.strip()} is on {len(matches)} lines of {order.intake_number} "
+                    f"({names}). Nothing was put away — scan the sticker, or tap "
+                    "\"No sticker?\" and pick which one."
+                ),
+            )
+        if len(matches) == 1:
+            lot = db.query(MaterialLot).filter(MaterialLot.id == matches[0].material_lot_id).first()
+    if lot is None:
         return _truck_payload(
             db, order, status="unknown_lot",
             message=(
-                f"No lot with this sticker is expected on {order.intake_number} — "
-                "it has not been checked in or received yet. Scan the sticker the "
-                "office printed, or ask the office."
+                f"Nothing on {order.intake_number} has the lot or sticker "
+                f"\"{(lot_code or '').strip()[:40]}\" — it has not been checked in or "
+                "received yet. Scan the sticker the office printed, or ask the office."
             ),
         )
 
@@ -2637,10 +2705,63 @@ def open_trucks(db: Session, *, warehouse_id: Optional[str] = None) -> list:
     return [truck_summary(db, o) for o in orders]
 
 
+def _locate_by_vendor_lot(db: Session, code: str, *, warehouse_id: Optional[str] = None) -> Optional[dict]:
+    """The truck list's answer to a typed VENDOR lot (browser test G3): the open
+    trucks with a checked-in line of that lot. None when there are none."""
+    token = _vendor_lot_token(code)
+    if not token:
+        return None
+    query = (
+        db.query(IngredientIntake)
+        .filter(
+            IngredientIntake.is_incoming_order == True,  # noqa: E712
+            IngredientIntake.is_deleted == False,  # noqa: E712
+            IngredientIntake.status.in_(INCOMING_RECEIVABLE_STATUSES),
+            IngredientIntake.forklift_submitted_at.is_(None),
+        )
+    )
+    if warehouse_id:
+        query = query.filter(IngredientIntake.warehouse_id == warehouse_id)
+    hits = []
+    lot_ids = set()
+    for order in query.all():
+        lines = _lines_for_vendor_lot(db, order, token)
+        if lines:
+            hits.append(order)
+            lot_ids.update(l.material_lot_id for l in lines)
+    if not hits:
+        return None
+    lot_code = None
+    if len(lot_ids) == 1:
+        only = db.query(MaterialLot).filter(MaterialLot.id == next(iter(lot_ids))).first()
+        lot_code = only.lot_code if only else None
+    vendors = {
+        v.id: v.name
+        for v in db.query(Vendor).filter(Vendor.id.in_({o.vendor_id for o in hits if o.vendor_id})).all()
+    }
+    return {
+        "status": "ok",
+        "message": "",
+        "lot_code": lot_code or (code or "").strip(),
+        "trucks": [
+            {
+                "order_id": o.id,
+                "order_number": o.intake_number,
+                "vendor_name": vendors.get(o.vendor_id),
+                "bol": o.bol,
+            }
+            for o in hits
+        ],
+    }
+
+
 def locate_truck(db: Session, code: str, *, warehouse_id: Optional[str] = None) -> dict:
     """A drum scanned on the truck list -> the open truck(s) carrying its lot."""
     lot = resolve_lot_code(db, code)
     if lot is None:
+        by_vendor = _locate_by_vendor_lot(db, code, warehouse_id=warehouse_id)
+        if by_vendor:
+            return by_vendor
         return {"status": "unknown_lot", "message": UNKNOWN_STICKER_MESSAGE, "trucks": []}
     query = (
         db.query(IngredientIntake)

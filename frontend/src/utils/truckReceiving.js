@@ -186,3 +186,91 @@ export const describeFlag = (flag) => {
 
 /** Flags worth an approver's attention — a recount that agreed is not one. */
 export const attentionFlags = (flags = []) => (flags || []).filter((f) => f.kind !== 'recount_ok');
+
+const upperTrim = (v) => String(v ?? '').trim().toUpperCase();
+
+/**
+ * A code typed (or scanned bare) on a truck -> which line it means, without the
+ * server (browser test G3). Workers read the VENDOR lot off the drum — "A-0925"
+ * — and the gun refused it as "not expected on this truck" because only our
+ * 44-character sticker code matched.
+ *
+ *   { kind: 'sticker',   lines: [line] }  our own lot code
+ *   { kind: 'vendor',    lines: [line] }  the vendor lot, one line on this truck
+ *   { kind: 'ambiguous', lines: [...] }   the vendor lot is on several lines —
+ *                                         ASK which, never pick
+ *   { kind: 'none',      lines: [] }
+ */
+export const matchTypedLot = (lines = [], code) => {
+  const want = upperTrim(code);
+  if (!want) return { kind: 'none', lines: [] };
+  const all = lines || [];
+  const bySticker = all.filter((l) => l?.lot_code && upperTrim(l.lot_code) === want);
+  if (bySticker.length) return { kind: 'sticker', lines: bySticker.slice(0, 1) };
+  const byVendor = all.filter((l) => l?.vendor_lot && upperTrim(l.vendor_lot) === want);
+  if (byVendor.length === 1) return { kind: 'vendor', lines: byVendor };
+  if (byVendor.length > 1) return { kind: 'ambiguous', lines: byVendor };
+  return { kind: 'none', lines: [] };
+};
+
+/**
+ * "11/12 drums" for the rack picker (browser test U10) — how FULL a rack is,
+ * not just how big. `onHand` is what the server last said plus anything queued
+ * on this gun. Capacity is a soft hint: `full` only colours the row.
+ */
+export const rackFillLabel = (row, onHand) => {
+  const n = Math.max(0, Number(onHand) || 0);
+  const unit = row?.storage_unit;
+  const cap = Number(row?.unit_capacity) || 0;
+  if (unit && cap > 0) {
+    return { text: `${number(n)}/${number(cap)} ${pluralizeUnit(singularUnit(unit) || unit)}`, full: n >= cap };
+  }
+  if (n > 0) return { text: `${unitCount(n, unit || 'unit')} here`, full: false };
+  if (unit) return { text: 'empty · no capacity set', full: false };
+  return { text: '', full: false };
+};
+
+/** `{ rowId: units }` from the server's rack-fill answer. */
+export const rackFillMap = (fill) => {
+  const out = {};
+  (Array.isArray(fill) ? fill : fill?.rows || []).forEach((r) => {
+    if (r?.storage_row_id) out[r.storage_row_id] = Number(r.units) || 0;
+  });
+  return out;
+};
+
+/**
+ * The pallet-or-bag guard (browser test U2). A pallet and a single bag of the
+ * same lot wear the SAME code — one word differs in the printed band — so the
+ * gun cannot tell them apart, and a bag sticker read in pallet mode books 40.
+ * When the paperwork still had room for 40 nothing stopped it.
+ *
+ * The least annoying check that still catches it: ask ONCE per lot per rack,
+ * on the first pallet-mode scan of that lot onto that rack. The answer is
+ * remembered, so a run of pallets onto one rack is one question, not one per
+ * pallet; and a bag sticker on a fresh rack — where the mix-up happens, at a
+ * broken pallet — is caught before anything is booked.
+ */
+export const palletCheckKey = (lineId, rowId) => `${lineId || '?'}|${rowId || '?'}`;
+
+export const needsPalletCheck = ({ unitsPerScan, confirmed, lineId, rowId }) => (
+  (Number(unitsPerScan) || 1) > 1
+  && !(confirmed && confirmed.has(palletCheckKey(lineId, rowId)))
+);
+
+/**
+ * What a worker is told when the gun could not reach the server for something
+ * that is not queued (finish, remove, load). Plain words; never a status code.
+ */
+export const offlineMessage = (what) => (
+  `${what} — the gun cannot reach the server right now. Nothing was changed. `
+  + 'Scans are saved on this gun and send by themselves when it is back.'
+);
+
+/** "QA Mango Puree · Lot A-0925 → QA-D4" for a queued scan, never an order id. */
+export const queuedScanLabel = ({ productName, vendorLot, lotCode, rowName, units, unit }) => {
+  const lot = vendorLot || lotCode;
+  const what = [productName, lot && `Lot ${lot}`].filter(Boolean).join(' · ') || 'Scan';
+  const qty = Number(units) > 1 ? `${unitCount(units, unit || 'unit')} of ` : '';
+  return `${qty}${what}${rowName ? ` → ${rowName}` : ''}`;
+};

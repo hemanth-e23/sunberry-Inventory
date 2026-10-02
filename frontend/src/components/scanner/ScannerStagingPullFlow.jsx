@@ -7,12 +7,13 @@ import ScannerLayout from './ScannerLayout';
 import NetworkStatus from './NetworkStatus';
 import ScanFeedback from './ScanFeedback';
 import { playErrorTone, playSuccessTone } from '../../utils/scannerFeedback';
-import { pluralizeUnit } from '../../utils/rowSources';
 import { removeScan } from '../../utils/scanQueue';
 import { useScanQueueCore } from '../../hooks/useScanQueue';
 import { decodeLotPayload, formatCalendarDate } from '../../utils/labelPayload';
 import { newIdempotencyKey, resolveRow } from '../../api/lotReceivingApi';
-import { listIngredientRows } from '../../api/ingredientIntakeApi';
+import { useGunRacks } from '../../hooks/useGunRacks';
+import { rackFillLabel } from '../../utils/truckReceiving';
+import OfflineBanner from './OfflineBanner';
 import {
   apiErrorMessage, getStagingPullRequest, listStagingPullRequests,
   requestIdFromEndpoint, stagingPullScanEndpoint, submitStagingPull,
@@ -228,7 +229,9 @@ const RequestView = ({ requestId }) => {
   // Sticky rack context — the rack being pulled FROM. Not persisted across a
   // reload: a rack restored from storage is a guessed location.
   const [row, setRow] = useState(null);
-  const [rows, setRows] = useState([]);
+  // Saved on the gun, with how full each rack is (U10) — the offline barcode
+  // fallback needs the list after a reload with no wifi too (U1).
+  const { rows, setRows, fill: rackFill, refreshFill } = useGunRacks();
   const rowsRef = useRef([]);
   useEffect(() => { rowsRef.current = rows; }, [rows]);
 
@@ -423,16 +426,6 @@ const RequestView = ({ requestId }) => {
 
   useEffect(() => { loadRequest(); }, [loadRequest]);
 
-  // Row list: the manual picker and the offline barcode fallback both read
-  // from this one cached list.
-  useEffect(() => {
-    let cancelled = false;
-    listIngredientRows()
-      .then((data) => { if (!cancelled) setRows(Array.isArray(data) ? data : []); })
-      .catch(() => { if (!cancelled) setRows([]); });
-    return () => { cancelled = true; };
-  }, []);
-
   // Remember the staging location across visits.
   useEffect(() => {
     if (locationId) saveLocation(locationId, subLocationId);
@@ -463,7 +456,7 @@ const RequestView = ({ requestId }) => {
     setRows((prev) => (prev.some((r) => r.id === resolved.id) ? prev : [...prev, resolved]));
     setRowPicker(false);
     showSuccess(`→ ${resolved.name}`);
-  }, [showSuccess]);
+  }, [showSuccess, setRows]);
 
   /**
    * Ask the SERVER what rack a code is. Returns `{ row, error }`:
@@ -743,6 +736,7 @@ const RequestView = ({ requestId }) => {
       headerExtra={netStatus}
     >
       <div className="sir-session">
+        <OfflineBanner online={online} queued={pendingItems.length} />
         <div className="sir-meta">
           <span>{request?.product_name}</span>
           {request?.formula_name && (
@@ -814,7 +808,7 @@ const RequestView = ({ requestId }) => {
               <span className="sir-rowbanner-path">No rack set — pulls are blocked</span>
             </div>
           )}
-          <button type="button" className="sir-rowbanner-btn" onClick={() => setRowPicker(true)}>
+          <button type="button" className="sir-rowbanner-btn" onClick={() => { setRowPicker(true); refreshFill(); }}>
             {row ? 'Change' : 'Pick rack'}
           </button>
         </div>
@@ -1082,20 +1076,28 @@ const RequestView = ({ requestId }) => {
                   {rackGroups.length > 1 && (
                     <div className="sir-dialog-group">{group.label}</div>
                   )}
-                  {group.rows.map((r) => (
-                    <button
-                      key={r.id}
-                      type="button"
-                      className="sir-dialog-row"
-                      onClick={() => adoptRow(r)}
-                    >
-                      <strong>{r.name}</strong>
-                      <span>
-                        {r.path || ''}
-                        {r.storage_unit ? ` · ${r.unit_capacity || 0} ${pluralizeUnit(r.storage_unit)}` : ''}
-                      </span>
-                    </button>
-                  ))}
+                  {group.rows.map((r) => {
+                    // "11/12 drums", not just "12 drums" (U10).
+                    const fillLabel = rackFillLabel(r, rackFill[r.id] || 0);
+                    return (
+                      <button
+                        key={r.id}
+                        type="button"
+                        className="sir-dialog-row"
+                        onClick={() => adoptRow(r)}
+                      >
+                        <strong>
+                          {r.name}
+                          {fillLabel.text && (
+                            <span className={`sir-rack-fill${fillLabel.full ? ' is-full' : ''}`}>
+                              {fillLabel.text}
+                            </span>
+                          )}
+                        </strong>
+                        <span>{r.path || ''}</span>
+                      </button>
+                    );
+                  })}
                 </React.Fragment>
               ))}
               {rackMatchCount === 0 && <p className="sir-muted">No racks match.</p>}

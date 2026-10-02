@@ -428,6 +428,16 @@ def locate_truck(
     return lrs.locate_truck(db, code, warehouse_id=warehouse_filter(current_user))
 
 
+@router.get("/rack-fill")
+def rack_fill(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Units on each rack right now — the gun's rack picker shows "11/12 drums"
+    rather than capacity alone. Read only; capacity stays a soft hint."""
+    return {"rows": lrs.rack_fill(db, warehouse_id=warehouse_filter(current_user))}
+
+
 @router.get("/trucks/{order_id}", response_model=TruckSummary)
 def get_truck(
     order_id: str,

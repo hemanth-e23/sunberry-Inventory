@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 // Browser test PART 1 (2026-10-01) — the truck screen on the gun: F7b, F11,
@@ -14,10 +14,16 @@ const api = vi.hoisted(() => ({
   truckRemove: vi.fn(),
   resolveRow: vi.fn(),
 }));
-const queue = vi.hoisted(() => ({ settled: null, send: vi.fn() }));
+const queue = vi.hoisted(() => ({ settled: null, send: vi.fn(), online: true }));
+const probe = vi.hoisted(() => ({ result: false }));
 
+vi.mock('../../utils/scanQueue', async (importOriginal) => ({
+  ...(await importOriginal()),
+  probeServer: vi.fn(() => Promise.resolve(probe.result)),
+}));
 vi.mock('../../api/lotReceivingApi', () => ({
   apiErrorMessage: (err, fallback) => err?.message || fallback,
+  getRackFill: vi.fn(() => Promise.resolve({ rows: [{ storage_row_id: 'r-d3', units: 11 }] })),
   getTruck: api.getTruck,
   listReceivingSessions: vi.fn(() => Promise.resolve([])),
   listTrucks: vi.fn(() => Promise.resolve([])),
@@ -39,7 +45,7 @@ vi.mock('../../hooks/useLotScanQueue', () => ({
   useLotScanQueue: (onSettled) => {
     queue.settled = onSettled;
     return {
-      online: true, queue: [], send: queue.send, drain: vi.fn(), retry: vi.fn(),
+      online: queue.online, queue: [], send: queue.send, drain: vi.fn(), retry: vi.fn(),
       syncing: false, lastSyncError: null,
     };
   },
@@ -52,6 +58,7 @@ vi.mock('../../components/scanner/ScannerLayout', () => ({
 }));
 
 import ScannerTruckReceiveFlow from '../../components/scanner/ScannerTruckReceiveFlow';
+import { listIngredientRows } from '../../api/ingredientIntakeApi';
 
 const bagLine = {
   line_id: 'l-bag', product_name: 'ASCORBIC ACID (SB)', lot_code: 'LOT-C', vendor_lot: 'C-0901',
@@ -87,6 +94,9 @@ const scan = (text) => {
 
 beforeEach(() => {
   Object.values(api).forEach((fn) => fn.mockReset());
+  window.localStorage.clear();
+  queue.online = true;
+  probe.result = false;
   queue.send.mockReset();
   queue.send.mockImplementation((requestId, endpoint, payload, key) => ({
     idempotency_key: key || `q-${queue.send.mock.calls.length}`, endpoint, payload,
@@ -234,5 +244,210 @@ describe('ScannerTruckReceiveFlow — truck screen', () => {
     fireEvent.click(screen.getByText('Remove a scan'));
     expect(screen.getByText('−1 · Lot B-0910 @ QA-D4')).toBeInTheDocument();
     expect(screen.getByText(/1 drum there now/)).toBeInTheDocument();
+  });
+});
+
+// Browser test PART 2 (2026-10-01): B7, U1, G3, U2, U9, U10 on the gun.
+const notFound = Object.assign(new Error('Not found'), { response: { status: 404, data: {} } });
+const atRack = (id, name) => (code) => (
+  code === `QA-${name}` ? Promise.resolve({ id, name }) : Promise.reject(notFound)
+);
+
+describe('ScannerTruckReceiveFlow — offline (B7, U1)', () => {
+  it('B7: a remove tapped offline is refused out loud and never sent', async () => {
+    queue.online = false;
+    api.getTruck.mockResolvedValue(truckOf([{
+      ...drumLine, scanned_count: 6, rows: [{ storage_row_id: 'r-d4', storage_row_name: 'QA-D4', count: 6 }],
+    }]));
+    renderTruck();
+    await screen.findByText(/drums are blocked/);
+    fireEvent.click(screen.getByText('Remove a scan'));
+    expect(screen.getByText(/Offline — removing needs the server/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('−1 · Lot B-0910 @ QA-D4'));
+    expect(await screen.findByText('Not removed — offline')).toBeInTheDocument();
+    expect(screen.getByText(/was NOT changed/)).toBeInTheDocument();
+    expect(api.truckRemove).not.toHaveBeenCalled();
+    // The count never moved.
+    expect(screen.getByText('6')).toBeInTheDocument();
+  });
+
+  it('B7: a remove whose request dies on the way says so and changes nothing', async () => {
+    api.getTruck.mockResolvedValue(truckOf([{
+      ...drumLine, rows: [{ storage_row_id: 'r-d4', storage_row_name: 'QA-D4', count: 2 }],
+    }]));
+    api.truckRemove.mockRejectedValue(Object.assign(new Error('Request failed with status code 500'), {
+      response: { status: 500, data: '' },
+    }));
+    renderTruck();
+    await screen.findByText(/drums are blocked/);
+    fireEvent.click(screen.getByText('Remove a scan'));
+    fireEvent.click(screen.getByText('−1 · Lot B-0910 @ QA-D4'));
+    expect(await screen.findByText('Not removed — offline')).toBeInTheDocument();
+    expect(screen.queryByText(/status code 500/)).not.toBeInTheDocument();
+  });
+
+  it('U1: says OFFLINE plainly, and Finish explains why it cannot finish', async () => {
+    queue.online = false;
+    api.getTruck.mockResolvedValue(truckOf([drumLine]));
+    renderTruck();
+    await screen.findByText(/drums are blocked/);
+    expect(screen.getByText(/OFFLINE — the gun cannot reach the server/)).toBeInTheDocument();
+    const finish = screen.getByText('Finish truck');
+    expect(finish).not.toBeDisabled();
+    fireEvent.click(finish);
+    expect(await screen.findByText('Cannot finish while offline')).toBeInTheDocument();
+    expect(api.truckFinish).not.toHaveBeenCalled();
+  });
+
+  it('U1: a reload with no server shows the truck saved on the gun, not "status code 500"', async () => {
+    window.localStorage.setItem('sunberry-gun-cache-v1:truck:o1', JSON.stringify({
+      savedAt: Date.now() - 60000, data: truckOf([drumLine]),
+    }));
+    api.getTruck.mockRejectedValue(Object.assign(new Error('Request failed with status code 500'), {
+      response: { status: 500, data: '' },
+    }));
+    renderTruck();
+    expect(await screen.findByText(/Showing this truck as saved on the gun/)).toBeInTheDocument();
+    expect(screen.getByText('QA Mango Puree')).toBeInTheDocument();
+    expect(screen.queryByText(/status code 500/)).not.toBeInTheDocument();
+  });
+
+  it('U1: with nothing saved, a reload offline says it will open by itself', async () => {
+    api.getTruck.mockRejectedValue(new Error('Network Error'));
+    renderTruck();
+    expect(await screen.findByText(/opens by itself as soon as the gun is back online/)).toBeInTheDocument();
+  });
+
+  it('U1: queued scans carry a name for the queue panel, not the order id', async () => {
+    api.getTruck.mockResolvedValue(truckOf([drumLine]));
+    api.resolveRow.mockImplementation(atRack('r-d3', 'D3'));
+    renderTruck();
+    await screen.findByText(/drums are blocked/);
+    scan('QA-D3');
+    await screen.findAllByText('→ D3');
+    scan('SB2|LOT-B|B-0910|20270301');
+    expect(queue.send.mock.calls[0][2].display).toBe('QA Mango Puree · Lot B-0910 → D3');
+  });
+});
+
+describe('ScannerTruckReceiveFlow — no sticker (G3)', () => {
+  it('typing the vendor lot books onto that line', async () => {
+    api.getTruck.mockResolvedValue(truckOf([drumLine]));
+    api.resolveRow.mockImplementation(atRack('r-d3', 'D3'));
+    renderTruck();
+    await screen.findByText(/drums are blocked/);
+    scan('QA-D3');
+    await screen.findAllByText('→ D3');
+    scan('b-0910');
+    await waitFor(() => expect(queue.send).toHaveBeenCalledTimes(1));
+    expect(queue.send.mock.calls[0][2]).toMatchObject({ lot_code: 'LOT-B', storage_row_id: 'r-d3' });
+  });
+
+  it('a vendor lot on two lines asks which, and books the one picked', async () => {
+    const other = { ...drumLine, line_id: 'l-other', product_name: 'Guava', lot_code: 'LOT-G' };
+    api.getTruck.mockResolvedValue(truckOf([drumLine, other]));
+    api.resolveRow.mockImplementation(atRack('r-d3', 'D3'));
+    renderTruck();
+    await screen.findByText(/drums are blocked/);
+    scan('QA-D3');
+    await screen.findAllByText('→ D3');
+    scan('B-0910');
+    expect(await screen.findByText('Lot B-0910 is on 2 lines — which one?')).toBeInTheDocument();
+    expect(queue.send).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole('dialog')).getByText(/^Guava/));
+    expect(queue.send.mock.calls[0][2]).toMatchObject({ lot_code: 'LOT-G' });
+  });
+
+  it('"No sticker?" lists the truck\'s lots and books the one tapped', async () => {
+    api.getTruck.mockResolvedValue(truckOf([drumLine, bagLine]));
+    api.resolveRow.mockImplementation(atRack('r-d3', 'D3'));
+    renderTruck();
+    await screen.findByText(/are blocked/);
+    scan('QA-D3');
+    await screen.findAllByText('→ D3');
+    fireEvent.click(screen.getByText('No sticker?'));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.click(within(dialog).getByText('Lot C-0901'));
+    // A palletised lot: the worker says how much — no second question.
+    fireEvent.click(screen.getByText('One loose bag'));
+    expect(queue.send).toHaveBeenCalledTimes(1);
+    expect(queue.send.mock.calls[0][2]).toMatchObject({ lot_code: 'LOT-C', single: true, est_units: 1 });
+  });
+});
+
+describe('ScannerTruckReceiveFlow — pallet or bag (U2)', () => {
+  it('the first pallet-mode scan of a lot onto a rack asks first; the answer sticks for that rack', async () => {
+    api.getTruck.mockResolvedValue(truckOf([bagLine]));
+    api.resolveRow.mockImplementation(atRack('r-p1', 'P1'));
+    renderTruck();
+    await screen.findByText(/bags are blocked/);
+    scan('QA-P1');
+    await screen.findAllByText('→ P1');
+
+    scan('SB2|LOT-C|C-0901|20270301');
+    expect(screen.getByText('Pallet sticker, or one bag?')).toBeInTheDocument();
+    expect(queue.send).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('PALLET sticker — book 40 bags'));
+    expect(queue.send.mock.calls[0][2]).toMatchObject({ est_units: 40 });
+    expect(queue.send.mock.calls[0][2].single).toBeUndefined();
+
+    // A second pallet onto the same rack goes straight through.
+    await act(async () => { await new Promise((r) => setTimeout(r, 1100)); });
+    scan('SB2|LOT-C|C-0901|20270301');
+    expect(queue.send).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('Pallet sticker, or one bag?')).not.toBeInTheDocument();
+  });
+
+  it('"One bag" books a single loose bag', async () => {
+    api.getTruck.mockResolvedValue(truckOf([bagLine]));
+    api.resolveRow.mockImplementation(atRack('r-p1', 'P1'));
+    renderTruck();
+    await screen.findByText(/bags are blocked/);
+    scan('QA-P1');
+    await screen.findAllByText('→ P1');
+    scan('SB2|LOT-C|C-0901|20270301');
+    fireEvent.click(screen.getByText('One bag — book 1'));
+    expect(queue.send.mock.calls[0][2]).toMatchObject({ single: true, est_units: 1 });
+  });
+});
+
+describe('ScannerTruckReceiveFlow — racks and holds (U9, U10)', () => {
+  it('U10: the rack picker shows how full each rack is', async () => {
+    listIngredientRows.mockResolvedValueOnce([
+      { id: 'r-d3', name: 'QA-D3', path: 'QA Barn', storage_unit: 'drum', unit_capacity: 12 },
+    ]);
+    api.getTruck.mockResolvedValue(truckOf([drumLine]));
+    renderTruck();
+    await screen.findByText(/drums are blocked/);
+    fireEvent.click(screen.getByText('Pick rack'));
+    expect(await screen.findByText('11/12 drums')).toBeInTheDocument();
+  });
+
+  it('U10: "Pick another rack" leaves no "+1" for a scan that booked nothing', async () => {
+    api.getTruck.mockResolvedValue(truckOf([drumLine]));
+    api.resolveRow.mockImplementation(atRack('r-d3', 'D3'));
+    renderTruck();
+    await screen.findByText(/drums are blocked/);
+    scan('QA-D3');
+    await screen.findAllByText('→ D3');
+    scan('SB2|LOT-B|B-0910|20270301');
+    const key = queue.send.mock.results[0].value.idempotency_key;
+    expect(screen.getByText('+1 drum')).toBeInTheDocument();
+    act(() => {
+      queue.settled(
+        { endpoint: '/lot-receiving/trucks/o1/scan', idempotency_key: key, payload: { storage_row_id: 'r-d3' } },
+        { status: 'needs_confirm', message: 'QA-D3 holds 12 drums — load past its capacity?', row_id: 'r-d3', row_name: 'D3' },
+      );
+    });
+    fireEvent.click(screen.getByText('Pick another rack'));
+    expect(screen.queryByText('+1 drum')).not.toBeInTheDocument();
+    expect(screen.getByText(/Not put away — you chose another rack/)).toBeInTheDocument();
+  });
+
+  it('U9: a held lot\'s line says ON HOLD loudly', async () => {
+    api.getTruck.mockResolvedValue(truckOf([{ ...drumLine, is_held: true }]));
+    renderTruck();
+    const badge = await screen.findByText(/ON HOLD — stays held when put away/);
+    expect(badge.closest('.sir-hold-badge')).not.toBeNull();
   });
 });

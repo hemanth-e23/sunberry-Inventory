@@ -411,7 +411,8 @@ class TruckScanResponse(BaseSchema):
     """ONE shape for every outcome, always HTTP 200. `status`:
 
     'ok' | 'needs_confirm_over' | 'needs_confirm' (rack full) | 'unknown_lot' |
-    'unknown_row' | 'truck_closed' | 'removed' | 'nothing_to_remove'
+    'unknown_row' | 'truck_closed' | 'removed' | 'nothing_to_remove' |
+    'ambiguous_lot' (a typed vendor lot on several lines of the truck)
     """
     status: str
     message: str

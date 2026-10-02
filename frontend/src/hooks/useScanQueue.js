@@ -16,6 +16,7 @@ import {
   enqueueScan,
   getConnectivity,
   listScans,
+  probeServer,
   removeScan,
   removeScansForRequest,
   retryFailedScans,
@@ -82,20 +83,39 @@ export const useScanQueueCore = ({ onItemResult } = {}) => {
   // Periodic poll — this is the one that actually recovers a gun whose `online`
   // event never fired, which is exactly why it must not be gated on
   // navigator.onLine the way it used to be.
+  const pendingCount = queue.filter((it) => it.state === 'pending').length;
+  const failedCount = queue.filter((it) => it.state === 'failed').length;
+  const pendingRef = useRef(pendingCount);
+  useEffect(() => { pendingRef.current = pendingCount; }, [pendingCount]);
+  const reachableRef = useRef(conn.reachable);
+  useEffect(() => { reachableRef.current = conn.reachable; }, [conn.reachable]);
+
   useEffect(() => {
-    const t = setInterval(drain, POLL_MS);
+    const t = setInterval(() => {
+      // With nothing queued, nothing measures the connection, and an OFFLINE
+      // banner raised by a failed direct call would never come down by itself.
+      if (reachableRef.current === false && pendingRef.current === 0) probeServer();
+      else drain();
+    }, POLL_MS);
     return () => clearInterval(t);
   }, [drain]);
 
-  const pendingCount = queue.filter((it) => it.state === 'pending').length;
-  const failedCount = queue.filter((it) => it.state === 'failed').length;
+  // Back from an outage: send right away rather than waiting out the poll —
+  // the worker must not have to press anything (browser test U1).
+  const prevReachable = useRef(conn.reachable);
+  useEffect(() => {
+    const was = prevReachable.current;
+    prevReachable.current = conn.reachable;
+    if (was === false && conn.reachable === true) syncNow();
+  }, [conn.reachable, syncNow]);
 
-  // What the operator is shown. Measured reachability wins whenever we have it
-  // and there is queued work keeping it fresh (a pass runs every 8s); with an
-  // empty queue nothing is being measured, so fall back to the browser's claim.
-  const online = (pendingCount > 0 && conn.reachable !== null)
-    ? conn.reachable
-    : navigatorOnline;
+  // What the operator is shown. A measured "cannot reach" always wins — from a
+  // queued send or from any direct call that failed. A measured "reachable"
+  // wins while queued work keeps it fresh; otherwise trust the browser's claim.
+  let online;
+  if (conn.reachable === false) online = false;
+  else if (pendingCount > 0 && conn.reachable !== null) online = conn.reachable;
+  else online = navigatorOnline;
 
   const send = useCallback(({ requestId, payload, endpoint, idempotencyKey }) => {
     const item = enqueueScan({ requestId, payload, endpoint, idempotencyKey });

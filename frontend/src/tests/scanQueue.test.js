@@ -5,7 +5,7 @@
 // device could force it through because every route to a send — the poll, the
 // focus handler, the "Sync now" button — was gated on navigator.onLine.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 
 vi.mock('../api/client', () => ({
   default: { post: vi.fn() },
@@ -15,8 +15,12 @@ import apiClient from '../api/client';
 import {
   drainScanQueue,
   enqueueScan,
+  getConnectivity,
+  isUnreachableError,
   listScans,
+  noteReachability,
   retryFailedScans,
+  updateScan,
   __resetScanQueueForTests,
 } from '../utils/scanQueue';
 import { useScanQueueCore } from '../hooks/useScanQueue';
@@ -97,15 +101,79 @@ describe('drainScanQueue', () => {
     vi.restoreAllMocks();
   });
 
-  it('parks a scan the server keeps rejecting so it stops being invisible', async () => {
+  it('never gives up on a scan the server answers 500 for — it backs off and stays queued', async () => {
+    // Browser test U1: the backend stopped behind the dev proxy answered 500,
+    // and after ~1 minute every scan read "gave up after 8 tries".
     queueScan('A');
     apiClient.post.mockRejectedValue(httpError(500));
 
-    for (let i = 0; i < 8; i += 1) await drainScanQueue();
+    for (let i = 0; i < 20; i += 1) await drainScanQueue({ force: true });
 
     const [item] = listScans();
-    expect(item.state).toBe('failed');
-    expect(item.lastError).toContain('gave up');
+    expect(item.state).toBe('pending');
+    expect(item.serverErrors).toBe(20);
+    expect(item.nextAttemptAt).toBeGreaterThan(Date.now());
+    expect(getConnectivity().reachable).toBe(false);
+  });
+
+  it('treats 502/503/504 like no connection: stops the pass, keeps everything', async () => {
+    queueScan('A');
+    queueScan('B');
+    apiClient.post.mockRejectedValue(httpError(503));
+
+    const result = await drainScanQueue();
+
+    expect(apiClient.post).toHaveBeenCalledTimes(1);
+    expect(result.reachable).toBe(false);
+    expect(listScans().every((i) => i.state === 'pending')).toBe(true);
+  });
+
+  it('once the server is known down, a 500 stops the pass instead of walking the queue', async () => {
+    queueScan('A');
+    queueScan('B');
+    queueScan('C');
+    apiClient.post.mockRejectedValue(httpError(500));
+
+    await drainScanQueue({ force: true }); // learns it is down: all three tried
+    expect(apiClient.post).toHaveBeenCalledTimes(3);
+    await drainScanQueue({ force: true }); // still down: one probe, then stop
+    expect(apiClient.post).toHaveBeenCalledTimes(4);
+
+    // Back: the background poll sends ALL of them, back-off notwithstanding.
+    apiClient.post.mockResolvedValue({ data: { status: 'ok' } });
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61000);
+    const result = await drainScanQueue();
+    expect(result.sent).toHaveLength(3);
+    expect(listScans()).toHaveLength(0);
+    vi.restoreAllMocks();
+  });
+
+  it('brings back scans parked by the old "gave up" rule on its own, but not refusals', async () => {
+    const a = queueScan('A');
+    const b = queueScan('B');
+    updateScan(a.id, { state: 'failed', lastError: 'boom 500 (gave up after 8 tries)' });
+    updateScan(b.id, { state: 'failed', failKind: 'terminal', lastError: 'Session closed' });
+    apiClient.post.mockResolvedValue({ data: { status: 'ok' } });
+
+    const result = await drainScanQueue();
+
+    expect(result.sent.map((s) => s.item.payload.licence_number)).toEqual(['A']);
+    expect(listScans().map((i) => [i.payload.licence_number, i.state])).toEqual([['B', 'failed']]);
+  });
+
+  it('a direct call that could not reach the server marks the gun offline', () => {
+    noteReachability(false);
+    expect(getConnectivity().reachable).toBe(false);
+    noteReachability(true);
+    expect(getConnectivity().reachable).toBe(true);
+  });
+
+  it('isUnreachableError: no response or any 5xx, never a 4xx', () => {
+    expect(isUnreachableError(transportError())).toBe(true);
+    expect(isUnreachableError(httpError(500))).toBe(true);
+    expect(isUnreachableError(httpError(504))).toBe(true);
+    expect(isUnreachableError(httpError(409))).toBe(false);
+    expect(isUnreachableError(null)).toBe(false);
   });
 
   it('parks a 4xx immediately — a closed session is not worth retrying', async () => {
@@ -196,6 +264,30 @@ describe('useScanQueueCore', () => {
 
     renderHook(() => useScanQueueCore());
 
+    await waitFor(() => expect(listScans()).toHaveLength(0));
+    vi.restoreAllMocks();
+  });
+
+  it('a direct call that could not reach the server turns the gun offline even with an empty queue', async () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    const { result } = renderHook(() => useScanQueueCore());
+    expect(result.current.online).toBe(true);
+    act(() => { noteReachability(false); });
+    await waitFor(() => expect(result.current.online).toBe(false));
+    act(() => { noteReachability(true); });
+    await waitFor(() => expect(result.current.online).toBe(true));
+    vi.restoreAllMocks();
+  });
+
+  it('sends the queue by itself the moment the server is back — nobody presses Retry', async () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    queueScan('A');
+    apiClient.post.mockRejectedValue(transportError());
+    const { result } = renderHook(() => useScanQueueCore());
+    await waitFor(() => expect(result.current.online).toBe(false));
+
+    apiClient.post.mockResolvedValue({ data: { status: 'ok' } });
+    act(() => { noteReachability(true); }); // e.g. a GET elsewhere succeeded
     await waitFor(() => expect(listScans()).toHaveLength(0));
     vi.restoreAllMocks();
   });

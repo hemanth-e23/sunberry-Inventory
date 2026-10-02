@@ -24,6 +24,11 @@ import './NetworkStatus.css';
  * gating it on the belief is what left a gun holding 26 unsendable scans with
  * no way to push them.
  */
+// What a queued item IS, in the worker's words. Lot scans carry a `display`
+// line ("QA Mango Puree · Lot A-0925 → QA-D4"); without it the truck screen
+// listed the incoming order's internal id for every scan (browser test U1, P10).
+const itemLabel = (s) => s.payload?.display || s.payload?.serial || s.requestId;
+
 const NetworkStatus = ({
   online,
   pendingCount,
@@ -43,7 +48,7 @@ const NetworkStatus = ({
   const variant = !online ? 'offline' : (failedCount > 0 ? 'warn' : 'pending');
   const Icon = online ? Wifi : WifiOff;
   const label = !online
-    ? (pendingCount > 0 ? `Offline · ${pendingCount}` : 'Offline')
+    ? (pendingCount > 0 ? `Offline · ${pendingCount} saved` : 'Offline')
     : failedCount > 0
       ? `${failedCount} failed`
       : `${pendingCount} pending`;
@@ -78,6 +83,15 @@ const NetworkStatus = ({
               <X size={16} />
             </button>
           </div>
+          {!online && (
+            <div className="network-status__reason">
+              <WifiOff size={13} />
+              <span>
+                The gun cannot reach the server. Scans are saved on this gun and
+                send by themselves when it is back — nothing to press.
+              </span>
+            </div>
+          )}
           <div className="network-status__panel-row">
             <span>Pending sync</span>
             <strong>{pendingCount}</strong>
@@ -126,7 +140,7 @@ const NetworkStatus = ({
                   <div>
                     <code>{s.payload?.licence_number
                       ? <LicenceDisplay licence={s.payload.licence_number} />
-                      : (s.payload?.serial || s.requestId)}</code>
+                      : itemLabel(s)}</code>
                     <small>{s.lastError || 'Waiting to send'} · {s.attempts} tries</small>
                   </div>
                 </div>
@@ -148,7 +162,7 @@ const NetworkStatus = ({
                        (ContainerScanRequest has no licence_number), so without
                        this fallback a failed drum scan renders as a blank code
                        and the driver cannot tell WHICH drum failed. */
-                    : (s.payload?.serial || s.requestId)}</code>
+                    : itemLabel(s)}</code>
                       <small>{s.lastError}</small>
                     </div>
                     <button
