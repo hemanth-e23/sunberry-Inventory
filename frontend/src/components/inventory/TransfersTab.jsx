@@ -6,7 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import SearchableSelect from '../SearchableSelect';
 import PalletPicker from './PalletPicker';
 import { formatDateTime } from '../../utils/dateUtils';
-import { buildEntriesForProduct, rowCapacityInfo, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary, containerSplit, pendingLabel } from '../../utils/rowSources';
+import { buildEntriesForProduct, rowCapacityInfo, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary, containerSplit, pendingLabel, pluralizeUnit, singularUnit } from '../../utils/rowSources';
 import RmEntryQtyInput from './RmEntryQtyInput';
 import '../InventoryActionsPage.css';
 import { CATEGORY_TYPES, RECEIPT_STATUS, SHIP_OUT_REASON, SHIP_OUT_REASON_LABELS } from '../../constants';
@@ -330,7 +330,7 @@ const TransfersTab = () => {
 
     const partPick = picks.find((p) => (containerSplit(p.entry, p.displayQty)?.openQty || 0) > 0);
     if (partPick) {
-      setRmError(`${partPick.entry.locationLabel}: move whole ${partPick.entry.displayUnit}s — part of a container cannot move between racks.`);
+      setRmError(`${partPick.entry.locationLabel}: move whole ${pluralizeUnit(singularUnit(partPick.entry.displayUnit || 'unit'))} — part of a container cannot move between racks.`);
       return;
     }
     if (picks.length === 0) {

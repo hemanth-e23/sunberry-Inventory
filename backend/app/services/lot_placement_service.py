@@ -642,7 +642,7 @@ def row_units_for_quantity(
         pass
     word = lot.unit_label or "unit"
     raise ValidationError(
-        f"{float(quantity):g} is not a whole number of {word}s on this rack "
+        f"{float(quantity):g} is not a whole number of {pluralize_unit(word)} on this rack "
         f"at {per_unit:g} per {word} (= {ratio:.2f}). Enter a whole-{word} amount."
     )
 
@@ -965,7 +965,7 @@ def move_units(
     if source is not None and _free_units(source) < full_units:
         held = int(source.held_units or 0)
         raise ConflictError(
-            f"Only {_free_units(source)} {lot.unit_label}s of lot {lot.lot_code} "
+            f"Only {_free_units(source)} {pluralize_unit(lot.unit_label or 'unit')} of lot {lot.vendor_lot_number or lot.lot_code} "
             f"can be moved from that rack ({held} on hold). "
             "Release the hold first if they need to move."
         )
@@ -1182,7 +1182,7 @@ def receipt_units_for_quantity(
     if rounded < 0 or abs(ratio - rounded) > 0.01:
         word = lot.unit_label or "unit"
         raise ValidationError(
-            f"{float(quantity):g} is not a whole number of {word}s at this "
+            f"{float(quantity):g} is not a whole number of {pluralize_unit(word)} at this "
             f"receipt's {per_unit:g} per {word} (= {ratio:.2f}). Enter a "
             f"whole-{word} amount."
         )
@@ -1325,7 +1325,7 @@ def take_partial(
     if open_qty + 1e-6 < qty:
         raise ConflictError(
             f"Only {open_qty:g} {lot.weight_unit or 'lbs'} is in the open "
-            f"{lot.unit_label or 'unit'}s on that rack; take whole units for the rest."
+            f"{pluralize_unit(lot.unit_label or 'unit')} on that rack; take whole units for the rest."
         )
     emptied = open_qty - qty <= 0.01
     apply_delta(
@@ -1360,7 +1360,7 @@ def put_units(
         return None
     if not to_row_id:
         raise ValidationError(
-            f"Returning {units} {lot.unit_label}s needs a rack to put them on."
+            f"Returning {units} {pluralize_unit(lot.unit_label or 'unit')} needs a rack to put them on."
         )
     return apply_delta(
         db, lot, to_row_id,
@@ -1402,7 +1402,7 @@ def return_units(
     """
     if not to_row_id:
         raise ValidationError(
-            f"Returning {lot.unit_label or 'unit'}s needs a rack to put them on."
+            f"Returning {pluralize_unit(lot.unit_label or 'unit')} needs a rack to put them on."
         )
 
     per_unit = float(per_unit_weight or 0) or float(lot.weight_per_unit or 0)
