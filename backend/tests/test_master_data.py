@@ -29,11 +29,19 @@ def test_create_location_requires_admin(client, auth_headers):
 
 @pytest.mark.integration
 def test_create_location_as_admin(client, admin_auth_headers, db_session):
-    """Admin can create locations."""
+    """A superadmin creates a location in the warehouse picked in the header.
+
+    It used to save the user's OWN warehouse — none for a superadmin — so the
+    location existed in no warehouse and plant users never saw its stock
+    (2026-10-01 browser test, QA Barn)."""
+    from app.models import Warehouse
+    db_session.add(Warehouse(id="wh-md-test", name="MD Test Plant", code="MDT",
+                             type="owned", is_active=True))
+    db_session.commit()
     response = client.post(
         "/api/master-data/locations",
         json={"id": "loc-test-2", "name": "Test Location 2"},
-        headers=admin_auth_headers,
+        headers={**admin_auth_headers, "X-View-Warehouse": "wh-md-test"},
     )
     assert response.status_code == 200
     data = response.json()
@@ -42,6 +50,19 @@ def test_create_location_as_admin(client, admin_auth_headers, db_session):
 
     loc = db_session.query(Location).filter(Location.id == "loc-test-2").first()
     assert loc is not None
+    assert loc.warehouse_id == "wh-md-test"
+
+
+@pytest.mark.integration
+def test_create_location_with_all_warehouses_is_refused(client, admin_auth_headers, db_session):
+    """No warehouse picked ("All Warehouses") → refused, never an orphan location."""
+    response = client.post(
+        "/api/master-data/locations",
+        json={"id": "loc-test-orphan", "name": "Orphan"},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 400
+    assert db_session.query(Location).filter(Location.id == "loc-test-orphan").first() is None
 
 
 @pytest.mark.integration

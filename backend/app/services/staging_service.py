@@ -499,7 +499,8 @@ def create_staging_transfer(db: Session, staging_data, current_user) -> dict:
                 original_storage_row_id=original_storage_row_id,
                 staging_storage_row_id=None,
                 staging_batch_id=staging_batch_id,
-                warehouse_id=current_user.warehouse_id,
+                # The material's warehouse: a corporate user staging has none.
+                warehouse_id=receipt.warehouse_id or current_user.warehouse_id,
             )
 
             db.add(staging_item)

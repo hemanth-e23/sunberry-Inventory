@@ -24,7 +24,7 @@ from app.schemas import (
     PackageSize as PackageSizeSchema, PackageSizeCreate, PackageSizeUpdate,
     ShipToLocationOut, CarrierOut, PalletTypeOut,
 )
-from app.utils.auth import get_current_active_user, require_role, warehouse_filter, require_superadmin
+from app.utils.auth import get_current_active_user, require_role, warehouse_filter, require_superadmin, resolve_warehouse_for_write
 from app.constants import ROLE_SUPERADMIN
 from app.utils.schema_filter import model_kwargs
 from app.services import ingredient_row_service
@@ -189,8 +189,11 @@ def create_location(
             detail="Location with this ID already exists"
         )
     
+    # The warehouse picked in the header, not the user's own: a superadmin has
+    # none, so QA Barn was saved with warehouse NULL and plant users could not
+    # see its stock (2026-10-01 browser test). Same rule every other create uses.
     db_location = Location(**model_kwargs(location_data, Location,
-                                          warehouse_id=current_user.warehouse_id))
+                                          warehouse_id=resolve_warehouse_for_write(current_user)))
     db.add(db_location)
     db.commit()
     db.refresh(db_location)
