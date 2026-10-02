@@ -1,5 +1,6 @@
 import apiClient from "../../api/client";
-import { toDateKey as tzToDateKey, getTodayDateKey } from "../../utils/dateUtils";
+import { RECEIPT_STATUS } from "../../constants";
+import { formatDate, toDateKey as tzToDateKey, getTodayDateKey } from "../../utils/dateUtils";
 
 export const apiFetch = async (path, params = {}) => {
   const cleanParams = Object.fromEntries(
@@ -88,3 +89,79 @@ export const TABS = [
   { id: "lot-trace", label: "Lot Traceability" },
   { id: "cycle-counts", label: "Cycle Counts" },
 ];
+
+// ─── Row formatters shared by the audit reports (browser test PART 4) ─────
+
+/** A before/after stock figure, or "—" when there is none to show. A
+ *  negative figure is never a stock level — old staging rows recorded one
+ *  delivery's paper ("0 → −202") — so it reads as unknown, not as a number. */
+export const stockFigure = (value) => {
+  if (value === null || value === undefined || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  return formatNumber(n);
+};
+
+/** "+1 drums", "−1 bags", "0 cases". */
+export const signedQty = (value, unit) => {
+  if (value === null || value === undefined) return "—";
+  const n = Number(value);
+  const sign = n > 0 ? "+" : n < 0 ? "−" : "";
+  return `${sign}${formatNumber(Math.abs(n))}${unit ? ` ${unit}` : ""}`;
+};
+
+/** A count's system / counted cell: the rack wording for a raw-material
+ *  count ("6 drums + 1 open (210 lbs)"), else the plain number. */
+export const countCell = (row, which) => {
+  const detail = which === "system" ? row.system_detail : row.actual_detail;
+  if (detail) return detail;
+  const value = which === "system" ? row.system_count : row.actual_count;
+  return value !== null && value !== undefined ? formatNumber(value) : "—";
+};
+
+/** One summary card per unit — 3 drums and 2 cases are not 5 of anything. */
+export const varianceCards = (totals = {}) => {
+  const entries = Object.entries(totals.variance_by_unit || {});
+  if (!entries.length) {
+    const v = Number(totals.total_variance || 0);
+    return [{ label: "Total Variance", value: formatNumber(v), highlight: Math.abs(v) > 0 }];
+  }
+  return entries.map(([unit, v]) => ({
+    label: `Variance (${unit})`,
+    value: signedQty(v, unit),
+    highlight: Math.abs(v) > 0,
+  }));
+};
+
+/** Cycle Counts report columns: finished-goods cycle counts and raw-material
+ *  rack counts side by side (browser test PART 4, P5). */
+export const cycleCountColumns = [
+  { label: "Count Date", value: (r) => formatDate(r.count_date) },
+  { label: "Kind", value: (r) => r.count_kind || "Cycle count" },
+  { label: "Product", value: (r) => r.product_name },
+  { label: "Lot", value: (r) => r.lot_number || "—" },
+  { label: "Location", value: (r) => r.location || "—" },
+  { label: "System Count", value: (r) => countCell(r, "system") },
+  { label: "Physical Count", value: (r) => countCell(r, "actual") },
+  { label: "Variance", value: (r) => (r.variance != null ? signedQty(r.variance, r.unit) : "—") },
+  { label: "Variance %", value: (r) => (r.variance_pct != null ? `${r.variance_pct}%` : "—") },
+  { label: "Counted By", value: (r) => r.counted_by || "—" },
+  { label: "Notes", value: (r) => r.notes || "—" },
+];
+
+/** Is this receipt row stock on hand? Only an APPROVED delivery is: a
+ *  rejected one keeps its paperwork quantity (D-0801's rejected 150 lb line
+ *  made the snapshot read Citric 2,600 for 2,450 on the racks, PART 4 P4),
+ *  and a recorded / reviewed / sent-back one has not entered stock yet. */
+export const isOnHandReceiptRow = (row) => (
+  row?.status === RECEIPT_STATUS.APPROVED && Number(row?.quantity || 0) > 0
+);
+
+/** What a delivery brought, e.g. "1,422 lbs (3 drums)". */
+export const receivedCell = (row) => {
+  const qty = row.quantity_received ?? row.quantity;
+  const base = `${formatNumber(qty)} ${row.unit || ""}`.trim();
+  return row.containers && row.container_unit
+    ? `${base} (${formatNumber(row.containers)} ${row.container_unit})`
+    : base;
+};

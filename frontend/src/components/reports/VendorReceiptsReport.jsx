@@ -2,7 +2,7 @@ import React, { useState, useCallback } from "react";
 import { formatDate } from "../../utils/dateUtils";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
-import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
+import { apiFetch, apiError, formatNumber, receivedCell, today, monthStart } from "./reportUtils";
 
 const VendorReceiptsReport = ({ vendorOptions }) => {
   const [vendorStart, setVendorStart] = useState(monthStart());
@@ -37,7 +37,13 @@ const VendorReceiptsReport = ({ vendorOptions }) => {
     { label: "Lot #", value: (r) => r.lot_number || "—" },
     { label: "BOL", value: (r) => r.bol || "—" },
     { label: "PO #", value: (r) => r.purchase_order || "—" },
-    { label: "Quantity", value: (r) => `${formatNumber(r.quantity)} ${r.unit}` },
+    // What the truck BROUGHT; what is left of it is a separate column
+    // (PART 4, P7: "A-0925 RC-T1 0 lbs depleted" for 3 drums received).
+    { label: "Received", value: receivedCell },
+    {
+      label: "Remaining",
+      value: (r) => `${formatNumber(r.quantity_remaining ?? r.quantity)} ${r.unit}`,
+    },
     { label: "Status", value: (r) => r.status },
   ];
 
@@ -74,13 +80,15 @@ const VendorReceiptsReport = ({ vendorOptions }) => {
                 columns={[
                   { label: "Vendor", value: (r) => r.vendor },
                   { label: "Receipts", value: (r) => r.receipts },
-                  { label: "Total Qty", value: (r) => formatNumber(r.quantity) },
+                  { label: "Total Received", value: (r) => formatNumber(r.quantity) },
+                  { label: "Still On Hand", value: (r) => (r.remaining != null ? formatNumber(r.remaining) : "—") },
                 ]}
                 rows={Object.entries(vendorData.by_vendor).map(([vendor, info], i) => ({
                   id: i,
                   vendor,
                   receipts: info.receipts,
                   quantity: info.quantity,
+                  remaining: info.remaining,
                 }))}
               />
             </div>

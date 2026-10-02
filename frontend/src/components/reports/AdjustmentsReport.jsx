@@ -2,7 +2,7 @@ import React, { useState, useCallback } from "react";
 import { formatDate } from "../../utils/dateUtils";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
-import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
+import { apiFetch, apiError, formatNumber, stockFigure, today, monthStart } from "./reportUtils";
 import { adjustmentTypeLabel } from "../../utils/adjustmentTypes";
 
 const adjTypeOptions = [
@@ -49,8 +49,10 @@ const AdjustmentsReport = ({ productOptions }) => {
     { label: "Product", value: (r) => r.product_name },
     { label: "Lot #", value: (r) => r.lot_number || "—" },
     { label: "Quantity", value: (r) => `${formatNumber(r.quantity)}${r.unit ? ` ${r.unit}` : ""}` },
-    { label: "Qty Before", value: (r) => r.qty_before != null ? formatNumber(r.qty_before) : "—" },
-    { label: "Qty After", value: (r) => r.qty_after != null ? formatNumber(r.qty_after) : "—" },
+    // The LOT's paper before/after. "—" where an old row recorded one
+    // delivery's figures instead (PART 4, P6: "0 → −202").
+    { label: "Lot Before", value: (r) => stockFigure(r.qty_before) },
+    { label: "Lot After", value: (r) => stockFigure(r.qty_after) },
     { label: "Reason", value: (r) => r.reason || "—" },
     // Who a donation went to (browser test PART 3, G5).
     { label: "Recipient", value: (r) => r.recipient || "—" },

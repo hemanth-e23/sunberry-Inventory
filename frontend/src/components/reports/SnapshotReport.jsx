@@ -3,7 +3,7 @@ import { formatDate, formatDateKey } from "../../utils/dateUtils";
 import { useAppData } from "../../context/AppDataContext";
 import SearchableSelect from "../SearchableSelect";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton } from "./ReportSharedComponents";
-import { apiFetch, apiError, formatNumber, today, GROUP_ORDER } from "./reportUtils";
+import { apiFetch, apiError, formatNumber, isOnHandReceiptRow, today, GROUP_ORDER } from "./reportUtils";
 
 const SnapshotReport = ({ productOptions, categoryOptions }) => {
   const {
@@ -31,6 +31,7 @@ const SnapshotReport = ({ productOptions, categoryOptions }) => {
 
   const currentSnapshotRows = useMemo(() => {
     return receiptReportingRows.filter((row) => {
+      if (!isOnHandReceiptRow(row)) return false;
       if (snapProductFilter && row.productId !== snapProductFilter) return false;
       if (snapCatFilter && row.categoryId !== snapCatFilter) return false;
       if (snapHoldFilter === "on" && !row.hold) return false;

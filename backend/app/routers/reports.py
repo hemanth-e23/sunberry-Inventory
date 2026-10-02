@@ -324,9 +324,11 @@ def cycle_count_report(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    """Cycle count records with per-item variance analysis."""
+    """Cycle count records with per-item variance analysis — finished-goods
+    cycle counts plus raw-material / packaging rack counts."""
     return build_cycle_count_report(
         db,
+        tz=_report_tz(db, current_user),
         warehouse_id=warehouse_filter(current_user),
         start_date=start_date,
         end_date=end_date,

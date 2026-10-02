@@ -292,3 +292,35 @@ export const queuedScanLabel = ({ productName, vendorLot, lotCode, rowName, unit
   const qty = Number(units) > 1 ? `${unitCount(units, unit || 'unit')} of ` : '';
   return `${qty}${what}${rowName ? ` → ${rowName}` : ''}`;
 };
+
+/**
+ * Where a truck stands on the gun's list: 'in_progress' (some scanned, some
+ * still to come), 'not_started' (nothing scanned yet) or 'all_scanned'
+ * (everything on the paperwork is in — it only waits for Finish).
+ */
+export const truckProgress = (truck) => {
+  const lines = truck?.lines || [];
+  const scanned = lines.reduce((n, l) => n + (Number(l.scanned_count) || 0), 0);
+  const expected = lines.reduce((n, l) => n + (Number(l.expected_count) || 0), 0);
+  if (scanned <= 0) return 'not_started';
+  if (expected > 0 && scanned >= expected) return 'all_scanned';
+  return 'in_progress';
+};
+
+const truckDateKey = (truck) => String(truck?.expected_date || '');
+
+/**
+ * The Receiving list in working order (browser test PART 4, P8): trucks being
+ * unloaded first, then the ones not started, newest expected date first in
+ * each — a never-touched truck from last month no longer heads the list. A
+ * truck with everything scanned goes in `done`, which the list keeps folded
+ * behind "Show finished" (it only needs its Finish tap).
+ */
+export const orderTruckList = (trucks = []) => {
+  const byNewest = (a, b) => truckDateKey(b).localeCompare(truckDateKey(a));
+  const of = (kind) => trucks.filter((t) => truckProgress(t) === kind).sort(byNewest);
+  return {
+    open: [...of('in_progress'), ...of('not_started')],
+    done: of('all_scanned'),
+  };
+};

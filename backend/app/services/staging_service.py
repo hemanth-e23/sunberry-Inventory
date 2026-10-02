@@ -1074,10 +1074,9 @@ def mark_staging_used(db: Session, staging_item: StagingItem, request, current_u
         product_id=staging_item.product_id,
         adjustment_type="production-consumption",
         quantity=request.quantity,
+        unit=receipt.unit,
         reason="Used from staging for production",
         status=AdjustmentStatus.APPROVED,
-        original_quantity=receipt.quantity,
-        new_quantity=receipt.quantity - request.quantity,
         submitted_by=str(current_user.id),
         approved_by=str(current_user.id),
         approved_at=datetime.now(timezone.utc),
@@ -1085,10 +1084,13 @@ def mark_staging_used(db: Session, staging_item: StagingItem, request, current_u
     # Rack/allocation already settled at staging time; consumption just reduces
     # the lot total.
     # Spills across the lot's receipts instead of clamping at zero (audit S5).
-    from app.services.staging_request_service import consume_receipt_quantity
+    from app.services.staging_request_service import consume_receipt_quantity, lot_paper_total
 
+    # Before/after are the LOT's, not this one delivery's (PART 4, P6).
     # quantity_used was already updated above (see the sweep's note).
+    adjustment.original_quantity = lot_paper_total(db, receipt)
     consume_receipt_quantity(db, receipt, request.quantity, staging_settled=True)
+    adjustment.new_quantity = lot_paper_total(db, receipt)
     db.add(adjustment)
 
     return staging_item

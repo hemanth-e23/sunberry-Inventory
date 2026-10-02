@@ -162,7 +162,7 @@ class TestRejectedReceiptIsNotStock:
     def test_vendor_receipts_lists_it_but_does_not_total_it(self, db_session, lots):
         out = rb.build_vendor_receipts_report(db_session, warehouse_id=WH, tz="UTC")
         assert {r["receipt_id"] for r in out["rows"]} >= {"rcpt-p2-rejected"}
-        assert out["by_vendor"]["Vendor P"] == {"receipts": 1, "quantity": 200.0}
+        assert out["by_vendor"]["Vendor P"] == {"receipts": 1, "quantity": 200.0, "remaining": 200.0}
 
     def test_movement_ledger_leaves_it_out(self, db_session, lots):
         out = rb.build_movement_ledger(db_session, product_id=PRODUCT, tz="UTC")

@@ -91,3 +91,20 @@
   padding: 1rem;
   overflow-y: auto;
 }
+
+/* Header buttons (back, sound, sign out) are 44 px targets — the sound
+   toggle measured 38 px on a 400 px gun (browser test PART 4, P8). */
+.scanner-back-btn,
+.scanner-logout-btn {
+  min-width: 44px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 480px) {
+  .scanner-header { padding: 0.6rem 0.75rem; }
+  .scanner-header-actions { gap: 0.35rem; }
+  .scanner-user { max-width: 72px; white-space: nowrap; font-size: 0.82rem; }
+  .scanner-main { padding: 0.85rem 0.75rem; }
+}

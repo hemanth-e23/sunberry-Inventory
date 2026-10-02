@@ -20,7 +20,7 @@ from app.enums import (
     TransferStatus, AdjustmentStatus, HoldStatus, InterWarehouseStatus, ReceiptStatus,
     ShipOutLifecycle,
 )
-from app.constants import CATEGORY_FINISHED, SHIP_OUT_REASONS
+from app.constants import CATEGORY_FINISHED, SHIP_OUT_REASONS, pluralize_unit
 from app.services.availability import container_qty_for_product
 from app.services.lot_status import room_label_for_rows
 from app.utils.calendar_dates import calendar_day
@@ -443,6 +443,90 @@ def _loc_str(loc, subloc) -> Optional[str]:
 # 1. Point-in-Time Inventory Snapshot
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _receiptless_lot_rows_on_date(
+    db: Session,
+    as_of_dt: datetime,
+    *,
+    warehouse_id: Optional[str] = None,
+    product_id: Optional[str] = None,
+    category_id: Optional[str] = None,
+    category_ids: Optional[list] = None,
+) -> list:
+    """Snapshot rows for lots with no receipt, replayed from the placement
+    ledger up to `as_of_dt` (weight = full units x unit weight + what is left
+    in open units)."""
+    from app.models import LotPlacement, LotPlacementEvent, MaterialLot
+
+    has_receipt = db.query(Receipt.id).filter(
+        Receipt.material_lot_id == MaterialLot.id
+    ).exists()
+    lq = db.query(MaterialLot).filter(~has_receipt)
+    if product_id:
+        lq = lq.filter(MaterialLot.product_id == product_id)
+    lots = {lot.id: lot for lot in lq.all()}
+    if not lots:
+        return []
+
+    events = (
+        db.query(
+            LotPlacementEvent.material_lot_id,
+            LotPlacementEvent.storage_row_id,
+            func.sum(LotPlacementEvent.full_units_delta),
+            func.sum(LotPlacementEvent.qty_delta),
+        )
+        .filter(
+            LotPlacementEvent.material_lot_id.in_(list(lots)),
+            LotPlacementEvent.occurred_at <= as_of_dt,
+        )
+        .group_by(LotPlacementEvent.material_lot_id, LotPlacementEvent.storage_row_id)
+        .all()
+    )
+    placement_wh = {
+        (p.material_lot_id, p.storage_row_id): p.warehouse_id
+        for p in db.query(LotPlacement).filter(LotPlacement.material_lot_id.in_(list(lots))).all()
+    }
+    qty_by_lot: dict = {}
+    for lot_id, row_id, full, open_qty in events:
+        lot = lots[lot_id]
+        wh = placement_wh.get((lot_id, row_id)) or lot.warehouse_id
+        if warehouse_id and wh and wh != warehouse_id:
+            continue
+        qty = int(full or 0) * float(lot.weight_per_unit or 0) + float(open_qty or 0)
+        qty_by_lot[lot_id] = qty_by_lot.get(lot_id, 0.0) + qty
+
+    rows = []
+    for lot_id, qty in qty_by_lot.items():
+        if qty <= 1e-9:
+            continue
+        lot = lots[lot_id]
+        product = db.query(Product).filter(Product.id == lot.product_id).first()
+        prod_cat = product.category_id if product else None
+        if category_id and prod_cat != category_id:
+            continue
+        if category_ids is not None and prod_cat not in category_ids:
+            continue
+        pname, pcode = product_info(db, lot.product_id)
+        cname, ctype = category_info(db, prod_cat)
+        rows.append({
+            "receipt_id": None,
+            "material_lot_id": lot.id,
+            "lot_number": lot.vendor_lot_number or lot.lot_code,
+            "product_id": lot.product_id,
+            "product_name": pname,
+            "product_code": pcode,
+            "category_name": cname,
+            "category_type": ctype,
+            "vendor_name": vendor_name(db, lot.vendor_id),
+            "receipt_date": None,
+            "production_date": None,
+            "expiration_date": calendar_day(lot.bbd_current or lot.bbd_original),
+            "quantity": round(qty, 2),
+            "unit": lot.weight_unit or "lbs",
+            "counted_lot": True,
+        })
+    return rows
+
+
 def build_point_in_time_snapshot(
     db: Session,
     as_of_date: str,
@@ -454,10 +538,17 @@ def build_point_in_time_snapshot(
 ) -> dict:
     as_of_dt = parse_dt_end(as_of_date, tz or report_timezone(db, warehouse_id))
 
+    # Stock on the books = approved + depleted receipts. Rejected / recorded /
+    # sent-back deliveries keep their paperwork quantity but never entered
+    # stock (D-0801's rejected 150 lb line, PART 4 P4), and a deleted one is
+    # gone. A lot-tracked lot's paper already covers racks AND staging, so no
+    # rack placements are added on top (that double counts).
     query = db.query(Receipt).filter(
         Receipt.receipt_date <= as_of_dt,
         Receipt.status.in_([ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED]),
+        Receipt.is_deleted == False,  # noqa: E712
     )
+    cat_ids = None
     if warehouse_id:
         query = query.filter(Receipt.warehouse_id == warehouse_id)
     if product_id:
@@ -493,6 +584,17 @@ def build_point_in_time_snapshot(
             "quantity": round(qty, 2),
             "unit": r.unit or "cases",
         })
+
+    # Lots known only by their placements (a cutover opening balance, a lot
+    # recorded by "Add what I found") have no receipt to reconstruct from;
+    # their rack ledger up to the date says what was there.
+    rows.extend(_receiptless_lot_rows_on_date(
+        db, as_of_dt,
+        warehouse_id=warehouse_id,
+        product_id=product_id,
+        category_id=category_id,
+        category_ids=cat_ids,
+    ))
 
     totals_by_type: dict = {}
     for row in rows:
@@ -1940,6 +2042,35 @@ def build_expiry_alerts(
 # 9. Adjustment Audit Report
 # ─────────────────────────────────────────────────────────────────────────────
 
+def adjustment_before_after(adjustment, receipt, *, lot_deliveries: int = 1):
+    """The before/after a report may show for one adjustment, or (None, None).
+
+    Before/after are the LOT's paper since 2026-10 (desk approvals, then the
+    staging consumption paths in PART 4, P6). Older rows written by staging,
+    production sync or close-out recorded ONE delivery's paper instead, and a
+    consumption that spilled across the lot's trucks read "0 → −202" or
+    "275 → 220" — figures about a single truck, presented as if they were the
+    lot's. Those are shown as "—" rather than as numbers nobody can reconcile:
+
+      * a negative before or after is never a real stock figure;
+      * a row with no recorded `unit` on a lot that came on more than one
+        truck is a legacy staging row (every desk adjustment carries its
+        unit, and the staging paths set it from the fix on), so its figures
+        are one delivery's.
+    """
+    before, after = adjustment.original_quantity, adjustment.new_quantity
+    if (before is not None and before < -1e-6) or (after is not None and after < -1e-6):
+        return None, None
+    if (
+        receipt is not None
+        and getattr(receipt, "material_lot_id", None)
+        and not getattr(adjustment, "unit", None)
+        and lot_deliveries > 1
+    ):
+        return None, None
+    return before, after
+
+
 def build_adjustments_report(
     db: Session,
     warehouse_id: Optional[str] = None,
@@ -1966,11 +2097,28 @@ def build_adjustments_report(
 
     adjustments = query.order_by(InventoryAdjustment.approved_at.desc()).all()
 
+    lot_deliveries: dict = {}
+
+    def _deliveries(lot_id: str) -> int:
+        if lot_id not in lot_deliveries:
+            lot_deliveries[lot_id] = db.query(Receipt.id).filter(
+                Receipt.material_lot_id == lot_id,
+                Receipt.status.notin_(NON_STOCK_RECEIPT_STATUSES),
+            ).count()
+        return lot_deliveries[lot_id]
+
     rows = []
     for a in adjustments:
         pname, pcode = product_info(db, a.product_id)
         cname, _ = category_info(db, a.category_id)
         receipt = db.query(Receipt).filter(Receipt.id == a.receipt_id).first()
+        before, after = adjustment_before_after(
+            a, receipt,
+            lot_deliveries=(
+                _deliveries(receipt.material_lot_id)
+                if receipt is not None and receipt.material_lot_id else 1
+            ),
+        )
         # Prefer the adjustment's own recorded unit (added in Task 2.5); fall
         # back to the receipt's unit. Adjustments span cases/lbs/units, so the
         # report must keep the unit per row and never sum across units.
@@ -1985,8 +2133,8 @@ def build_adjustments_report(
             "lot_number": receipt.lot_number if receipt else "",
             "quantity": round(float(a.quantity or 0), 2),
             "unit": unit,
-            "qty_before": a.original_quantity,
-            "qty_after": a.new_quantity,
+            "qty_before": before,
+            "qty_after": after,
             "reason": a.reason,
             # Who a donation went to (browser test PART 3, G5).
             "recipient": a.recipient,
@@ -2018,6 +2166,25 @@ def build_adjustments_report(
 # 10. Vendor Receipt Report
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _whole_or_none(value) -> Optional[float]:
+    if value is None or float(value) <= 0:
+        return None
+    v = float(value)
+    return int(v) if v.is_integer() else round(v, 3)
+
+
+def _container_word(db: Session, receipt: Receipt) -> Optional[str]:
+    """'drums' / 'bags' for a lot-tracked delivery, else None."""
+    if not receipt.material_lot_id or not receipt.container_count:
+        return None
+    from app.models import MaterialLot
+
+    lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
+    if not lot or not lot.unit_label:
+        return None
+    return lot.unit_label if float(receipt.container_count) == 1 else pluralize_unit(lot.unit_label)
+
+
 def build_vendor_receipts_report(
     db: Session,
     warehouse_id: Optional[str] = None,
@@ -2047,6 +2214,17 @@ def build_vendor_receipts_report(
         pname, pcode = product_info(db, r.product_id)
         cname, _ = category_info(db, r.category_id)
         vname = vendor_name(db, r.vendor_id)
+        # What the truck BROUGHT, not what is left of it: "A-0925 RC-T1 0 lbs
+        # depleted" for 3 drums received told nobody what arrived (browser
+        # test PART 4, P7). A delivery not yet in stock (recorded / rejected)
+        # has had nothing taken from it, so its paper IS what it brought.
+        remaining = round(float(r.quantity or 0), 2)
+        if r.status in (ReceiptStatus.APPROVED.value, ReceiptStatus.DEPLETED.value):
+            received = round(initial_receipt_qty(r, db), 2)
+        else:
+            count = float(r.container_count or 0)
+            per = float(r.weight_per_container or 0)
+            received = round(count * per, 2) if count > 0 and per > 0 else remaining
         rows.append({
             "receipt_id": r.id,
             "receipt_date": r.receipt_date,
@@ -2056,7 +2234,11 @@ def build_vendor_receipts_report(
             "product_code": pcode,
             "category_name": cname,
             "lot_number": r.lot_number,
-            "quantity": round(float(r.quantity or 0), 2),
+            "quantity": received,
+            "quantity_received": received,
+            "quantity_remaining": remaining,
+            "containers": _whole_or_none(r.container_count),
+            "container_unit": _container_word(db, r),
             "unit": r.unit or "cases",
             "bol": r.bol,
             "purchase_order": r.purchase_order,
@@ -2071,9 +2253,12 @@ def build_vendor_receipts_report(
             continue
         v = r["vendor_name"]
         if v not in vendor_summary:
-            vendor_summary[v] = {"receipts": 0, "quantity": 0}
+            vendor_summary[v] = {"receipts": 0, "quantity": 0, "remaining": 0}
         vendor_summary[v]["receipts"] += 1
-        vendor_summary[v]["quantity"] += r["quantity"]
+        vendor_summary[v]["quantity"] = round(vendor_summary[v]["quantity"] + r["quantity"], 2)
+        vendor_summary[v]["remaining"] = round(
+            vendor_summary[v]["remaining"] + r["quantity_remaining"], 2
+        )
 
     return {"rows": rows, "by_vendor": vendor_summary}
 
@@ -2082,12 +2267,167 @@ def build_vendor_receipts_report(
 # 11. Cycle Count Variance Report
 # ─────────────────────────────────────────────────────────────────────────────
 
+# A raw-material count is recorded as a placement event, not a CycleCount:
+# "Recount" writes `counted` (an absolute figure, the event holding the delta
+# from what the system believed) and "Add what I found" / the cutover writes
+# `opening_balance` (added to what was there). Both are applied counts — a
+# count still waiting for approval writes no event, so none shows here.
+_RM_COUNT_EVENT_TYPES = ("counted", "opening_balance")
+
+
+def _row_location_id(db: Session, row: Optional[StorageRow]) -> Optional[str]:
+    if row is None:
+        return None
+    if row.sub_location_id:
+        sub = db.query(SubLocation).filter(SubLocation.id == row.sub_location_id).first()
+        if sub and sub.location_id:
+            return sub.location_id
+    if row.storage_area_id:
+        from app.models import StorageArea
+
+        area = db.query(StorageArea).filter(StorageArea.id == row.storage_area_id).first()
+        if area:
+            return area.location_id
+    return None
+
+
+def _units_phrase(full: int, open_units: int, open_qty: float, unit: str, weight_unit: str) -> str:
+    word = unit if full == 1 else pluralize_unit(unit)
+    text = f"{full:,} {word}"
+    if open_units:
+        text += f" + {open_units} open ({open_qty:,.0f} {weight_unit})"
+    return text
+
+
+def build_rm_count_rows(
+    db: Session,
+    warehouse_id: Optional[str] = None,
+    start_dt: Optional[datetime] = None,
+    end_dt: Optional[datetime] = None,
+    location_id: Optional[str] = None,
+) -> list:
+    """One row per raw-material / packaging rack count (browser test PART 4,
+    P5: the Cycle Counts report said "No cycle counts found" after three).
+
+    The ledger records each count as a signed delta, so what the rack held
+    after the count is the running total of that (lot, rack)'s events up to
+    and including it; what the system said is that minus the delta.
+    """
+    from app.models import LotPlacement, LotPlacementEvent, MaterialLot
+
+    q = db.query(LotPlacementEvent).filter(
+        LotPlacementEvent.event_type.in_(_RM_COUNT_EVENT_TYPES)
+    )
+    if start_dt is not None:
+        q = q.filter(LotPlacementEvent.occurred_at >= start_dt)
+    if end_dt is not None:
+        q = q.filter(LotPlacementEvent.occurred_at <= end_dt)
+    events = q.order_by(LotPlacementEvent.seq.asc()).all()
+    if not events:
+        return []
+
+    wanted = {e.id for e in events}
+    lot_ids = {e.material_lot_id for e in events}
+    after: dict = {}
+    running: dict = {}
+    ledger = (
+        db.query(
+            LotPlacementEvent.id,
+            LotPlacementEvent.material_lot_id,
+            LotPlacementEvent.storage_row_id,
+            LotPlacementEvent.full_units_delta,
+            LotPlacementEvent.open_units_delta,
+            LotPlacementEvent.qty_delta,
+        )
+        .filter(LotPlacementEvent.material_lot_id.in_(lot_ids))
+        .order_by(LotPlacementEvent.seq.asc())
+        .all()
+    )
+    for ev_id, lot_id, row_id, d_full, d_open, d_qty in ledger:
+        acc = running.setdefault((lot_id, row_id), [0, 0, 0.0])
+        acc[0] += int(d_full or 0)
+        acc[1] += int(d_open or 0)
+        acc[2] += float(d_qty or 0)
+        if ev_id in wanted:
+            after[ev_id] = tuple(acc)
+
+    lots = {
+        lot.id: lot
+        for lot in db.query(MaterialLot).filter(MaterialLot.id.in_(lot_ids)).all()
+    }
+    row_ids = {e.storage_row_id for e in events}
+    rows_by_id = {
+        r.id: r for r in db.query(StorageRow).filter(StorageRow.id.in_(row_ids)).all()
+    }
+    placement_wh = {
+        (p.material_lot_id, p.storage_row_id): p.warehouse_id
+        for p in db.query(LotPlacement).filter(LotPlacement.material_lot_id.in_(lot_ids)).all()
+    }
+    loc_cache: dict = {}
+
+    out = []
+    for e in events:
+        lot = lots.get(e.material_lot_id)
+        if lot is None:
+            continue
+        wh = placement_wh.get((e.material_lot_id, e.storage_row_id)) or lot.warehouse_id
+        if warehouse_id and wh and wh != warehouse_id:
+            continue
+        row = rows_by_id.get(e.storage_row_id)
+        if location_id:
+            if e.storage_row_id not in loc_cache:
+                loc_cache[e.storage_row_id] = _row_location_id(db, row)
+            if loc_cache[e.storage_row_id] != location_id:
+                continue
+
+        a_full, a_open, a_qty = after.get(e.id, (0, 0, 0.0))
+        b_full = a_full - int(e.full_units_delta or 0)
+        b_open = a_open - int(e.open_units_delta or 0)
+        b_qty = a_qty - float(e.qty_delta or 0)
+        unit = lot.unit_label or "unit"
+        wunit = lot.weight_unit or "lbs"
+        per = float(lot.weight_per_unit or 0)
+        variance = a_full - b_full
+        pname, pcode = product_info(db, lot.product_id)
+        found = e.event_type == "opening_balance"
+        out.append({
+            "count_id": e.id,
+            "count_date": e.occurred_at,
+            "source": "raw-material",
+            "count_kind": "Found" if found else "Recount",
+            "product_name": pname,
+            "product_code": pcode,
+            "lot_number": lot.vendor_lot_number or lot.lot_code,
+            "lot_code": lot.lot_code,
+            "location": row.name if row else e.storage_row_id,
+            "system_count": b_full,
+            "actual_count": a_full,
+            "system_open": b_open,
+            "actual_open": a_open,
+            "system_detail": _units_phrase(b_full, b_open, b_qty, unit, wunit),
+            "actual_detail": _units_phrase(a_full, a_open, a_qty, unit, wunit),
+            "variance": variance,
+            "variance_pct": (
+                round(variance / b_full * 100, 1) if b_full else None
+            ),
+            "variance_weight": (
+                round(variance * per + (a_qty - b_qty), 2) if per else None
+            ),
+            "unit": pluralize_unit(unit),
+            "weight_unit": wunit,
+            "counted_by": user_name(db, e.actor_id),
+            "notes": e.reason or "",
+        })
+    return out
+
+
 def build_cycle_count_report(
     db: Session,
     warehouse_id: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     location_id: Optional[str] = None,
+    tz: Optional[str] = None,
 ) -> dict:
     query = db.query(CycleCount)
     if warehouse_id:
@@ -2130,15 +2470,39 @@ def build_cycle_count_report(
                 "variance_pct": variance_pct,
                 "counted_by": c.performed_by,
                 "notes": item.get("notes") or "",
+                "source": "finished-goods",
+                "count_kind": "Cycle count",
+                "unit": "cases",
             })
 
+    # Raw-material / packaging rack counts (PART 4, P5) alongside.
+    tz = tz or report_timezone(db, warehouse_id)
+    rm_rows = build_rm_count_rows(
+        db,
+        warehouse_id=warehouse_id,
+        start_dt=parse_dt_start(start_date, tz) if start_date else None,
+        end_dt=parse_dt_end(end_date, tz) if end_date else None,
+        location_id=location_id,
+    )
+    rows.extend(rm_rows)
+    rows.sort(key=lambda r: _sort_dt(r["count_date"]), reverse=True)
+
+    # Variance is summed per unit — 3 drums and 2 cases are not 5 of anything.
+    variance_by_unit: dict = {}
+    for r in rows:
+        if r["variance"] is None:
+            continue
+        u = r.get("unit") or "units"
+        variance_by_unit[u] = round(variance_by_unit.get(u, 0) + r["variance"], 2)
     total_variance = sum(r["variance"] for r in rows if r["variance"] is not None)
     rows_with_variance = [r for r in rows if r["variance"] is not None and abs(r["variance"]) > 0]
 
     return {
         "rows": rows,
         "totals": {
-            "count_events": len(counts),
+            "count_events": len(counts) + len(rm_rows),
+            "rm_counts": len(rm_rows),
+            "variance_by_unit": variance_by_unit,
             "item_rows": len(rows),
             "total_variance": round(total_variance, 2),
             "rows_with_discrepancy": len(rows_with_variance),

@@ -1,7 +1,8 @@
 import React, { useState, useCallback } from "react";
-import { formatDate } from "../../utils/dateUtils";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
-import { apiFetch, apiError, formatNumber, today, monthStart } from "./reportUtils";
+import {
+  apiFetch, apiError, cycleCountColumns, formatNumber, today, monthStart, varianceCards,
+} from "./reportUtils";
 
 const CycleCountsReport = () => {
   const [ccStart, setCcStart] = useState(monthStart());
@@ -26,17 +27,7 @@ const CycleCountsReport = () => {
     }
   }, [ccStart, ccEnd]);
 
-  const ccCols = [
-    { label: "Count Date", value: (r) => formatDate(r.count_date) },
-    { label: "Product", value: (r) => r.product_name },
-    { label: "Location", value: (r) => r.location || "—" },
-    { label: "System Count", value: (r) => r.system_count != null ? formatNumber(r.system_count) : "—" },
-    { label: "Physical Count", value: (r) => r.actual_count != null ? formatNumber(r.actual_count) : "—" },
-    { label: "Variance", value: (r) => r.variance != null ? formatNumber(r.variance) : "—" },
-    { label: "Variance %", value: (r) => r.variance_pct != null ? `${r.variance_pct}%` : "—" },
-    { label: "Counted By", value: (r) => r.counted_by || "—" },
-    { label: "Notes", value: (r) => r.notes || "—" },
-  ];
+  const ccCols = cycleCountColumns;
 
   return (
     <section className="reports-panel">
@@ -60,14 +51,14 @@ const CycleCountsReport = () => {
       {ccData && (
         <>
           <SummaryCards cards={[
-            { label: "Count Sessions", value: formatNumber(ccData.totals?.count_events) },
+            { label: "Counts", value: formatNumber(ccData.totals?.count_events) },
             { label: "Items Counted", value: formatNumber(ccData.totals?.item_rows) },
-            { label: "Total Variance", value: formatNumber(ccData.totals?.total_variance), highlight: Math.abs(ccData.totals?.total_variance || 0) > 0 },
+            ...varianceCards(ccData.totals),
             { label: "Items with Discrepancy", value: formatNumber(ccData.totals?.rows_with_discrepancy) },
           ]} />
           <div className="reports-section">
             <div className="reports-section-header">
-              <div><h3>Cycle Count Variance</h3><p>System vs physical count comparison.</p></div>
+              <div><h3>Cycle Count Variance</h3><p>System vs physical count — finished-goods cycle counts and raw-material rack counts.</p></div>
               <ExportButtons columns={ccCols} rows={ccData.rows || []} fileBaseName="cycle-count-variance" />
             </div>
             <ReportTable columns={ccCols} rows={(ccData.rows || []).map((r, i) => ({ ...r, id: r.count_id || i }))} emptyMessage="No cycle counts found." />

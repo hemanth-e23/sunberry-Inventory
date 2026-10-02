@@ -113,11 +113,17 @@
   font-weight: 700;
   color: #6b7280;
   margin-right: auto;
+  /* "Each scan is" wrapped onto three lines at 400 px (PART 4, P8). */
+  white-space: nowrap;
 }
 
+/* 44 px: a gloved thumb's target (PART 4, P8). Padding 0 so the global
+   button padding cannot widen it past the row. */
 .spf-units-btn {
-  width: 2.2rem;
-  height: 2.2rem;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  flex-shrink: 0;
   border: 1.5px solid #d1d5db;
   border-radius: 8px;
   background: #f9fafb;
@@ -129,7 +135,8 @@
 
 .spf-units-input {
   width: 3rem;
-  height: 2.2rem;
+  height: 44px;
+  flex-shrink: 0;
   text-align: center;
   font-size: 1.05rem;
   font-weight: 800;
@@ -153,7 +160,17 @@
   font-size: 0.82rem;
   font-weight: 700;
   padding: 0 0.8rem;
+  min-height: 44px;
   white-space: nowrap;
+}
+
+/* Phone width: the per-scan stepper takes the whole row and "Pull open drum"
+   drops below it at full width, instead of being clipped to "Pull open d…"
+   (PART 4, P8). */
+@media (max-width: 480px) {
+  .spf-scanopts { flex-wrap: wrap; }
+  .spf-units { flex: 1 1 100%; }
+  .spf-open-btn { flex: 1 1 100%; white-space: normal; }
 }
 
 .spf-open-btn.is-on {

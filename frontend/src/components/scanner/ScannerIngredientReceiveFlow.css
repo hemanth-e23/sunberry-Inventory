@@ -1102,3 +1102,40 @@
 
 .sir-link-row { display: flex; gap: 0.4rem; }
 .sir-link-row .sir-link { flex: 1; }
+
+/* ── Tap targets and phone width (browser test PART 4, P8) ──────────────────
+   Gloved thumbs on a 400 px gun: every tappable thing is at least 44 px
+   tall, and the rack banner's second line wraps instead of cutting off
+   "No location set — drums are bl…". */
+.sir-link { min-height: 44px; }
+.sir-rowbanner-btn { min-height: 44px; min-width: 64px; padding: 0.5rem 0.9rem; font-size: 0.9rem; }
+.sir-rowbanner-path { white-space: normal; overflow-wrap: anywhere; }
+
+/* Truck list: where each truck stands, and the folded finished ones. */
+.sir-truck-stage {
+  display: inline-block;
+  margin: 0 0.4rem 0.2rem 0;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.sir-truck-stage--in_progress { background: #dcfce7; color: #14532d; }
+.sir-truck-stage--not_started { background: #f3f4f6; color: #374151; }
+.sir-truck-stage--all_scanned { background: #e0e7ff; color: #312e81; }
+.sir-card--done { opacity: 0.8; }
+.sir-show-finished { margin: 0.25rem 0 0.5rem; }
+
+@media (max-width: 480px) {
+  .sir-input { font-size: 1rem; padding: 0.85rem 0.75rem; }
+  .sir-scan-btn { min-width: 56px; padding: 0.85rem 0.9rem; }
+  .sir-rowbanner { gap: 0.55rem; padding: 0.75rem 0.8rem; }
+  .sir-rowbanner-name { font-size: 1.3rem; }
+  .sir-link-row { flex-wrap: wrap; }
+  .sir-perscan { flex-wrap: wrap; }
+  .sir-perscan-label { flex-basis: 100%; }
+  .sir-truck-product { flex-wrap: wrap; }
+  .sir-truck-product strong { white-space: nowrap; }
+}

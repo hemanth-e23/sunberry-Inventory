@@ -19,8 +19,8 @@ import {
 } from '../../utils/gunCache';
 import {
   createDoubleFireGuard, describeRecountDiff, formatUnitTotals, lineMismatchNote,
-  matchTypedLot, offlineMessage, overScanTitle, palletCheckKey, shouldAskPallet,
-  parseLooseQty, queuedScanLabel, rackFillLabel, scanUnitsBadge, truckUnitWords, unitCount,
+  matchTypedLot, offlineMessage, orderTruckList, overScanTitle, palletCheckKey, shouldAskPallet,
+  parseLooseQty, queuedScanLabel, rackFillLabel, scanUnitsBadge, truckProgress, truckUnitWords, unitCount,
 } from '../../utils/truckReceiving';
 import { isTerminal, useLotScanQueue } from '../../hooks/useLotScanQueue';
 import { useScanFocusKeeper } from '../../hooks/useScanFocusKeeper';
@@ -79,6 +79,12 @@ const errorText = (err, fallback) => (
 /** Report a direct call's outcome to the shared connectivity, then pass it on. */
 const reportFailure = (err) => {
   if (isUnreachableError(err)) noteReachability(false);
+};
+
+const TRUCK_STAGE_LABEL = {
+  in_progress: 'Unloading',
+  not_started: 'Not started',
+  all_scanned: 'All scanned — tap to finish',
 };
 
 const sameCode = (a, b) => String(a || '').toUpperCase() === String(b || '').toUpperCase();
@@ -205,6 +211,49 @@ const TruckListView = () => {
     }
   }, [scanInput, navigate, refuse, trucks]);
 
+  // Trucks being unloaded first, then not started; all-scanned ones fold
+  // away behind "Show finished" (PART 4, P8). Offline sticker lookups above
+  // still search every truck.
+  const orderedTrucks = useMemo(() => orderTruckList(trucks), [trucks]);
+  const [showFinished, setShowFinished] = useState(false);
+
+  const renderTruck = (truck, done = false) => {
+    const products = (truck.lines || []).reduce((acc, line) => {
+      const key = line.product_name || line.lot_code;
+      if (!acc[key]) acc[key] = { lots: 0, scanned: 0, expected: 0, unit: line.count_unit };
+      acc[key].lots += 1;
+      acc[key].scanned += line.scanned_count;
+      acc[key].expected += line.expected_count;
+      return acc;
+    }, {});
+    const progress = truckProgress(truck);
+    return (
+      <button
+        key={truck.order_id}
+        type="button"
+        className={`sir-card${done ? ' sir-card--done' : ''}`}
+        onClick={() => navigate(`/forklift/lot-receiving/truck/${truck.order_id}`)}
+      >
+        <div className="sir-card-head">
+          <span className="sir-card-number sir-truck-number"><Truck size={18} /> {truck.order_number}</span>
+          <span className="sir-card-status">{truck.vendor_name || truck.origin_name || ''}</span>
+        </div>
+        <div className="sir-card-meta">
+          <span className={`sir-truck-stage sir-truck-stage--${progress}`}>
+            {TRUCK_STAGE_LABEL[progress]}
+          </span>
+          {truck.bol ? `BOL ${truck.bol}` : 'No BOL'}
+          {Object.entries(products).map(([name, p]) => (
+            <div key={name} className="sir-truck-product">
+              <span>{name}{p.lots > 1 ? ` (${p.lots} lots)` : ''}</span>
+              <strong>{p.scanned} of {unitCount(p.expected, p.unit)}</strong>
+            </div>
+          ))}
+        </div>
+      </button>
+    );
+  };
+
   return (
     <ScannerLayout
       title="Receiving"
@@ -235,7 +284,7 @@ const TruckListView = () => {
             type="text"
             value={scanInput}
             onChange={(e) => setScanInput(e.target.value)}
-            placeholder="Scan any sticker to open its truck…"
+            placeholder="Scan a sticker to open its truck"
             className="sir-input"
             autoComplete="off"
             autoCapitalize="characters"
@@ -262,38 +311,21 @@ const TruckListView = () => {
           </p>
         )}
 
-        {trucks.map((truck) => {
-          const products = truck.lines.reduce((acc, line) => {
-            const key = line.product_name || line.lot_code;
-            if (!acc[key]) acc[key] = { lots: 0, scanned: 0, expected: 0, unit: line.count_unit };
-            acc[key].lots += 1;
-            acc[key].scanned += line.scanned_count;
-            acc[key].expected += line.expected_count;
-            return acc;
-          }, {});
-          return (
-            <button
-              key={truck.order_id}
-              type="button"
-              className="sir-card"
-              onClick={() => navigate(`/forklift/lot-receiving/truck/${truck.order_id}`)}
-            >
-              <div className="sir-card-head">
-                <span className="sir-card-number sir-truck-number"><Truck size={18} /> {truck.order_number}</span>
-                <span className="sir-card-status">{truck.vendor_name || truck.origin_name || ''}</span>
-              </div>
-              <div className="sir-card-meta">
-                {truck.bol ? `BOL ${truck.bol}` : 'No BOL'}
-                {Object.entries(products).map(([name, p]) => (
-                  <div key={name} className="sir-truck-product">
-                    <span>{name}{p.lots > 1 ? ` (${p.lots} lots)` : ''}</span>
-                    <strong>{p.scanned} of {unitCount(p.expected, p.unit)}</strong>
-                  </div>
-                ))}
-              </div>
-            </button>
-          );
-        })}
+        {orderedTrucks.open.map((truck) => renderTruck(truck))}
+
+        {orderedTrucks.done.length > 0 && (
+          <button
+            type="button"
+            className="sir-link sir-show-finished"
+            aria-expanded={showFinished}
+            onClick={() => setShowFinished((v) => !v)}
+          >
+            {showFinished
+              ? 'Hide finished trucks'
+              : `Show finished (${orderedTrucks.done.length} all scanned, waiting for Finish)`}
+          </button>
+        )}
+        {showFinished && orderedTrucks.done.map((truck) => renderTruck(truck, true))}
 
         {walkIns.length > 0 && <div className="sir-dialog-group">Walk-in receipts</div>}
         {walkIns.map((session) => (

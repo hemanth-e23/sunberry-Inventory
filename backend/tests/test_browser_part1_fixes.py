@@ -88,7 +88,7 @@ class TestReportDayIsTheWarehouseDay:
             db_session, warehouse_id="wh-tz", start_date="2026-10-01", end_date="2026-10-01",
         )
         assert {r["receipt_id"] for r in out["rows"]} == {"r-morning", "r-evening"}
-        assert out["by_vendor"]["QA Chem Supply"] == {"receipts": 2, "quantity": 2750.0}
+        assert out["by_vendor"]["QA Chem Supply"] == {"receipts": 2, "quantity": 2750.0, "remaining": 2750.0}
 
         tomorrow = rb.build_vendor_receipts_report(
             db_session, warehouse_id="wh-tz", start_date="2026-10-02", end_date="2026-10-02",

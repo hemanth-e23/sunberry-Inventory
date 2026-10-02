@@ -569,11 +569,13 @@ def mark_request_item_used(
         # approve_adjustment (where production-consumption is not a deduction).
         adjustment_type="production-consumption",
         quantity=quantity,
+        # Set, so the report knows these before/after are the lot's (P6).
+        unit=receipt.unit,
         reason=f"Used from staging for production (request {request_id})",
         status=AdjustmentStatus.APPROVED,
         approved_at=datetime.now(timezone.utc),
-        original_quantity=receipt.quantity,
-        new_quantity=receipt.quantity - quantity,
+        # Lot-level before/after (browser test PART 4, P6).
+        original_quantity=lot_paper_total(db, receipt),
         submitted_by=None,
         approved_by=None,
     )
@@ -584,6 +586,7 @@ def mark_request_item_used(
     # storage-row or allocation-JSON change here. Spills across the lot's
     # receipts instead of clamping at zero (audit S5).
     consume_receipt_quantity(db, receipt, quantity)
+    adjustment.new_quantity = lot_paper_total(db, receipt)
 
     # Update staging item
     staging_item.quantity_used += quantity
@@ -990,6 +993,34 @@ def get_reconciliation_summary(db: Session) -> list:
 # Notify ingredient used (push from Production)
 # ---------------------------------------------------------------------------
 
+def lot_paper_total(db: Session, receipt) -> float:
+    """What the books say the receipt's LOT holds: Σ paper of its approved and
+    depleted receipts (a rejected delivery never entered stock).
+
+    The before/after of a production-consumption adjustment is recorded at
+    this scope. Staging pins a pull to one delivery, and consumption spills
+    across the lot's deliveries, so that one delivery's paper read
+    "0 → −202" and "275 → 220" in the Adjustments report (browser test
+    PART 4, P6). A receipt without a lot is its own scope.
+
+    Flushes first: the session does not autoflush, and a spill just applied
+    to a sibling would otherwise be read back stale.
+    """
+    if not getattr(receipt, "material_lot_id", None):
+        return round(float(receipt.quantity or 0), 3)
+    db.flush()
+    family = (
+        db.query(Receipt)
+        .filter(
+            Receipt.material_lot_id == receipt.material_lot_id,
+            Receipt.status.in_((ReceiptStatus.APPROVED, ReceiptStatus.DEPLETED)),
+            Receipt.is_deleted == False,  # noqa: E712
+        )
+        .all()
+    )
+    return round(sum(float(r.quantity or 0) for r in family), 3)
+
+
 def consume_receipt_quantity(db: Session, receipt, amount: float, *, staging_settled: bool = False) -> None:
     """Decrement paper quantity by `amount`, SPILLING any excess across the
     lot's other open receipts (oldest first) instead of clamping at zero
@@ -1218,11 +1249,12 @@ def notify_ingredient_used(
                     product_id=receipt.product_id,
                     adjustment_type="production-consumption",
                     quantity=use_qty,
+                    unit=receipt.unit,
                     reason=f"Used in production scan (batch {production_batch_uid}, lot {lot_barcode or 'N/A'})",
                     status=AdjustmentStatus.APPROVED,
                     approved_at=datetime.now(timezone.utc),
-                    original_quantity=receipt.quantity,
-                    new_quantity=max(0, receipt.quantity - use_qty),
+                    # Lot-level before/after (browser test PART 4, P6).
+                    original_quantity=lot_paper_total(db, receipt),
                     submitted_by=None,
                     approved_by=None,
                 )
@@ -1231,6 +1263,7 @@ def notify_ingredient_used(
                 # Staged material: rack freed at staging, so only reduce the
                 # paper total — spilling across the lot's receipts (audit S5).
                 consume_receipt_quantity(db, receipt, use_qty)
+                adjustment.new_quantity = lot_paper_total(db, receipt)
 
                 si.quantity_used += use_qty
                 staging_service.settle_status(si)
@@ -1435,7 +1468,7 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                 if reduce_qty <= 0:
                     continue
                 si.quantity_used -= reduce_qty
-                qty_before_credit = float(receipt.quantity or 0)
+                qty_before_credit = lot_paper_total(db, receipt)
                 if receipt.material_lot_id:
                     # The consume spilled across the lot's receipts, so the
                     # credit must un-spill the same way — crediting this one
@@ -1458,11 +1491,12 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
                     product_id=receipt.product_id,
                     adjustment_type="stock-correction",
                     quantity=-reduce_qty,
+                    unit=receipt.unit,
                     reason=f"Sync correction: was over-marked, restored to match Production ({batches_completed} completed batch(es))",
                     status=AdjustmentStatus.APPROVED,
                     approved_at=datetime.now(timezone.utc),
                     original_quantity=qty_before_credit,
-                    new_quantity=receipt.quantity,
+                    new_quantity=lot_paper_total(db, receipt),
                     submitted_by=None,
                     approved_by=None,
                 ))
@@ -1472,25 +1506,28 @@ async def sync_production_usage(db: Session, request_id: str) -> dict:
 
             use_qty = delta
             adj_id = f"adj-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
-            db.add(InventoryAdjustment(
+            sync_adj = InventoryAdjustment(
                 id=adj_id,
                 receipt_id=receipt.id,
                 warehouse_id=receipt.warehouse_id,
                 product_id=receipt.product_id,
                 adjustment_type="production-consumption",
                 quantity=use_qty,
+                unit=receipt.unit,
                 reason=f"Synced from Production — {batches_completed} completed batch(es)",
                 status=AdjustmentStatus.APPROVED,
                 approved_at=datetime.now(timezone.utc),
-                original_quantity=receipt.quantity,
-                new_quantity=max(0, receipt.quantity - use_qty),
+                # Lot-level before/after (browser test PART 4, P6).
+                original_quantity=lot_paper_total(db, receipt),
                 submitted_by=None,
                 approved_by=None,
-            ))
+            )
+            db.add(sync_adj)
 
             # Staged material: rack freed at staging, so only reduce the
             # paper total — spilling across the lot's receipts (audit S5).
             consume_receipt_quantity(db, receipt, use_qty)
+            sync_adj.new_quantity = lot_paper_total(db, receipt)
 
             si.quantity_used += use_qty
             staging_service.settle_status(si)
