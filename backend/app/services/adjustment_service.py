@@ -12,6 +12,7 @@ from app.services.ship_out_service import _release_row_capacity
 from app.services.transfer_service import (
     _rebuild_receipt_allocation_from_licences,
     lot_scoped_availability,
+    spill_receipt_credit,
     spill_receipt_deduction,
 )
 from app.services.row_allocation import (
@@ -195,10 +196,12 @@ def _apply_row_breakdown_counted(
     if deductions:
         # The operator named the racks, so honour exactly that. Their weight per
         # rack becomes a count per rack.
+        exact = 0.0
         for row_id, qty in deductions.items():
-            units = lps.receipt_units_for_quantity(receipt, lot, float(qty or 0))
+            units = lps.row_units_for_quantity(db, lot, row_id, float(qty or 0), receipt=receipt)
             if units <= 0:
                 continue
+            exact += lps.fifo_units_weight(db, lot, row_id, units)
             lps.take_units(
                 db, lot,
                 units=units,
@@ -208,6 +211,17 @@ def _apply_row_breakdown_counted(
                 ref_id=adjustment.id,
                 reason=adjustment.reason,
             )
+        # A rack holding two deliveries' drums: the drums that left weigh what
+        # their deliveries say, which can differ from typed drums × the rack's
+        # average. Settle the paper to the real pounds so it keeps matching
+        # the racks, and record the real figure on the adjustment.
+        typed = float(adjustment.quantity or 0)
+        if exact > 0 and abs(exact - typed) > 0.01:
+            if exact > typed:
+                spill_receipt_deduction(db, receipt, exact - typed)
+            else:
+                spill_receipt_credit(db, receipt, typed - exact)
+            adjustment.quantity = round(exact, 3)
         return
 
     # No racks named — take it off the fullest first and let the ledger record

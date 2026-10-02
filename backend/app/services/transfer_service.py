@@ -533,7 +533,19 @@ def _apply_raw_material_internal_transfer(
     # says. Every silent-no-op incident in the 2026-09 audit was the absence
     # of this check.
     lot = db.query(MaterialLot).filter(MaterialLot.id == receipt.material_lot_id).first()
-    expected_units = lps.receipt_units_for_quantity(receipt, lot, float(transfer.quantity or 0)) if lot else 0
+    # The paper's total, converted at the weight the named racks carry — each
+    # rack's own figure, so a rack of another delivery's drums is not misread
+    # — and compared with what the racks would move. A transfer saying 10
+    # drums while naming racks for 6 must still be refused (audit T5/T8).
+    expected_units = 0
+    if lot:
+        named_lbs = sum(float(q or 0) for rid, q in source_cases.items() if rid)
+        named_units = sum(
+            lps.row_units_for_quantity(db, lot, rid, float(q or 0), receipt=receipt)
+            for rid, q in source_cases.items() if rid
+        )
+        if named_units > 0 and named_lbs > 0:
+            expected_units = int(round(float(transfer.quantity or 0) / (named_lbs / named_units)))
     if moved_units <= 0:
         raise ValidationError(
             "Approving this transfer would move nothing on the racks. Check "
@@ -589,7 +601,7 @@ def _move_counted_lot(
 
     moved = 0
     for index, (src_row, qty) in enumerate(source_cases.items()):
-        units = lps.receipt_units_for_quantity(receipt, lot, float(qty or 0))
+        units = lps.row_units_for_quantity(db, lot, src_row, float(qty or 0), receipt=receipt)
         if units <= 0 or not src_row:
             continue
         dest_row = dest_rows[index] if index < len(dest_rows) else dest_rows[-1]
@@ -636,14 +648,20 @@ def _apply_raw_material_ship_out(
             return
         if source_cases:
             # The worker named the racks they pulled from. Honour exactly that.
+            exact = 0.0
             for row_id, qty in source_cases.items():
-                units = lps.receipt_units_for_quantity(receipt, lot, float(qty or 0))
+                units = lps.row_units_for_quantity(db, lot, row_id, float(qty or 0), receipt=receipt)
                 if units > 0 and row_id:
+                    # What those drums actually weigh (their deliveries), so
+                    # the paper drops by the same pounds the racks lose.
+                    exact += lps.fifo_units_weight(db, lot, row_id, units)
                     lps.take_units(
                         db, lot, units=units, event_type=lps.EVENT_MOVED,
                         from_row_id=row_id, ref_type="transfer", ref_id=transfer.id,
                         reason="Shipped out",
                     )
+            if exact > 0 and abs(exact - float(transfer.quantity or 0)) > 0.01:
+                transfer.quantity = round(exact, 3)
         else:
             lps.take_units(
                 db, lot,

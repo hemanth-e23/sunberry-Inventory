@@ -24,6 +24,7 @@ from app.schemas import (
     PackageSize as PackageSizeSchema, PackageSizeCreate, PackageSizeUpdate,
     ShipToLocationOut, CarrierOut, PalletTypeOut,
 )
+from app.services import lot_placement_service as lps
 from app.utils.auth import get_current_active_user, require_role, warehouse_filter, require_superadmin, resolve_warehouse_for_write
 from app.constants import ROLE_SUPERADMIN
 from app.utils.schema_filter import model_kwargs
@@ -278,6 +279,16 @@ def _attach_live_unit_aggregates(db: Session, sub_locations: list) -> None:
         .all()
     )
 
+    lot_objs: dict = {}
+
+    def _rack_unit_weight(lot_id, row_id, fallback):
+        lot = lot_objs.get(lot_id)
+        if lot is None:
+            lot = lot_objs[lot_id] = db.query(MaterialLot).filter(MaterialLot.id == lot_id).first()
+        if lot is None:
+            return float(fallback or 0)
+        return lps.row_unit_weight(db, lot, row_id)
+
     totals: dict[str, list] = defaultdict(lambda: [0, 0])
     lots: dict[str, list[dict]] = defaultdict(list)
     content_units: dict[str, str] = {}
@@ -298,9 +309,11 @@ def _attach_live_unit_aggregates(db: Session, sub_locations: list) -> None:
             "vendor_lot_number": vendor_lot,
             "units": units,
             "open_units": int(open_units or 0),
-            # Derived, exactly as everywhere else.
+            # Derived, exactly as everywhere else — sealed units at the weight
+            # of the deliveries they came on, so a rack of the 474 truck does
+            # not read as 502s (2026-10-01).
             "weight": round(
-                int(full_units or 0) * float(weight_per_unit or 0)
+                int(full_units or 0) * _rack_unit_weight(lot_id, row_id, weight_per_unit)
                 + float(open_qty or 0), 3,
             ),
             "weight_unit": weight_unit,

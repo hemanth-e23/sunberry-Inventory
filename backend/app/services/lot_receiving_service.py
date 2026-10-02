@@ -1426,8 +1426,10 @@ def receiving_summary(db: Session, receipt: Receipt) -> dict:
         # Set for bags and boxes, and it is the prefill for "how many are under
         # this pallet sticker?".
         "units_per_pallet": lot.units_per_pallet if lot else None,
+        # THIS delivery's weight per unit: a second truck of the lot at 474
+        # is not 502s (2026-10-01).
         "derived_weight": round(
-            counts["total"] * float(lot.weight_per_unit or 0), 3
+            counts["total"] * float(receipt.weight_per_container or lot.weight_per_unit or 0), 3
         ) if lot else None,
         "rows": rows,
         "source": "incoming_order" if order else "walk_in",

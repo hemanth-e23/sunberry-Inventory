@@ -117,10 +117,16 @@ def _event_quantity(db: Session, event: LotPlacementEvent, _lot_cache: dict) -> 
         ).first()
         cached = (lot, _per_unit_weight(db, lot) if lot else 0.0)
         _lot_cache[event.material_lot_id] = cached
-    _lot, per_unit = cached
+    lot, per_unit = cached
     units = -int(event.full_units_delta or 0)
     open_qty = -float(event.qty_delta or 0)
-    return max(0.0, units * per_unit) + max(0.0, open_qty)
+    # The drums this pull took weigh what THEIR deliveries say (a rack can
+    # hold 502s and 474s of one lot); the pinned receipt's figure is only the
+    # fallback when the ledger cannot say (2026-10-01).
+    sealed = lps.event_taken_weight(db, lot, event.id) if (lot and units > 0) else None
+    if sealed is None:
+        sealed = max(0.0, units * per_unit)
+    return sealed + max(0.0, open_qty)
 
 
 def _pending_by_item(db: Session, item_ids: List[str]) -> Dict[str, float]:
@@ -423,6 +429,8 @@ def scan(db: Session, request_id: str, body, user_id: Optional[str]) -> dict:
                 "Check the rack, or scan the rack you are actually pulling from."
             ),
         )
+    # Priced BEFORE the drums leave: the oldest deliveries on that rack.
+    pulled_lbs = lps.fifo_units_weight(db, lot, body.storage_row_id, int(body.units))
     lps.apply_delta(
         db, lot, body.storage_row_id,
         event_type=lps.EVENT_STAGED,
@@ -434,11 +442,10 @@ def scan(db: Session, request_id: str, body, user_id: Optional[str]) -> dict:
         idempotency_key=body.idempotency_key,
     )
     db.flush()
-    # Priced at the RECEIPT's per-container weight, not the lot's first-
-    # delivery figure — one vendor lot genuinely arrives at different drum
-    # weights, and lot-priced pulls booked phantom lbs into staging
-    # (2026-09-29 audit, weight finding 6).
-    qty = int(body.units) * _per_unit_weight(db, lot)
+    # Priced by the deliveries the pulled drums came from (2026-10-01) — the
+    # pinned receipt's figure booked phantom lbs when the rack held another
+    # truck's drums (2026-09-29 audit, weight finding 6).
+    qty = pulled_lbs
     return _scan_payload(
         db, sr, status="ok", item=item, lot=lot,
         units=int(body.units), quantity=qty,
@@ -531,12 +538,14 @@ def submit(
     # from (most-drawn row becomes the StagingItem's original row).
     agg: Dict[tuple, dict] = {}
     lot_cache: dict = {}
+    price_cache: dict = {}   # _event_quantity's own (lot, per-unit) cache
     for ev in events:
         key = (ev.ref_id, ev.material_lot_id)
-        entry = agg.setdefault(key, {"units": 0, "open_qty": 0.0, "rows": {}})
+        entry = agg.setdefault(key, {"units": 0, "open_qty": 0.0, "rows": {}, "lbs": 0.0})
         u = -int(ev.full_units_delta or 0)
         entry["units"] += u
         entry["open_qty"] += -float(ev.qty_delta or 0)
+        entry["lbs"] += _event_quantity(db, ev, price_cache)
         entry["rows"][ev.storage_row_id] = entry["rows"].get(ev.storage_row_id, 0) + max(u, 1)
 
     # Shortage advisory — a prompt, not a gate (over/short pulls are real).
@@ -579,11 +588,10 @@ def submit(
                 "until receiving paperwork exists."
             )
 
-        # Priced at the pinned RECEIPT's per-container weight (lot figure only
-        # as fallback): the lot's weight is frozen at the first delivery and
-        # deliveries genuinely differ, so lot-priced pulls booked phantom lbs
-        # into staging (2026-09-29 audit, weight finding 6).
-        qty = entry["units"] * _per_unit_weight(db, lot, receipt) + entry["open_qty"]
+        # Each pull's own weight: its drums' deliveries + open qty. The pinned
+        # receipt's single figure booked phantom lbs into staging when the
+        # rack held another truck's drums (2026-09-29 audit, 2026-10-01).
+        qty = entry["lbs"]
         if qty <= 0:
             continue
         original_row = max(entry["rows"], key=entry["rows"].get) if entry["rows"] else None

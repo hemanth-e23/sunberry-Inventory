@@ -77,7 +77,7 @@ const makeEntry = (overrides) => {
   let displayFactor = 1;
   if (wpc && cu) {
     displayUnit = cu;
-    displayFactor = wpc;
+    displayFactor = Number(overrides.rackUnitWeight) > 0 ? Number(overrides.rackUnitWeight) : wpc;
   }
   // What this rack's FOOTPRINT is counted in — a property of the ROOM, not of
   // what the receipt arrived in. A drum room counts drums on its shelves
@@ -196,9 +196,13 @@ export const buildEntriesForProduct = ({
         const heldUnits = Number(a.heldUnits) || 0;
         const grossWeight = Number(a.cases) || 0;
         const allocUnits = Number(a.units) || 0;
-        const perUnit = (weightPerContainer && weightPerContainer > 0)
-          ? weightPerContainer
-          : (allocUnits > 0 ? grossWeight / allocUnits : 0);
+        // The rack's own weight per sealed unit first (its deliveries), then
+        // the receipt's, then an average of what the rack holds.
+        const perUnit = Number(a.weightPerUnit) > 0
+          ? Number(a.weightPerUnit)
+          : (weightPerContainer && weightPerContainer > 0)
+            ? weightPerContainer
+            : (allocUnits > 0 ? grossWeight / allocUnits : 0);
         const heldWeight = Math.min(grossWeight, heldUnits * perUnit);
         const reservedWeight = Math.min(
           Math.max(0, grossWeight - heldWeight),
@@ -222,6 +226,11 @@ export const buildEntriesForProduct = ({
           fullUnits: Number(a.fullUnits) || 0,
           openUnits: Number(a.openUnits) || 0,
           openQty: Number(a.openQty) || 0,
+          grossWeight: grossWeight,
+          // What a sealed unit on THIS rack weighs (from the deliveries on
+          // it). One lot can be 502s on one rack and 474s on another, and the
+          // receipt's single figure misread the second (2026-10-01).
+          rackUnitWeight: Number(a.weightPerUnit) || 0,
           rowPallets: Number(a.pallets) || 0,
           unit,
           weightPerContainer,
@@ -470,8 +479,16 @@ export const describeContainers = (entry, available = entry.available) => {
   const unit = pluralizeUnit(singularUnit(entry.displayUnit || 'unit'));
   const openQty = Number(entry.openQty) || 0;
   const avail = Math.max(0, Number(available) || 0);
+  const gross = Number(entry.grossWeight) || avail;
   const openFree = open > 0 && avail >= openQty - 0.01 ? open : 0;
-  const fullFree = Math.max(0, Math.round((avail - (openFree ? openQty : 0)) / factor));
+  // Nothing held back: the free count IS the rack count. Dividing pounds by
+  // one weight said "15 drums" for 14 when the lot had 502s and 474s
+  // (2026-10-01). Only what is held or promised is converted, and rounded
+  // up — a part-promised drum is not free.
+  const withheld = Math.max(0, gross - avail);
+  const fullFree = withheld <= 0.01
+    ? full
+    : Math.max(0, full - Math.ceil((withheld - 0.01) / factor));
   const fmt = (n) => Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
   const storage = entry.unit || 'lbs';
   if (!openFree) return `${fullFree} ${fullFree === 1 ? singularUnit(unit) : unit}`;

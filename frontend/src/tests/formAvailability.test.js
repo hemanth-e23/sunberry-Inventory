@@ -76,3 +76,31 @@ describe('an open drum is one container, not a fraction', () => {
     expect(describeContainers({ displayFactor: W, displayUnit: 'drum', available: W })).toBeNull();
   });
 });
+
+describe('one lot, two drum weights (2026-10-01 PART 1 F2)', () => {
+  // A-0925: truck 1 at 502 lb/drum on QA-D1, truck 2 at 474 on QA-D2. The
+  // carrier receipt is truck 2, so its weightPerContainer is 474 — the rack
+  // weight from the projection must win.
+  const carrier = lotReceipt('t2', [
+    { rowId: 'd1', cases: 10 * 502, units: 10, fullUnits: 10, weightPerUnit: 502 },
+    { rowId: 'd2', cases: 9 * 474, units: 9, fullUnits: 9, weightPerUnit: 474 },
+  ], { weightPerContainer: 474 });
+
+  it('converts typed drums with each rack\'s own weight', () => {
+    const entries = buildEntriesForProduct({ productId: 'p1', approvedReceipts: [carrier] });
+    const d1 = entries.find((e) => e.rowId === 'd1');
+    const d2 = entries.find((e) => e.rowId === 'd2');
+    expect(d1.displayFactor).toBe(502);
+    expect(d2.displayFactor).toBe(474);
+    expect(describeContainers(d1)).toBe('10 drums');
+    expect(describeContainers(d2)).toBe('9 drums');
+  });
+
+  it('counts drums from the rack, not pounds ÷ one weight', () => {
+    // 14 drums at 502 on one rack described with a 474 factor used to say 15.
+    expect(describeContainers({
+      displayFactor: 474, displayUnit: 'drum', unit: 'lbs',
+      fullUnits: 14, openUnits: 0, openQty: 0, grossWeight: 14 * 502, available: 14 * 502,
+    })).toBe('14 drums');
+  });
+});

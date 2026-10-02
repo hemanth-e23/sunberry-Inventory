@@ -224,7 +224,7 @@ class Story:
         return r.json()
 
     # ── receiving ──
-    def receive_truck(self, key, vendor_lot, bbd, count, row):
+    def receive_truck(self, key, vendor_lot, bbd, count, row, weight=W):
         order = self.post("/api/lot-receiving/orders", WH_H, json={
             "vendor_id": VENDOR,
             "bol": f"BOL-{uuid.uuid4().hex[:6]}",
@@ -233,7 +233,7 @@ class Story:
                 "product_id": PRODUCT, "category_id": CAT,
                 "vendor_lot": vendor_lot, "bbd": bbd,
                 "expected_count": count, "unit_label": "drum",
-                "weight_per_unit": W, "weight_unit": "lbs",
+                "weight_per_unit": weight, "weight_unit": "lbs",
             }],
         }).json()
         self.post(f"/api/lot-receiving/orders/{order['id']}/release", WH_H,

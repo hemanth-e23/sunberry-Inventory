@@ -417,6 +417,7 @@ const ProductLine = ({ product, depth }) => {
         {describeContainers({
           displayFactor: product.displayFactor, displayUnit, unit: product.unit,
           fullUnits: product.fullUnits, openUnits: product.openUnits, openQty: product.openQty,
+          grossWeight: product.qty,
         }, product.qty)
           ?? `${displayQty.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${displayUnit}`}
         {product.displayUnit && (

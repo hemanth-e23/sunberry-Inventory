@@ -257,16 +257,63 @@ def _placements_by_bucket(
         # sits in two plants, and only the placement knows which drums are where.
         q = q.filter(LotPlacement.warehouse_id == warehouse_id)
 
+    free_fix, held_fix = _mixed_weight_corrections(db, product_id, warehouse_id)
+
     out = []
     for unit, held_qty, held_n, free_qty, free_n, count in q.all():
+        free_qty = float(free_qty or 0.0) + free_fix.get(unit, 0.0)
+        held_qty = float(held_qty or 0.0) + held_fix.get(unit, 0.0)
         # The placement count is reported against the unheld bucket. It counts
         # ROWS, not drums, and a partly-held rack is still one row that has
         # something on it.
-        if float(free_qty or 0) or int(free_n or 0):
-            out.append((False, unit, float(free_qty or 0.0), int(count or 0), int(free_n or 0)))
-        if float(held_qty or 0) or int(held_n or 0):
-            out.append((True, unit, float(held_qty or 0.0), 0, int(held_n or 0)))
+        if free_qty or int(free_n or 0):
+            out.append((False, unit, free_qty, int(count or 0), int(free_n or 0)))
+        if held_qty or int(held_n or 0):
+            out.append((True, unit, held_qty, 0, int(held_n or 0)))
     return out
+
+
+def _mixed_weight_corrections(db: Session, product_id: str, warehouse_id: Optional[str]):
+    """Per weight unit, what the SQL above gets wrong for lots whose
+    deliveries weigh differently per unit.
+
+    The SQL prices every sealed unit at the lot's first-seen weight; a lot that
+    arrived at 502 and 474 lb/drum is then over-stated by 28 lb for every 474
+    on a rack (2026-10-01). Only those lots are touched — the per-rack weight
+    comes from the ledger (`lps.row_unit_weight`), which is not cheap."""
+    from app.services import lot_placement_service as lps
+
+    mixed = (
+        db.query(Receipt.material_lot_id)
+        .filter(
+            Receipt.product_id == product_id,
+            Receipt.material_lot_id.isnot(None),
+            Receipt.weight_per_container.isnot(None),
+        )
+        .group_by(Receipt.material_lot_id)
+        .having(func.count(func.distinct(Receipt.weight_per_container)) > 1)
+        .all()
+    )
+    free_fix: dict = {}
+    held_fix: dict = {}
+    for (lot_id,) in mixed:
+        lot = db.query(MaterialLot).filter(MaterialLot.id == lot_id).first()
+        if lot is None or lot.is_deleted:
+            continue
+        lot_w = float(lot.weight_per_unit or 0)
+        q = db.query(LotPlacement).filter(
+            LotPlacement.material_lot_id == lot_id, LotPlacement.full_units > 0
+        )
+        if warehouse_id:
+            q = q.filter(LotPlacement.warehouse_id == warehouse_id)
+        for p in q.all():
+            diff = lps.row_unit_weight(db, lot, p.storage_row_id) - lot_w
+            full = int(p.full_units or 0)
+            held = full if lot.is_held else min(int(p.held_units or 0), full)
+            unit = lot.weight_unit
+            free_fix[unit] = free_fix.get(unit, 0.0) + (full - held) * diff
+            held_fix[unit] = held_fix.get(unit, 0.0) + held * diff
+    return free_fix, held_fix
 
 
 def _containers_by_bucket(

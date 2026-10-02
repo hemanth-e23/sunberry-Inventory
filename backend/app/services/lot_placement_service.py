@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.constants import is_palletised_unit, pluralize_unit
 from app.enums import ReceiptStatus
@@ -384,9 +384,267 @@ def can_print_labels(lot: MaterialLot) -> tuple:
 # ─── reads ────────────────────────────────────────────────────────────────────
 
 def derived_weight(lot: MaterialLot, placement: LotPlacement) -> float:
-    """Pounds for one placement. Derived, never stored."""
-    per_unit = float(lot.weight_per_unit or 0)
-    return float(placement.full_units or 0) * per_unit + float(placement.open_remaining_qty or 0)
+    """Pounds for one placement. Derived, never stored.
+
+    Sealed units are priced at the weight of the DELIVERY they came on (see
+    `receipt_layers`), not the lot's first-seen figure: one lot arrived at 502
+    and 474 lb/drum and QA-D2's nine 474s read 4,518 lb instead of 4,266
+    (2026-10-01). Open units carry their own weighed remainder."""
+    db = object_session(lot)
+    full = int(placement.full_units or 0)
+    if db is None or full <= 0:
+        return full * float(lot.weight_per_unit or 0) + float(placement.open_remaining_qty or 0)
+    return (
+        _layers_weight(db, lot, _cached_layers(db, lot).get(placement.storage_row_id, []))
+        + float(placement.open_remaining_qty or 0)
+    )
+
+
+# ─── per-delivery layers on each rack ─────────────────────────────────────────
+#
+# One lot is often several deliveries at different weights per drum (502 and
+# 474 on two trucks of A-0925). A placement counts the lot's drums on a rack;
+# it does not say which truck they came on. That is RECONSTRUCTED from the
+# ledger, never stored: receiving events name their receipt, a move's two
+# halves share a ref so the drums carry their delivery across, and anything
+# that removes drums without naming them (use, staging pull, a count down)
+# takes the OLDEST delivery first. A return brings back what was most recently
+# taken off. The gun cannot tell two drums of one lot apart — they wear the
+# same sticker — so this is exact while deliveries sit on separate racks and
+# the agreed best guess once they share one.
+
+_RECEIVING_REF_TYPES = ("receipt", "receiving")
+_RETURN_EVENTS = (EVENT_RETURNED,)
+
+
+def _lot_receipt_weights(db: Session, lot: MaterialLot):
+    """Receipts of the lot oldest first, and lbs per unit for each (None = lot)."""
+    receipts = (
+        db.query(Receipt)
+        .filter(Receipt.material_lot_id == lot.id, Receipt.is_deleted == False)  # noqa: E712
+        .order_by(Receipt.receipt_date, Receipt.created_at)
+        .all()
+    )
+    lot_w = float(lot.weight_per_unit or 0)
+    weights = {r.id: (float(r.weight_per_container or 0) or lot_w) for r in receipts}
+    weights[None] = lot_w
+    order = {r.id: i for i, r in enumerate(receipts)}
+    return [r.id for r in receipts], weights, order
+
+
+def _take_fifo(layers: list, units: int, order: dict) -> list:
+    """Remove `units` from a rack's layers, oldest delivery first. Returns
+    the [(receipt_id, units)] actually removed."""
+    taken = []
+    layers.sort(key=lambda l: order.get(l[0], -1))
+    for layer in layers:
+        if units <= 0:
+            break
+        n = min(layer[1], units)
+        if n > 0:
+            layer[1] -= n
+            units -= n
+            taken.append((layer[0], n))
+    layers[:] = [l for l in layers if l[1] > 0]
+    return taken
+
+
+def _add(layers: list, receipt_id, units: int) -> None:
+    for layer in layers:
+        if layer[0] == receipt_id:
+            layer[1] += units
+            return
+    layers.append([receipt_id, units])
+
+
+def receipt_layers(db: Session, lot: MaterialLot) -> Dict[str, list]:
+    return _replay_layers(db, lot)[0]
+
+
+def _replay_layers(db: Session, lot: MaterialLot):
+    """`{row_id: [[receipt_id, sealed_units], ...]}`, oldest delivery first.
+
+    Rebuilt from the ledger and reconciled to the placements, so it is never
+    more or less than what the racks hold — only the split by delivery is the
+    reconstruction. `receipt_id` None means "no delivery known" (an opening
+    balance), priced at the lot's weight."""
+    receipt_ids, _weights, order = _lot_receipt_weights(db, lot)
+    known = set(receipt_ids)
+    default_receipt = receipt_ids[0] if receipt_ids else None
+
+    layers: Dict[str, list] = {}
+    taken_by_event: Dict[str, list] = {}   # removal event id -> [(receipt_id, units)]
+    moving: Dict[str, list] = {}   # move ref -> what its source half took
+    taken_off: list = []           # compositions removed, newest last (for returns)
+
+    events = (
+        db.query(LotPlacementEvent)
+        .filter(LotPlacementEvent.material_lot_id == lot.id)
+        .order_by(LotPlacementEvent.seq)
+        .all()
+    )
+    for ev in events:
+        delta = int(ev.full_units_delta or 0)
+        if not delta:
+            continue
+        row = layers.setdefault(ev.storage_row_id, [])
+        if ev.ref_type in _RECEIVING_REF_TYPES and ev.ref_id in known:
+            if delta > 0:
+                _add(row, ev.ref_id, delta)
+            else:
+                own = next((l for l in row if l[0] == ev.ref_id), None)
+                n = min(-delta, own[1]) if own else 0
+                if own:
+                    own[1] -= n
+                    row[:] = [l for l in row if l[1] > 0]
+                if -delta - n > 0:
+                    _take_fifo(row, -delta - n, order)
+            continue
+        if ev.event_type == EVENT_MOVED and ev.ref_id:
+            key = f"{ev.ref_type}:{ev.ref_id}"
+            if delta < 0:
+                moving[key] = _take_fifo(row, -delta, order)
+            else:
+                carried = moving.pop(key, None)
+                if carried:
+                    for rid, n in carried:
+                        _add(row, rid, n)
+                else:
+                    _add(row, default_receipt, delta)
+            continue
+        if delta < 0:
+            taken = _take_fifo(row, -delta, order)
+            if taken:
+                taken_off.append(list(taken))
+                taken_by_event[ev.id] = taken
+            continue
+        if ev.event_type in _RETURN_EVENTS and taken_off:
+            # Drums coming back are the ones just pulled.
+            remaining = delta
+            while remaining > 0 and taken_off:
+                last = taken_off[-1]
+                rid, n = last[-1]
+                use = min(n, remaining)
+                _add(row, rid, use)
+                remaining -= use
+                if use == n:
+                    last.pop()
+                    if not last:
+                        taken_off.pop()
+                else:
+                    last[-1] = (rid, n - use)
+            if remaining > 0:
+                _add(row, default_receipt, remaining)
+            continue
+        _add(row, default_receipt, delta)
+
+    # Reconcile to the racks: the ledger split is a reconstruction, the
+    # placement count is the truth.
+    for placement in placements_for_lot(db, lot.id, include_empty=True):
+        row = layers.setdefault(placement.storage_row_id, [])
+        have = sum(n for _rid, n in row)
+        want = int(placement.full_units or 0)
+        if have > want:
+            _take_fifo(row, have - want, order)
+        elif have < want:
+            _add(row, default_receipt, want - have)
+    return (
+        {rid: sorted(row, key=lambda l: order.get(l[0], -1)) for rid, row in layers.items() if row},
+        taken_by_event,
+    )
+
+
+def _cached_layers(db: Session, lot: MaterialLot) -> Dict[str, list]:
+    """`receipt_layers`, memoised on the session until the lot's ledger or any
+    placement of it changes — `project_lot` asks once per rack."""
+    db.flush()
+    stamp = (
+        db.query(func.max(LotPlacementEvent.seq))
+        .filter(LotPlacementEvent.material_lot_id == lot.id)
+        .scalar(),
+        tuple(
+            (p.storage_row_id, int(p.full_units or 0))
+            for p in placements_for_lot(db, lot.id, include_empty=True)
+        ),
+    )
+    cache = db.info.setdefault("_receipt_layers", {})
+    hit = cache.get(lot.id)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    layers, taken = _replay_layers(db, lot)
+    cache[lot.id] = (stamp, layers, taken)
+    return layers
+
+
+def event_taken_weight(db: Session, lot: MaterialLot, event_id: str) -> Optional[float]:
+    """Lbs of the sealed units one removal event took, priced by the
+    deliveries they came from. None when the event removed no sealed units
+    (or is unknown), so callers keep their own figure."""
+    _cached_layers(db, lot)
+    taken = db.info["_receipt_layers"][lot.id][2].get(event_id)
+    if not taken:
+        return None
+    _ids, weights, _order = _lot_receipt_weights(db, lot)
+    return sum(n * weights.get(rid, weights[None]) for rid, n in taken)
+
+
+def _layers_weight(db: Session, lot: MaterialLot, layers: list) -> float:
+    _ids, weights, _order = _lot_receipt_weights(db, lot)
+    return sum(n * weights.get(rid, weights[None]) for rid, n in layers)
+
+
+def row_unit_weight(db: Session, lot: MaterialLot, row_id: str) -> float:
+    """Average lbs per SEALED unit on one rack, from the deliveries on it.
+    The lot's figure when the rack holds none."""
+    layers = _cached_layers(db, lot).get(row_id, [])
+    units = sum(n for _rid, n in layers)
+    if units <= 0:
+        return float(lot.weight_per_unit or 0)
+    return _layers_weight(db, lot, layers) / units
+
+
+def fifo_units_weight(db: Session, lot: MaterialLot, row_id: str, units: int) -> float:
+    """Lbs of the `units` sealed units that would leave `row_id` next — the
+    oldest deliveries first, the same order `receipt_layers` removes them."""
+    _ids, weights, order = _lot_receipt_weights(db, lot)
+    layers = [list(l) for l in _cached_layers(db, lot).get(row_id, [])]
+    taken = _take_fifo(layers, int(units), order)
+    lbs = sum(n * weights.get(rid, weights[None]) for rid, n in taken)
+    short = int(units) - sum(n for _rid, n in taken)
+    return lbs + max(0, short) * float(lot.weight_per_unit or 0)
+
+
+def row_units_for_quantity(
+    db: Session, lot: MaterialLot, row_id: str, quantity: float, *,
+    receipt=None, exact: bool = True,
+) -> int:
+    """`receipt_units_for_quantity`, priced at what THIS RACK's drums weigh.
+
+    The forms convert typed drums with the rack's own weight per drum, so the
+    server must convert back with the same figure; the receipt's weight turned
+    3 drums of 502 off a rack into "3.18 drums" when the receipt was the 474
+    truck (2026-10-01)."""
+    per_unit = row_unit_weight(db, lot, row_id) if row_id else 0.0
+    if per_unit <= 0:
+        return receipt_units_for_quantity(receipt, lot, quantity, exact=exact)
+    ratio = float(quantity) / per_unit
+    if not exact:
+        return int(math.ceil(ratio - 1e-9))
+    rounded = int(round(ratio))
+    if rounded >= 0 and abs(ratio - rounded) <= 0.01:
+        return rounded
+    # Not whole at the rack's average: a caller may have priced it at one
+    # delivery's weight (5 × 400 off a rack of 500s and 400s). Accept that if
+    # it is whole there; the arithmetic error below names the rack's figure.
+    try:
+        return receipt_units_for_quantity(receipt, lot, quantity, exact=True)
+    except ValidationError:
+        pass
+    word = lot.unit_label or "unit"
+    raise ValidationError(
+        f"{float(quantity):g} is not a whole number of {word}s on this rack "
+        f"at {per_unit:g} per {word} (= {ratio:.2f}). Enter a whole-{word} amount."
+    )
 
 
 def placements_for_lot(db: Session, material_lot_id: str, *, include_empty: bool = False):
@@ -1219,6 +1477,9 @@ def project_lot(db: Session, lot: MaterialLot) -> None:
             # of "6.45 drums" — an open drum is one container, not 0.45 of one
             # (2026-10-01: three screens counted the same rack three ways).
             "fullUnits": int(placement.full_units or 0),
+            # What a sealed unit on THIS rack weighs, from the deliveries on
+            # it — the forms convert typed drums with it (2026-10-01).
+            "weightPerUnit": round(row_unit_weight(db, lot, placement.storage_row_id), 3),
             "openUnits": int(placement.open_units or 0),
             "openQty": round(float(placement.open_remaining_qty or 0), 3),
             "unitLabel": lot.unit_label,
