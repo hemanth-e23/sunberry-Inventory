@@ -37,18 +37,37 @@ const describeReceiptQuantity = (receipt) => {
     };
   }
 
-  const parts = [`${containers.toLocaleString()} ${unit}`];
-  if (perPallet > 1) {
-    // Rounded UP: a part-used pallet still takes a whole slot, and this has to
-    // agree with the rack card the approval will produce.
-    const pallets = Math.ceil(containers / perPallet);
-    parts.push(`${pallets} pallet${pallets === 1 ? "" : "s"}`);
-  }
+  const each = Number(receipt.weightPerContainer) || 0;
+  const weight = `${Number(receipt.quantity || 0).toLocaleString()} ${receipt.quantityUnits || ""}`.trim();
+  // Full pallets and the partial one, as entered — "3 pallets" alone could
+  // not tell 105 boxes on 3 x 35 from 2 x 35 + 35 loose.
+  const pallets = perPallet > 1 ? describePallets(containers, perPallet, unit) : null;
 
   return {
-    primary: parts.join(" · "),
-    secondary: `${Number(receipt.quantity || 0).toLocaleString()} ${receipt.quantityUnits || ""}`.trim(),
+    primary: `${containers.toLocaleString()} ${unit}`,
+    secondary: [
+      pallets,
+      each > 0 ? `${each} ${receipt.weightUnit || "lbs"} each = ${weight}` : weight,
+    ].filter(Boolean).join(" · "),
   };
+};
+
+/** True when the receipt is stated in containers with a weight each, so the
+ * pounds are derived and the count is what the approver checks. */
+const countsDriveQuantity = (r) =>
+  Number(r?.containerCount) > 0 && Number(r?.weightPerContainer) > 0;
+
+/** "3 full pallets of 35 + 1 partial (12)" from a count and a per-pallet size. */
+const describePallets = (count, perPallet, unitWord) => {
+  const n = Number(count) || 0;
+  const per = Number(perPallet) || 0;
+  if (n <= 0 || per <= 1) return null;
+  const full = Math.floor(n / per);
+  const rest = n - full * per;
+  const parts = [];
+  if (full > 0) parts.push(`${full} full pallet${full === 1 ? "" : "s"} of ${per}`);
+  if (rest > 0) parts.push(`1 partial pallet of ${rest} ${unitWord}`);
+  return parts.join(" + ");
 };
 
 const getPriorityLevel = (days) => {
@@ -227,6 +246,9 @@ const ReceiptsTab = ({
       lotNo: "Lot Number",
       quantity: "Quantity",
       quantityUnits: "Quantity Units",
+      containerCount: "Count",
+      weightPerContainer: "Weight each",
+      unitsPerPallet: "Per pallet",
       expiration: "Expiration",
       sid: "SID",
       vendorId: "Vendor",
@@ -250,6 +272,11 @@ const ReceiptsTab = ({
       const normalizedOriginal = typeof original === "boolean" ? original : original ?? "";
       const normalizedUpdated = typeof updated === "boolean" ? updated : updated ?? "";
       if (normalizedOriginal === normalizedUpdated) return;
+      if (["containerCount", "weightPerContainer", "unitsPerPallet"].includes(field)
+        && Number(original || 0) === Number(updated || 0)) return;
+      // Pounds follow count x weight on the server; sending a typed total
+      // alongside a changed count would fight it.
+      if (field === "quantity" && countsDriveQuantity(nextDraft)) return;
       if (field === "sid") {
         const productSID = productLookup[receipt.productId]?.sid || "";
         if (original === productSID && updated === productSID) return;
@@ -878,13 +905,66 @@ const ReceiptsTab = ({
                   />
                 </label>
 
+                {isWeighedMaterial && Number(selectedReceipt.containerCount) > 0 && (() => {
+                  const unitWord = pluralizeUnit(singularUnit(draft.containerUnit || selectedReceipt.containerUnit || "unit"));
+                  const count = Number(draft.containerCount) || 0;
+                  const each = Number(draft.weightPerContainer) || 0;
+                  const pallets = describePallets(count, draft.unitsPerPallet, unitWord);
+                  return (
+                    <>
+                      <label>
+                        <span>Count ({unitWord})</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={draft.containerCount ?? ""}
+                          onChange={(event) => handleDraftChange("containerCount", event.target.value)}
+                          disabled={!isEditable}
+                        />
+                      </label>
+                      <label>
+                        <span>Weight each ({draft.weightUnit || selectedReceipt.weightUnit || "lbs"})</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={draft.weightPerContainer ?? ""}
+                          onChange={(event) => handleDraftChange("weightPerContainer", event.target.value)}
+                          disabled={!isEditable}
+                        />
+                      </label>
+                      <label>
+                        <span>{unitWord.charAt(0).toUpperCase() + unitWord.slice(1)} per pallet</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={draft.unitsPerPallet ?? ""}
+                          onChange={(event) => handleDraftChange("unitsPerPallet", event.target.value)}
+                          disabled={!isEditable}
+                          placeholder="not on pallets"
+                        />
+                      </label>
+                      <div className="full" style={{ fontSize: "0.9rem", color: "#374151", padding: "4px 0 8px" }}>
+                        <strong>{count.toLocaleString()} {unitWord}</strong>
+                        {pallets ? ` = ${pallets}` : ""}
+                        {each > 0 ? ` · ${count.toLocaleString()} × ${each} = ${(Math.round(count * each * 100) / 100).toLocaleString()} ${draft.weightUnit || selectedReceipt.weightUnit || "lbs"}` : ""}
+                      </div>
+                    </>
+                  );
+                })()}
+
                 <label>
                   <span>Quantity</span>
                   <input
                     type="number"
-                    value={draft.quantity || ""}
+                    value={countsDriveQuantity(draft)
+                      ? Math.round(Number(draft.containerCount) * Number(draft.weightPerContainer) * 1000) / 1000
+                      : (draft.quantity || "")}
                     onChange={(event) => handleDraftChange("quantity", event.target.value)}
-                    disabled={!isEditable}
+                    disabled={!isEditable || countsDriveQuantity(draft)}
+                    title={countsDriveQuantity(draft) ? "Count × weight each" : undefined}
                   />
                 </label>
 
