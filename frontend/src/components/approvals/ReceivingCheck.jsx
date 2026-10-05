@@ -66,6 +66,24 @@ const ReceivingCheck = ({ receipt }) => {
   const { expected_count: expected, scanned_count: scanned, difference } = summary;
   const unit = summary.count_unit || 'units';
 
+  // Nothing scanned: a Log Receipt for stock already on the racks (it has a
+  // lot because its stickers were printed). "0 of 105 — 105 short" read as a
+  // missing delivery (production, 2026-10-05); approval places what the form
+  // says, so say that instead.
+  if (!scanned) {
+    return (
+      <div className="receiving-check">
+        <div className="receiving-check-head">
+          <span className="receiving-check-title">Logged, not scanned</span>
+          <span className="receiving-check-total">{expected} {unit}</span>
+        </div>
+        <div className="receiving-check-note">
+          Approving puts {expected} {unit} where this receipt says they are.
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="receiving-check">
       <div className="receiving-check-head">
