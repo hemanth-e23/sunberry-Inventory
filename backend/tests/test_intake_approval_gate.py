@@ -52,10 +52,12 @@ def gate_seed(db_session):
     db_session.add_all([
         Category(id="cat-gate-ing", name="Ingredients", type="ingredient"),
         Category(id="cat-gate-fin", name="Finished", type="finished"),
+        Category(id="cat-gate-pkg", name="Packaging", type="packaging"),
     ])
     db_session.add_all([
         Product(id=PRODUCT, name="Gate Mango Puree", category_id="cat-gate-ing"),
         Product(id=FG_PRODUCT, name="Gate Juice 12pk", category_id="cat-gate-fin"),
+        Product(id="prod-gate-caps", name="Gate Caps 38mm", category_id="cat-gate-pkg"),
     ])
     db_session.add(Vendor(id=VENDOR, name="Gate Vendor"))
     db_session.add(Location(id="loc-gate", name="Plant G", warehouse_id=WH))
@@ -239,3 +241,40 @@ class TestFinishedGoodsUntouched:
         db_session.commit()
         assert receipt.status == ReceiptStatus.APPROVED
         assert receipt.material_lot_id is None
+
+
+class TestPackagingLogReceipt:
+    """Packaging goes through the same Log Receipt gate (production question,
+    2026-10-05): counted in cases, no weight, stock already on the racks."""
+
+    def _pkg(self, db, rid, **kw):
+        receipt = _receipt(db, rid=rid, count=50, weight=None, unit="cases", quantity=50,
+                           category="cat-gate-pkg", product="prod-gate-caps",
+                           lot_number=f"PK-{rid}", **kw)
+        receipt.container_unit = "cases"
+        return receipt
+
+    def test_room_with_no_racks(self, db_session, gate_seed):
+        db_session.add(SubLocation(id="sub-gate-pkgfloor", name="Pkg Floor", location_id="loc-gate"))
+        db_session.flush()
+        receipt = self._pkg(db_session, "r-pkg-open", sub_location="sub-gate-pkgfloor")
+        receipt_service.approve_receipt(db_session, receipt, gate_seed)
+        db_session.commit()
+        assert receipt.status == ReceiptStatus.APPROVED
+        assert list(_placed_units(db_session, receipt.material_lot_id).values()) == [50]
+
+    def test_typed_rack(self, db_session, gate_seed):
+        receipt = self._pkg(db_session, "r-pkg-rack", row=ROW_B, sub_location=SUB_TWO_ROWS)
+        receipt_service.approve_receipt(db_session, receipt, gate_seed)
+        db_session.commit()
+        assert _placed_units(db_session, receipt.material_lot_id) == {ROW_B: 50}
+        assert float(receipt.quantity) == 50
+
+    def test_stickers_keep_it_off_the_gun(self, db_session, gate_seed):
+        receipt = self._pkg(db_session, "r-pkg-sticker", row=ROW_A, sub_location=SUB_TWO_ROWS)
+        lrs.ensure_lot_for_receipt(db_session, receipt)
+        db_session.flush()
+        assert [s["receipt_id"] for s in lrs.open_sessions(db_session)] == []
+        receipt_service.approve_receipt(db_session, receipt, gate_seed)
+        db_session.commit()
+        assert _placed_units(db_session, receipt.material_lot_id) == {ROW_A: 50}
