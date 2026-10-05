@@ -233,21 +233,21 @@ const ReceiptPage = () => {
               <div className={`alert ${feedback.type}`}>{feedback.message}</div>
             )}
 
-            {/* THE WALK-IN PATH. Material turned up with no incoming order, the
-                worker logged it off the driver's BOL, and now they print
-                stickers and scan the units in on the gun.
-
-                Printing is NOT receiving: nothing here puts a single unit in
-                stock. This is an offer, and the receipt is complete without it
-                — which is what keeps the dock from ever being blocked. */}
+            {/* A Log Receipt is stock ALREADY on the racks: approval places it
+                from the form, and nothing is scanned. Stickers are optional and
+                only label it for later moves and staging pulls. A delivery that
+                must be scanned in is a truck (Incoming -> Walk-in), not this
+                form — telling people to scan here put a logged receipt on the
+                gun at "0 of 105" (production, 2026-10-05). */}
             {justLogged && (
               <div className="alert info" style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
                 <span>
                   Stickers for this lot — one per wrapped pallet if it came
                   palletised, otherwise one for every{' '}
-                  {singularUnit(justLogged.unitLabel)}. They go on as it comes
-                  off the truck, then a forklift user scans a rack and scans each
-                  one in.
+                  {singularUnit(justLogged.unitLabel)}. Optional — this stock is
+                  already on the rack, so nothing needs scanning; approval puts it
+                  in the system. A delivery that needs scanning in goes through
+                  Incoming → Walk-in instead.
                 </span>
                 <button
                   type="button"

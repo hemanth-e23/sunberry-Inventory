@@ -1663,6 +1663,21 @@ def open_sessions(
             ~closed_order,
         )
     )
+    # A Log Receipt is stock ALREADY on the racks: approval places it from the
+    # form. Printing its stickers gives it a lot, which put it on the gun as a
+    # walk-in at "0 of 105" — and submitting it there would book 0 (production,
+    # 2026-10-05). Order-less receipts reach the gun only once a unit has been
+    # scanned into them, so a walk-in already started is never stranded.
+    on_order = db.query(IntakeLot.id).filter(IntakeLot.receipt_id == Receipt.id).exists()
+    started = (
+        db.query(LotPlacementEvent.id)
+        .filter(
+            LotPlacementEvent.ref_type == REF_TYPE_RECEIVING,
+            LotPlacementEvent.ref_id == Receipt.id,
+        )
+        .exists()
+    )
+    query = query.filter(or_(on_order, started))
     if warehouse_id:
         query = query.filter(Receipt.warehouse_id == warehouse_id)
     if walk_in_only:

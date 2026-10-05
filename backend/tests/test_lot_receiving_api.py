@@ -1114,9 +1114,13 @@ class TestClosingAnOrderClearsTheGun:
         self._received(client, wh_headers)
         assert len(client.get("/api/lot-receiving/sessions", headers=fk_headers).json()) == 1
 
-    def test_a_walk_in_is_unaffected(self, client, api_seed, wh_headers, fk_headers, db_session):
-        """A walk-in has no order, so its receipt status IS its lifecycle. The
-        order filter must not touch it."""
+    def test_a_logged_receipt_with_stickers_stays_off_the_gun(
+        self, client, api_seed, wh_headers, fk_headers, db_session
+    ):
+        """A Log Receipt is stock already on the racks; printing its stickers
+        gives it a lot. That used to list it on the gun as a walk-in at "0 of
+        N", where submitting would book 0 (production, 2026-10-05). It stays
+        off the gun until a unit is scanned into it, and then stays on."""
         from app.enums import ReceiptStatus as RS
         from app.models import Receipt
         from datetime import datetime, timezone as tz
@@ -1134,6 +1138,18 @@ class TestClosingAnOrderClearsTheGun:
             f"/api/lot-receiving/sessions/{receipt.id}/print-labels",
             headers=wh_headers, json={"count": 10},
         )
+        sessions = client.get("/api/lot-receiving/sessions", headers=fk_headers).json()
+        assert [s["source"] for s in sessions].count("walk_in") == 0
+
+        lot_code = client.post(
+            f"/api/lot-receiving/sessions/{receipt.id}/print-labels",
+            headers=wh_headers, json={"count": 1},
+        ).json()["lot_code"]
+        scanned = client.post(
+            f"/api/lot-receiving/sessions/{receipt.id}/scan", headers=fk_headers,
+            json={"lot_code": lot_code, "storage_row_id": ROW_1, "idempotency_key": "wi-started-1"},
+        )
+        assert scanned.json()["status"] == "ok"
         sessions = client.get("/api/lot-receiving/sessions", headers=fk_headers).json()
         assert [s["source"] for s in sessions].count("walk_in") == 1
 
