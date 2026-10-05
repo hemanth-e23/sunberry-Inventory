@@ -61,6 +61,7 @@ from app.models import (
     Product,
     Receipt,
     StorageRow,
+    SubLocation,
     Vendor,
 )
 from app.services import lot_placement_service as lps
@@ -272,17 +273,22 @@ def place_logged_receipt(db: Session, receipt: Receipt, *, actor_id=None):
         # rack nobody counted from.
         total = int(float(receipt.container_count or 0))
         if total > 0 and receipt.sub_location_id:
-            row_ids = [
-                rid
-                for (rid,) in db.query(StorageRow.id)
-                .filter(
-                    StorageRow.sub_location_id == receipt.sub_location_id,
-                    StorageRow.is_active == True,  # noqa: E712
-                )
-                .all()
-            ]
+            from app.services.ingredient_row_service import _room_row_ids, open_space_row
+
+            row_ids = _room_row_ids(db, receipt.sub_location_id, active_only=True)
             if len(row_ids) == 1:
                 rows = [(row_ids[0], total)]
+            elif not row_ids:
+                # A room with NO racks (the Cage): the form offers it as open
+                # storage and submits no row, so approval refused it with
+                # "place 0 of 140" (production, 2026-10-05). Same answer
+                # transfers give a rack-less staging floor: the room's own
+                # open-space row.
+                room = db.query(SubLocation).filter(SubLocation.id == receipt.sub_location_id).first()
+                actor = db.query(User).filter(User.id == actor_id).first() if actor_id else None
+                space = open_space_row(db, room, actor) if room is not None else None
+                if space is not None:
+                    rows = [(space.id, total)]
     if not rows:
         return None
 

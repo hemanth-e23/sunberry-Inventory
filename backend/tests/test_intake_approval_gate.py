@@ -151,6 +151,33 @@ class TestLoggedMode:
         assert receipt.material_lot_id is not None
         assert _placed_units(db_session, receipt.material_lot_id) == {ROW_SOLO: 10}
 
+    def test_room_with_no_racks_places_on_its_open_space(self, db_session, gate_seed):
+        """Production 2026-10-05: 140 bags of ascorbic (4 pallets) logged into
+        the Cage, a room with no racks. The form calls that open storage and
+        sends no row; approval refused with "place 0 of 140". It now places
+        them on the room's own open-space row."""
+        db_session.add(SubLocation(id="sub-gate-cage", name="Cage", location_id="loc-gate"))
+        db_session.flush()
+        receipt = _receipt(db_session, rid="r-gate-cage", count=140, weight=51.97,
+                           sub_location="sub-gate-cage")
+        receipt.units_per_pallet = 35
+        receipt.container_unit = "bags"
+        receipt_service.approve_receipt(db_session, receipt, gate_seed)
+        db_session.commit()
+        assert receipt.status == ReceiptStatus.APPROVED
+        placed = _placed_units(db_session, receipt.material_lot_id)
+        assert list(placed.values()) == [140]
+        row = db_session.query(StorageRow).filter(StorageRow.id == next(iter(placed))).one()
+        assert row.name == "Cage" and row.sub_location_id == "sub-gate-cage"
+
+    def test_room_with_racks_still_needs_a_rack(self, db_session, gate_seed):
+        receipt = _receipt(db_session, rid="r-gate-racked", count=10,
+                           sub_location=SUB_TWO_ROWS)
+        with pytest.raises(ValidationError, match="place 0 of 10"):
+            receipt_service.approve_receipt(db_session, receipt, gate_seed)
+        assert db_session.query(StorageRow).filter(
+            StorageRow.sub_location_id == SUB_TWO_ROWS).count() == 2
+
     def test_typed_row_places_exactly(self, db_session, gate_seed):
         receipt = _receipt(db_session, rid="r-gate-typed", count=8, row=ROW_A,
                            sub_location=SUB_TWO_ROWS)
