@@ -17,7 +17,9 @@ const fmtT = (iso) => {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 };
 
-const ShipOutDocuments = ({ snapshot: s, transferId }) => {
+// `pdfPath` overrides where the BOL PDF is fetched from (the Moyel shuttle
+// serves its own: /inventory/moyel-shuttle/{id}/bol.pdf).
+const ShipOutDocuments = ({ snapshot: s, transferId, pdfPath }) => {
   const [tab, setTab] = useState('slip');
   const [pdfBusy, setPdfBusy] = useState(false);
   const [pdfError, setPdfError] = useState('');
@@ -32,7 +34,7 @@ const ShipOutDocuments = ({ snapshot: s, transferId }) => {
     setPdfError('');
     let url;
     try {
-      const r = await apiClient.get(`/inventory/transfers/${transferId}/bol.pdf`, {
+      const r = await apiClient.get(pdfPath || `/inventory/transfers/${transferId}/bol.pdf`, {
         responseType: 'blob',
       });
       url = URL.createObjectURL(new Blob([r.data], { type: 'application/pdf' }));
@@ -194,14 +196,19 @@ const ShipOutDocuments = ({ snapshot: s, transferId }) => {
               <tr><th style={{ width: '26%' }}>CUSTOMER ORDER NO.</th><th>NO. OF PKGS</th><th>WGT</th><th style={{ width: '12%' }}>PALLET / SLIP</th><th style={{ width: '32%' }}>ADDITIONAL SHIPPER INFO</th></tr>
             </thead>
             <tbody>
-              <tr>
-                <td><strong>{s.order_number}</strong></td><td><strong>{s.total_cases}</strong></td>
-                <td><strong>{Math.round(s.weight.product)}</strong></td>
-                <td className="sod-yn"><span>Y</span><span className="n">N</span></td>
-                <td><strong>{s.po_number ? `PO: ${s.po_number}` : ''}</strong></td>
-              </tr>
-              <tr><td></td><td></td><td></td><td className="sod-yn"><span>Y</span><span className="n">N</span></td><td></td></tr>
-              <tr><td></td><td></td><td></td><td className="sod-yn"><span>Y</span><span className="n">N</span></td><td></td></tr>
+              {/* Moyel shuttle snapshots carry one row per lot ("Lot: …"); a
+                  ship-out keeps its single summary row. Always 3 rows, like the form. */}
+              {(s.order_rows
+                ? [0, 1, 2].map((i) => s.order_rows[i] || null)
+                : [{ order_no: s.order_number, qty: s.total_cases, weight: s.weight.product, info: s.po_number ? `PO: ${s.po_number}` : '' }, null, null]
+              ).map((r, i) => (
+                <tr key={i}>
+                  <td><strong>{r?.order_no || ''}</strong></td><td><strong>{r ? r.qty : ''}</strong></td>
+                  <td><strong>{r ? Math.round(r.weight) : ''}</strong></td>
+                  <td className="sod-yn"><span>Y</span><span className="n">N</span></td>
+                  <td><strong>{r?.info || ''}</strong></td>
+                </tr>
+              ))}
               <tr>
                 <td className="sod-shade" style={{ textAlign: 'center', fontWeight: 800 }}>TOTAL</td>
                 <td className="sod-shade" style={{ fontWeight: 700 }}>{s.total_cases}</td>

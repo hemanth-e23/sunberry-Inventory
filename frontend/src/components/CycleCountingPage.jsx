@@ -940,7 +940,8 @@ const CycleCountingPage = () => {
                         </thead>
                         <tbody>
                           {selectedCycleCount.items.map((item, idx) => (
-                            <tr key={idx}>
+                            <React.Fragment key={idx}>
+                            <tr>
                               <td>{item.productName}</td>
                               <td style={{ fontFamily: 'monospace', fontWeight: 600 }}>{item.lotNo}</td>
                               <td>{item.expiryDate ? formatDateKey(item.expiryDate) : '—'}</td>
@@ -956,6 +957,16 @@ const CycleCountingPage = () => {
                                 </span>
                               </td>
                             </tr>
+                            {/* Gun row check: the pallet numbers behind the difference. */}
+                            {(item.notHere?.length > 0 || item.arrived?.length > 0) && (
+                              <tr>
+                                <td colSpan={8} style={{ fontSize: '12px', color: '#6b7280' }}>
+                                  {item.notHere?.length > 0 && <>Not here (now missing): {item.notHere.join(', ')}. </>}
+                                  {item.arrived?.length > 0 && <>Found here: {item.arrived.map((a) => `${a.licence_number} (${a.result})`).join(', ')}.</>}
+                                </td>
+                              </tr>
+                            )}
+                            </React.Fragment>
                           ))}
                         </tbody>
                       </table>

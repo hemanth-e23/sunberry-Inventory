@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Float
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Float, JSON, Text
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
 from app.database import Base
@@ -34,6 +34,11 @@ class ForkliftRequest(Base):
     cancelled_reason = Column(String(100), nullable=True)
     rejected_at = Column(DateTime(timezone=True), nullable=True)
     rejected_by = Column(String(50), ForeignKey("users.id"), nullable=True)
+    # "Scan the last pallet at the wrapper" (FG-PALLET-LIFECYCLE-SPEC §3.3),
+    # keyed by lot: {lot: {"sequence", "licence_number", "by", "at"}} or
+    # {lot: {"skipped": true, "by", "at"}}. NULL = never asked (older sessions,
+    # auto-submitted ones).
+    closing_scans = Column(JSON, nullable=True)
 
     product = relationship("Product", backref="forklift_requests")
     shift = relationship("ProductionShift", backref="forklift_requests")
@@ -102,3 +107,38 @@ class TransferScanEvent(Base):
 
     transfer = relationship("InventoryTransfer", backref="scan_events")
     scanner = relationship("User", foreign_keys=[scanned_by], backref="transfer_scan_events")
+
+
+class PalletEvent(Base):
+    """Append-only ledger of finished-goods pallet corrections.
+
+    Every status a person (or the shuttle) puts on a pallet outside the normal
+    scan → approve → ship path is written here with who / when / why, so month
+    end can say WHICH pallet went missing and when it was found, instead of a
+    bare "-2,240 cases" adjustment. Event types: PalletEventType in enums.py.
+    """
+    __tablename__ = "pallet_events"
+
+    id = Column(String(50), primary_key=True)
+    # SET NULL: a pallet row can still be deleted (a re-scan in another open
+    # session); its events keep the licence_number.
+    pallet_licence_id = Column(
+        String(50), ForeignKey("pallet_licences.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    licence_number = Column(String(100), nullable=True, index=True)
+    event_type = Column(String(30), nullable=False)
+    from_status = Column(String(20), nullable=True)
+    to_status = Column(String(20), nullable=True)
+    reason_code = Column(String(40), nullable=True)
+    reason = Column(Text, nullable=True)
+    cases_before = Column(Integer, nullable=True)
+    cases_after = Column(Integer, nullable=True)
+    storage_row_id = Column(String(50), ForeignKey("storage_rows.id"), nullable=True)
+    ref_type = Column(String(30), nullable=True)
+    ref_id = Column(String(50), nullable=True)
+    user_id = Column(String(50), ForeignKey("users.id"), nullable=True)
+    warehouse_id = Column(String(50), ForeignKey("warehouses.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    pallet = relationship("PalletLicence", backref="events")
+    user = relationship("User", foreign_keys=[user_id])

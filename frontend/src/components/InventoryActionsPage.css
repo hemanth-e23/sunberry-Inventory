@@ -493,3 +493,22 @@
 @media (max-width: 640px) {
   .action-form .form-grid-2 { grid-template-columns: 1fr; }
 }
+
+/* Inline form alerts. Same rules as ReceiptPage.css — that sheet only loads
+   with the Receipt page, so on Inventory Actions every `alert error` printed as
+   plain body text unless the Receipt page had been opened first. */
+.tab-panel .alert {
+  padding: 10px 12px;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.tab-panel .alert.success {
+  background: var(--success-100, #dcfce7);
+  color: var(--success-800, #166534);
+}
+
+.tab-panel .alert.error {
+  background: var(--error-100, #fee2e2);
+  color: var(--error-800, #991b1b);
+}

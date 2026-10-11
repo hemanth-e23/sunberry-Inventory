@@ -126,7 +126,7 @@ class TestRecallTrace:
         assert trace["receipts"] == []
         assert trace["containers"] == []
         assert trace["coverage"]["sources_searched"] == [
-            "legacy_receipts", "serialized_containers",
+            "legacy_receipts", "serialized_containers", "fg_pallets",
         ]
 
     def test_half_converted_lot_is_flagged_partial(self, db_session, env):

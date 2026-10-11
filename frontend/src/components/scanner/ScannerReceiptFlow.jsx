@@ -12,10 +12,12 @@ import {
   cleanScannedLicence,
   parseLineFromLicence,
   parseLineFromLot,
+  lotOfLicence,
   playSuccessTone,
   playErrorTone,
 } from '../../utils/scannerFeedback';
 import { formatDateTime } from '../../utils/dateUtils';
+import ClosingPrompt from './ClosingPrompt';
 import {
   Scan, MapPin, Package, Check, RefreshCw, CheckCircle2, Cloud, CloudOff,
   AlertTriangle, Keyboard, Clock,
@@ -120,7 +122,11 @@ const ScannerReceiptFlow = () => {
           },
         };
       }
-      if (resp.status === 'duplicate' || (!resp.pallet && resp.status !== 'updated')) {
+      if (resp.status === 'found') {
+        // A MISSING pallet turned up: back in stock in this row, not part of
+        // this session's production — drop the optimistic row.
+        pallets = pallets.filter((p) => p._idempotency_key !== item.idempotency_key);
+      } else if (resp.status === 'duplicate' || (!resp.pallet && resp.status !== 'updated')) {
         pallets = pallets.filter((p) => p._idempotency_key !== item.idempotency_key);
       } else if (resp.status === 'updated' && !resp.pallet) {
         pallets = pallets.filter((p) => p._idempotency_key !== item.idempotency_key);
@@ -142,6 +148,8 @@ const ScannerReceiptFlow = () => {
 
     if (resp.status === 'needs_confirm') {
       showError(resp.message || 'Row is full by the system. Load into it anyway?');
+    } else if (resp.status === 'found') {
+      showSuccess(resp.message || 'Found missing pallet — back in stock');
     } else if (resp.status === 'duplicate' || (!resp.pallet && resp.status !== 'updated')) {
       showError(resp.message || 'Pallet already scanned');
     } else if (resp.status === 'updated' && !resp.pallet) {
@@ -471,6 +479,12 @@ const ScannerReceiptFlow = () => {
       showError('Already scanned this pallet.');
       return;
     }
+    // First pallet of a new lot in this session (midnight rollover): record it,
+    // THEN ask for the last pallet of the old lot.
+    const prevLot = lotOfLicence(ls.pallets[ls.pallets.length - 1]?.licence_number) || ls.lotNumber;
+    const newLot = lotOfLicence(licence);
+    const rolledOver = ls.pallets.length > 0 && prevLot && newLot && newLot !== prevLot
+      && !ls.pallets.some((p) => lotOfLicence(p.licence_number) === newLot);
     queuePallet(code, licence, {
       licence_number: licence,
       storage_row_id: ls.selectedRowId,
@@ -479,6 +493,9 @@ const ScannerReceiptFlow = () => {
       // The driver already answered "load it anyway" for this rack.
       allow_overfill: ls.overfillAckRowId === ls.selectedRowId,
     });
+    if (rolledOver) {
+      updateLine(code, { status: 'closing', closingLot: prevLot, closingReason: 'rollover' });
+    }
   };
 
   const handleScan = (e) => {
@@ -491,6 +508,12 @@ const ScannerReceiptFlow = () => {
     const active = activeLine ? lines[activeLine] : null;
     const needsRow = active && isRowState(active.status);
     const { cleaned, line } = resolveScan(raw);
+
+    // While the closing prompt is up, the next scan IS the closing pallet.
+    if (active && active.status === 'closing') {
+      handleClosingScan(activeLine, cleaned);
+      return;
+    }
 
     // While the active line waits for a row, a non-pallet scan is the row barcode.
     if (needsRow && !isValidLicenceFormat(cleaned)) {
@@ -570,7 +593,7 @@ const ScannerReceiptFlow = () => {
     }
   };
 
-  const handleSubmitLine = async (code) => {
+  const handleSubmitLine = (code) => {
     const ls = lines[code];
     if (!ls) return;
     const { pending, failed } = countsForRequest(ls.requestId);
@@ -582,6 +605,20 @@ const ScannerReceiptFlow = () => {
       showError('Scan at least one pallet before submitting.');
       return;
     }
+    // The closing prompt is already up: only the closing scan or Skip may
+    // finish the submit. A second tap (or a scanner's Enter landing on this
+    // button) used to submit straight away with neither recorded.
+    if (ls.status === 'closing') {
+      showError('Scan the last pallet at the wrapper first.');
+      return;
+    }
+    const lastLot = lotOfLicence(ls.pallets[ls.pallets.length - 1]?.licence_number) || ls.lotNumber;
+    updateLine(code, { status: 'closing', closingLot: lastLot, closingReason: 'submit' });
+  };
+
+  const finishSubmit = async (code) => {
+    const ls = lines[code];
+    if (!ls) return;
     setLoading(true);
     try {
       await apiClient.post(`/scanner/requests/${ls.requestId}/submit`, {});
@@ -599,6 +636,38 @@ const ScannerReceiptFlow = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Closing scan answered (scanned or skipped): store it, then either submit
+  // or carry on scanning the new lot.
+  const sendClosing = async (code, body) => {
+    const ls = lines[code];
+    if (!ls) return;
+    setLoading(true);
+    try {
+      await apiClient.post(`/scanner/requests/${ls.requestId}/closing-scan`, {
+        ...body, lot_number: ls.closingLot || null,
+      });
+    } catch (err) {
+      setLoading(false);
+      showError(err.response?.data?.detail || 'Could not record the last pallet — try again or Skip.');
+      return;
+    }
+    setLoading(false);
+    if (ls.closingReason === 'submit') {
+      await finishSubmit(code);
+    } else {
+      updateLine(code, { status: 'scanning', closingLot: null, closingReason: null });
+      showSuccess(body.skipped ? 'Skipped — keep scanning' : 'Last pallet recorded — keep scanning');
+    }
+  };
+
+  const handleClosingScan = (code, licence) => {
+    if (!isValidLicenceFormat(licence)) {
+      showError('Scan the sticker of the last pallet at the wrapper.');
+      return;
+    }
+    sendClosing(code, { licence_number: licence });
   };
 
   // ── Derived UI bits ─────────────────────────────────────────────────────────
@@ -637,7 +706,7 @@ const ScannerReceiptFlow = () => {
 
   const lineNeedsAttention = (code) => {
     const ls = lines[code];
-    return !!ls && (ls.status === 'overfill-confirm' || ls.status === 'gap');
+    return !!ls && (ls.status === 'overfill-confirm' || ls.status === 'gap' || ls.status === 'closing');
   };
 
   const autoSubmittedBanner = autoSubmittedNotice ? (
@@ -698,7 +767,9 @@ const ScannerReceiptFlow = () => {
     );
   }
 
-  const placeholder = activeState && activeState.status === 'overfill-confirm'
+  const placeholder = activeState && activeState.status === 'closing'
+    ? 'Scan the last pallet at the wrapper…'
+    : activeState && activeState.status === 'overfill-confirm'
     ? 'Scan a different rack, or tap Continue…'
     : activeState && isRowState(activeState.status)
       ? `Scan the ${lineLabel(activeLine)} row barcode…`
@@ -874,6 +945,15 @@ const ScannerReceiptFlow = () => {
                   />
                 )}
 
+                {activeState.status === 'closing' && (
+                  <ClosingPrompt
+                    key={`${activeState.requestId}-${activeState.closingLot}-${activeState.closingReason}`}
+                    reason={activeState.closingReason}
+                    busy={loading}
+                    onSkip={() => sendClosing(activeLine, { skipped: true })}
+                  />
+                )}
+
                 {activeState.status === 'gap' && (
                   <div className="scanner-receipt-gap">
                     <p className="scanner-receipt-instruction">Missing pallet(s) in sequence:</p>
@@ -916,7 +996,7 @@ const ScannerReceiptFlow = () => {
                   type="button"
                   className="scanner-receipt-submit-btn"
                   onClick={() => handleSubmitLine(activeLine)}
-                  disabled={loading || activeState.pallets.length === 0 || activePending > 0 || activeFailed > 0}
+                  disabled={loading || activeState.status === 'closing' || activeState.pallets.length === 0 || activePending > 0 || activeFailed > 0}
                   title={activePending > 0 ? 'Wait for scans to sync before submitting' : (activeFailed > 0 ? 'Resolve failed scans before submitting' : '')}
                 >
                   {loading

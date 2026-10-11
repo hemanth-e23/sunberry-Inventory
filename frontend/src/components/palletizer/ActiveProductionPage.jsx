@@ -84,7 +84,7 @@ const ActiveProductionPage = () => {
     const newProduct = finishedProductOptions.find(p => p.id === productId);
     const newName = newProduct?.name || 'the new product';
     const ok = await confirm(
-      `Switch ${lineLabel} from "${currentProductName}" to "${newName}"? The pallet counter will reset to 001 (lot number stays the same).`,
+      `Switch ${lineLabel} from "${currentProductName}" to "${newName}"? Pallet numbers continue from the last one this lot already used for that product (lot number stays the same).`,
       { title: 'Switch product?', confirmLabel: 'Switch' },
     );
     if (!ok) return;
@@ -166,7 +166,7 @@ const ActiveProductionPage = () => {
                   <div className="line-card__row"><span className="line-card__label">Set at</span><span className="line-card__value">{formatDateTime(active.set_at)}</span></div>
 
                   <div className="line-card__switch">
-                    <span className="line-card__hint">Switch to a different product (resets counter):</span>
+                    <span className="line-card__hint">Switch to a different product (numbering continues per product):</span>
                     <SearchableSelect
                       options={finishedProductOptions
                         .filter(p => p.id !== active.product_id)

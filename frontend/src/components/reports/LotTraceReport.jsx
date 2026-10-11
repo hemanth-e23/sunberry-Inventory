@@ -2,6 +2,7 @@ import React, { useState, useCallback } from "react";
 import { formatDate, formatDateKey, formatDateTime } from "../../utils/dateUtils";
 import { LoadingBox, ErrorBox, RunButton } from "./ReportSharedComponents";
 import { apiFetch, apiError, formatNumber } from "./reportUtils";
+import FgPalletTrace from "./FgPalletTrace";
 
 const LotTraceReport = () => {
   const [lotNumber, setLotNumber] = useState("");
@@ -48,9 +49,14 @@ const LotTraceReport = () => {
       {!lotLoading && !lotError && !lotData && (
         <div className="report-empty-prompt">Enter a lot number and click <strong>Run Report</strong> to trace its full history.</div>
       )}
-      {lotData && (lotData.receipts || []).length === 0 && (
+      {lotData && (lotData.receipts || []).length === 0 && (lotData.fg_pallet_lots || []).length === 0 && (
         <div className="report-error">No receipts found matching lot number "{lotData.lot_number}".</div>
       )}
+      {/* Finished goods, balanced from the pallets (sees live loads, the Moyel
+          shuttle and MISSING, which the receipt timelines below cannot). */}
+      {lotData && (lotData.fg_pallet_lots || []).map((lot) => (
+        <FgPalletTrace key={`${lot.product_id}-${lot.lot_number}`} lot={lot} />
+      ))}
       {lotData && (lotData.receipts || []).map((receipt) => (
         <div key={receipt.receipt_id} className="reports-section lot-trace-receipt">
           {/* Receipt Header */}

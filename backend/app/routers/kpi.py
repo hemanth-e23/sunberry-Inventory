@@ -121,13 +121,20 @@ def get_production_today(
             """
             SELECT
                 (regexp_match(pl.licence_number, '^MP\\d{3}\\d{2}L(\\d+)-'))[1] AS line_number,
-                COALESCE(SUM(pl.cases), 0)::int                                    AS cases,
-                COUNT(*) FILTER (WHERE NOT pl.is_partial)::int                    AS full_pallets,
-                COUNT(*) FILTER (WHERE pl.is_partial)::int                        AS partial_pallets,
+                COALESCE(SUM(pl.cases + COALESCE(ca.removed, 0)), 0)::int                                    AS cases,
+                COUNT(*) FILTER (WHERE NOT (CASE WHEN ca.removed IS NULL THEN pl.is_partial ELSE (pl.cases + ca.removed) < fr.cases_per_pallet END))::int                    AS full_pallets,
+                COUNT(*) FILTER (WHERE (CASE WHEN ca.removed IS NULL THEN pl.is_partial ELSE (pl.cases + ca.removed) < fr.cases_per_pallet END))::int                        AS partial_pallets,
                 MIN(pl.scanned_at)                                                AS first_scan_at,
                 MAX(pl.scanned_at)                                                AS last_scan_at
             FROM pallet_licences pl
             JOIN forklift_requests fr ON fr.id = pl.forklift_request_id
+            -- Production is what was made: add back cases a case adjustment later
+            -- took off (leakers), so an emptied or trimmed pallet still counts in full.
+            LEFT JOIN (
+                SELECT pallet_licence_id, SUM(cases_before - cases_after) AS removed
+                FROM pallet_events WHERE event_type = 'case_adjusted'
+                GROUP BY pallet_licence_id
+            ) ca ON ca.pallet_licence_id = pl.id
             WHERE pl.warehouse_id = :wid
               AND pl.is_deleted = false
               -- Voided pallets keep their cases and is_deleted = false, so only
@@ -224,11 +231,18 @@ def get_production_detail(
                 pl.product_id                                                  AS product_id,
                 p.name                                                         AS product_name,
                 p.short_code                                                   AS short_code,
-                COALESCE(SUM(pl.cases), 0)::int                                AS cases,
-                COUNT(*) FILTER (WHERE NOT pl.is_partial)::int                 AS full_pallets,
-                COUNT(*) FILTER (WHERE pl.is_partial)::int                     AS partial_pallets
+                COALESCE(SUM(pl.cases + COALESCE(ca.removed, 0)), 0)::int                                AS cases,
+                COUNT(*) FILTER (WHERE NOT (CASE WHEN ca.removed IS NULL THEN pl.is_partial ELSE (pl.cases + ca.removed) < fr.cases_per_pallet END))::int                 AS full_pallets,
+                COUNT(*) FILTER (WHERE (CASE WHEN ca.removed IS NULL THEN pl.is_partial ELSE (pl.cases + ca.removed) < fr.cases_per_pallet END))::int                     AS partial_pallets
             FROM pallet_licences pl
             JOIN forklift_requests fr ON fr.id = pl.forklift_request_id
+            -- Production is what was made: add back cases a case adjustment later
+            -- took off (leakers), so an emptied or trimmed pallet still counts in full.
+            LEFT JOIN (
+                SELECT pallet_licence_id, SUM(cases_before - cases_after) AS removed
+                FROM pallet_events WHERE event_type = 'case_adjusted'
+                GROUP BY pallet_licence_id
+            ) ca ON ca.pallet_licence_id = pl.id
             LEFT JOIN products p ON p.id = pl.product_id
             WHERE pl.warehouse_id = :wid
               AND pl.is_deleted = false
@@ -271,10 +285,17 @@ def get_production_detail(
                 pl.product_id                                                        AS product_id,
                 p.name                                                               AS product_name,
                 p.short_code                                                         AS short_code,
-                COALESCE(SUM(pl.cases), 0)::int                                      AS cases,
+                COALESCE(SUM(pl.cases + COALESCE(ca.removed, 0)), 0)::int                                      AS cases,
                 COUNT(*)::int                                                        AS pallets
             FROM pallet_licences pl
             JOIN forklift_requests fr ON fr.id = pl.forklift_request_id
+            -- Production is what was made: add back cases a case adjustment later
+            -- took off (leakers), so an emptied or trimmed pallet still counts in full.
+            LEFT JOIN (
+                SELECT pallet_licence_id, SUM(cases_before - cases_after) AS removed
+                FROM pallet_events WHERE event_type = 'case_adjusted'
+                GROUP BY pallet_licence_id
+            ) ca ON ca.pallet_licence_id = pl.id
             LEFT JOIN products p ON p.id = pl.product_id
             WHERE pl.warehouse_id = :wid
               AND pl.is_deleted = false
@@ -369,10 +390,17 @@ def get_production_range(
                 pl.product_id                                                  AS product_id,
                 p.name                                                         AS product_name,
                 p.short_code                                                   AS short_code,
-                COALESCE(SUM(pl.cases), 0)::int                                AS cases,
+                COALESCE(SUM(pl.cases + COALESCE(ca.removed, 0)), 0)::int                                AS cases,
                 COUNT(*)::int                                                  AS pallets
             FROM pallet_licences pl
             JOIN forklift_requests fr ON fr.id = pl.forklift_request_id
+            -- Production is what was made: add back cases a case adjustment later
+            -- took off (leakers), so an emptied or trimmed pallet still counts in full.
+            LEFT JOIN (
+                SELECT pallet_licence_id, SUM(cases_before - cases_after) AS removed
+                FROM pallet_events WHERE event_type = 'case_adjusted'
+                GROUP BY pallet_licence_id
+            ) ca ON ca.pallet_licence_id = pl.id
             LEFT JOIN products p ON p.id = pl.product_id
             WHERE pl.warehouse_id = :wid
               AND pl.is_deleted = false

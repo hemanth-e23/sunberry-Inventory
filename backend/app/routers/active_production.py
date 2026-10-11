@@ -22,6 +22,7 @@ from app.schemas import (
 )
 from app.utils.auth import get_current_active_user, warehouse_filter
 from app.utils.lot_number import lot_for_today, plant_local_date
+from app.services import active_production_service
 
 
 router = APIRouter()
@@ -53,25 +54,11 @@ def _resolve_warehouse_id(user: User) -> str:
     return wh_id
 
 
-def _ensure_today(active: ActiveLineProduction, plant_tz: str) -> bool:
-    """Lazy day-rollover: if the active row is from a previous plant-local
-    day, refresh it in-place (caller commits) so the same product continues
-    on the new day with a fresh lot number and pallet sequence reset to 0.
-    The supervisor's product choice is preserved — only midnight triggers
-    this, not the supervisor.
-
-    Returns True if a rollover happened."""
-    if not active or not active.is_active:
-        return False
-    set_at_date = plant_local_date(plant_tz, active.set_at)
-    today_local = datetime.now(ZoneInfo(plant_tz or "UTC")).date()
-    if set_at_date < today_local:
-        line_name = active.line.name if active.line else ""
-        active.lot_number = lot_for_today(plant_tz, line_name)
-        active.last_printed_seq = 0
-        active.set_at = datetime.now(timezone.utc)
-        return True
-    return False
+def _ensure_today(db: Session, active: ActiveLineProduction, plant_tz: str) -> ActiveLineProduction:
+    """Lazy day-rollover — see active_production_service.ensure_today. Keeps
+    the previous lot's row (and its last printed number) and returns the new
+    active row for today's lot, same product. Caller commits."""
+    return active_production_service.ensure_today(db, active, plant_tz)
 
 
 def _to_active_read(active: ActiveLineProduction) -> ActiveLineProductionRead:
@@ -132,10 +119,11 @@ def list_lines_with_active(
     dirty = False
     by_line = {}
     for a in actives:
-        if _ensure_today(a, plant_tz):
+        cur = _ensure_today(db, a, plant_tz)
+        if cur is not a:
             dirty = True
-        if a.is_active:
-            by_line[a.line_id] = a
+        if cur is not None and cur.is_active:
+            by_line[cur.line_id] = cur
     if dirty:
         db.commit()
 
@@ -202,17 +190,11 @@ def set_active_production(
     if existing:
         db.flush()
 
-    new_row = ActiveLineProduction(
-        id=f"alp-{uuid.uuid4().hex[:12]}",
-        line_id=line.id,
-        product_id=product.id,
-        lot_number=lot_number,
-        last_printed_seq=0,
-        set_at=datetime.now(timezone.utc),
-        set_by_user_id=current_user.id,
-        is_active=True,
+    # Continue the lot's numbering — A → B → A on the same day must not
+    # reprint A's #1 (FG-PALLET-LIFECYCLE-SPEC §3.2).
+    new_row = active_production_service.new_active_row(
+        db, line.id, product.id, lot_number, current_user.id,
     )
-    db.add(new_row)
     db.commit()
     db.refresh(new_row)
     return _to_active_read(new_row)

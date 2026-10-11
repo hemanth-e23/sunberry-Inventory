@@ -5,6 +5,8 @@ import { useConfirm } from "../../context/ConfirmContext";
 import { useToast } from "../../context/ToastContext";
 import { formatTimeAgo, getDaysAgo } from "../../utils/dateUtils";
 import { pluralizeUnit, singularUnit } from "../../utils/rowSources";
+import { adjustmentTypeLabel } from "../../utils/adjustmentTypes";
+import { CASE_ADJUSTMENT_REASON_LABELS } from "../../constants";
 
 const getPriorityLevel = (days) => {
   if (days === 0) return { level: 'low', label: 'New', color: '#10b981' };
@@ -13,19 +15,9 @@ const getPriorityLevel = (days) => {
   return { level: 'high', label: 'Urgent', color: '#ef4444' };
 };
 
-const getAdjustmentTypeLabel = (type) => {
-  const labels = {
-    'stock-correction': 'Stock Correction',
-    'damage-reduction': 'Damage Reduction',
-    'donation': 'Donation',
-    'trash-disposal': 'Trash Disposal',
-    'quality-rejection': 'Quality Rejection',
-    'used-in-production': 'Used in Production',
-    'production-consumption': 'Production Consumption',
-    'shipped-out': 'Shipped Out',
-  };
-  return labels[type] || type;
-};
+// One label table for every list (utils/adjustmentTypes) — this card kept its
+// own copy and printed newer types raw ("missing").
+const getAdjustmentTypeLabel = adjustmentTypeLabel;
 
 const adjustmentTypeColors = {
   'stock-correction': { bg: '#eff6ff', color: '#1d4ed8' },
@@ -34,6 +26,8 @@ const adjustmentTypeColors = {
   'trash-disposal': { bg: '#fee2e2', color: '#991b1b' },
   'quality-rejection': { bg: '#fef3c7', color: '#92400e' },
   'shipped-out': { bg: '#f5f3ff', color: '#5b21b6' },
+  'missing': { bg: '#fee2e2', color: '#991b1b' },
+  'case-adjustment': { bg: '#eff6ff', color: '#1d4ed8' },
 };
 
 const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, categoryLookup, userNameMap }) => {
@@ -85,7 +79,12 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
           if (a?.rowId) rackNames[a.rowId] = a.rowName || rackNames[a.rowId];
         }));
         const containerWord = receipt?.containerUnit || 'unit';
-        const rackLines = (adjustment.sourceBreakdown || []).map((b) => {
+        // ±N cases on one FG pallet: the signed delta lives in the breakdown
+        // (quantity is −delta), so "+5" must not read "Removing −-5".
+        const isCaseAdj = adjustment.adjustmentType === 'case-adjustment';
+        const caseDetail = isCaseAdj ? ((adjustment.sourceBreakdown || [])[0] || {}) : null;
+        const caseDelta = isCaseAdj ? Number(caseDetail.case_delta) || -adjQty : 0;
+        const rackLines = isCaseAdj ? [] : (adjustment.sourceBreakdown || []).map((b) => {
           const rowId = String(b?.id || '').replace(/^row-/, '');
           const units = b?.units != null ? Number(b.units) : null;
           const part = Number(b?.open_qty) || 0;
@@ -116,7 +115,28 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
             {/* Pallet-based adjustments have no receipt to read a before/after
                 from, so state the removal on its own rather than hiding the
                 panel and leaving the approver with no quantity at all. */}
-            {!receipt && isPalletBased && (
+            {isCaseAdj && (
+              <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '12px 16px', marginBottom: '12px' }}>
+                <div style={{ fontSize: '12px', color: '#6b7280', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>Cases on one pallet</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '15px', flexWrap: 'wrap' }}>
+                  <div style={{ textAlign: 'center', padding: '6px 12px', background: caseDelta > 0 ? '#dcfce7' : '#fee2e2', borderRadius: '8px' }}>
+                    <div style={{ fontSize: '11px', color: caseDelta > 0 ? '#166534' : '#991b1b', marginBottom: '2px' }}>{caseDelta > 0 ? 'Adding' : 'Removing'}</div>
+                    <div style={{ fontWeight: 700, fontSize: '18px', color: caseDelta > 0 ? '#16a34a' : '#dc2626' }}>{caseDelta > 0 ? '+' : '−'}{Math.abs(caseDelta)}</div>
+                    <div style={{ fontSize: '11px', color: caseDelta > 0 ? '#166534' : '#991b1b' }}>cases</div>
+                  </div>
+                  <div style={{ fontSize: '13px', color: '#374151' }}>
+                    {caseDetail.cases_before != null && (
+                      <div>Pallet: {caseDetail.cases_before} → {Number(caseDetail.cases_before) + caseDelta} cases</div>
+                    )}
+                    {caseDetail.reason_code && (
+                      <div style={{ color: '#6b7280' }}>{CASE_ADJUSTMENT_REASON_LABELS[caseDetail.reason_code] || caseDetail.reason_code}</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {!receipt && isPalletBased && !isCaseAdj && (
               <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '12px 16px', marginBottom: '12px' }}>
                 <div style={{ fontSize: '12px', color: '#6b7280', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>Quantity Impact</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '15px' }}>
@@ -205,7 +225,11 @@ const AdjustmentsTab = ({ pendingAdjustments, receiptLookup, productLookup, cate
                   // 'cases' rather than 'units' as the fallback: the only time
                   // there is no receipt is a pallet-based FG adjustment, which
                   // is always measured in cases (adjustments.py:79).
-                  confirm(`Approve this ${getAdjustmentTypeLabel(adjustment.adjustmentType).toLowerCase()} of ${adjQty} ${receipt?.quantityUnits || 'cases'}?`).then(async ok => {
+                  confirm(isCaseAdj
+                    ? `Approve ${caseDelta > 0 ? 'adding' : 'removing'} ${Math.abs(caseDelta)} cases on this pallet?`
+                    : adjustment.adjustmentType === 'missing'
+                    ? `Mark ${palletCount} ${palletCount === 1 ? 'pallet' : 'pallets'} (${adjQty} cases) missing? A later scan finds them again.`
+                    : `Approve this ${getAdjustmentTypeLabel(adjustment.adjustmentType).toLowerCase()} of ${adjQty} ${receipt?.quantityUnits || 'cases'}?`).then(async ok => {
                     if (!ok) return;
                     setActingId(adjustment.id);
                     const res = await approveAdjustment(adjustment.id, user?.id || user?.username);

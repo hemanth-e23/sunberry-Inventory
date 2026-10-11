@@ -9,7 +9,10 @@ import { formatDateTime } from '../../utils/dateUtils';
 import { buildEntriesForProduct, containersFreed, describeContainers, countWithUnit, overAskMessage, stockSummary, containerSplit, singularUnit, pendingLabel } from '../../utils/rowSources';
 import RmEntryQtyInput from './RmEntryQtyInput';
 import '../InventoryActionsPage.css';
-import { CATEGORY_TYPES, RECEIPT_STATUS } from '../../constants';
+import {
+  CATEGORY_TYPES, RECEIPT_STATUS, ADJUSTMENT_TYPE, CASE_ADJUSTMENT_REASON, CASE_ADJUSTMENT_REASON_LABELS,
+} from '../../constants';
+import { caseAdjustmentPayload } from '../../utils/caseAdjustment';
 import { adjustmentTypeLabel } from '../../utils/adjustmentTypes';
 
 const ADJUSTMENT_TYPES = [
@@ -19,6 +22,13 @@ const ADJUSTMENT_TYPES = [
   { value: 'trash-disposal', label: 'Trash / Disposal' },
   { value: 'quality-rejection', label: 'Quality Rejection' },
   { value: 'used-in-production', label: 'Used in Production' },
+];
+
+// Finished goods also have "Missing (not found)": the pallets go MISSING, not
+// written off, so any later scan finds them again (FG pallet lifecycle §1.2).
+const FG_ADJUSTMENT_TYPES = [
+  { value: ADJUSTMENT_TYPE.MISSING, label: 'Missing (not found)' },
+  ...ADJUSTMENT_TYPES,
 ];
 
 const AdjustmentsTab = () => {
@@ -55,6 +65,12 @@ const AdjustmentsTab = () => {
   const [fgLoadError, setFgLoadError] = useState('');
   const [isLoadingFg, setIsLoadingFg] = useState(false);
   const [isSubmittingFg, setIsSubmittingFg] = useState(false);
+  // 'pallets' = whole-pallet deduction; 'cases' = ±N cases on ONE pallet (§4.2).
+  const [fgMode, setFgMode] = useState('pallets');
+  const [casePalletId, setCasePalletId] = useState('');
+  const [caseSign, setCaseSign] = useState('-');
+  const [caseCount, setCaseCount] = useState('');
+  const [caseReason, setCaseReason] = useState(CASE_ADJUSTMENT_REASON.LEAKER_DAMAGED);
 
   // ─── RM / Packaging (product-first) state ────────────────────────────────────
   const [rmForm, setRmForm] = useState({
@@ -193,9 +209,36 @@ const AdjustmentsTab = () => {
     .reduce((s, p) => s + (p.cases || 0), 0);
 
   // ─── FG submit ───────────────────────────────────────────────────────────────
+  const handleCaseSubmit = async () => {
+    const pallet = fgPallets.find((p) => p.id === casePalletId);
+    const built = caseAdjustmentPayload({
+      pallet, sign: caseSign, count: caseCount, reasonCode: caseReason, reason: fgReason,
+    });
+    if (built.error) { setFgError(built.error); return; }
+    const product = productLookup[fgProductId];
+    setIsSubmittingFg(true);
+    setFgError('');
+    const result = await submitAdjustment({
+      productId: fgProductId,
+      categoryId: product?.categoryId || null,
+      ...built.adjustment,
+    });
+    setIsSubmittingFg(false);
+    if (result.success) {
+      setCasePalletId('');
+      setCaseCount('');
+      setFgReason('');
+      addToast('Case adjustment submitted for approval.', 'success');
+    } else {
+      setFgError(result.error || 'Failed to submit adjustment.');
+      addToast(result.error || 'Failed to submit adjustment.', 'error');
+    }
+  };
+
   const handleFgSubmit = async (e) => {
     e.preventDefault();
     if (!fgProductId) { setFgError('Select a product.'); return; }
+    if (fgMode === 'cases') { await handleCaseSubmit(); return; }
     if (fgSelectedIds.length === 0) { setFgError('Select at least one pallet.'); return; }
     if (!fgReason.trim()) { setFgError('Reason is required.'); return; }
 
@@ -415,7 +458,55 @@ const AdjustmentsTab = () => {
 
             {fgLoadError && <div className="alert error">{fgLoadError}</div>}
 
-            {(isLoadingFg || fgPallets.length > 0 || fgProductId) && (
+            <div className="toggle-row" style={{ display: 'flex', gap: '6px' }}>
+              {[['pallets', 'Whole pallets'], ['cases', 'Cases on one pallet']].map(([k, label]) => (
+                <button
+                  key={k}
+                  type="button"
+                  className={fgMode === k ? 'primary-button' : 'secondary-button'}
+                  onClick={() => { setFgMode(k); setFgError(''); }}
+                >{label}</button>
+              ))}
+            </div>
+
+            {fgMode === 'cases' && fgProductId && (
+              <>
+                <label>
+                  <span>Pallet <span className="required">*</span></span>
+                  <select value={casePalletId} onChange={e => setCasePalletId(e.target.value)} aria-label="Pallet for case adjustment">
+                    <option value="">Pick the pallet</option>
+                    {fgPallets.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.licence_number} · {p.cases} cs{p.storage_row_name ? ` · ${p.storage_row_name}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'end' }}>
+                  <label style={{ width: '110px' }}>
+                    <span>Change</span>
+                    <select value={caseSign} onChange={e => setCaseSign(e.target.value)} aria-label="Add or remove cases">
+                      <option value="-">− remove</option>
+                      <option value="+">+ add</option>
+                    </select>
+                  </label>
+                  <label style={{ flex: 1 }}>
+                    <span>Cases <span className="required">*</span></span>
+                    <input type="number" min="1" step="1" value={caseCount} onChange={e => setCaseCount(e.target.value)} aria-label="Number of cases" />
+                  </label>
+                </div>
+                <label>
+                  <span>Why <span className="required">*</span></span>
+                  <select value={caseReason} onChange={e => setCaseReason(e.target.value)} aria-label="Case adjustment reason">
+                    {Object.values(CASE_ADJUSTMENT_REASON).map(r => (
+                      <option key={r} value={r}>{CASE_ADJUSTMENT_REASON_LABELS[r]}</option>
+                    ))}
+                  </select>
+                </label>
+              </>
+            )}
+
+            {fgMode === 'pallets' && (isLoadingFg || fgPallets.length > 0 || fgProductId) && (
               <div>
                 <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--color-text-muted)' }}>
                   Select pallets to adjust
@@ -430,14 +521,22 @@ const AdjustmentsTab = () => {
               </div>
             )}
 
+            {fgMode === 'pallets' && (
             <label>
               <span>Adjustment Type <span className="required">*</span></span>
               <select value={fgAdjustmentType} onChange={e => setFgAdjustmentType(e.target.value)}>
-                {ADJUSTMENT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                {FG_ADJUSTMENT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
               </select>
             </label>
+            )}
+            {fgMode === 'pallets' && fgAdjustmentType === ADJUSTMENT_TYPE.MISSING && (
+              <p className="muted small">
+                The pallets are marked missing, not written off — a later scan anywhere (ship-out, receiving,
+                cycle check) puts them back in stock automatically.
+              </p>
+            )}
 
-            {fgAdjustmentType === 'donation' && (
+            {fgMode === 'pallets' && fgAdjustmentType === 'donation' && (
               <label>
                 <span>Recipient (Optional)</span>
                 <input
@@ -466,11 +565,13 @@ const AdjustmentsTab = () => {
               <button
                 type="submit"
                 className="primary-button"
-                disabled={isSubmittingFg || fgSelectedIds.length === 0}
+                disabled={isSubmittingFg || (fgMode === 'pallets' ? fgSelectedIds.length === 0 : !casePalletId)}
               >
                 {isSubmittingFg
                   ? 'Submitting...'
-                  : fgSelectedIds.length > 0
+                  : fgMode === 'cases'
+                    ? 'Submit Case Adjustment'
+                    : fgSelectedIds.length > 0
                     ? `Submit Adjustment (${fgSelectedIds.length} pallets · ${selectedFgCases} cases)`
                     : 'Submit Adjustment'}
               </button>
@@ -699,7 +800,7 @@ const AdjustmentsTab = () => {
             {recentAdjustments.map(adj => {
               const product = productLookup[adj.productId];
               const isPallet = adj.palletLicenceIds?.length > 0;
-              const typeLabel = ADJUSTMENT_TYPES.find(t => t.value === adj.adjustmentType)?.label || adjustmentTypeLabel(adj.adjustmentType);
+              const typeLabel = FG_ADJUSTMENT_TYPES.find(t => t.value === adj.adjustmentType)?.label || adjustmentTypeLabel(adj.adjustmentType);
               return (
                 <li key={adj.id}>
                   <div className="item-main">
@@ -708,7 +809,9 @@ const AdjustmentsTab = () => {
                   </div>
                   <div className="item-meta">
                     <span><strong>Type:</strong> {typeLabel}</span>
-                    {isPallet
+                    {isPallet && adj.adjustmentType === ADJUSTMENT_TYPE.CASE_ADJUSTMENT
+                      ? <span><strong>Cases:</strong> {adj.quantity > 0 ? `−${adj.quantity}` : `+${-adj.quantity}`} on 1 pallet</span>
+                      : isPallet
                       ? <span><strong>Pallets:</strong> {adj.palletLicenceIds.length} · {adj.quantity} cases</span>
                       : <span><strong>Qty:</strong> {adj.quantity}</span>
                     }

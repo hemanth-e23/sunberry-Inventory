@@ -112,3 +112,32 @@ def test_missing_optional_data_does_not_crash():
 def test_empty_snapshot_is_rejected():
     with pytest.raises(ValidationError):
         bol_pdf_service.render_bol_pdf({})
+
+
+def test_time_out_prints_in_the_warehouse_timezone():
+    """Snapshots store time_out as UTC; the BOL must show the dock's clock."""
+    snap = {**SNAPSHOT, "time_out": "2026-10-09T00:20:58+00:00"}
+    assert _fields(bol_pdf_service.render_bol_pdf(snap, "America/New_York"))["timeOut"] == "20:20:58"
+    # No timezone given: printed as stored (old behaviour, naive values untouched).
+    assert _fields(bol_pdf_service.render_bol_pdf(SNAPSHOT))["timeOut"] == "13:33:00"
+
+
+def _da(pdf_bytes, name):
+    for ref in PdfReader(BytesIO(pdf_bytes)).pages[0]["/Annots"]:
+        a = ref.get_object()
+        if a.get("/T") == name:
+            return str(a.get("/DA"))
+    return None
+
+
+def test_long_values_shrink_to_fit_instead_of_clipping():
+    long_info = "128OZ - PASSION ORANGE GUAVA NECTAR (FCCPG4884SUN01) · 2 PAL"
+    snap = {**SNAPSHOT, "order_rows": [
+        {"order_no": "Lot: MP12626L1", "qty": 100, "weight": 3750, "info": long_info},
+        {"order_no": "Lot: X", "qty": 1, "weight": 1, "info": "SHORT"},
+    ]}
+    pdf = bol_pdf_service.render_bol_pdf(snap)
+    assert _fields(pdf)["additionalInfo1"] == long_info          # value intact
+    size = float(_da(pdf, "additionalInfo1").split()[-2])
+    assert 5 <= size < 9                                         # shrunk, not below the floor
+    assert _da(pdf, "additionalInfo2").endswith("9 Tf")          # short value keeps 9pt

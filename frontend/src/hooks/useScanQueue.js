@@ -91,16 +91,27 @@ export const useScanQueueCore = ({ onItemResult } = {}) => {
   useEffect(() => { pendingRef.current = pendingCount; }, [pendingCount]);
   const reachableRef = useRef(conn.reachable);
   useEffect(() => { reachableRef.current = conn.reachable; }, [conn.reachable]);
+  const navigatorOnlineRef = useRef(navigatorOnline);
+  useEffect(() => { navigatorOnlineRef.current = navigatorOnline; }, [navigatorOnline]);
 
   useEffect(() => {
     const t = setInterval(() => {
-      // With nothing queued, nothing measures the connection, and an OFFLINE
-      // banner raised by a failed direct call would never come down by itself.
-      if (reachableRef.current === false && pendingRef.current === 0) probeServer();
+      // With nothing queued, nothing measures the connection — so measure it.
+      // An OFFLINE chip raised by a failed direct call, or a browser that
+      // claims "offline" while scans sync fine (its `online` event never
+      // fired — reproduced 2026-10-08), would otherwise never come down.
+      const unmeasured = reachableRef.current !== true;
+      if (pendingRef.current === 0 && (unmeasured || !navigatorOnlineRef.current)) probeServer();
       else drain();
     }, POLL_MS);
     return () => clearInterval(t);
   }, [drain]);
+
+  // The browser says offline but we have never measured: ask the server now
+  // rather than showing "Offline" until the first poll.
+  useEffect(() => {
+    if (!navigatorOnline && pendingCount === 0) probeServer();
+  }, [navigatorOnline, pendingCount]);
 
   // Back from an outage: send right away rather than waiting out the poll —
   // the worker must not have to press anything (browser test U1).
@@ -111,12 +122,15 @@ export const useScanQueueCore = ({ onItemResult } = {}) => {
     if (was === false && conn.reachable === true) syncNow();
   }, [conn.reachable, syncNow]);
 
-  // What the operator is shown. A measured "cannot reach" always wins — from a
-  // queued send or from any direct call that failed. A measured "reachable"
-  // wins while queued work keeps it fresh; otherwise trust the browser's claim.
+  // What the operator is shown: MEASURED reachability — the last real send,
+  // direct call or /health probe — whenever there is one. navigator.onLine is
+  // only a fallback before anything has been measured. It used to win
+  // whenever the queue was empty, so a gun whose `online` event never fired
+  // read "Offline" all shift while every scan synced (FG spec §3.4); the poll
+  // above keeps the measurement fresh, so the label recovers without a reload.
   let online;
   if (conn.reachable === false) online = false;
-  else if (pendingCount > 0 && conn.reachable !== null) online = conn.reachable;
+  else if (conn.reachable === true) online = true;
   else online = navigatorOnline;
 
   const send = useCallback(({ requestId, payload, endpoint, idempotencyKey }) => {

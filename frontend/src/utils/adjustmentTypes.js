@@ -14,6 +14,8 @@ export const ADJUSTMENT_TYPE_LABELS = {
   'used-in-production': 'Used in Production',
   'production-consumption': 'Production Consumption',
   'shipped-out': 'Shipped Out',
+  missing: 'Missing (not found)',
+  'case-adjustment': 'Case Adjustment',
 };
 
 export const adjustmentTypeLabel = (type) => {

@@ -29,6 +29,7 @@ from app.schemas import (
 from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
 from app.enums import TransferStatus, PalletStatus, ReceiptStatus, ShipOutScanReason, ShipOutLifecycle
 from app.services import transfer_service
+from app.services import pallet_lifecycle_service as plc
 from app.services import lot_placement_service as lps
 from app.services.lot_status import transfer_units
 from app.constants import (
@@ -695,6 +696,18 @@ def scan_pick_transfer(
 
     licence_label = pl.licence_number or pl.id
 
+    # An emptied pallet (case-adjusted to 0) stays at 0 — even if it was on
+    # the pick list before it was emptied. Refuse, never revive.
+    if pl.status == PalletStatus.EMPTIED:
+        _record_scan(pl.id, pl.licence_number, on_list=False)
+        db.commit()
+        return {
+            "success": False,
+            "on_list": False,
+            "reason": ShipOutScanReason.PALLET_UNAVAILABLE.value,
+            "message": plc.emptied_detail(db, pl),
+        }
+
     # On-list scan: planned pallet, record and return.
     if pl.id in pl_ids:
         _record_scan(pl.id, pl.licence_number, on_list=True)
@@ -757,6 +770,24 @@ def scan_pick_transfer(
             "reason": ShipOutScanReason.PALLET_UNAVAILABLE.value,
             "message": f"Pallet {licence_label} is on hold",
         }
+    # A MISSING / NOT_PRODUCED / written-off pallet that is physically here
+    # goes back on its receipt and then swaps in like any in-stock pallet
+    # (FG-PALLET-LIFECYCLE-SPEC §1.2).
+    found_note = None
+    if pl.status in plc.FOUNDABLE_STATUSES and not (
+        transfer.warehouse_id and pl.warehouse_id and pl.warehouse_id != transfer.warehouse_id
+    ):
+        prev_status = pl.status
+        plc.restore_to_stock(
+            db, pl, row=None, user=current_user,
+            reason=f"Scanned at ship-out on order {transfer.order_number or transfer.id}",
+            ref_type="transfer", ref_id=transfer.id,
+        )
+        found_note = (
+            "Found missing pallet"
+            if prev_status == PalletStatus.MISSING
+            else plc.found_message(db, pl, prev_status)
+        )
     if pl.status != PalletStatus.IN_STOCK:
         _record_scan(pl.id, pl.licence_number, on_list=False)
         db.commit()
@@ -765,7 +796,9 @@ def scan_pick_transfer(
             "on_list": False,
             "reason": ShipOutScanReason.PALLET_UNAVAILABLE.value,
             "message": (
-                f"Pallet {licence_label} is not in stock "
+                plc.shipped_detail(db, pl)
+                if pl.status == PalletStatus.SHIPPED
+                else f"Pallet {licence_label} is not in stock "
                 f"(status: {pl.status}) — may be in another order"
             ),
         }
@@ -871,7 +904,11 @@ def scan_pick_transfer(
             "added_licence_number": pl.licence_number,
         },
         "licence": {"id": pl.id, "licence_number": pl.licence_number, "cases": pl.cases},
-        "message": f"Swapped {removed_pl.licence_number} for {pl.licence_number}",
+        "found": bool(found_note),
+        "message": (
+            (f"{found_note} — " if found_note else "")
+            + f"Swapped {removed_pl.licence_number} for {pl.licence_number}"
+        ),
     }
 
 
@@ -1937,7 +1974,10 @@ def get_bol_pdf_endpoint(
             detail="No documents generated yet — generate them before printing.",
         )
     try:
-        pdf = bol_pdf_service.render_bol_pdf(transfer.document_snapshot)
+        from app.utils.warehouse_time import warehouse_timezone
+        pdf = bol_pdf_service.render_bol_pdf(
+            transfer.document_snapshot, warehouse_timezone(db, transfer.warehouse_id),
+        )
     except ValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
 

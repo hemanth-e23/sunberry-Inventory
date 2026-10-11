@@ -56,6 +56,9 @@ class ShipToLocation(Base):
     zip_code = Column(String(20), nullable=True)
     notes = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False, server_default="true")
+    # Offered in the Moyel Shuttle destination list (FG-PALLET-LIFECYCLE-SPEC
+    # §1.1). Seeded with RMI WAREHOUSE; admin-editable.
+    is_shuttle_destination = Column(Boolean, default=False, nullable=False, server_default="false")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

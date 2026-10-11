@@ -60,6 +60,7 @@ const RowLabelPrintPage = lazy(() => import('./components/ingredient/RowLabelPri
 const IngredientStagingPage = lazy(() => import('./components/ingredient/IngredientStagingPage'));
 const ScannerIngredientStagingFlow = lazy(() => import('./components/scanner/ScannerIngredientStagingFlow'));
 const ScannerStagingPullFlow = lazy(() => import('./components/scanner/ScannerStagingPullFlow'));
+const ScannerCycleCheckFlow = lazy(() => import('./components/scanner/ScannerCycleCheckFlow'));
 
 // Context
 import { ToastProvider } from './context/ToastContext';
@@ -241,6 +242,11 @@ function AppRoutes() {
           </ProtectedRoute>
         } />
 
+        <Route path="/forklift/cycle-check" element={
+          <ProtectedRoute requiredRole="forklift">
+            <ScannerCycleCheckFlow />
+          </ProtectedRoute>
+        } />
         <Route path="/forklift/transfer" element={
           <ProtectedRoute requiredRole="forklift">
             <ScannerTransferFlow />

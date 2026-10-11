@@ -656,6 +656,10 @@ export const InventoryProvider = ({ children }) => {
       };
       if (adjustment.palletLicenceIds?.length > 0) {
         payload.pallet_licence_ids = adjustment.palletLicenceIds;
+        // A case adjustment carries its signed delta + reason here.
+        if (adjustment.sourceBreakdown && adjustment.sourceBreakdown.length > 0) {
+          payload.source_breakdown = adjustment.sourceBreakdown;
+        }
       } else {
         payload.receipt_id = adjustment.receiptId;
         payload.quantity = adjustment.quantity;
@@ -939,10 +943,13 @@ export const InventoryProvider = ({ children }) => {
 
   // ─── markPalletsNotProduced ─────────────────────────────────────────────────
 
-  const markPalletsNotProduced = async (requestId, licenceNumbers) => {
+  // reason = { reasonCode, note } — required by the server (NOT_PRODUCED_REASON).
+  const markPalletsNotProduced = async (requestId, licenceNumbers, reason = {}) => {
     try {
       const resp = await apiClient.post(`/scanner/requests/${requestId}/mark-not-produced`, {
         licence_numbers: licenceNumbers,
+        reason_code: reason.reasonCode || null,
+        note: reason.note || null,
       });
       await fetchForkliftRequests();
       return { success: true, data: resp.data };

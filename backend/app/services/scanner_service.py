@@ -16,13 +16,17 @@ from app.models import (
     ForkliftRequest, PalletLicence, Receipt, ReceiptAllocation,
     Category, ProductionLine, InventoryTransfer,
 )
-from app.enums import ForkliftRequestStatus, PalletStatus, ReceiptStatus, TransferStatus
+from app.enums import (
+    ForkliftRequestStatus, NotProducedReason, PalletEventType, PalletStatus, ReceiptStatus,
+    TransferStatus,
+)
 from app.constants import (
     ROLE_FORKLIFT, ROLE_ADMIN, ROLE_SUPERVISOR, ROLE_WAREHOUSE, APPROVAL_ROLES,
     CATEGORY_FINISHED, DEFAULT_CASES_PER_PALLET, DEFAULT_EXPIRE_YEARS, DAYS_PER_YEAR,
     STALE_FORKLIFT_SESSION_HOURS,
 )
 from app.exceptions import NotFoundError, ForbiddenError, ValidationError
+from app.services import pallet_lifecycle_service as plc
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +235,16 @@ def _validate_storage_row(db: Session, row_id: str) -> StorageRow:
     return row
 
 
+# Pallets that are this session's production: still pending, sticker-less
+# placeholders, and pallets that already left (live load / Moyel shuttle) before
+# the session was approved.
+_SESSION_PRODUCTION_STATUSES = (
+    PalletStatus.PENDING,
+    PalletStatus.MISSING_STICKER,
+    PalletStatus.SHIPPED,
+)
+
+
 def _touch_activity(fr: ForkliftRequest) -> None:
     """Bump last_activity_at to now — keeps the 3h auto-submit window from firing on an active session."""
     fr.last_activity_at = datetime.now(timezone.utc)
@@ -276,7 +290,10 @@ def auto_close_stale_sessions(db: Session) -> dict:
         for fr in sessions:
             pending_count = db.query(func.count(PalletLicence.id)).filter(
                 PalletLicence.forklift_request_id == fr.id,
-                PalletLicence.status.in_([PalletStatus.PENDING, PalletStatus.MISSING_STICKER]),
+                # SHIPPED: live-loaded or put on the Moyel shuttle before the
+                # session closed. Still this session's production — cancelling
+                # the session as "empty" would orphan them.
+                PalletLicence.status.in_(_SESSION_PRODUCTION_STATUSES),
             ).scalar() or 0
             if pending_count > 0:
                 fr.status = ForkliftRequestStatus.SUBMITTED
@@ -558,6 +575,10 @@ def scan_pallet(
         PalletLicence.forklift_request_id == request_id
     ).first()
     if existing_in_this:
+        if existing_in_this.status == PalletStatus.SHIPPED:
+            # Live-loaded or shuttled while the session was open — moving it
+            # "to a new row" would put a shipped pallet back on a rack.
+            return {"status": "duplicate", "message": plc.shipped_detail(db, existing_in_this)}
         if existing_in_this.storage_row_id != storage_row_id:
             existing_in_this.storage_row_id = storage_row_id
             existing_in_this.storage_area_id = row.storage_area_id
@@ -566,9 +587,15 @@ def scan_pallet(
         return {"status": "duplicate", "message": "Already scanned"}
 
     # Handle duplicate in other requests
+    reused: Optional[PalletLicence] = None
+    revived_flag: Optional[str] = None
     existing_other = db.query(PalletLicence).filter(
         PalletLicence.licence_number == licence_number,
-        PalletLicence.forklift_request_id != request_id
+        # NULL-safe: pallets with no session (Log Receipt, shuttle-created,
+        # cycle-check-created) were invisible here, and the insert below then
+        # hit the unique licence_number constraint.
+        or_(PalletLicence.forklift_request_id.is_(None),
+            PalletLicence.forklift_request_id != request_id),
     ).first()
     if existing_other:
         if existing_other.status in (PalletStatus.PENDING, PalletStatus.MISSING_STICKER):
@@ -593,23 +620,63 @@ def scan_pallet(
                 db.flush()
         elif existing_other.status == PalletStatus.IN_STOCK:
             raise ValidationError("This pallet is already received and in stock.")
-        elif existing_other.status == PalletStatus.CANCELLED:
-            db.delete(existing_other)
-            db.flush()
+        elif existing_other.status == PalletStatus.MISSING:
+            # It was in stock, went missing, and is in the driver's hands now:
+            # found into the row he is loading (§1.2). Not added to this
+            # session — it was produced (and counted) long ago.
+            plc.restore_to_stock(
+                db, existing_other, row=row, user=current_user,
+                reason="Scanned on the gun during a receipt scan",
+                ref_type="forklift_request", ref_id=request_id,
+            )
+            _touch_activity(fr)
+            db.commit()
+            return {
+                "status": "found",
+                "message": f"Found missing pallet {licence_number} — back in stock in {row.name}",
+                "row_name": row.name,
+            }
+        elif existing_other.status == PalletStatus.SHIPPED:
+            return {"status": "duplicate", "message": plc.shipped_detail(db, existing_other)}
+        elif existing_other.status == PalletStatus.EMPTIED:
+            # Case-adjusted to 0: it stays at 0. Never re-used as a new pallet.
+            raise ValidationError(plc.emptied_detail(db, existing_other))
+        elif existing_other.status in (PalletStatus.NOT_PRODUCED, PalletStatus.CANCELLED):
+            # A not-produced marker or a cancelled leftover holds this unique
+            # licence number. The pallet is real after all: re-use the row as
+            # this session's pending pallet (deleting it would also delete its
+            # history) and flag a not-produced one so the review sees it.
+            if existing_other.status == PalletStatus.NOT_PRODUCED:
+                revived_flag = plc.not_produced_detail(db, existing_other)
+                plc.record_event(
+                    db, existing_other, PalletEventType.NOT_PRODUCED_SCANNED, user=current_user,
+                    from_status=PalletStatus.NOT_PRODUCED.value, to_status=PalletStatus.PENDING.value,
+                    storage_row_id=storage_row_id,
+                    ref_type="forklift_request", ref_id=request_id,
+                )
+            reused = existing_other
         else:
             raise ValidationError(f"This licence number already exists (status: {existing_other.status}).")
 
-    # Detect sequence gaps
-    all_licences = db.query(PalletLicence).filter(
-        PalletLicence.forklift_request_id == request_id,
-        PalletLicence.status.in_([PalletStatus.PENDING])
-    ).order_by(PalletLicence.sequence).all()
-    max_seq = max([pl.sequence for pl in all_licences], default=0)
-    expected_next = max_seq + 1
+    # Detect sequence gaps — against the whole lot, not just this session
+    # (FG-PALLET-LIFECYCLE-SPEC §3.1). A second-shift driver starting at #181
+    # was told 1–180 were missing because only THIS session's pallets counted.
+    # Same coverage rule as _unresolved_missing_for_fr (other sessions, Log
+    # Receipt pallets, shipped/missing/not-produced), and only the run
+    # between the highest covered number below this one and this one is a gap,
+    # so an old unresolved hole doesn't re-alarm on every scan.
+    covered_rows = db.query(PalletLicence.sequence).filter(
+        PalletLicence.lot_number == lot_number,
+        PalletLicence.product_id == product.id,
+        PalletLicence.status.in_(_COVERED_PALLET_STATUSES_FOR_GAPS),
+        PalletLicence.sequence.isnot(None),
+        PalletLicence.sequence < sequence,
+    ).all()
+    max_below = max((int(x) for (x,) in covered_rows if x is not None), default=0)
     gap_missing = []
-    if sequence > expected_next:
-        for s in range(expected_next, sequence):
-            gap_licence = f"{lot_number}-{product_code}-{str(s).zfill(3)}"
+    if sequence > max_below + 1:
+        for s_ in range(max_below + 1, sequence):
+            gap_licence = f"{lot_number}-{product_code}-{str(s_).zfill(3)}"
             gap_missing.append(gap_licence)
 
     # Determine cases
@@ -619,27 +686,49 @@ def scan_pallet(
 
     area = db.query(StorageArea).filter(StorageArea.id == row.storage_area_id).first()
 
-    # Create pallet licence
-    pl_id = f"pl-{uuid.uuid4().hex[:12]}"
-    pl = PalletLicence(
-        id=pl_id,
-        licence_number=licence_number,
-        idempotency_key=idempotency_key,
-        receipt_id=None,
-        forklift_request_id=request_id,
-        product_id=product.id,
-        lot_number=lot_number,
-        storage_area_id=row.storage_area_id,
-        storage_row_id=storage_row_id,
-        cases=cases,
-        is_partial=is_partial,
-        sequence=sequence,
-        status=PalletStatus.PENDING,
-        scanned_by=str(current_user.id),
-        scanned_at=datetime.now(timezone.utc),
-        warehouse_id=fr.warehouse_id,
-    )
-    db.add(pl)
+    # Create pallet licence (or re-use a not-produced / cancelled row that
+    # already holds this unique licence number).
+    if reused is not None:
+        pl = reused
+        pl.idempotency_key = idempotency_key
+        pl.receipt_id = None
+        pl.forklift_request_id = request_id
+        pl.product_id = product.id
+        pl.lot_number = lot_number
+        pl.storage_area_id = row.storage_area_id
+        pl.storage_row_id = storage_row_id
+        pl.cases = cases
+        pl.is_partial = is_partial
+        pl.sequence = sequence
+        pl.status = PalletStatus.PENDING
+        pl.transfer_id = None
+        pl.scanned_by = str(current_user.id)
+        pl.scanned_at = datetime.now(timezone.utc)
+        pl.warehouse_id = fr.warehouse_id
+        pl.is_deleted = False
+        pl.deleted_at = None
+        pl.deleted_by_id = None
+    else:
+        pl_id = f"pl-{uuid.uuid4().hex[:12]}"
+        pl = PalletLicence(
+            id=pl_id,
+            licence_number=licence_number,
+            idempotency_key=idempotency_key,
+            receipt_id=None,
+            forklift_request_id=request_id,
+            product_id=product.id,
+            lot_number=lot_number,
+            storage_area_id=row.storage_area_id,
+            storage_row_id=storage_row_id,
+            cases=cases,
+            is_partial=is_partial,
+            sequence=sequence,
+            status=PalletStatus.PENDING,
+            scanned_by=str(current_user.id),
+            scanned_at=datetime.now(timezone.utc),
+            warehouse_id=fr.warehouse_id,
+        )
+        db.add(pl)
 
     # Update request totals
     fr.total_full_pallets = fr.total_full_pallets + (0 if is_partial else 1)
@@ -652,7 +741,7 @@ def scan_pallet(
     # Recompute available after commit
     row_available = _row_available_capacity(db, row, request_id)
 
-    return {
+    out = {
         "status": "scanned",
         "pallet": {
             "id": pl.id,
@@ -666,6 +755,10 @@ def scan_pallet(
         "row_name": row.name,
         "area_name": area.name if area else "",
     }
+    if revived_flag:
+        out["flag"] = revived_flag
+        out["message"] = revived_flag
+    return out
 
 
 def mark_missing_pallets(
@@ -719,6 +812,8 @@ def mark_not_produced(
     request_id: str,
     licence_numbers: List[str],
     current_user: User,
+    reason_code: Optional[str] = None,
+    note: Optional[str] = None,
 ) -> dict:
     """Supervisor marks one or more sequences as 'never produced by the line'.
 
@@ -728,7 +823,21 @@ def mark_not_produced(
     won't haunt future cards for the same lot.
 
     Caller must have approval rights (warehouse or higher).
+
+    A reason is required (FG-PALLET-LIFECYCLE-SPEC §2.1) and recorded as a
+    PalletEvent, so "Not Produced" is no longer a silent, final write-off: if
+    the pallet is scanned later the scan is accepted and names who skipped it.
     """
+    valid = {r.value for r in NotProducedReason}
+    if reason_code not in valid:
+        raise ValidationError(
+            "Pick a reason for Not Produced: sticker damaged/misprinted, "
+            "rejected/destroyed by QA, or other."
+        )
+    note = (note or "").strip() or None
+    if reason_code == NotProducedReason.OTHER.value and not note:
+        raise ValidationError("Add a note saying why this pallet was not produced.")
+
     fr = _get_forklift_request(db, request_id)
     # Allow during scanning OR after submit (approver typically marks at review time)
     if fr.status not in (ForkliftRequestStatus.SCANNING, ForkliftRequestStatus.SUBMITTED):
@@ -773,6 +882,12 @@ def mark_not_produced(
                 existing.scanned_by = str(current_user.id)
                 existing.scanned_at = datetime.now(timezone.utc)
                 existing.warehouse_id = fr.warehouse_id
+                plc.record_event(
+                    db, existing, PalletEventType.NOT_PRODUCED, user=current_user,
+                    to_status=PalletStatus.NOT_PRODUCED.value,
+                    reason_code=reason_code, reason=note,
+                    ref_type="forklift_request", ref_id=request_id,
+                )
                 inserted += 1
                 continue
             # A real, covering pallet — the supervisor can't turn a scanned
@@ -795,6 +910,12 @@ def mark_not_produced(
             warehouse_id=fr.warehouse_id,
         )
         db.add(pl)
+        plc.record_event(
+            db, pl, PalletEventType.NOT_PRODUCED, user=current_user,
+            to_status=PalletStatus.NOT_PRODUCED.value,
+            reason_code=reason_code, reason=note,
+            ref_type="forklift_request", ref_id=request_id,
+        )
         inserted += 1
 
     _touch_activity(fr)
@@ -810,7 +931,7 @@ def submit_forklift_request(db: Session, request_id: str) -> dict:
 
     count = db.query(func.count(PalletLicence.id)).filter(
         PalletLicence.forklift_request_id == request_id,
-        PalletLicence.status.in_([PalletStatus.PENDING, PalletStatus.MISSING_STICKER])
+        PalletLicence.status.in_(_SESSION_PRODUCTION_STATUSES)
     ).scalar() or 0
     if count == 0:
         raise ValidationError("No pallets scanned")
@@ -867,6 +988,11 @@ _COVERED_PALLET_STATUSES_FOR_GAPS = (
     PalletStatus.TRANSFERRED,
     PalletStatus.SHIPPED,
     PalletStatus.NOT_PRODUCED,
+    # A MISSING pallet existed (it was in stock, then lost) — its number is not
+    # a production gap. Lost is a stock question, not a scanning one.
+    PalletStatus.MISSING,
+    # Case-adjusted to 0: it existed, so its number is not a gap either.
+    PalletStatus.EMPTIED,
 )
 
 
@@ -941,8 +1067,134 @@ def _unresolved_missing_for_fr(db: Session, fr: ForkliftRequest) -> list:
                 continue
             missing.append(f"{prefix}-{str(s).zfill(3)}")
 
-    missing.sort()
+        # Closing scan (§3.3): numbers after the highest one scanned, up to the
+        # last pallet the driver saw at the wrapper, were produced but never
+        # scanned in — "missing after last scan".
+        closing = _closing_for_lot(fr, lot_for_prefix)
+        close_seq = closing.get("sequence") if closing else None
+        if close_seq and int(close_seq) > g["max_seq"]:
+            for s in range(g["max_seq"] + 1, int(close_seq) + 1):
+                if s in covered_elsewhere:
+                    continue
+                missing.append(f"{prefix}-{str(s).zfill(3)}")
+
+    missing = sorted(set(missing))
     return missing
+
+
+def _closing_for_lot(fr: ForkliftRequest, lot: Optional[str]) -> Optional[dict]:
+    return (fr.closing_scans or {}).get(lot or "") if lot else None
+
+
+def missing_after_last_scan(db: Session, fr: ForkliftRequest) -> dict:
+    """{prefix: [licence, ...]} — the closing-scan part of the missing list,
+    so the review can label those rows "after last scan"."""
+    out: dict = {}
+    if not fr.closing_scans:
+        return out
+    by_prefix: dict = {}
+    for pl in (fr.pallet_licences or []):
+        lic = pl.licence_number or ""
+        cut = lic.rfind("-")
+        if cut <= 0 or pl.sequence is None or pl.status == PalletStatus.CANCELLED:
+            continue
+        by_prefix.setdefault(lic[:cut], set()).add(int(pl.sequence))
+    for prefix, seqs in by_prefix.items():
+        cut = prefix.rfind("-")
+        lot = prefix[:cut] if cut > 0 else prefix
+        closing = _closing_for_lot(fr, lot)
+        close_seq = closing.get("sequence") if closing else None
+        top = max(seqs) if seqs else 0
+        if not close_seq or int(close_seq) <= top:
+            continue
+        covered = {
+            int(x) for (x,) in db.query(PalletLicence.sequence).filter(
+                PalletLicence.lot_number == lot,
+                PalletLicence.product_id == fr.product_id,
+                or_(PalletLicence.forklift_request_id.is_(None),
+                    PalletLicence.forklift_request_id != fr.id),
+                PalletLicence.status.in_(_COVERED_PALLET_STATUSES_FOR_GAPS),
+                PalletLicence.sequence.isnot(None),
+            ).all() if x is not None
+        }
+        items = [
+            f"{prefix}-{str(s).zfill(3)}"
+            for s in range(top + 1, int(close_seq) + 1)
+            if s not in covered
+        ]
+        if items:
+            out[prefix] = items
+    return out
+
+
+def closing_status_by_lot(fr: ForkliftRequest) -> dict:
+    """{lot: "closed" | "skipped" | "not_closed"} for every lot on the session.
+    Skipped and auto-submitted sessions read "Not closed: last pallet unknown"
+    on the review."""
+    lots = {pl.lot_number for pl in (fr.pallet_licences or []) if pl.lot_number}
+    if fr.lot_number:
+        lots.add(fr.lot_number)
+    out: dict = {}
+    for lot in lots:
+        c = _closing_for_lot(fr, lot)
+        if c and c.get("sequence"):
+            out[lot] = "closed"
+        elif c and c.get("skipped"):
+            out[lot] = "skipped"
+        else:
+            out[lot] = "not_closed"
+    return out
+
+
+def record_closing_scan(
+    db: Session,
+    request_id: str,
+    current_user: User,
+    licence_number: Optional[str] = None,
+    skipped: bool = False,
+    lot_number: Optional[str] = None,
+) -> dict:
+    """Store the "scan the last pallet at the wrapper" answer for one lot of a
+    session (§3.3). Asked on Submit and when the first pallet of a new lot
+    arrives (midnight rollover — for the OLD lot). The closing pallet is NOT
+    recorded as a scanned pallet; only its number is kept."""
+    fr = _get_forklift_request(db, request_id)
+    if fr.status not in (ForkliftRequestStatus.SCANNING, ForkliftRequestStatus.SUBMITTED):
+        raise ValidationError("This session is already closed")
+    if current_user.role == ROLE_FORKLIFT and str(fr.scanned_by) != str(current_user.id):
+        raise ForbiddenError("You can only close your own session")
+
+    session_lots = {fr.lot_number} if fr.lot_number else set()
+    session_lots |= {pl.lot_number for pl in (fr.pallet_licences or []) if pl.lot_number}
+    now = datetime.now(timezone.utc).isoformat()
+    entry: dict
+    if skipped:
+        lot = lot_number or fr.lot_number
+        if lot not in session_lots:
+            raise ValidationError("That lot is not on this session")
+        entry = {"skipped": True, "by": str(current_user.id), "at": now}
+    else:
+        lic = normalize_scanned_licence(licence_number or "", fr.lot_number)
+        lot, product_code, seq = parse_licence_number(lic)
+        if not lot or seq is None:
+            raise ValidationError("That is not a pallet tag — scan the last pallet's sticker")
+        product = find_product_by_code(db, product_code)
+        if not product or product.id != fr.product_id:
+            raise ValidationError("That pallet is a different product from this line")
+        if lot not in session_lots:
+            raise ValidationError(f"Lot {lot} is not on this session")
+        if lot_number and lot != lot_number:
+            raise ValidationError(f"Scan the last pallet of lot {lot_number}")
+        entry = {
+            "sequence": int(seq), "licence_number": lic,
+            "by": str(current_user.id), "at": now,
+        }
+    scans = dict(fr.closing_scans or {})
+    scans[lot] = entry
+    fr.closing_scans = scans  # reassign: plain JSON column, no mutation tracking
+    _touch_activity(fr)
+    db.commit()
+    return {"status": "recorded", "lot_number": lot, **entry}
 
 
 def approve_forklift_request(
@@ -991,18 +1243,47 @@ def approve_forklift_request(
         pl for pl in fr.pallet_licences
         if pl.status in (PalletStatus.PENDING, PalletStatus.MISSING_STICKER)
     ]
+    # Pallets that left before approval — live-loaded onto a truck or put on
+    # the Moyel shuttle (§2.2). They were produced, so they count in the
+    # lot's receipt, but they never enter stock or row counters.
+    shipped_early = [
+        pl for pl in fr.pallet_licences
+        if pl.status == PalletStatus.SHIPPED and not pl.receipt_id
+    ]
 
     # Group by per-pallet lot_number so a mixed session produces multiple receipts.
     lot_groups: dict = {}
     for pl in licences:
         key = pl.lot_number or fr.lot_number
         lot_groups.setdefault(key, []).append(pl)
+    shipped_groups: dict = {}
+    for pl in shipped_early:
+        key = pl.lot_number or fr.lot_number
+        shipped_groups.setdefault(key, []).append(pl)
+        lot_groups.setdefault(key, [])
+    # A missing number ticked on the Moyel shuttle was created as a shipped
+    # pallet with no session at all. Its lot's next approval adopts it.
+    for key in list(lot_groups.keys()):
+        orphans = db.query(PalletLicence).filter(
+            PalletLicence.lot_number == key,
+            PalletLicence.product_id == fr.product_id,
+            PalletLicence.forklift_request_id.is_(None),
+            PalletLicence.receipt_id.is_(None),
+            PalletLicence.status == PalletStatus.SHIPPED,
+            PalletLicence.is_deleted == False,  # noqa: E712
+        ).all()
+        known = {p.id for p in shipped_groups.get(key, [])}
+        for o in orphans:
+            if o.id not in known:
+                shipped_groups.setdefault(key, []).append(o)
 
     # Deterministic order: by the first pallet's sequence in each lot. Keeps the
     # earlier-produced lot as the "primary" for fr.receipt_id back-compat.
     ordered_lots = sorted(
         lot_groups.items(),
-        key=lambda kv: min((pl.sequence or 0) for pl in kv[1]),
+        key=lambda kv: min(
+            [(pl.sequence or 0) for pl in kv[1] + shipped_groups.get(kv[0], [])] or [0]
+        ),
     )
 
     category = db.query(Category).filter(Category.id == fr.product.category_id).first()
@@ -1012,9 +1293,13 @@ def approve_forklift_request(
     created_receipt_ids: List[str] = []
 
     for lot_number, lot_licences in ordered_lots:
-        lot_total_cases = sum(pl.cases for pl in lot_licences)
-        lot_partial_cases = sum(pl.cases for pl in lot_licences if pl.is_partial)
-        lot_full_pallets = sum(1 for pl in lot_licences if not pl.is_partial)
+        lot_shipped = shipped_groups.get(lot_number, [])
+        produced = lot_licences + lot_shipped
+        # On hand = what went into stock; produced also counts what left early.
+        lot_total_cases = sum(pl.cases or 0 for pl in lot_licences)
+        lot_produced_cases = sum(pl.cases or 0 for pl in produced)
+        lot_partial_cases = sum(pl.cases or 0 for pl in produced if pl.is_partial)
+        lot_full_pallets = sum(1 for pl in produced if not pl.is_partial)
 
         # Split this lot's pallets into located (real storage row) and floor.
         row_groups: dict = {}
@@ -1074,6 +1359,11 @@ def approve_forklift_request(
             "totalCases": lot_total_cases,
             "totalPallets": len(lot_licences),
         }
+        if lot_shipped:
+            allocation["shippedBeforeApproval"] = {
+                "pallets": len(lot_shipped),
+                "cases": sum(pl.cases or 0 for pl in lot_shipped),
+            }
         if floor_pallets or floor_cases:
             allocation["floorAllocation"] = {
                 "pallets": floor_pallets,
@@ -1093,10 +1383,10 @@ def approve_forklift_request(
             cases_per_pallet=fr.cases_per_pallet,
             full_pallets=lot_full_pallets,
             partial_cases=int(lot_partial_cases),
-            quantity_produced=lot_total_cases,
+            quantity_produced=lot_produced_cases,
             shift_id=fr.shift_id,
             line_id=line_id or fr.line_id,
-            status=ReceiptStatus.APPROVED,
+            status=ReceiptStatus.APPROVED if lot_total_cases > 0 else ReceiptStatus.DEPLETED,
             location_id=location_id,
             sub_location_id=sub_location_id,
             submitted_by=str(fr.scanned_by),
@@ -1119,6 +1409,11 @@ def approve_forklift_request(
         for pl in lot_licences:
             pl.receipt_id = receipt_id
             pl.status = PalletStatus.IN_STOCK
+            if pl.warehouse_id is None:
+                pl.warehouse_id = fr.warehouse_id
+        for pl in lot_shipped:
+            # Produced-then-shipped: linked for production totals, left SHIPPED.
+            pl.receipt_id = receipt_id
             if pl.warehouse_id is None:
                 pl.warehouse_id = fr.warehouse_id
 
@@ -1329,6 +1624,10 @@ def add_pallet_to_request(
             raise ValidationError("This pallet is already received and in stock")
         if existing.status in (PalletStatus.PENDING, PalletStatus.MISSING_STICKER):
             raise ValidationError("This pallet is in another pending request")
+        if existing.status == PalletStatus.SHIPPED:
+            raise ValidationError(plc.shipped_detail(db, existing))
+        if existing.status == PalletStatus.EMPTIED:
+            raise ValidationError(plc.emptied_detail(db, existing))
         if existing.status == PalletStatus.CANCELLED:
             db.delete(existing)
             db.flush()

@@ -24,6 +24,7 @@ from app.schemas import (
     ProductMini, RecentPalletsResponse,
 )
 from app.utils.lot_number import lot_for_today, plant_local_date
+from app.services import active_production_service
 
 
 router = APIRouter()
@@ -57,21 +58,11 @@ def _build_licence(lot_number: str, product: Product, seq: int) -> str:
     return f"{lot_number}-{_product_code(product)}-{seq:03d}"
 
 
-def _ensure_today(active: ActiveLineProduction, plant_tz: str) -> bool:
-    """Lazy day-rollover: if the active row is from a previous plant-local
-    day, refresh lot_number to today's and reset the pallet sequence to 0,
-    keeping the same product. Caller commits. Returns True on rollover."""
-    if not active or not active.is_active:
-        return False
-    set_at_date = plant_local_date(plant_tz, active.set_at)
-    today_local = datetime.now(ZoneInfo(plant_tz or "UTC")).date()
-    if set_at_date < today_local:
-        line_name = active.line.name if active.line else ""
-        active.lot_number = lot_for_today(plant_tz, line_name)
-        active.last_printed_seq = 0
-        active.set_at = datetime.now(timezone.utc)
-        return True
-    return False
+def _ensure_today(db: Session, active: ActiveLineProduction, plant_tz: str) -> ActiveLineProduction:
+    """Lazy day-rollover — see active_production_service.ensure_today. Keeps
+    the previous lot's row (and its last printed number) and returns the new
+    active row for today's lot, same product. Caller commits."""
+    return active_production_service.ensure_today(db, active, plant_tz)
 
 
 def _to_product_mini(product: Product) -> ProductMini:
@@ -133,10 +124,11 @@ def kiosk_list_lines(
     dirty = False
     by_line = {}
     for a in actives:
-        if _ensure_today(a, plant_tz):
+        cur = _ensure_today(db, a, plant_tz)
+        if cur is not a:
             dirty = True
-        if a.is_active:
-            by_line[a.line_id] = a
+        if cur is not None and cur.is_active:
+            by_line[cur.line_id] = cur
     if dirty:
         db.commit()
 
@@ -205,7 +197,8 @@ def kiosk_mint_pallets(
     # Silent day-rollover: refreshes lot_number + resets sequence if needed.
     # Mint then continues with the new lot. The product itself never changes
     # automatically — only a supervisor can do that.
-    _ensure_today(active, plant_tz)
+    active = _ensure_today(db, active, plant_tz)
+    db.flush()
 
     product = db.query(Product).filter(Product.id == active.product_id).first()
     if not product:

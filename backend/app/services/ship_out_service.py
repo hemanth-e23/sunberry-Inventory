@@ -17,7 +17,7 @@ from sqlalchemy import and_ as sa_and, func, or_ as sa_or, text as sa_text
 from sqlalchemy.orm import Session
 
 from app.constants import TRANSFER_TYPE_SHIPPED_OUT
-from app.enums import PalletStatus, ShipOutScanReason, TransferStatus, ShipOutLifecycle
+from app.enums import PalletEventType, PalletStatus, ShipOutScanReason, TransferStatus, ShipOutLifecycle
 from app.exceptions import NotFoundError, ValidationError
 from app.models import (
     Carrier,
@@ -37,6 +37,7 @@ from app.models.inventory import ShipOutLotReservation, TransferPalletSwap
 from app.services.transfer_service import _rebuild_receipt_allocation_from_licences
 from app.utils.locations import warehouse_id_for_row
 from app.utils.gs1 import build_bol_number
+from app.services import pallet_lifecycle_service as plc
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +204,9 @@ def _resolve_ship_to(db: Session, ship_to) -> Optional[str]:
     existing = db.query(ShipToLocation).filter(
         func.lower(ShipToLocation.customer_name) == ship_to.customer_name.strip().lower(),
         func.lower(ShipToLocation.location_name) == ship_to.location_name.strip().lower(),
+        # Never adopt a Moyel shuttle destination as a customer ship-to: an
+        # admin edit of the shuttle address would then rewrite the order's.
+        ShipToLocation.is_shuttle_destination == False,  # noqa: E712
     ).first()
     if existing:
         return existing.id
@@ -1667,6 +1671,15 @@ def scan_pick_v2(
 
     label = pl.licence_number or pl.id
 
+    # An emptied pallet (case-adjusted to 0) stays at 0 — refuse, never revive.
+    if pl.status == PalletStatus.EMPTIED:
+        _record_scan_event(db, transfer.id, pl, licence_number, on_list=False, scanned_by=user_id)
+        return {
+            "ok": False,
+            "reject_reason": ShipOutScanReason.PALLET_UNAVAILABLE.value,
+            "message": plc.emptied_detail(db, pl),
+        }
+
     # 2. Pallet hygiene checks.
     if pl.is_held:
         _record_scan_event(db, transfer.id, pl, licence_number, on_list=False, scanned_by=user_id)
@@ -1687,7 +1700,11 @@ def scan_pick_v2(
             "reject_reason": ShipOutScanReason.LIVE_LOAD_NEEDS_CONFIRM.value,
             "message": f"Pallet {label} is from today's production. Live-load it onto the truck?",
         }
-    if pl.status not in (PalletStatus.IN_STOCK, PalletStatus.PENDING):
+    # A MISSING / NOT_PRODUCED / written-off pallet in the forklift's hands
+    # exists after all (FG-PALLET-LIFECYCLE-SPEC §1.2/§2.1): it is put back on
+    # its receipt below and then ships like any other — never refused.
+    is_found = pl.status in plc.FOUNDABLE_STATUSES
+    if pl.status not in (PalletStatus.IN_STOCK, PalletStatus.PENDING) and not is_found:
         _record_scan_event(db, transfer.id, pl, licence_number, on_list=False, scanned_by=user_id)
         # Distinguish "the worker already scanned this pallet onto THIS order"
         # (a harmless double-scan — reassure, don't alarm) from "it shipped on a
@@ -1702,7 +1719,9 @@ def scan_pick_v2(
             "ok": False,
             "reject_reason": ShipOutScanReason.PALLET_UNAVAILABLE.value,
             "message": (
-                f"Pallet {label} already shipped out on another order"
+                # Order, customer, date and who scanned it — "another order"
+                # sent the office digging for which one (§2.4).
+                plc.shipped_detail(db, pl)
                 if pl.status == PalletStatus.SHIPPED
                 else f"Pallet {label} is not in stock (status: {pl.status})"
             ),
@@ -1730,6 +1749,23 @@ def scan_pick_v2(
             "reject_reason": ShipOutScanReason.WRONG_PRODUCT.value,
             "message": f"Pallet {label} is for a product not on this order",
         }
+
+    # Found pallet: restore it to stock (and its receipt) first, so everything
+    # below treats it exactly like an in-stock pallet — receipt deduction, row
+    # release and the found → shipped trail all line up.
+    found_note = None
+    if is_found:
+        prev_status = pl.status
+        plc.restore_to_stock(
+            db, pl, row=None, user=current_user,
+            reason=f"Scanned at ship-out on order {transfer.order_number or transfer.id}",
+            ref_type="transfer", ref_id=transfer.id,
+        )
+        found_note = (
+            "Found missing pallet — shipped"
+            if prev_status == PalletStatus.MISSING
+            else f"{plc.found_message(db, pl, prev_status)} — shipped"
+        )
 
     # Aggregate every allocation for (product, lot) across all sub-lines.
     # The "is the lot fully picked?" check has to look at the **lot-level**
@@ -1921,6 +1957,11 @@ def scan_pick_v2(
     # 6. Mutate the pallet itself.
     row_emptied: Optional[str] = None
     remaining_after = int(max(0, round(pallet_cases - consumed)))
+    # Only a pallet that was IN_STOCK is counted in its row's occupied_* —
+    # PENDING pallets join the row at forklift approval. Releasing a live-load
+    # subtracted a pallet that was never added: one permanent under-count per
+    # live load (FG-PALLET-LIFECYCLE-SPEC §2.3).
+    counted_in_row = not is_live_load
     if was_partial and remaining_after > 0:
         # Normal partial: cases left over → move to Partials row.
         partial_row = _partial_pallet_row(db, transfer.warehouse_id)
@@ -1930,13 +1971,15 @@ def scan_pick_v2(
                 "`is_partial_pallet_location=true` on one storage row first."
             )
         # Free original row of the FULL original case count (before decrement).
-        _release_row_capacity(db, pl, pallet_cases)
+        if counted_in_row:
+            _release_row_capacity(db, pl, pallet_cases)
         prev_row_id = pl.storage_row_id
         pl.cases = remaining_after
         pl.is_partial = True
         pl.storage_row_id = partial_row.id
         pl.storage_area_id = partial_row.storage_area_id
-        _add_to_row(partial_row, pl, float(remaining_after))
+        if counted_in_row:
+            _add_to_row(partial_row, pl, float(remaining_after))
         # Check whether the original row hit zero (only meaningful if the
         # pallet actually moved; pulling a partial pallet that was already
         # at the Partials row won't empty anything new).
@@ -1948,11 +1991,18 @@ def scan_pick_v2(
         # Either a full-pull (consumed == pallet_cases) or a partial-pull
         # that happened to drain the pallet to zero — both end the same
         # way: pallet is gone, mark SHIPPED, free the row.
-        _release_row_capacity(db, pl, pallet_cases)
+        if counted_in_row:
+            _release_row_capacity(db, pl, pallet_cases)
         prev_row_id = pl.storage_row_id
         pl.cases = 0 if was_partial else pl.cases  # zero out for drain-from-partial
         pl.status = PalletStatus.SHIPPED
         pl.transfer_id = transfer.id
+        if is_live_load:
+            plc.record_event(
+                db, pl, PalletEventType.LIVE_LOADED, user=current_user,
+                from_status=PalletStatus.PENDING.value, to_status=PalletStatus.SHIPPED.value,
+                ref_type="transfer", ref_id=transfer.id,
+            )
         if prev_row_id:
             prev = db.query(StorageRow).filter(StorageRow.id == prev_row_id).first()
             if prev and (prev.occupied_pallets or 0) <= 0:
@@ -2029,8 +2079,10 @@ def scan_pick_v2(
         "partial_pallet_remaining": float(pl.cases or 0) if was_partial else None,
         "is_overage": is_overage,
         "lot_hint": lot_hint,
+        "found": bool(found_note),
         "message": (
-            f"Pulled {consumed:g} cases from pallet {label}"
+            (f"{found_note}. " if found_note else "")
+            + f"Pulled {consumed:g} cases from pallet {label}"
             + (" (partial)" if was_partial else "")
             + (" — over the ordered amount" if is_overage else "")
             + (
@@ -2126,8 +2178,11 @@ def unscan_pick_v2(
         x for x in (transfer.pallet_licence_ids or []) if x != pl.id
     ]
 
-    # 3. Restore the pallet to its origin row, IN_STOCK.
-    pl.status = PalletStatus.IN_STOCK
+    # 3. Restore the pallet to its origin row. A live-loaded pallet whose
+    # session isn't approved yet goes back to PENDING and stays out of the row
+    # counters — it was never counted in them (§2.3).
+    back_to_pending = bool(pick_entry.get("live_loaded")) and not pl.receipt_id
+    pl.status = PalletStatus.PENDING if back_to_pending else PalletStatus.IN_STOCK
     pl.transfer_id = None
     pl.cases = consumed  # full pull → the pallet held exactly `consumed` cases
     origin_row_id = pick_entry.get("storage_row_id") or pl.storage_row_id
@@ -2136,7 +2191,8 @@ def unscan_pick_v2(
         if row:
             pl.storage_row_id = row.id
             pl.storage_area_id = row.storage_area_id
-            _add_to_row(row, pl, consumed)
+            if not back_to_pending:
+                _add_to_row(row, pl, consumed)
 
     # 4. Re-credit the receipt's on-hand and rebuild its row allocation
     # (inverse of the scan-time decrement).

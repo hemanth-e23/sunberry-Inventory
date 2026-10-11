@@ -96,7 +96,56 @@ export const PALLET_STATUS = {
   SHIPPED: 'shipped',
   MISSING: 'missing',
   CANCELLED: 'cancelled',
+  NOT_PRODUCED: 'not_produced',
+  // Case-adjusted to 0 cases. Stays at 0: scans are refused, never revived.
+  EMPTIED: 'emptied',
 };
+
+// Why a gap was skipped as Not Produced at forklift review (FG pallet
+// lifecycle §2.1). Mirrors backend enums.NotProducedReason; OTHER needs a note.
+export const NOT_PRODUCED_REASON = {
+  STICKER_DAMAGED: 'sticker_damaged',
+  QA_REJECTED: 'qa_rejected',
+  OTHER: 'other',
+};
+
+export const NOT_PRODUCED_REASON_LABELS = {
+  [NOT_PRODUCED_REASON.STICKER_DAMAGED]: 'Sticker damaged / misprinted',
+  [NOT_PRODUCED_REASON.QA_REJECTED]: 'Pallet rejected / destroyed by QA',
+  [NOT_PRODUCED_REASON.OTHER]: 'Other',
+};
+
+// ±N cases on one FG pallet (§4.2). Mirrors backend enums.CaseAdjustmentReason.
+export const CASE_ADJUSTMENT_REASON = {
+  LEAKER_DAMAGED: 'leaker_damaged',
+  QA_SAMPLE: 'qa_sample',
+  REPACK: 'repack',
+  COUNT_CORRECTION: 'count_correction',
+};
+
+export const CASE_ADJUSTMENT_REASON_LABELS = {
+  [CASE_ADJUSTMENT_REASON.LEAKER_DAMAGED]: 'Leaker / damaged',
+  [CASE_ADJUSTMENT_REASON.QA_SAMPLE]: 'QA sample',
+  [CASE_ADJUSTMENT_REASON.REPACK]: 'Repack',
+  [CASE_ADJUSTMENT_REASON.COUNT_CORRECTION]: 'Count correction',
+};
+
+export const ADJUSTMENT_TYPE = {
+  MISSING: 'missing',
+  CASE_ADJUSTMENT: 'case-adjustment',
+};
+
+export const TRANSFER_TYPE = {
+  SHIPPED_OUT: 'shipped-out',
+  MOYEL_SHUTTLE: 'moyel-shuttle',
+};
+
+// Gun cycle check: confirm once before marking more than this many pallets
+// missing in one submit. Mirrors backend constants.CYCLE_CHECK_CONFIRM_OVER.
+export const CYCLE_CHECK_CONFIRM_OVER = 5;
+
+// The closing scan's Skip button appears after this many seconds (§3.3).
+export const CLOSING_SCAN_SKIP_SECONDS = 10;
 
 // Scan reason codes returned by the ship-out scan-pick endpoint
 export const SHIP_OUT_SCAN_REASON = {

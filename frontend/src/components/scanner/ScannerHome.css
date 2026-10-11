@@ -154,3 +154,10 @@
   background: #4f46e5;
   color: white;
 }
+
+/* Cycle Check — slate */
+.scanner-home-btn.cyclecheck {
+  border-color: #cbd5e1;
+  background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+  color: #1e293b;
+}

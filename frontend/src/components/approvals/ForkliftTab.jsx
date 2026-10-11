@@ -5,7 +5,9 @@ import { useToast } from "../../context/ToastContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { formatDateTime, formatDate, formatDateKey, toDateKey } from "../../utils/dateUtils";
 import { cleanScannedLicence } from "../../utils/scannerFeedback";
-import { FORKLIFT_REQUEST_STATUS, PALLET_STATUS } from '../../constants';
+import {
+  FORKLIFT_REQUEST_STATUS, PALLET_STATUS, NOT_PRODUCED_REASON, NOT_PRODUCED_REASON_LABELS,
+} from '../../constants';
 
 // Typeable storage-row picker. Replaces the long native <select> with a
 // filter-as-you-type combobox. Filters case-insensitively on `parent name +
@@ -151,6 +153,9 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
   const [fixingPalletId, setFixingPalletId] = useState(null);
   const [fixForm, setFixForm] = useState({ licence_number: '', storage_row_id: '', cases: '' });
   const [isSavingFix, setIsSavingFix] = useState(false);
+  // Skip — Not Produced needs a reason (sticker damaged · QA rejected · other
+  // + note). One open at a time: { licence, reasonCode, note }.
+  const [notProducedFor, setNotProducedFor] = useState(null);
 
   // Union of all storage rows visible to the approver: FG areas + raw-material
   // sub-locations. The floor row lives under a sub-location, so iterating only
@@ -231,6 +236,14 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                     : <span className="badge">{fr.lot_number || '—'}</span>}
                   {fccCode && <span className="badge" style={{ background: '#e0e7ff', color: '#3730a3' }}>FCC: {fccCode}</span>}
                   {shortCode && <span className="badge" style={{ background: '#d1fae5', color: '#065f46' }}>{shortCode}</span>}
+                  {Object.entries(fr.closing_status || {}).map(([lot, st]) => (
+                    (st === 'skipped' || (st === 'not_closed' && fr.auto_submitted_at)) ? (
+                      <span key={`close-${lot}`} className="badge" style={{ background: '#fee2e2', color: '#991b1b', whiteSpace: 'normal', maxWidth: '100%' }}
+                        title={st === 'skipped' ? 'The driver skipped the closing scan' : 'Auto-submitted — no closing scan'}>
+                        {lot}: Not closed — last pallet unknown
+                      </span>
+                    ) : null
+                  ))}
                   {floorPalletCount > 0 && (
                     <span className="badge" style={{ background: '#fef3c7', color: '#92400e' }}>
                       Floor: {floorPalletCount}
@@ -376,7 +389,8 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
             {/* Row summary — per-row pallet/case counts so the reviewer doesn't have to count rows in the table */}
             {(() => {
               const summary = new Map();
-              for (const pl of licences) {
+              // Shipped pallets (live load / Moyel shuttle) already left the row.
+              for (const pl of licences.filter((x) => x.status !== PALLET_STATUS.SHIPPED)) {
                 const key = pl.storage_row_id || 'unknown';
                 if (!summary.has(key)) {
                   summary.set(key, {
@@ -480,6 +494,16 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                   }
                 }
               }
+              // Closing scan (§3.3): numbers after the highest one scanned, up to
+              // the last pallet the driver saw at the wrapper.
+              const afterLast = fr.missing_after_last_scan || {};
+              for (const [prefix, lics] of Object.entries(afterLast)) {
+                for (const lic of lics) {
+                  if (merged.some((r) => r.kind === 'missing' && r.licence_number === lic)) continue;
+                  const seq = parseInt(lic.slice(lic.lastIndexOf('-') + 1), 10);
+                  merged.push({ kind: 'missing', prefix, sequence: seq, licence_number: lic, afterLastScan: true });
+                }
+              }
               merged.sort((a, b) => {
                 if (a.prefix !== b.prefix) return a.prefix < b.prefix ? -1 : 1;
                 return a.sequence - b.sequence;
@@ -520,6 +544,9 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                           <tr key={`missing-${m.sequence}`} style={{ borderTop: '1px solid #fcd34d', background: '#fef3c7' }}>
                             <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: '12px', color: '#7c2d12' }}>
                               ⚠ {m.licence_number}
+                              {m.afterLastScan && (
+                                <div style={{ fontFamily: 'inherit', fontSize: '11px', fontWeight: 600 }}>after last scan</div>
+                              )}
                             </td>
                             <td colSpan={isEditing ? 5 : 4} style={{ padding: '6px 10px' }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
@@ -570,32 +597,72 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                                     background: '#fff', color: '#7c2d12', border: '1px solid #fcd34d',
                                     borderRadius: '4px', cursor: 'pointer',
                                   }}
-                                  title="The production line never made this pallet — remove the gap permanently"
-                                  onClick={async () => {
-                                    const ok = await confirm(`Mark ${m.licence_number} as NOT produced? This is final — the gap will disappear from this card and any future cards for the same lot.`);
-                                    if (!ok) return;
-                                    setAddingMissingLicence(skipKey);
-                                    const result = await markPalletsNotProduced(fr.id, [m.licence_number]);
-                                    setAddingMissingLicence(null);
-                                    if (!result?.success) {
-                                      addToast(result?.error || 'Skip failed', 'error');
-                                    } else if ((result.data?.count || 0) === 0) {
-                                      // Nothing changed — surface why instead of a silent no-op.
-                                      const reason = result.data?.skipped?.[0]?.reason;
-                                      addToast(
-                                        reason === 'already_exists'
-                                          ? `${m.licence_number} is a real scanned pallet — use Fix, not Skip.`
-                                          : `Couldn't mark ${m.licence_number} not-produced (${reason || 'no change'}).`,
-                                        'warning',
-                                      );
-                                    } else {
-                                      addToast(`${m.licence_number} marked Not Produced.`, 'success');
-                                    }
-                                  }}
+                                  title="The production line never made this pallet — needs a reason"
+                                  onClick={() => setNotProducedFor(
+                                    notProducedFor?.licence === m.licence_number
+                                      ? null
+                                      : { licence: m.licence_number, reasonCode: '', note: '' },
+                                  )}
                                 >
                                   {isSkipping ? 'Skipping…' : 'Skip — Not Produced'}
                                 </button>
                               </div>
+                              {notProducedFor?.licence === m.licence_number && (
+                                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center', marginTop: '6px' }}>
+                                  <select
+                                    aria-label="Not produced reason"
+                                    value={notProducedFor.reasonCode}
+                                    onChange={(e) => setNotProducedFor((p) => ({ ...p, reasonCode: e.target.value }))}
+                                    style={{ padding: '4px 6px', fontSize: '12px', border: '1px solid #fcd34d', borderRadius: '4px' }}
+                                  >
+                                    <option value="">Why was it not produced?</option>
+                                    {Object.values(NOT_PRODUCED_REASON).map((r) => (
+                                      <option key={r} value={r}>{NOT_PRODUCED_REASON_LABELS[r]}</option>
+                                    ))}
+                                  </select>
+                                  <input
+                                    type="text"
+                                    aria-label="Not produced note"
+                                    placeholder={notProducedFor.reasonCode === NOT_PRODUCED_REASON.OTHER ? 'Note (required)' : 'Note (optional)'}
+                                    value={notProducedFor.note}
+                                    onChange={(e) => setNotProducedFor((p) => ({ ...p, note: e.target.value }))}
+                                    style={{ padding: '4px 6px', fontSize: '12px', border: '1px solid #fcd34d', borderRadius: '4px', minWidth: '160px' }}
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={
+                                      isSkipping || !notProducedFor.reasonCode
+                                      || (notProducedFor.reasonCode === NOT_PRODUCED_REASON.OTHER && !notProducedFor.note.trim())
+                                    }
+                                    style={{ padding: '4px 12px', fontSize: '12px', fontWeight: 600, background: '#7c2d12', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                                    onClick={async () => {
+                                      setAddingMissingLicence(skipKey);
+                                      const result = await markPalletsNotProduced(fr.id, [m.licence_number], {
+                                        reasonCode: notProducedFor.reasonCode,
+                                        note: notProducedFor.note.trim(),
+                                      });
+                                      setAddingMissingLicence(null);
+                                      if (!result?.success) {
+                                        addToast(result?.error || 'Skip failed', 'error');
+                                      } else if ((result.data?.count || 0) === 0) {
+                                        // Nothing changed — surface why instead of a silent no-op.
+                                        const reason = result.data?.skipped?.[0]?.reason;
+                                        addToast(
+                                          reason === 'already_exists'
+                                            ? `${m.licence_number} is a real scanned pallet — use Fix, not Skip.`
+                                            : `Couldn't mark ${m.licence_number} not-produced (${reason || 'no change'}).`,
+                                          'warning',
+                                        );
+                                      } else {
+                                        setNotProducedFor(null);
+                                        addToast(`${m.licence_number} marked Not Produced. A later scan of it is still accepted.`, 'success');
+                                      }
+                                    }}
+                                  >
+                                    Mark Not Produced
+                                  </button>
+                                </div>
+                              )}
                             </td>
                           </tr>
                         );
@@ -603,6 +670,12 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                       const pl = row.pl;
                       const isMissingSticker = pl.status === PALLET_STATUS.MISSING_STICKER;
                       const isNotProduced = pl.status === PALLET_STATUS.NOT_PRODUCED;
+                      // Live-loaded or put on the Moyel shuttle before review:
+                      // already gone — say where, never "Pending" (§1.1, §2.2).
+                      const isShipped = pl.status === PALLET_STATUS.SHIPPED;
+                      // Case-adjusted to 0 after approval: stays at 0, nothing to fix.
+                      const isEmptied = pl.status === PALLET_STATUS.EMPTIED;
+                      const isLocked = isShipped || isEmptied;
                       const isFixingThis = fixingPalletId === pl.id;
                       const colCount = isEditing ? 6 : 5;
                       if (isNotProduced) {
@@ -612,7 +685,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                               {pl.licence_number}
                             </td>
                             <td colSpan={isEditing ? 5 : 4} style={{ padding: '8px 10px', fontStyle: 'italic' }}>
-                              Not produced
+                              {fr.pallet_notes?.[pl.id] || 'Not produced'}
                             </td>
                           </tr>
                         );
@@ -675,12 +748,18 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                         </td>
                         <td style={{ padding: '8px 10px', textAlign: 'center' }}>
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                            {isMissingSticker ? (
+                            {isShipped ? (
+                              <span style={{ background: '#dcfce7', color: '#166534', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>
+                                {fr.pallet_notes?.[pl.id] || '🚚 Shipped'}
+                              </span>
+                            ) : isEmptied ? (
+                              <span style={{ background: '#f3f4f6', color: '#374151', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Emptied (0 cases)</span>
+                            ) : isMissingSticker ? (
                               <span style={{ background: '#fee2e2', color: '#991b1b', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Missing Sticker</span>
                             ) : (
                               <span style={{ background: '#e0e7ff', color: '#3730a3', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Pending</span>
                             )}
-                            <button
+                            {!isLocked && <button
                               type="button"
                               style={{ padding: '2px 8px', fontSize: '11px', fontWeight: 600, background: '#fff', color: '#1f2937', border: '1px solid #d1d5db', borderRadius: '4px', cursor: 'pointer' }}
                               onClick={() => {
@@ -691,12 +770,12 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                                   cases: String(pl.cases ?? fr.cases_per_pallet ?? ''),
                                 });
                               }}
-                            >{isFixingThis ? 'Close' : 'Fix'}</button>
+                            >{isFixingThis ? 'Close' : 'Fix'}</button>}
                           </span>
                         </td>
                         {isEditing && (
                           <td style={{ padding: '8px 10px', textAlign: 'center' }}>
-                            <button
+                            {!isLocked && <button
                               type="button"
                               style={{ padding: '2px 8px', fontSize: '12px', background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', borderRadius: '4px', cursor: 'pointer' }}
                               onClick={async () => {
@@ -706,7 +785,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                                   if (!result?.success) addToast(result?.error || 'Remove failed', 'error');
                                 }
                               }}
-                            >Remove</button>
+                            >Remove</button>}
                           </td>
                         )}
                       </tr>

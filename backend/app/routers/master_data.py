@@ -790,6 +790,9 @@ def get_ship_to_locations(
     return (
         db.query(ShipToLocation)
         .filter(ShipToLocation.is_active == True)
+        # Moyel shuttle destinations are our own trailer runs, managed on the
+        # Moyel Shuttle tab — not customer ship-tos.
+        .filter(ShipToLocation.is_shuttle_destination == False)  # noqa: E712
         .order_by(ShipToLocation.customer_name, ShipToLocation.location_name)
         .all()
     )

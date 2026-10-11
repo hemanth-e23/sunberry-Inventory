@@ -20,7 +20,10 @@ from app.enums import (
     TransferStatus, AdjustmentStatus, HoldStatus, InterWarehouseStatus, ReceiptStatus,
     ShipOutLifecycle,
 )
-from app.constants import CATEGORY_FINISHED, SHIP_OUT_REASONS, pluralize_unit
+from app.constants import (
+    CATEGORY_FINISHED, SHIP_OUT_LIKE_TRANSFER_TYPES, SHIP_OUT_REASONS, TRANSFER_TYPE_MOYEL_SHUTTLE,
+    pluralize_unit,
+)
 from app.services.availability import container_qty_for_product
 from app.services.lot_status import room_label_for_rows
 from app.utils.calendar_dates import calendar_day
@@ -284,7 +287,9 @@ def _shipped_cases_for_receipt(
         .join(InventoryTransfer, InventoryTransfer.id == InventoryTransferLine.transfer_id)
         .filter(
             InventoryTransferLine.receipt_id == receipt_id,
-            InventoryTransfer.transfer_type == "shipped-out",
+            # A Moyel shuttle trailer takes in-stock pallets off their receipt
+            # exactly like a ship-out, and books them on a receipt-pinned line.
+            InventoryTransfer.transfer_type.in_(SHIP_OUT_LIKE_TRANSFER_TYPES),
             InventoryTransfer.status.in_(SHIPPED_OUT_STOCK_REMOVED_STATUSES),
         )
     )
@@ -292,7 +297,47 @@ def _shipped_cases_for_receipt(
         line_q = line_q.filter(_ship_ts_col() > approved_after)
     line_total = sum(float(ln.cases_picked or 0) for ln, _t in line_q.all())
 
-    return legacy_total + line_total
+    return legacy_total + line_total + _pending_shipped_cases_for_receipt(db, receipt_id, approved_after)
+
+
+def _pending_shipped_cases_for_receipt(
+    db: Session, receipt_id: str, approved_after: Optional[datetime] = None,
+) -> float:
+    """Cases of pallets that left while still PENDING — live-loaded at ship-out
+    or put on a Moyel shuttle before their forklift request was approved.
+
+    Their picks sit on a receipt-less line (a pick is routed to the line of the
+    pallet's receipt, and they had none yet). Forklift approval later attaches
+    the pallet to this receipt as produced-then-shipped, so count those picks
+    here; otherwise "initial = on hand + shipped + adjusted" under-reads the
+    lot by every live-loaded and shuttled pallet (FG-PALLET-LIFECYCLE-SPEC §2.2).
+    A pick lives on exactly one line, so nothing is counted twice."""
+    shipped_pallets = db.query(PalletLicence.id, PalletLicence.transfer_id).filter(
+        PalletLicence.receipt_id == receipt_id,
+        PalletLicence.transfer_id.isnot(None),
+    ).all()
+    if not shipped_pallets:
+        return 0.0
+    pallet_ids = {pid for pid, _t in shipped_pallets}
+    transfer_ids = {tid for _p, tid in shipped_pallets}
+    q = (
+        db.query(InventoryTransferLine, InventoryTransfer)
+        .join(InventoryTransfer, InventoryTransfer.id == InventoryTransferLine.transfer_id)
+        .filter(
+            InventoryTransferLine.receipt_id.is_(None),
+            InventoryTransfer.id.in_(transfer_ids),
+            InventoryTransfer.transfer_type.in_(SHIP_OUT_LIKE_TRANSFER_TYPES),
+            InventoryTransfer.status.in_(SHIPPED_OUT_STOCK_REMOVED_STATUSES),
+        )
+    )
+    if approved_after is not None:
+        q = q.filter(_ship_ts_col() > approved_after)
+    total = 0.0
+    for ln, _t in q.all():
+        for pk in (ln.picks or []):
+            if pk.get("pallet_licence_id") in pallet_ids:
+                total += float(pk.get("cases_consumed") or 0)
+    return total
 
 
 def qty_on_date(receipt: Receipt, as_of_dt: datetime, db: Session) -> float:
@@ -411,6 +456,13 @@ def initial_receipt_qty(receipt: Receipt, db: Session) -> float:
     per = float(receipt.weight_per_container or 0)
     if count > 0 and per > 0:
         return count * per
+    # A finished-goods receipt approved from the forklift review records what
+    # the lot produced (incl. live-loaded / shuttled pallets, and pallets found
+    # or created later). Rebuilding it from on-hand + shipped + adjustments
+    # cannot see a cycle-check MISSING (no adjustment) or a written-off pallet
+    # that was found again (its adjustment still counts) — FG pallet lifecycle.
+    if float(receipt.quantity_produced or 0) > 0:
+        return float(receipt.quantity_produced)
     shipped = _shipped_cases_for_receipt(db, receipt.id, approved_after=None)
     adjs = approved_adjustments_for_receipt(db, receipt)
     # Inter-warehouse transfers where this receipt was the source
@@ -1517,17 +1569,23 @@ def build_lot_trace(db: Session, lot_number: str, warehouse_id: Optional[str] = 
     result = _merge_lot_deliveries(db, receipts, result)
 
     containers = _lot_trace_containers(db, lot_number, warehouse_id)
+    # Finished goods, from the pallets themselves — sees live-loaded and
+    # shuttle pallets and MISSING, which the receipts cannot (FG spec §5).
+    from app.services.fg_lot_trace import build_fg_pallet_trace
+    fg_pallet_lots = build_fg_pallet_trace(db, lot_number, warehouse_id)
 
     return {
         "lot_number": lot_number,
         "receipts": result,
         "containers": containers,
+        "fg_pallet_lots": fg_pallet_lots,
         # §18.9: a report that bounds or partially answers must say so. An empty
         # trace now means "searched both, found nothing", never "unsupported".
         "coverage": {
-            "sources_searched": ["legacy_receipts", "serialized_containers"],
+            "sources_searched": ["legacy_receipts", "serialized_containers", "fg_pallets"],
             "legacy_receipts_found": len(result),
             "serialized_containers_found": len(containers),
+            "fg_pallet_lots_found": len(fg_pallet_lots),
             "partial": bool(result) and bool(containers),
         },
     }
@@ -2432,6 +2490,25 @@ def _count_request_submitter(db: Session, event) -> Optional[str]:
     req = db.query(LotCountRequest).filter(LotCountRequest.id == event.ref_id).first()
     return req.submitted_by if req else None
 
+def _first_present(item: dict, *keys):
+    for k in keys:
+        if item.get(k) is not None:
+            return item.get(k)
+    return None
+
+
+def _gun_check_note(item: dict) -> str:
+    """Pallet numbers behind a gun row check's difference."""
+    parts = []
+    if item.get("notHere"):
+        parts.append("Not here: " + ", ".join(item["notHere"]))
+    if item.get("arrived"):
+        parts.append("Found here: " + ", ".join(
+            f"{a.get('licence_number')} ({a.get('result')})" for a in item["arrived"]
+        ))
+    return " · ".join(parts)
+
+
 def build_cycle_count_report(
     db: Session,
     warehouse_id: Optional[str] = None,
@@ -2457,11 +2534,18 @@ def build_cycle_count_report(
     for c in counts:
         location = db.query(Location).filter(Location.id == c.location_id).first() if c.location_id else None
         items = c.items if isinstance(c.items, list) else []
+        summary = c.summary if isinstance(c.summary, dict) else {}
+        is_gun = summary.get("kind") == "gun_row_check"
         for item in items:
             pid = item.get("productId") or item.get("product_id")
             pname, pcode = product_info(db, pid)
-            system_count = item.get("systemCount") or item.get("system_count")
-            actual_count = item.get("actualCount") or item.get("actual_count")
+            if not pname:
+                pname = item.get("productName")
+            # The Cycle Count page saves expectedQuantity / actualQuantity; the
+            # old systemCount / actualCount names never matched it, so every
+            # row read blank. `or` also dropped a real 0 — first non-None wins.
+            system_count = _first_present(item, "expectedQuantity", "systemCount", "system_count")
+            actual_count = _first_present(item, "actualQuantity", "actualCount", "actual_count")
             variance = None
             variance_pct = None
             if system_count is not None and actual_count is not None:
@@ -2474,16 +2558,22 @@ def build_cycle_count_report(
                 "count_date": c.count_date,
                 "product_name": pname,
                 "product_code": pcode,
-                "location": location.name if location else c.location_id,
+                "location": (
+                    item.get("location") if is_gun
+                    else (location.name if location else (item.get("location") or c.location_id))
+                ),
+                "lot_number": item.get("lotNo"),
                 "system_count": system_count,
                 "actual_count": actual_count,
                 "variance": round(variance, 2) if variance is not None else None,
                 "variance_pct": variance_pct,
                 "counted_by": c.performed_by,
-                "notes": item.get("notes") or "",
+                "notes": item.get("notes") or _gun_check_note(item),
                 "source": "finished-goods",
-                "count_kind": "Cycle count",
-                "unit": "cases",
+                "count_kind": "Gun row check" if is_gun else "Cycle count",
+                "unit": item.get("unit") or "cases",
+                "not_here": item.get("notHere") or [],
+                "arrived": item.get("arrived") or [],
             })
 
     # Raw-material / packaging rack counts (PART 4, P5) alongside.

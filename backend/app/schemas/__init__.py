@@ -58,7 +58,7 @@ from app.schemas.staging import (
     CreateStagingRequest, MarkStagingUsedRequest, ReturnStagingRequest,
 )
 from app.schemas.scanner import (
-    ScanPalletRequest, MarkMissingRequest,
+    ScanPalletRequest, MarkMissingRequest, MarkNotProducedRequest, ClosingScanRequest,
     PalletLicenceBase, PalletLicenceCreate, PalletLicence, PalletLicenceUpdate,
     ForkliftRequestBase, ForkliftRequestCreate, ForkliftRequestProductRef,
     ForkliftRequest, ForkliftRequestUpdate,
@@ -120,7 +120,7 @@ __all__ = [
     "StagingLotSuggestion", "StagingLotRequest", "StagingItemRequest",
     "CreateStagingRequest", "MarkStagingUsedRequest", "ReturnStagingRequest",
     # Scanner
-    "ScanPalletRequest", "MarkMissingRequest",
+    "ScanPalletRequest", "MarkMissingRequest", "MarkNotProducedRequest", "ClosingScanRequest",
     "PalletLicenceBase", "PalletLicenceCreate", "PalletLicence", "PalletLicenceUpdate",
     "ForkliftRequestBase", "ForkliftRequestCreate", "ForkliftRequestProductRef",
     "ForkliftRequest", "ForkliftRequestUpdate",

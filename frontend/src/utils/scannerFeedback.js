@@ -176,3 +176,9 @@ export const parseLineFromLicence = (input) => {
   const lot = parts.slice(0, -2).join('-');
   return parseLineFromLot(lot);
 };
+
+// Lot part of a licence: everything before "-{PRODUCT}-{SEQ}".
+export const lotOfLicence = (licence) => {
+  const parts = String(licence || '').split('-');
+  return parts.length >= 3 ? parts.slice(0, -2).join('-') : '';
+};

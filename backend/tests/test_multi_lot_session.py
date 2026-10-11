@@ -136,7 +136,7 @@ def test_skip_not_produced_accepts_the_secondary_lot(
     """The header lot is MP26126L1; this licence is MP26026L1 and must be accepted."""
     r = client.post(
         "/api/scanner/requests/fr-rollover/mark-not-produced",
-        json={"licence_numbers": ["MP26026L1-GRT128-184"]},
+        json={"licence_numbers": ["MP26026L1-GRT128-184"], "reason_code": "sticker_damaged"},
         headers=supervisor_headers,
     )
     assert r.status_code == 200, r.text
@@ -151,7 +151,7 @@ def test_skip_still_accepts_the_header_lot(
 ):
     r = client.post(
         "/api/scanner/requests/fr-rollover/mark-not-produced",
-        json={"licence_numbers": ["MP26126L1-GRT128-001"]},
+        json={"licence_numbers": ["MP26126L1-GRT128-001"], "reason_code": "sticker_damaged"},
         headers=supervisor_headers,
     )
     assert r.status_code == 200, r.text
@@ -165,7 +165,7 @@ def test_skip_still_refuses_a_lot_that_is_not_on_the_session(
     """Widening to 'any lot on the session' must not become 'any lot at all'."""
     r = client.post(
         "/api/scanner/requests/fr-rollover/mark-not-produced",
-        json={"licence_numbers": ["MP99926L1-GRT128-001"]},
+        json={"licence_numbers": ["MP99926L1-GRT128-001"], "reason_code": "sticker_damaged"},
         headers=supervisor_headers,
     )
     assert r.status_code == 200, r.text

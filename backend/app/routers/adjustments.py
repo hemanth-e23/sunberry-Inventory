@@ -12,10 +12,10 @@ from app.schemas import (
     InventoryAdjustmentUpdate,
 )
 from app.utils.auth import get_current_active_user, warehouse_filter, resolve_warehouse_for_write, require_approval_access
-from app.enums import AdjustmentStatus
+from app.enums import AdjustmentStatus, AdjustmentType, CaseAdjustmentReason, PalletStatus
 from app.services import adjustment_service, transfer_service
 from app.services import lot_placement_service as lps
-from app.constants import ROLE_WAREHOUSE
+from app.constants import ROLE_FORKLIFT, ROLE_WAREHOUSE
 
 router = APIRouter()
 
@@ -63,13 +63,47 @@ def create_adjustment(
 
     # Only deduction types actually change inventory on approval. Reject anything
     # else here rather than approving a silent no-op the user thinks corrected stock.
-    if adjustment_data.adjustment_type not in adjustment_service.DEDUCTION_TYPES:
+    # A case adjustment is signed per row and is applied explicitly at approval.
+    is_case_adj = adjustment_data.adjustment_type == AdjustmentType.CASE_ADJUSTMENT.value
+    if adjustment_data.adjustment_type not in adjustment_service.DEDUCTION_TYPES and not is_case_adj:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported adjustment type '{adjustment_data.adjustment_type}'.",
         )
+    # Missing and case adjustments are about specific finished-goods pallets.
+    if adjustment_data.adjustment_type in (
+        AdjustmentType.MISSING.value, AdjustmentType.CASE_ADJUSTMENT.value,
+    ) and not adjustment_data.pallet_licence_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pick the pallet(s) this adjustment is for.",
+        )
 
+    # The gun has no adjustment screen; a forklift token could still submit
+    # write-offs (incl. MISSING and case adjustments) straight to the queue.
+    if current_user.role == ROLE_FORKLIFT:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Adjustments are submitted from the desk, not the gun.")
+    # Pallet-based adjustments may only name pallets of the warehouse they are
+    # filed under — otherwise a plant's approver could write off another
+    # plant's pallets (security review 2026-10-08).
     if adjustment_data.pallet_licence_ids:
+        target_wh = resolve_warehouse_for_write(current_user)
+        foreign = db.query(PalletLicence.licence_number).filter(
+            PalletLicence.id.in_(adjustment_data.pallet_licence_ids),
+            PalletLicence.warehouse_id.isnot(None),
+            PalletLicence.warehouse_id != target_wh,
+        ).first() if target_wh else None
+        if foreign is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Pallet {foreign[0]} belongs to another warehouse.",
+            )
+
+    if is_case_adj:
+        adjustment_dict.update(_validate_case_adjustment(db, adjustment_data))
+        resolved_unit = "cases"
+    elif adjustment_data.pallet_licence_ids:
         # Pallet-based adjustment (Finished Goods) — always measured in cases.
         pallets = db.query(PalletLicence).filter(
             PalletLicence.id.in_(adjustment_data.pallet_licence_ids)
@@ -168,6 +202,51 @@ def create_adjustment(
     db.commit()
     db.refresh(db_adjustment)
     return db_adjustment
+
+def _validate_case_adjustment(db: Session, data: InventoryAdjustmentCreate) -> dict:
+    """±N cases on one in-stock FG pallet (FG-PALLET-LIFECYCLE-SPEC §4.2).
+    Returns the fields to store: quantity = −N (positive = removed), and the
+    signed delta + reason code in source_breakdown."""
+    if len(data.pallet_licence_ids or []) != 1:
+        raise HTTPException(status_code=400, detail="A case adjustment is for exactly one pallet.")
+    detail = (data.source_breakdown or [{}])[0] or {}
+    try:
+        delta = int(detail.get("case_delta") or 0)
+    except (TypeError, ValueError):
+        delta = 0
+    if delta == 0 or delta != float(detail.get("case_delta") or 0):
+        raise HTTPException(status_code=400, detail="Enter a whole number of cases to add or remove.")
+    # One pallet holds tens of cases; a fat-fingered 50000 would otherwise
+    # overflow the integer cases column at approval.
+    if abs(delta) > 9999:
+        raise HTTPException(status_code=400, detail="That is more cases than a pallet holds.")
+    reason_code = detail.get("reason_code")
+    if reason_code not in {r.value for r in CaseAdjustmentReason}:
+        raise HTTPException(
+            status_code=400,
+            detail="Pick a reason: leaker/damaged, QA sample, repack or count correction.",
+        )
+    pallet = db.query(PalletLicence).filter(PalletLicence.id == data.pallet_licence_ids[0]).first()
+    if pallet is None:
+        raise HTTPException(status_code=400, detail="Pallet not found")
+    if pallet.status != PalletStatus.IN_STOCK:
+        raise HTTPException(status_code=400, detail=f"Pallet {pallet.licence_number} is not in stock.")
+    if (pallet.cases or 0) + delta < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pallet {pallet.licence_number} has {pallet.cases} cases — can't remove {-delta}.",
+        )
+    return {
+        "quantity": float(-delta),
+        "product_id": pallet.product_id,
+        "source_breakdown": [{
+            "pallet_licence_id": pallet.id,
+            "case_delta": delta,
+            "reason_code": reason_code,
+            "cases_before": pallet.cases,
+        }],
+    }
+
 
 @router.put("/adjustments/{adjustment_id}", response_model=InventoryAdjustmentSchema)
 def update_adjustment(

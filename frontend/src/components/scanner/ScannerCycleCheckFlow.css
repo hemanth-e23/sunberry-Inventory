@@ -1,0 +1,43 @@
+/* Gun cycle check (FG pallet lifecycle §4.1) */
+.cc-modebar { display: flex; gap: 8px; margin: 10px 0; }
+.cc-modebar button {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px; border: 2px solid #e5e7eb; border-radius: 10px; background: #fff;
+  font-weight: 600; color: #374151; cursor: pointer;
+}
+.cc-modebar button.active { border-color: #1a472a; background: #f0fdf4; color: #14532d; }
+.cc-groups { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.cc-group { border: 2px solid #e5e7eb; border-radius: 10px; background: #fff; display: grid; grid-template-columns: 1fr auto; }
+.cc-group.seen { border-color: #86efac; background: #f0fdf4; }
+.cc-group.out { border-color: #fca5a5; background: #fef2f2; }
+.cc-group-main {
+  display: flex; align-items: center; gap: 10px; padding: 12px; background: none; border: none;
+  text-align: left; font-size: 1rem; cursor: pointer;
+  /* The scanner layout's global button rule paints text white — on this
+     white card the product name and count were invisible. */
+  color: #111827;
+}
+.cc-group-name { flex: 1; font-weight: 600; }
+.cc-lot { font-weight: 400; color: #6b7280; font-family: monospace; }
+.cc-group-count { font-size: 1.25rem; font-weight: 700; }
+.cc-nothere {
+  margin: 8px; padding: 8px 12px; border-radius: 8px; border: 1px solid #fca5a5;
+  background: #fff; color: #991b1b; font-weight: 600; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.cc-nothere.on { background: #991b1b; color: #fff; }
+.cc-nothere.small { margin: 0; padding: 4px 8px; font-size: 12px; }
+.cc-pallets { grid-column: 1 / -1; list-style: none; margin: 0; padding: 0 12px 10px; }
+.cc-pallets li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 14px; }
+.cc-pallets li.out { color: #991b1b; text-decoration: line-through; }
+.cc-card { border: 2px solid #e5e7eb; border-radius: 10px; padding: 12px; background: #fff; margin: 10px 0; }
+.cc-find-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-family: monospace; }
+.cc-find-meta { color: #4b5563; font-size: 14px; margin-top: 4px; }
+.cc-find-msg { font-size: 14px; color: #1f2937; margin: 8px 0; }
+.cc-status { font-family: inherit; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 10px; background: #e5e7eb; text-transform: uppercase; }
+.cc-status-in_stock { background: #dcfce7; color: #166534; }
+.cc-status-missing, .cc-status-cancelled, .cc-status-not_produced { background: #fee2e2; color: #991b1b; }
+.cc-status-emptied { background: #f3f4f6; color: #374151; }
+.cc-status-shipped { background: #e0e7ff; color: #3730a3; }
+.cc-history { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
+.cc-history-reason { color: #6b7280; }

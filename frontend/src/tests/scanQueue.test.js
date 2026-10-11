@@ -374,6 +374,23 @@ describe('useScanQueueCore', () => {
     vi.restoreAllMocks();
   });
 
+  it('the label follows measured reachability even when the browser never fires `online` (FG spec §3.4)', async () => {
+    // Reproduced 2026-10-08: navigator.onLine stuck false, queue empty, scans
+    // syncing fine — the header said "Offline" until a reload.
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    apiClient.get.mockResolvedValue({ data: { status: 'healthy' } }); // /health answers
+    const { result } = renderHook(() => useScanQueueCore());
+    // An empty queue measures nothing, so the hook probes /health itself.
+    await waitFor(() => expect(result.current.online).toBe(true));
+    expect(apiClient.get).toHaveBeenCalledWith('/health', expect.anything());
+    // And a real outage still reads offline.
+    act(() => { noteReachability(false); });
+    await waitFor(() => expect(result.current.online).toBe(false));
+    act(() => { noteReachability(true); });
+    await waitFor(() => expect(result.current.online).toBe(true));
+    vi.restoreAllMocks();
+  });
+
   it('reports offline from a failed send, not from navigator', async () => {
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
     queueScan('A');

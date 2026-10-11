@@ -332,7 +332,7 @@ def test_19_9_recall_over_serialized_lot_states_its_coverage(db_session, env):
     trace = build_lot_trace(db_session, "L19")
     assert trace["containers"], "a serialized lot must not return blank"
     assert trace["coverage"]["sources_searched"] == [
-        "legacy_receipts", "serialized_containers",
+        "legacy_receipts", "serialized_containers", "fg_pallets",
     ]
 
 

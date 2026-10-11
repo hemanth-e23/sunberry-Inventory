@@ -22,6 +22,21 @@ class MarkMissingRequest(BaseSchema):
     licence_numbers: List[str] = Field(..., min_length=1)
 
 
+class MarkNotProducedRequest(BaseSchema):
+    licence_numbers: List[str] = Field(..., min_length=1)
+    # NotProducedReason. Optional at the schema so a missing reason gets the
+    # service's plain-English 400, not a 422 field dump.
+    reason_code: Optional[str] = None
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class ClosingScanRequest(BaseSchema):
+    licence_number: Optional[str] = Field(None, max_length=100)
+    skipped: bool = False
+    # The lot being closed (the OLD lot on a midnight rollover).
+    lot_number: Optional[str] = Field(None, max_length=100)
+
+
 class PalletLicenceBase(BaseSchema):
     licence_number: str
     product_id: str
@@ -113,6 +128,14 @@ class ForkliftRequest(ForkliftRequestBase):
     # the UI reads; the flat list stays so a cached older bundle keeps working.
     covered_sequences: List[int] = []
     covered_sequences_by_prefix: Dict[str, List[int]] = {}
+    # FG-PALLET-LIFECYCLE-SPEC §3.3: the closing-scan answer per lot, the
+    # numbers after the last scan up to it (by licence prefix), and per lot
+    # "closed" / "skipped" / "not_closed".
+    closing_scans: Optional[Dict[str, dict]] = None
+    missing_after_last_scan: Dict[str, List[str]] = {}
+    closing_status: Dict[str, str] = {}
+    # {pallet_id: label} — "🚚 Moyel shuttle · trailer 12", "Not produced — …".
+    pallet_notes: Dict[str, str] = {}
 
 class ForkliftRequestUpdate(BaseSchema):
     shift_id: Optional[str] = None

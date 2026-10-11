@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, Text, ForeignKey, Float, JSON
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, Text, ForeignKey, Float, JSON, Index, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -6,6 +6,14 @@ from app.database import Base
 
 class InventoryTransfer(Base):
     __tablename__ = "inventory_transfers"
+    # Mirrors migration x9y0z1a2b3c4 so test schemas built from the models
+    # enforce the same rule as production: a BOL number is used once.
+    __table_args__ = (
+        Index(
+            "uq_inventory_transfers_bol_number", "bol_number",
+            unique=True, postgresql_where=text("bol_number IS NOT NULL"),
+        ),
+    )
 
     id = Column(String(50), primary_key=True)
     receipt_id = Column(String(50), ForeignKey("receipts.id"), nullable=True)

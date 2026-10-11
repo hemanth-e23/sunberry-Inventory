@@ -55,6 +55,19 @@ STALE_FORKLIFT_SESSION_HOURS = 3
 
 # ─── Ship-out transfer types ──────────────────────────────────────────────────
 TRANSFER_TYPE_SHIPPED_OUT = "shipped-out"
+# Line → our own trailer → Moyel/RMI warehouse (FG-PALLET-LIFECYCLE-SPEC §1.1).
+# An InventoryTransfer of this type IS the trailer: pallets point at it through
+# transfer_id exactly like a ship-out, so lot trace and the "already shipped"
+# messages read it the same way.
+TRANSFER_TYPE_MOYEL_SHUTTLE = "moyel-shuttle"
+# Transfer types after which a pallet has physically left the plant.
+SHIP_OUT_LIKE_TRANSFER_TYPES = (TRANSFER_TYPE_SHIPPED_OUT, TRANSFER_TYPE_MOYEL_SHUTTLE)
+MOYEL_SHUTTLE_CARRIER = "SUNBERRY"
+MOYEL_SHUTTLE_DEFAULT_DESTINATION_ID = "shipto-rmi-warehouse"
+
+# Gun cycle check: confirm once before marking more than this many pallets
+# missing in one submit (§4.1).
+CYCLE_CHECK_CONFIRM_OVER = 5
 
 # ─── Pallet swap source markers ───────────────────────────────────────────────
 SWAP_SOURCE_FORKLIFT = "forklift"

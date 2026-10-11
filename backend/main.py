@@ -23,6 +23,7 @@ from app.routers import transfers, adjustments, holds, cycle_counts, staging
 from app.routers import active_production, palletizer, kpi
 from app.routers import ingredient_intakes, ingredient_containers, ingredient_staging, ingredient_cutover, ingredient_rows
 from app.routers import lot_receiving, lot_cutover, staging_pull
+from app.routers import moyel_shuttle, cycle_check
 from app.utils.logging_setup import setup_logging
 
 # Configure logging — writes to stdout AND a rotating file at /app/logs/app.log
@@ -514,8 +515,10 @@ app.include_router(transfers.router, prefix="/api/inventory", tags=["Transfers"]
 app.include_router(adjustments.router, prefix="/api/inventory", tags=["Adjustments"])
 app.include_router(holds.router, prefix="/api/inventory", tags=["Holds"])
 app.include_router(cycle_counts.router, prefix="/api/inventory", tags=["Cycle Counts"])
+app.include_router(moyel_shuttle.router, prefix="/api/inventory", tags=["Moyel Shuttle"])
 app.include_router(staging.router, prefix="/api/inventory", tags=["Staging"])
 app.include_router(scanner.router, prefix="/api/scanner", tags=["Scanner"])
+app.include_router(cycle_check.router, prefix="/api/scanner", tags=["Cycle Check"])
 app.include_router(pallet_licences.router, prefix="/api/pallet-licences", tags=["Pallet Licences"])
 app.include_router(master_data.router, prefix="/api/master-data", tags=["Master Data"])
 app.include_router(service.router, prefix="/api/service", tags=["Service-to-Service"])

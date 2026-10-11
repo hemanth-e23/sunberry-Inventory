@@ -40,7 +40,7 @@ from app.models.inventory import (
 )
 
 # 5. Scanner models (FK: products, receipts, storage_areas, storage_rows, inventory_transfers, users)
-from app.models.scanner import ForkliftRequest, PalletLicence, TransferScanEvent
+from app.models.scanner import ForkliftRequest, PalletLicence, TransferScanEvent, PalletEvent
 
 # 6. Staging requests (FK: products)
 # NOTE: StagingLineContainer FKs containers, which is defined in section 11 —
@@ -77,7 +77,7 @@ __all__ = [
     "InventoryTransfer", "InventoryTransferLine", "TransferPalletSwap",
     "InventoryAdjustment", "InventoryHoldAction",
     "CycleCount", "StagingItem",
-    "ForkliftRequest", "PalletLicence", "TransferScanEvent",
+    "ForkliftRequest", "PalletLicence", "TransferScanEvent", "PalletEvent",
     "StagingRequest", "StagingRequestItem", "StagingLineContainer",
     "InterWarehouseTransfer",
     "Notification",

@@ -17,6 +17,8 @@ from app.schemas import (
     PalletLicenceUpdate,
     ScanPalletRequest,
     MarkMissingRequest,
+    MarkNotProducedRequest,
+    ClosingScanRequest,
 )
 from app.utils.auth import get_current_active_user, warehouse_filter
 from app.constants import ROLE_FORKLIFT, ROLE_ADMIN, ROLE_SUPERVISOR
@@ -36,6 +38,10 @@ _COVERED_PALLET_STATUSES = (
     PalletStatus.TRANSFERRED,
     PalletStatus.SHIPPED,
     PalletStatus.NOT_PRODUCED,
+    # Existed, then went missing from stock — not a production gap.
+    PalletStatus.MISSING,
+    # Existed, then case-adjusted to 0 — not a production gap.
+    PalletStatus.EMPTIED,
 )
 
 
@@ -103,11 +109,46 @@ def _compute_covered_sequences_by_prefix(db: Session, fr: ForkliftRequest) -> di
     return out
 
 
+def _pallet_notes(db: Session, fr: ForkliftRequest) -> dict:
+    """{pallet_id: label} for pallets the review must not call "Pending":
+    shipped before approval (live load / Moyel shuttle) and not-produced
+    markers with their reason (FG-PALLET-LIFECYCLE-SPEC §1.1, §2.1, §2.2)."""
+    from app.services import pallet_lifecycle_service as plc
+    from app.enums import NotProducedReason, PalletEventType
+    labels = {
+        NotProducedReason.STICKER_DAMAGED.value: "sticker damaged/misprinted",
+        NotProducedReason.QA_REJECTED.value: "rejected/destroyed by QA",
+        NotProducedReason.OTHER.value: "other",
+    }
+    out: dict = {}
+    for pl in (fr.pallet_licences or []):
+        if pl.status == PalletStatus.SHIPPED:
+            out[pl.id] = plc.shipped_label(db, pl)
+        elif pl.status == PalletStatus.NOT_PRODUCED:
+            ev = plc.last_event(db, pl, PalletEventType.NOT_PRODUCED.value)
+            if ev is not None:
+                why = labels.get(ev.reason_code or "", ev.reason_code or "")
+                if ev.reason:
+                    why = f"{why}: {ev.reason}" if why else ev.reason
+                who = plc._user_name(db, ev.user_id)
+                out[pl.id] = f"Not produced — {why}" + (f" ({who})" if who else "")
+    return out
+
+
+# Only open sessions are annotated — the full list includes every approved
+# session ever, and the labels cost a query per shipped pallet.
+_ANNOTATED_STATUSES = ("scanning", "submitted")
+
+
 def _attach_covered_sequences(db: Session, frs: list[ForkliftRequest]) -> None:
     """Mutate each ForkliftRequest in-place so pydantic picks up the coverage fields."""
     for fr in frs:
         fr.covered_sequences = _compute_covered_sequences(db, fr)
         fr.covered_sequences_by_prefix = _compute_covered_sequences_by_prefix(db, fr)
+        if fr.status in _ANNOTATED_STATUSES:
+            fr.missing_after_last_scan = scanner_service.missing_after_last_scan(db, fr)
+            fr.closing_status = scanner_service.closing_status_by_lot(fr)
+            fr.pallet_notes = _pallet_notes(db, fr)
 
 
 router = APIRouter()
@@ -177,20 +218,39 @@ def mark_missing_pallets(
 @router.post("/requests/{request_id}/mark-not-produced")
 def mark_not_produced(
     request_id: str,
-    data: MarkMissingRequest,  # same shape: { licence_numbers: [...] }
+    data: MarkNotProducedRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_forklift_or_admin)
 ):
     """Supervisor marks pallet slots as 'never produced by the production line'.
     Removes them from the missing-pallets list in this card and any other card
-    for the same lot. Final action — undo requires DB intervention."""
+    for the same lot. Needs a reason; reversible — a later scan of the pallet
+    is accepted and flagged (FG-PALLET-LIFECYCLE-SPEC §2.1)."""
     if current_user.role == ROLE_FORKLIFT:
         # Only approvers should be able to declare "not produced"
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only supervisors/admins can mark pallets as not produced",
         )
-    return scanner_service.mark_not_produced(db, request_id, data.licence_numbers, current_user)
+    return scanner_service.mark_not_produced(
+        db, request_id, data.licence_numbers, current_user,
+        reason_code=data.reason_code, note=data.note,
+    )
+
+
+@router.post("/requests/{request_id}/closing-scan")
+def record_closing_scan(
+    request_id: str,
+    data: ClosingScanRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_forklift_or_admin),
+):
+    """"Scan the last pallet at the wrapper" — the closing number for a lot, or
+    that the driver skipped it (FG-PALLET-LIFECYCLE-SPEC §3.3)."""
+    return scanner_service.record_closing_scan(
+        db, request_id, current_user,
+        licence_number=data.licence_number, skipped=data.skipped, lot_number=data.lot_number,
+    )
 
 
 @router.post("/requests/{request_id}/submit")
@@ -244,8 +304,7 @@ def get_forklift_request(
     ).filter(ForkliftRequest.id == request_id).first()
     if not fr:
         raise HTTPException(status_code=404, detail="Forklift request not found")
-    fr.covered_sequences = _compute_covered_sequences(db, fr)
-    fr.covered_sequences_by_prefix = _compute_covered_sequences_by_prefix(db, fr)
+    _attach_covered_sequences(db, [fr])
     return fr
 
 

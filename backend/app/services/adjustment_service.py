@@ -3,11 +3,12 @@ from sqlalchemy.orm import Session
 
 from app.models import MaterialLot, Receipt, InventoryAdjustment, PalletLicence
 from app.models.location import StorageRow
-from app.enums import AdjustmentStatus, ReceiptStatus, PalletStatus, AdjustmentType
+from app.enums import AdjustmentStatus, ReceiptStatus, PalletStatus, AdjustmentType, PalletEventType
 from app.enums import DEDUCTION_TYPES  # noqa: F401  (re-exported; routers/adjustments.py:65 reads adjustment_service.DEDUCTION_TYPES)
 from app.exceptions import ForbiddenError, ValidationError
 from app.constants import ROLE_WAREHOUSE
 from app.services import lot_placement_service as lps
+from app.services import pallet_lifecycle_service as plc
 from app.services.ship_out_service import _release_row_capacity
 from app.services.transfer_service import (
     _rebuild_receipt_allocation_from_licences,
@@ -38,7 +39,9 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
 
     # Status flips at the END — the guards below refuse by raising, and a
     # refused adjustment must be left exactly as it was.
-    if adjustment.pallet_licence_ids:
+    if adjustment.adjustment_type == AdjustmentType.CASE_ADJUSTMENT.value:
+        _approve_case_adjustment(db, adjustment, current_user)
+    elif adjustment.pallet_licence_ids:
         # Pallet-based (Finished Goods): subtract each pallet's cases from its receipt
         pallets = db.query(PalletLicence).filter(
             PalletLicence.id.in_(adjustment.pallet_licence_ids)
@@ -67,9 +70,21 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
                 # rows they occupied. Without this they stayed IN_STOCK and
                 # could be picked again at ship-out — deducting the receipt a
                 # second time for goods that were already written off.
+                # "Not found" pallets become MISSING, not CANCELLED: a later
+                # scan anywhere finds them again (FG-PALLET-LIFECYCLE-SPEC
+                # §1.2). Every other type keeps writing them off as before.
+                is_missing = adjustment.adjustment_type == AdjustmentType.MISSING.value
                 for pallet in live_pallets:
                     _release_row_capacity(db, pallet, pallet.cases or 0)
-                    pallet.status = PalletStatus.CANCELLED
+                    pallet.status = PalletStatus.MISSING if is_missing else PalletStatus.CANCELLED
+                    if is_missing:
+                        plc.record_event(
+                            db, pallet, PalletEventType.MISSING, user=current_user,
+                            from_status=PalletStatus.IN_STOCK.value,
+                            to_status=PalletStatus.MISSING.value,
+                            reason=adjustment.reason, cases_before=pallet.cases,
+                            ref_type="adjustment", ref_id=adjustment.id,
+                        )
                 # Rebuild the FG occupancy view from the remaining IN_STOCK
                 # pallets so row cards and allocation stay in sync.
                 _rebuild_receipt_allocation_from_licences(db, receipt)
@@ -148,6 +163,73 @@ def approve_adjustment(db: Session, adjustment: InventoryAdjustment, current_use
     adjustment.approved_at = datetime.now(timezone.utc)
 
     return adjustment
+
+
+def _approve_case_adjustment(db: Session, adjustment: InventoryAdjustment, current_user) -> None:
+    """±N cases on ONE FG pallet (FG-PALLET-LIFECYCLE-SPEC §4.2).
+
+    The pallet stays in stock with its new count; at 0 it is closed (written
+    off, its rack slot freed). The receipt and the row's occupied_cases move by
+    the same N. `adjustment.quantity` is −N (report convention: positive =
+    removed), and the signed delta + reason live in source_breakdown[0]."""
+    detail = (adjustment.source_breakdown or [{}])[0] or {}
+    delta = int(detail.get("case_delta") or 0)
+    if not delta or not adjustment.pallet_licence_ids:
+        raise ValidationError("A case adjustment needs one pallet and a non-zero number of cases.")
+    pallet = (
+        db.query(PalletLicence)
+        .filter(PalletLicence.id == adjustment.pallet_licence_ids[0])
+        .with_for_update()
+        .first()
+    )
+    if pallet is None or pallet.status != PalletStatus.IN_STOCK:
+        raise ValidationError(
+            "That pallet is no longer in stock — the case adjustment can't be applied."
+        )
+    before = int(pallet.cases or 0)
+    after = before + delta
+    if after < 0:
+        raise ValidationError(
+            f"Pallet {pallet.licence_number} has {before} cases — can't remove {-delta}."
+        )
+    receipt = (
+        db.query(Receipt).filter(Receipt.id == pallet.receipt_id).with_for_update().first()
+        if pallet.receipt_id else None
+    )
+    if receipt is not None:
+        adjustment.original_quantity = receipt.quantity
+        receipt.quantity = max(0.0, float(receipt.quantity or 0) + delta)
+        adjustment.new_quantity = receipt.quantity
+    row = (
+        db.query(StorageRow).filter(StorageRow.id == pallet.storage_row_id).first()
+        if pallet.storage_row_id else None
+    )
+    if after == 0:
+        # Nothing left on it: the pallet is gone, its rack slot is free. It is
+        # EMPTIED, not CANCELLED: a later scan of its sticker is refused (with
+        # who/when/why) instead of reviving it as a full pallet.
+        _release_row_capacity(db, pallet, before)
+        pallet.cases = 0
+        pallet.status = PalletStatus.EMPTIED
+    else:
+        if row is not None:
+            row.occupied_cases = max(0, (row.occupied_cases or 0) + delta)
+        pallet.cases = after
+        cpp = receipt.cases_per_pallet if receipt is not None else None
+        pallet.is_partial = bool(cpp) and after < cpp
+    plc.record_event(
+        db, pallet, PalletEventType.CASE_ADJUSTED, user=current_user,
+        from_status=PalletStatus.IN_STOCK.value, to_status=pallet.status,
+        reason_code=detail.get("reason_code"), reason=adjustment.reason,
+        cases_before=before, cases_after=after,
+        ref_type="adjustment", ref_id=adjustment.id,
+    )
+    if receipt is not None:
+        _rebuild_receipt_allocation_from_licences(db, receipt)
+        if receipt.quantity <= 0:
+            receipt.status = ReceiptStatus.DEPLETED
+        elif receipt.status == ReceiptStatus.DEPLETED:
+            receipt.status = ReceiptStatus.APPROVED
 
 
 def _hold_blocks_deduction(db: Session, receipt: Receipt) -> bool:

@@ -80,6 +80,15 @@ class AdjustmentType(str, Enum):
     # adjustment already-APPROVED for KPI/report continuity only. Routing it
     # through approve_adjustment would double-decrement.
     SERIALIZATION_CONVERSION = "serialization-conversion"
+    # FG pallets that cannot be found (FG-PALLET-LIFECYCLE-SPEC §1.2). A
+    # DEDUCTION_TYPE like stock-correction, but approval sets the pallets to
+    # PalletStatus.MISSING instead of CANCELLED, so a later scan finds them.
+    MISSING = "missing"
+    # ±N cases on ONE FG pallet (§4.2). Deliberately NOT a DEDUCTION_TYPE: the
+    # sign is per adjustment. `quantity` follows the report convention —
+    # positive = cases removed, negative = cases put back — and approval
+    # applies it explicitly in adjustment_service.
+    CASE_ADJUSTMENT = "case-adjustment"
 
 
 # Adjustment types that reduce inventory quantity when approved.
@@ -94,7 +103,16 @@ DEDUCTION_TYPES = frozenset({
     AdjustmentType.TRASH_DISPOSAL.value,
     AdjustmentType.QUALITY_REJECTION.value,
     AdjustmentType.USED_IN_PRODUCTION.value,
+    AdjustmentType.MISSING.value,
 })
+
+
+class CaseAdjustmentReason(str, Enum):
+    """Why one FG pallet's case count changed (§4.2)."""
+    LEAKER_DAMAGED = "leaker_damaged"
+    QA_SAMPLE = "qa_sample"
+    REPACK = "repack"
+    COUNT_CORRECTION = "count_correction"
 
 
 class HoldStatus(str, Enum):
@@ -136,6 +154,34 @@ class PalletStatus(str, Enum):
     # line never actually produced (skipped sticker number). Excluded
     # from missing-pallet lists in this AND other forklift sessions.
     NOT_PRODUCED = "not_produced"
+    # EMPTIED: a "cases on one pallet" adjustment took it to 0 cases. It existed
+    # (so its sticker number is not a sequence gap and it stays under Adjusted
+    # in the lot trace), but unlike CANCELLED it is NOT foundable: a later scan
+    # is refused with who emptied it, when and why — it never comes back on its
+    # own (FG-PALLET-LIFECYCLE-SPEC §4.2).
+    EMPTIED = "emptied"
+
+
+class NotProducedReason(str, Enum):
+    """Required reason when a supervisor skips a gap as Not Produced (§2.1)."""
+    STICKER_DAMAGED = "sticker_damaged"      # sticker damaged / misprinted
+    QA_REJECTED = "qa_rejected"              # pallet rejected / destroyed by QA
+    OTHER = "other"                          # free-text note required
+
+
+class PalletEventType(str, Enum):
+    """`pallet_events.event_type` (FG-PALLET-LIFECYCLE-SPEC)."""
+    MISSING = "missing"                        # marked not found (adjustment / cycle check)
+    FOUND = "found"                            # a missing pallet was scanned again
+    NOT_PRODUCED = "not_produced"              # gap skipped at review, with reason
+    NOT_PRODUCED_SCANNED = "not_produced_scanned"  # a not_produced pallet turned up
+    REVIVED = "revived"                        # a cancelled pallet put back in stock
+    SHUTTLED = "shuttled"                      # loaded on a Moyel shuttle trailer
+    CREATED_SHIPPED = "created_shipped"        # missing number ticked on the shuttle
+    CREATED_FROM_STICKER = "created_from_sticker"  # Find Pallet: never existed, now in stock
+    MOVED = "moved"                            # cycle check found it in another row
+    CASE_ADJUSTED = "case_adjusted"            # ±N cases on one pallet
+    LIVE_LOADED = "live_loaded"                # pending pallet shipped before approval
 
 
 class ShipOutScanReason(str, Enum):

@@ -8,6 +8,7 @@ import AdjustmentsTab from './inventory/AdjustmentsTab';
 import ShipOutTab from './inventory/ShipOutTab';
 import ScheduleShipOutTab from './inventory/ScheduleShipOutTab';
 import CountsTab from './inventory/CountsTab';
+import MoyelShuttleTab from './inventory/MoyelShuttleTab';
 import './Shared.css';
 import './InventoryActionsPage.css';
 
@@ -17,8 +18,9 @@ import './InventoryActionsPage.css';
 // during the changeover, where stock is entered onto the lot model by hand.
 // Counting a rack IS an inventory action, so it belongs here rather than behind
 // a nav item of its own.
-const TAB_OPTIONS = ['transfers', 'holds', 'adjustments', 'counts', 'schedule'];
-const TAB_LABELS = { schedule: 'Ship Out' };
+// 'shuttle' = Moyel Shuttle: line → our own trailer → Moyel/RMI warehouse.
+const TAB_OPTIONS = ['transfers', 'holds', 'adjustments', 'counts', 'schedule', 'shuttle'];
+const TAB_LABELS = { schedule: 'Ship Out', shuttle: 'Moyel Shuttle' };
 
 const InventoryActionsPage = () => {
   const navigate = useNavigate();
@@ -56,6 +58,7 @@ const InventoryActionsPage = () => {
       {activeTab === 'shipout' && <ShipOutTab />}
       {activeTab === 'counts' && <CountsTab />}
       {activeTab === 'schedule' && <ScheduleShipOutTab />}
+      {activeTab === 'shuttle' && <MoyelShuttleTab />}
     </div>
   );
 };
