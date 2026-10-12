@@ -463,7 +463,7 @@ def submit_row_check(
             "unit": "pallets",
             "variance": variance,
             "status": "ok" if variance == 0 else ("shortage" if variance < 0 else "overage"),
-            "notHere": missing_here,
+            "notHere": sorted(missing_here),
             "arrived": [{"licence_number": lic, "result": res} for lic, res, _ in extra],
         })
 

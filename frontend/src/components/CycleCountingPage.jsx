@@ -931,8 +931,8 @@ const CycleCountingPage = () => {
                                               <td className="text-right">{item.expectedQuantity ?? 0}</td>
                                               <td className={`text-right variance-${item.status}`}>{item.actualQuantity ?? 0}</td>
                                               <td className="cc-pallet-notes">
-                                                {item.notHere?.length > 0 && <div>Not here (now missing): {item.notHere.join(', ')}</div>}
-                                                {item.arrived?.length > 0 && <div>Arrived: {item.arrived.map(a => `${a.licence_number} (${a.result})`).join(', ')}</div>}
+                                                {item.notHere?.length > 0 && <div>Not here (now missing): {[...item.notHere].sort().join(', ')}</div>}
+                                                {item.arrived?.length > 0 && <div>Arrived: {[...item.arrived].sort((a, b) => String(a.licence_number).localeCompare(String(b.licence_number))).map(a => `${a.licence_number} (${a.result})`).join(', ')}</div>}
                                                 {!item.notHere?.length && !item.arrived?.length && '—'}
                                               </td>
                                             </>

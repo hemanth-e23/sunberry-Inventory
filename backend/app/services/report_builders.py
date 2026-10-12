@@ -2501,10 +2501,11 @@ def _gun_check_note(item: dict) -> str:
     """Pallet numbers behind a gun row check's difference."""
     parts = []
     if item.get("notHere"):
-        parts.append("Not here: " + ", ".join(item["notHere"]))
+        parts.append("Not here: " + ", ".join(sorted(item["notHere"])))
     if item.get("arrived"):
         parts.append("Found here: " + ", ".join(
-            f"{a.get('licence_number')} ({a.get('result')})" for a in item["arrived"]
+            f"{a.get('licence_number')} ({a.get('result')})"
+            for a in sorted(item["arrived"], key=lambda a: str(a.get("licence_number")))
         ))
     return " · ".join(parts)
 

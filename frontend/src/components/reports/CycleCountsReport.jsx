@@ -71,7 +71,7 @@ const CycleCountsReport = () => {
               <div><h3>Cycle Count Variance</h3><p>System vs physical count — finished-goods cycle counts and raw-material rack counts.</p></div>
               <ExportButtons columns={ccCols} rows={ccData.rows || []} fileBaseName="cycle-count-variance" />
             </div>
-            <ReportTable columns={ccCols} rows={(ccData.rows || []).map((r, i) => ({ ...r, id: r.count_id || i }))} emptyMessage="No cycle counts found." />
+            <ReportTable columns={ccCols} rows={(ccData.rows || []).map((r, i) => ({ ...r, id: `${r.count_id || "row"}-${i}` }))} emptyMessage="No cycle counts found." />
           </div>
         </>
       )}
