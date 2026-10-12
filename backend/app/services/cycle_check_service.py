@@ -18,13 +18,17 @@ and offer the action that fits it.
 
 Callers own commit/rollback.
 """
+import re
 import uuid
-from datetime import datetime, timezone
-from typing import Iterable, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Iterable, List, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.constants import CYCLE_CHECK_CONFIRM_OVER, DEFAULT_CASES_PER_PALLET
+from app.constants import (
+    CYCLE_CHECK_CONFIRM_OVER, CYCLE_CHECK_SESSION_IDLE_MINUTES, DEFAULT_CASES_PER_PALLET,
+)
 from app.enums import ForkliftRequestStatus, PalletEventType, PalletStatus, ReceiptStatus
 from app.exceptions import NotFoundError, ValidationError
 from app.models import (
@@ -37,6 +41,10 @@ from app.services.transfer_service import _rebuild_receipt_allocation_from_licen
 from app.utils.warehouse_time import warehouse_timezone, zone
 
 KIND_GUN_ROW_CHECK = "gun_row_check"
+# Server-minted count-session ids. Anything else the client sends is ignored
+# and a fresh session is started.
+SESSION_ID_RE = re.compile(r"^cs-[0-9a-f]{12}$")
+_SESSION_IDLE = timedelta(minutes=CYCLE_CHECK_SESSION_IDLE_MINUTES)
 
 
 def _row_location_id(db: Session, row: StorageRow) -> Optional[str]:
@@ -254,12 +262,144 @@ def _mark_missing(db: Session, pl: PalletLicence, row: StorageRow, user, ref_id:
 
 
 # ---------------------------------------------------------------------------
+# Count sessions — one walk of rows (Next row … Finish)
+# ---------------------------------------------------------------------------
+
+def _aware(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _is_gun(c) -> bool:
+    return isinstance(c.summary, dict) and c.summary.get("kind") == KIND_GUN_ROW_CHECK
+
+
+def _resolve_session(db: Session, user, session_id: Optional[str]) -> tuple:
+    """(session_id, session_started_at ISO) for a row about to be saved.
+
+    The id is minted here on the walk's first row and the gun sends it back
+    with every later row. A sent id is only continued when THIS user saved a
+    row under it within the idle window — an unknown, foreign, malformed or
+    stale id silently starts a new session, so nobody can append rows to
+    someone else's count."""
+    now = datetime.now(timezone.utc)
+    if session_id and SESSION_ID_RE.match(session_id):
+        recent = (
+            db.query(CycleCount)
+            .filter(
+                CycleCount.performed_by_id == str(user.id),
+                CycleCount.created_at >= now - timedelta(hours=24),
+            )
+            .all()
+        )
+        mine = [c for c in recent if _is_gun(c) and c.summary.get("session_id") == session_id]
+        if mine:
+            last = max(_aware(c.created_at) or now for c in mine)
+            if now - last <= _SESSION_IDLE:
+                started = min(
+                    (c.summary.get("session_started_at") for c in mine if c.summary.get("session_started_at")),
+                    default=None,
+                ) or min(_aware(c.created_at) or now for c in mine).isoformat()
+                return session_id, started
+    return f"cs-{uuid.uuid4().hex[:12]}", now.isoformat()
+
+
+def row_has_difference(summary: dict) -> bool:
+    """A row check found something to fix: a count off, or any pallet marked
+    not here, moved in, found again or created."""
+    return bool(
+        (summary.get("variancesCount") or 0)
+        or (summary.get("not_here") or 0)
+        or (summary.get("moved_in") or 0)
+        or (summary.get("found") or 0)
+        or (summary.get("created") or 0)
+    )
+
+
+def group_sessions(counts: Iterable) -> List[list]:
+    """Gun row checks grouped into count sessions, newest session first.
+
+    Checks saved with a session id group by (who, session id). Older checks
+    without one (everything before sessions existed) group by the same person
+    on the same day with no gap longer than the idle window between
+    consecutive checks. Non-gun counts are ignored."""
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    gun = sorted(
+        (c for c in counts if _is_gun(c)),
+        key=lambda c: (str(c.performed_by_id), _aware(c.created_at) or epoch, c.id),
+    )
+    groups: dict = {}
+    chain: dict = {}   # who -> (key, last created_at, count_date) of the open untagged run
+    for c in gun:
+        who = str(c.performed_by_id)
+        sid = c.summary.get("session_id")
+        if sid:
+            key = (who, sid)
+        else:
+            dt = _aware(c.created_at)
+            cur = chain.get(who)
+            if cur and cur[2] == c.count_date and dt and cur[1] and dt - cur[1] <= _SESSION_IDLE:
+                key = cur[0]
+            else:
+                key = (who, f"auto-{c.id}")
+            chain[who] = (key, dt, c.count_date)
+        groups.setdefault(key, []).append(c)
+    out = list(groups.values())
+    out.sort(key=lambda g: max(_aware(c.created_at) or epoch for c in g), reverse=True)
+    return out
+
+
+def session_rollup(records: list) -> dict:
+    """Totals + per-row detail of one count session (records = one group
+    from group_sessions, any order)."""
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    recs = sorted(records, key=lambda c: (_aware(c.created_at) or epoch, c.id))
+    first = recs[0]
+    sid = first.summary.get("session_id")
+    rows = []
+    for c in recs:
+        sm = c.summary
+        rows.append({
+            "cycle_count_id": c.id,
+            "row_id": sm.get("row_id"),
+            "row_name": sm.get("row_name"),
+            "checked_at": _aware(c.created_at),
+            "ok": not row_has_difference(sm),
+            "expected_pallets": sm.get("expected_pallets") or 0,
+            "not_here": sm.get("not_here") or 0,
+            "found": sm.get("found") or 0,
+            "moved_in": sm.get("moved_in") or 0,
+            "created": sm.get("created") or 0,
+            "items": c.items if isinstance(c.items, list) else [],
+        })
+    return {
+        "session_key": f"{first.performed_by_id}|{sid or 'auto-' + first.id}",
+        "session_id": sid,
+        "inferred": not sid,
+        "performed_by": first.performed_by,
+        "performed_by_id": first.performed_by_id,
+        "count_date": first.count_date,
+        "started_at": _aware(first.created_at),
+        "ended_at": _aware(recs[-1].created_at),
+        "rows_checked": len(rows),
+        "rows_ok": sum(1 for r in rows if r["ok"]),
+        "rows_with_differences": sum(1 for r in rows if not r["ok"]),
+        "not_here": sum(r["not_here"] for r in rows),
+        "found": sum(r["found"] for r in rows),
+        "moved_in": sum(r["moved_in"] for r in rows),
+        "created": sum(r["created"] for r in rows),
+        "rows": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Submit a row check
 # ---------------------------------------------------------------------------
 
 def submit_row_check(
     db: Session, *, row_id: str, scanned: Iterable[str], not_here_pallet_ids: Iterable[str],
-    confirmed: bool, user, warehouse_id: Optional[str],
+    confirmed: bool, user, warehouse_id: Optional[str], session_id: Optional[str] = None,
 ) -> dict:
     row = _get_row(db, row_id, warehouse_id)
     before = row_contents(db, row.id, warehouse_id)
@@ -280,6 +420,7 @@ def submit_row_check(
         }
 
     cc_id = f"cycle-{uuid.uuid4().hex[:12]}"
+    session_id, session_started_at = _resolve_session(db, user, session_id)
     results = [_apply_scan(db, lic, row, user, warehouse_id) for lic in scanned]
     for p in not_here:
         _mark_missing(db, p, row, user, cc_id)
@@ -329,6 +470,8 @@ def submit_row_check(
     tz = zone(warehouse_timezone(db, warehouse_id))
     summary = {
         "kind": KIND_GUN_ROW_CHECK,
+        "session_id": session_id,
+        "session_started_at": session_started_at,
         "row_id": row.id,
         "row_name": row.name,
         "expected_pallets": before["total_pallets"],
@@ -354,16 +497,116 @@ def submit_row_check(
     )
     db.add(cc)
     db.flush()
-    return {"status": "recorded", "cycle_count_id": cc.id, "summary": summary, "items": items}
+    return {
+        "status": "recorded", "cycle_count_id": cc.id, "session_id": session_id,
+        "session_started_at": session_started_at, "summary": summary, "items": items,
+    }
 
 
 # ---------------------------------------------------------------------------
 # Find Pallet
 # ---------------------------------------------------------------------------
 
+def _seq_ranges(seqs: List[int], limit: int = 6) -> str:
+    """[1,2,3,5,7,8] → '#1–3, 5, 7–8' (first `limit` runs, then '…')."""
+    runs = []
+    for n in seqs:
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    parts = [f"{a}" if a == b else f"{a}–{b}" for a, b in runs[:limit]]
+    return "#" + ", ".join(parts) + (", …" if len(runs) > limit else "")
+
+
+def _lot_sequences(db: Session, lot: str, product_id: str, warehouse_id: Optional[str]) -> List[int]:
+    """Every pallet number recorded for this lot + product (any status) in the
+    checker's warehouse (legacy pallets with no warehouse count too)."""
+    q = db.query(PalletLicence.sequence).filter(
+        PalletLicence.lot_number == lot,
+        PalletLicence.product_id == product_id,
+        PalletLicence.sequence.isnot(None),
+    )
+    if warehouse_id:
+        q = q.filter(or_(PalletLicence.warehouse_id == warehouse_id, PalletLicence.warehouse_id.is_(None)))
+    return sorted({int(s) for (s,) in q.all()})
+
+
+def _parse_sticker(db: Session, licence: str):
+    """(lot, product, sequence) of a sticker, or Nones."""
+    from app.services.scanner_service import find_product_by_code, parse_licence_number
+    lot, code, seq = parse_licence_number(licence)
+    if not lot or seq is None:
+        return None, None, None, code
+    product = find_product_by_code(db, code)
+    if product is not None and not plc.is_finished_good(db, product.id):
+        product = None
+    return lot, product, seq, code
+
+
+def explain_never_scanned(db: Session, licence: str, warehouse_id: Optional[str]) -> dict:
+    """Why a sticker is not in the system, from the rest of its lot."""
+    lot, product, seq, code = _parse_sticker(db, licence)
+    if not lot:
+        return {"kind": "not_a_sticker", "actions": [],
+                "message": f"{licence} is not a pallet sticker (LOT-PRODUCT-###) — check what was scanned."}
+    if product is None:
+        return {"kind": "unknown_product", "actions": [], "lot_number": lot, "sequence": seq,
+                "message": f"Not in the system — product code {code} is not a known finished good. Check the sticker."}
+    base = {"lot_number": lot, "sequence": seq, "product_name": product.name, "actions": ["create_here"]}
+    seqs = _lot_sequences(db, lot, product.id, warehouse_id)
+    num = f"#{seq:03d}"
+    if not seqs:
+        return {**base, "kind": "lot_not_in_system", "confirm_create": True,
+                "message": (f"No pallet of this lot is in the system ({product.name}, lot {lot}) — "
+                            "check the product and lot on the sticker before creating.")}
+    recorded = f"lot {lot} has {_seq_ranges(seqs)} recorded"
+    hi, lo = seqs[-1], seqs[0]
+    if seq > hi:
+        kind = "end_of_lot"
+        where = "right after" if seq == hi + 1 else "after"
+        msg = f"Never scanned — {recorded}; this is {num}, {where} the last scanned pallet #{hi:03d} (end of lot)."
+    elif seq < lo:
+        kind = "before_first"
+        msg = f"Never scanned — {recorded}; this is {num}, before the first scanned pallet #{lo:03d}."
+    elif seq in seqs:
+        # Same lot + number under another sticker spelling (product code alias).
+        kind = "number_taken"
+        base = {**base, "actions": []}
+        msg = (f"{recorded}, including {num} under a different sticker — "
+               "check the product code on this sticker; do not create it.")
+    else:
+        kind = "gap"
+        prev = max(n for n in seqs if n < seq)
+        nxt = min(n for n in seqs if n > seq)
+        msg = f"Never scanned — a gap between #{prev:03d} and #{nxt:03d} in lot {lot} ({_seq_ranges(seqs)} recorded)."
+    return {**base, "kind": kind, "message": msg, "highest": hi}
+
+
+def _status_event(db: Session, pl: PalletLicence, status: str) -> Optional[PalletEvent]:
+    return (
+        db.query(PalletEvent)
+        .filter(PalletEvent.pallet_licence_id == pl.id, PalletEvent.to_status == status)
+        .order_by(PalletEvent.created_at.desc())
+        .first()
+    )
+
+
+def _who_when_why(db: Session, pl: PalletLicence, ev: Optional[PalletEvent]) -> Optional[str]:
+    """'by Ann on 10/12/2026 9:14 AM — Not here — cycle check of FG-01'."""
+    if ev is None:
+        return None
+    who = plc._user_name(db, ev.user_id) or "someone"
+    why = ev.reason or (ev.reason_code or "").replace("_", " ")
+    return f"by {who} on {plc.fmt_local(db, ev.created_at, pl.warehouse_id)}" + (f" — {why}" if why else "")
+
+
+_NO_RECORD = "no record of who or when (older data)"
+
+
 def find_pallet(db: Session, licence: str, warehouse_id: Optional[str] = None) -> dict:
     from app.services.scanner_service import normalize_scanned_licence
-    licence = normalize_scanned_licence((licence or "").strip(), "")
+    licence = normalize_scanned_licence((licence or "").strip(), "")[:100]
     pl = db.query(PalletLicence).filter(PalletLicence.licence_number == licence).first()
     if _other_warehouse(pl, warehouse_id):
         # Say it exists (so nobody tries to create it) but nothing about it.
@@ -373,11 +616,13 @@ def find_pallet(db: Session, licence: str, warehouse_id: Optional[str] = None) -
             "message": "This pallet belongs to another warehouse.",
         }
     if pl is None:
+        why = explain_never_scanned(db, licence, warehouse_id)
         return {
             "licence_number": licence, "exists": False, "status": None,
-            "actions": ["create_here"],
-            "message": "Not in the system — it can be created in stock here from its sticker.",
-            "history": [],
+            "actions": why.pop("actions"), "message": why.pop("message"),
+            "explanation": why, "confirm_create": bool(why.get("confirm_create")),
+            "product_name": why.get("product_name"), "lot_number": why.get("lot_number"),
+            "sequence": why.get("sequence"), "history": [],
         }
     row = db.query(StorageRow).filter(StorageRow.id == pl.storage_row_id).first() if pl.storage_row_id else None
     product = db.query(Product).filter(Product.id == pl.product_id).first()
@@ -396,19 +641,29 @@ def find_pallet(db: Session, licence: str, warehouse_id: Optional[str] = None) -
         ),
         "shipped": None, "actions": [], "message": None,
     }
+    num = f"#{int(pl.sequence):03d}" if pl.sequence is not None else pl.licence_number
     if pl.status == PalletStatus.IN_STOCK.value:
         out["actions"] = ["move_here"]
-        out["message"] = f"In stock in {row.name if row else 'no row'}."
+        out["message"] = (
+            f"In stock in {row.name if row else 'no row'} · lot {pl.lot_number or '—'}"
+            + (" · ON HOLD" if pl.is_held else "") + "."
+        )
     elif pl.status == PalletStatus.MISSING.value:
         out["actions"] = ["found_here"]
-        out["message"] = "Marked missing — mark it found, in stock here."
-    elif pl.status in (PalletStatus.NOT_PRODUCED.value, PalletStatus.CANCELLED.value):
+        www = _who_when_why(db, pl, _status_event(db, pl, PalletStatus.MISSING.value))
+        out["message"] = f"Marked missing {www or '— ' + _NO_RECORD}. Mark it found, in stock here."
+    elif pl.status == PalletStatus.NOT_PRODUCED.value:
         out["actions"] = ["restore_here"]
-        out["message"] = (
-            plc.not_produced_detail(db, pl).replace(" — now scanned", "")
-            if pl.status == PalletStatus.NOT_PRODUCED.value
-            else "Written off — put it back in stock here (flagged)."
-        )
+        ev = (_status_event(db, pl, PalletStatus.NOT_PRODUCED.value)
+              or plc.last_event(db, pl, PalletEventType.NOT_PRODUCED.value))
+        www = _who_when_why(db, pl, ev)
+        out["message"] = f"{num} was marked Not Produced {www or '— ' + _NO_RECORD}. Put it back in stock here (flagged)."
+    elif pl.status == PalletStatus.CANCELLED.value:
+        out["actions"] = ["restore_here"]
+        www = _who_when_why(db, pl, _status_event(db, pl, PalletStatus.CANCELLED.value))
+        if www is None and fr is not None:
+            www = f"— its forklift request {fr.id} is {fr.status}"
+        out["message"] = f"Written off (cancelled) {www or '— ' + _NO_RECORD}. Put it back in stock here (flagged)."
     elif pl.status == PalletStatus.EMPTIED.value:
         # Stays at 0: history only, no actions (nothing a scan can do to it).
         out["message"] = plc.emptied_detail(db, pl)
@@ -443,7 +698,9 @@ _ACTION_FOR_STATUS = {
 }
 
 
-def find_pallet_action(db: Session, *, licence: str, action: str, row_id: str, user, warehouse_id) -> dict:
+def find_pallet_action(
+    db: Session, *, licence: str, action: str, row_id: str, user, warehouse_id, confirmed: bool = False,
+) -> dict:
     row = _get_row(db, row_id, warehouse_id)
     from app.services.scanner_service import normalize_scanned_licence
     licence = normalize_scanned_licence((licence or "").strip(), "")
@@ -453,6 +710,16 @@ def find_pallet_action(db: Session, *, licence: str, action: str, row_id: str, u
     if action == "create_here":
         if pl is not None:
             raise ValidationError(f"{licence} already exists ({pl.status})")
+        why = explain_never_scanned(db, licence, warehouse_id)
+        if why["kind"] == "number_taken":
+            raise ValidationError(why["message"])
+        # Creating the first pallet of a lot the system has never seen risks
+        # counting it twice (wrong product or lot on the sticker): the checker
+        # must have tapped the explicit confirm.
+        if why.get("confirm_create") and not confirmed:
+            raise ValidationError(
+                "No pallet of this lot is in the system — check the sticker, then confirm to create it."
+            )
         _create_from_sticker(db, licence, row, user, warehouse_id)
     else:
         allowed = _ACTION_FOR_STATUS.get(action)

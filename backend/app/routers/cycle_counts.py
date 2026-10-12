@@ -24,6 +24,12 @@ def create_cycle_count(
     # got written to the DB permanently.
     cycle_count_dict["performed_by"] = current_user.name or current_user.username
     cycle_count_dict["performed_by_id"] = str(current_user.id)
+    # Gun row checks (and their count sessions) are only written by the gun
+    # endpoint; a web count sheet can't pose as one in Count History.
+    summary = dict(cycle_count_dict.get("summary") or {})
+    for key in ("kind", "session_id", "session_started_at"):
+        summary.pop(key, None)
+    cycle_count_dict["summary"] = summary
 
     db_cycle_count = CycleCount(
         id=f"cycle-{uuid.uuid4().hex[:12]}",

@@ -1037,3 +1037,13 @@
     border-bottom: 2px solid var(--color-border);
     margin-bottom: var(--spacing-md);
 }
+
+/* Count History: one line per gun count session, expandable to its rows. */
+.cc-history-table .cc-caret { display: inline-block; width: 1em; color: #6b7280; }
+.cc-history-table .cc-session-line.open td { background: #f0fdf4; }
+.cc-history-table .cc-session-detail > td { background: #fafafa; padding: 8px 12px 14px; }
+.cc-session-note { margin: 0 0 8px; font-size: 12px; color: #6b7280; }
+.cc-session-rows { width: 100%; font-size: 13px; }
+.cc-session-rows .cc-rowname { font-weight: 700; white-space: nowrap; vertical-align: top; }
+.cc-session-rows .cc-row-diff td { background: #fff7ed; }
+.cc-session-rows .cc-pallet-notes { font-size: 12px; color: #4b5563; font-family: monospace; }

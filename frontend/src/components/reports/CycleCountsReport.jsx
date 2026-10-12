@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from "react";
 import { ExportButtons, ReportTable, SummaryCards, LoadingBox, ErrorBox, RunButton, QuickRange } from "./ReportSharedComponents";
 import {
-  apiFetch, apiError, cycleCountColumns, formatNumber, today, monthStart, varianceCards,
+  apiFetch, apiError, cycleCountColumns, cycleCountSessionColumns, formatNumber, today, monthStart, varianceCards,
 } from "./reportUtils";
 
 const CycleCountsReport = () => {
@@ -52,10 +52,20 @@ const CycleCountsReport = () => {
         <>
           <SummaryCards cards={[
             { label: "Counts", value: formatNumber(ccData.totals?.count_events) },
+            { label: "Gun Count Sessions", value: formatNumber(ccData.totals?.gun_sessions ?? 0) },
             { label: "Items Counted", value: formatNumber(ccData.totals?.item_rows) },
             ...varianceCards(ccData.totals),
             { label: "Items with Discrepancy", value: formatNumber(ccData.totals?.rows_with_discrepancy) },
           ]} />
+          {(ccData.sessions || []).length > 0 && (
+            <div className="reports-section">
+              <div className="reports-section-header">
+                <div><h3>Gun Count Sessions</h3><p>One line per walk of rows on the gun — rows checked, OK and with differences, and the pallets marked not here, found, moved or created.</p></div>
+                <ExportButtons columns={cycleCountSessionColumns} rows={ccData.sessions} fileBaseName="cycle-count-sessions" />
+              </div>
+              <ReportTable columns={cycleCountSessionColumns} rows={ccData.sessions.map((r) => ({ ...r, id: r.session_key }))} />
+            </div>
+          )}
           <div className="reports-section">
             <div className="reports-section-header">
               <div><h3>Cycle Count Variance</h3><p>System vs physical count — finished-goods cycle counts and raw-material rack counts.</p></div>

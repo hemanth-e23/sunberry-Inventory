@@ -2509,6 +2509,22 @@ def _gun_check_note(item: dict) -> str:
     return " · ".join(parts)
 
 
+def _clock(dt: Optional[datetime], tzinfo) -> str:
+    if dt is None:
+        return "?"
+    local = dt.astimezone(tzinfo)
+    return f"{local.hour % 12 or 12}:{local.minute:02d} {'AM' if local.hour < 12 else 'PM'}"
+
+
+def _session_label(s: dict, tzinfo) -> str:
+    """'10/12/2026 9:02 AM–9:13 AM · JOE · 21 rows'."""
+    start = s["started_at"].astimezone(tzinfo) if s["started_at"] else None
+    day = f"{start.month}/{start.day}/{start.year} " if start else ""
+    n = s["rows_checked"]
+    return (f"{day}{_clock(s['started_at'], tzinfo)}–{_clock(s['ended_at'], tzinfo)}"
+            f" · {s['performed_by']} · {n} row{'s' if n != 1 else ''}")
+
+
 def build_cycle_count_report(
     db: Session,
     warehouse_id: Optional[str] = None,
@@ -2529,6 +2545,21 @@ def build_cycle_count_report(
         query = query.filter(CycleCount.location_id == location_id)
 
     counts = query.order_by(CycleCount.count_date.desc()).all()
+    tz = tz or report_timezone(db, warehouse_id)
+    tzinfo = zone(tz)
+
+    # Gun row checks roll up into count sessions (one walk of rows); older
+    # checks without a session id are grouped by person + day + no >60 min gap.
+    from app.services.cycle_check_service import group_sessions, session_rollup
+    sessions = []
+    session_of: dict = {}
+    for group in group_sessions(counts):
+        s = session_rollup(group)
+        s["label"] = _session_label(s, tzinfo)
+        for r in s["rows"]:
+            session_of[r["cycle_count_id"]] = s
+        s.pop("rows")
+        sessions.append(s)
 
     rows = []
     for c in counts:
@@ -2574,10 +2605,11 @@ def build_cycle_count_report(
                 "unit": item.get("unit") or "cases",
                 "not_here": item.get("notHere") or [],
                 "arrived": item.get("arrived") or [],
+                "session_key": session_of[c.id]["session_key"] if c.id in session_of else None,
+                "session": session_of[c.id]["label"] if c.id in session_of else None,
             })
 
     # Raw-material / packaging rack counts (PART 4, P5) alongside.
-    tz = tz or report_timezone(db, warehouse_id)
     rm_rows = build_rm_count_rows(
         db,
         warehouse_id=warehouse_id,
@@ -2602,12 +2634,14 @@ def build_cycle_count_report(
         "rows": rows,
         "totals": {
             "count_events": len(counts) + len(rm_rows),
+            "gun_sessions": len(sessions),
             "rm_counts": len(rm_rows),
             "variance_by_unit": variance_by_unit,
             "item_rows": len(rows),
             "total_variance": round(total_variance, 2),
             "rows_with_discrepancy": len(rows_with_variance),
         },
+        "sessions": sessions,
     }
 
 

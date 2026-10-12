@@ -143,6 +143,9 @@ export const TRANSFER_TYPE = {
 // Gun cycle check: confirm once before marking more than this many pallets
 // missing in one submit. Mirrors backend constants.CYCLE_CHECK_CONFIRM_OVER.
 export const CYCLE_CHECK_CONFIRM_OVER = 5;
+// A count session ends after Finish or this long without a row saved.
+// Mirrors backend constants.CYCLE_CHECK_SESSION_IDLE_MINUTES.
+export const CYCLE_CHECK_SESSION_IDLE_MINUTES = 60;
 
 // The closing scan's Skip button appears after this many seconds (§3.3).
 export const CLOSING_SCAN_SKIP_SECONDS = 10;

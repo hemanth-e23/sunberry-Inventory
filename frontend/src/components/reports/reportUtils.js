@@ -138,6 +138,7 @@ export const varianceCards = (totals = {}) => {
 export const cycleCountColumns = [
   { label: "Count Date", value: (r) => formatDate(r.count_date) },
   { label: "Kind", value: (r) => r.count_kind || "Cycle count" },
+  { label: "Session", value: (r) => r.session || "—" },
   { label: "Product", value: (r) => r.product_name },
   { label: "Lot", value: (r) => r.lot_number || "—" },
   { label: "Location", value: (r) => r.location || "—" },
@@ -148,6 +149,21 @@ export const cycleCountColumns = [
   { label: "Counted By", value: (r) => r.counted_by || "—" },
   { label: "Approved By", value: (r) => r.approved_by || "—" },
   { label: "Notes", value: (r) => r.notes || "—" },
+];
+
+/** Gun count sessions (one walk of rows) — one line each, same figures as
+ *  the Cycle Counting page's Count History. */
+export const cycleCountSessionColumns = [
+  { label: "Session", value: (r) => r.label },
+  { label: "Counted By", value: (r) => r.performed_by || "—" },
+  { label: "Rows Checked", value: (r) => r.rows_checked },
+  { label: "Rows OK", value: (r) => r.rows_ok },
+  { label: "Rows with Differences", value: (r) => r.rows_with_differences },
+  { label: "Not Here", value: (r) => r.not_here },
+  { label: "Found", value: (r) => r.found },
+  { label: "Moved", value: (r) => r.moved_in },
+  { label: "Created", value: (r) => r.created },
+  { label: "Grouped", value: (r) => (r.inferred ? "By time (older checks)" : "Gun session") },
 ];
 
 /** Is this receipt row stock on hand? Only an APPROVED delivery is: a

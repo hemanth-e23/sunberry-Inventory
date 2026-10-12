@@ -5,7 +5,7 @@ Open to the forklift role (it is a gun screen) and to warehouse staff and up.
 """
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import Field
 from sqlalchemy.orm import Session
 
@@ -39,12 +39,18 @@ class RowCheckSubmit(BaseSchema):
     not_here_pallet_ids: List[str] = Field(default_factory=list, max_length=2000)
     # The checker already answered "N pallets not here — sure?".
     confirmed: bool = False
+    # The count session this row belongs to (minted by the server on the
+    # walk's first row). Unknown / foreign / stale ids start a new session.
+    session_id: Optional[str] = Field(None, max_length=40)
 
 
 class FindPalletAction(BaseSchema):
     licence_number: str = Field(..., max_length=100)
     action: str = Field(..., max_length=20)
     row_id: str = Field(..., max_length=50)
+    # Explicit confirm tap for creating the first pallet of a lot the system
+    # has never seen.
+    confirmed: bool = False
 
 
 def _http(e: Exception):
@@ -75,6 +81,7 @@ def cycle_submit(data: RowCheckSubmit, db: Session = Depends(get_db), current_us
             db, row_id=data.row_id, scanned=data.scanned,
             not_here_pallet_ids=data.not_here_pallet_ids, confirmed=data.confirmed,
             user=current_user, warehouse_id=_write_warehouse(current_user),
+            session_id=data.session_id,
         )
     except Exception as e:  # noqa: BLE001
         db.rollback()
@@ -87,7 +94,10 @@ def cycle_submit(data: RowCheckSubmit, db: Session = Depends(get_db), current_us
 
 
 @router.get("/cycle-check/find")
-def find_pallet(licence_number: str, db: Session = Depends(get_db), current_user=Depends(_require_checker)):
+def find_pallet(
+    licence_number: str = Query(..., max_length=100),
+    db: Session = Depends(get_db), current_user=Depends(_require_checker),
+):
     return svc.find_pallet(db, licence_number, _write_warehouse(current_user))
 
 
@@ -96,7 +106,7 @@ def find_pallet_action(data: FindPalletAction, db: Session = Depends(get_db), cu
     try:
         out = svc.find_pallet_action(
             db, licence=data.licence_number, action=data.action, row_id=data.row_id,
-            user=current_user, warehouse_id=_write_warehouse(current_user),
+            user=current_user, warehouse_id=_write_warehouse(current_user), confirmed=data.confirmed,
         )
     except Exception as e:  # noqa: BLE001
         db.rollback()

@@ -41,3 +41,28 @@
 .cc-status-shipped { background: #e0e7ff; color: #3730a3; }
 .cc-history { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
 .cc-history-reason { color: #6b7280; }
+
+/* Count session (Next row … Finish) — kept compact for a ~400px gun. */
+.cc-sessionbar {
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px;
+  padding: 6px 10px; border-radius: 8px; background: #f0fdf4; border: 1px solid #bbf7d0;
+  color: #14532d; font-size: 14px; margin-bottom: 8px;
+}
+.cc-sessionbar .cc-diff { color: #9a3412; font-weight: 600; }
+.cc-actions { display: grid; grid-template-columns: 3fr 2fr; gap: 8px; margin-top: 1.25rem; }
+.cc-actions .scanner-receipt-submit-btn { margin-top: 0; padding: 0.9rem 0.5rem; }
+.scanner-receipt-submit-btn.cc-finish,
+.scanner-receipt-submit-btn.cc-finish-only { background: #fff; color: #1a472a; border: 2px solid #1a472a; }
+.scanner-receipt-submit-btn.cc-finish:hover:not(:disabled),
+.scanner-receipt-submit-btn.cc-finish-only:hover:not(:disabled) { background: #f0fdf4; }
+.cc-lastrow { border-color: #86efac; background: #f0fdf4; font-size: 15px; }
+.cc-lastrow.bad { border-color: #fdba74; background: #fff7ed; }
+.cc-totals { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 8px 0; text-align: center; }
+.cc-totals div { border: 1px solid #e5e7eb; border-radius: 8px; padding: 6px 2px; display: flex; flex-direction: column; }
+.cc-totals strong { font-size: 1.5rem; color: #111827; }
+.cc-totals span { font-size: 12px; color: #6b7280; }
+.cc-totals .bad strong { color: #9a3412; }
+.cc-find-msg.cc-warn {
+  display: flex; gap: 6px; align-items: flex-start; padding: 8px; border-radius: 8px;
+  background: #fffbeb; border: 1px solid #fcd34d; color: #92400e; font-weight: 600;
+}

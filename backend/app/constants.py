@@ -68,6 +68,10 @@ MOYEL_SHUTTLE_DEFAULT_DESTINATION_ID = "shipto-rmi-warehouse"
 # Gun cycle check: confirm once before marking more than this many pallets
 # missing in one submit (§4.1).
 CYCLE_CHECK_CONFIRM_OVER = 5
+# A count session (one walk of rows) ends after Finish or after this long
+# with no row saved. Old checks without a session id are grouped the same
+# way: same person, same day, no gap longer than this.
+CYCLE_CHECK_SESSION_IDLE_MINUTES = 60
 
 # ─── Pallet swap source markers ───────────────────────────────────────────────
 SWAP_SOURCE_FORKLIFT = "forklift"
