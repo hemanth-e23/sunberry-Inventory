@@ -5,6 +5,7 @@ import { useToast } from "../../context/ToastContext";
 import { useConfirm } from "../../context/ConfirmContext";
 import { formatDateTime, formatDate, formatDateKey, toDateKey } from "../../utils/dateUtils";
 import { cleanScannedLicence } from "../../utils/scannerFeedback";
+import { CLOSING_COLORS, closingLabel, closingSummary } from "../../utils/closingScan";
 import {
   FORKLIFT_REQUEST_STATUS, PALLET_STATUS, NOT_PRODUCED_REASON, NOT_PRODUCED_REASON_LABELS,
 } from '../../constants';
@@ -236,13 +237,13 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                     : <span className="badge">{fr.lot_number || '—'}</span>}
                   {fccCode && <span className="badge" style={{ background: '#e0e7ff', color: '#3730a3' }}>FCC: {fccCode}</span>}
                   {shortCode && <span className="badge" style={{ background: '#d1fae5', color: '#065f46' }}>{shortCode}</span>}
-                  {Object.entries(fr.closing_status || {}).map(([lot, st]) => (
-                    (st === 'skipped' || (st === 'not_closed' && fr.auto_submitted_at)) ? (
-                      <span key={`close-${lot}`} className="badge" style={{ background: '#fee2e2', color: '#991b1b', whiteSpace: 'normal', maxWidth: '100%' }}
-                        title={st === 'skipped' ? 'The driver skipped the closing scan' : 'Auto-submitted — no closing scan'}>
-                        {lot}: Not closed — last pallet unknown
-                      </span>
-                    ) : null
+                  {/* The closing scan, always — a clean close used to look the same as none. */}
+                  {closingSummary(fr, licences).map((c) => (
+                    <span key={`close-${c.lot}`} className="badge"
+                      style={{ ...CLOSING_COLORS[c.kind], whiteSpace: 'normal', maxWidth: '100%' }}
+                      title={c.at ? `Closing scan ${formatDateTime(c.at)}` : undefined}>
+                      {hasMixedLots ? `${c.lot}: ` : ''}{closingLabel(c)}
+                    </span>
                   ))}
                   {floorPalletCount > 0 && (
                     <span className="badge" style={{ background: '#fef3c7', color: '#92400e' }}>

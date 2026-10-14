@@ -71,7 +71,7 @@ describe('forklift review', () => {
 
   it('flags a lot whose closing scan was skipped', () => {
     renderTab(request({ closing_status: { [LOT]: 'skipped' } }));
-    expect(screen.getByText(`${LOT}: Not closed — last pallet unknown`)).toBeInTheDocument();
+    expect(screen.getByText('Closing scan skipped — last pallet unknown')).toBeInTheDocument();
   });
 
   it('Skip — Not Produced asks for a reason before it marks anything', async () => {

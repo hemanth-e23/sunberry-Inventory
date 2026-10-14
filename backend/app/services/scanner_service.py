@@ -71,6 +71,16 @@ def parse_licence_number(licence_number: str) -> tuple:
 
 
 _LOT_PREFIX_RE = re.compile(r"MP\d{3}\d{2}L\d+", re.IGNORECASE)
+_LOT_FULL_RE = re.compile(r"MP\d{3}\d{2}L\d+", re.IGNORECASE)
+
+MISREAD_LOT_MESSAGE = "Couldn't read the lot on this sticker — scan it again."
+
+
+def is_valid_lot(lot_number: Optional[str]) -> bool:
+    """A palletizer lot is MP{DDD}{YY}L{N}. A sticker read with its first
+    character dropped ('P28226L2-MAN64O-005') parses fine but names a lot
+    that doesn't exist; once stored it haunts the approval gap check."""
+    return bool(lot_number) and bool(_LOT_FULL_RE.fullmatch(lot_number))
 
 
 def normalize_scanned_licence(licence_number: str, expected_lot: str) -> str:
@@ -541,6 +551,8 @@ def scan_pallet(
     lot_number, product_code, sequence = parse_licence_number(licence_number)
     if not lot_number or not product_code:
         raise ValidationError("Invalid licence number format")
+    if not is_valid_lot(lot_number):
+        raise ValidationError(MISREAD_LOT_MESSAGE)
 
     product = find_product_by_code(db, product_code)
     if not product or product.id != fr.product_id:
@@ -1017,6 +1029,11 @@ def _unresolved_missing_for_fr(db: Session, fr: ForkliftRequest) -> list:
         lic = pl.licence_number or ""
         if not lic or pl.sequence is None:
             continue
+        # Removed in review (a misread sticker, a wrong scan): not production.
+        # The review card already hides these; counting them invented a lot
+        # out of a misread like 'P28226L2-...' and demanded its #001-004.
+        if pl.status == PalletStatus.CANCELLED:
+            continue
         last_dash = lic.rfind("-")
         if last_dash < 0:
             continue
@@ -1131,7 +1148,10 @@ def closing_status_by_lot(fr: ForkliftRequest) -> dict:
     """{lot: "closed" | "skipped" | "not_closed"} for every lot on the session.
     Skipped and auto-submitted sessions read "Not closed: last pallet unknown"
     on the review."""
-    lots = {pl.lot_number for pl in (fr.pallet_licences or []) if pl.lot_number}
+    lots = {
+        pl.lot_number for pl in (fr.pallet_licences or [])
+        if pl.lot_number and pl.status != PalletStatus.CANCELLED
+    }
     if fr.lot_number:
         lots.add(fr.lot_number)
     out: dict = {}
@@ -1609,6 +1629,8 @@ def add_pallet_to_request(
     lot_number, product_code, sequence = parse_licence_number(licence_number)
     if not lot_number or not product_code:
         raise ValidationError("Invalid licence number format")
+    if not is_valid_lot(lot_number):
+        raise ValidationError(MISREAD_LOT_MESSAGE)
 
     product = find_product_by_code(db, product_code)
     if not product or product.id != fr.product_id:
