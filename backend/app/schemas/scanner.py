@@ -136,6 +136,10 @@ class ForkliftRequest(ForkliftRequestBase):
     closing_status: Dict[str, str] = {}
     # {pallet_id: label} — "🚚 Moyel shuttle · trailer 12", "Not produced — …".
     pallet_notes: Dict[str, str] = {}
+    # Shuttle-added pallets this session's lots will adopt at approval, and
+    # produced / shipped (per trailer or order) / still-in-warehouse totals.
+    shuttle_added: List[dict] = []
+    production_summary: Optional[dict] = None
 
 class ForkliftRequestUpdate(BaseSchema):
     shift_id: Optional[str] = None

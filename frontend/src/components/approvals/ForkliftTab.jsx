@@ -205,6 +205,12 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
         const fccCode = fr.product?.fcc_code || productLookup[fr.product_id]?.fcc_code || '';
         const shortCode = fr.product?.short_code || productLookup[fr.product_id]?.short_code || '';
         const licences = (fr.pallet_licences || []).filter(pl => pl.status !== FORKLIFT_REQUEST_STATUS.CANCELLED);
+        // Missing numbers the clerk ticked on the Moyel shuttle: shipped, never
+        // scanned, adopted by this lot at approval. Listed so the card's count
+        // matches what the lot will book.
+        const shuttleAdded = fr.shuttle_added || [];
+        const tableLicences = [...licences, ...shuttleAdded];
+        const summaryTotals = fr.production_summary || null;
         const isEditing = editingForkliftId === fr.id;
 
         // Per-lot + floor breakdown — driver may scan multiple lots into one
@@ -264,8 +270,8 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
 
             {/* Summary row */}
             <dl className="summary-grid">
-              <div><dt>Pallets</dt><dd>{licences.length}</dd></div>
-              <div><dt>Total Cases</dt><dd>{fr.total_cases ?? 0}</dd></div>
+              <div><dt>Pallets</dt><dd>{summaryTotals ? summaryTotals.produced.pallets : licences.length}</dd></div>
+              <div><dt>Total Cases</dt><dd>{summaryTotals ? summaryTotals.produced.cases : (fr.total_cases ?? 0)}</dd></div>
               <div><dt>Cases/Pallet</dt><dd>{fr.cases_per_pallet ?? '—'}</dd></div>
               <div><dt>Scanned By</dt><dd>{userNameMap[fr.scanned_by] || '—'}</dd></div>
             </dl>
@@ -387,6 +393,8 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
               {!fr.shift_id && <span style={{ color: '#ef4444', fontSize: '12px' }}>Required before approval</span>}
             </div>
 
+            <ProductionSummary summary={summaryTotals} />
+
             {/* Row summary — per-row pallet/case counts so the reviewer doesn't have to count rows in the table */}
             {(() => {
               const summary = new Map();
@@ -411,7 +419,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
               return (
                 <div style={{ marginBottom: '12px', background: '#f9fafb', borderRadius: '8px', padding: '12px 16px' }}>
                   <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>
-                    Row Summary ({entries.length} {entries.length === 1 ? 'row' : 'rows'})
+                    Still in warehouse ({entries.length} {entries.length === 1 ? 'row' : 'rows'})
                   </h4>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', columnGap: '24px', rowGap: '4px', fontSize: '13px' }}>
                     <div style={{ color: '#6b7280', fontWeight: 500 }}>Row</div>
@@ -464,7 +472,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                   ? new Set(coveredByPrefix[prefix] || [])
                   : flatCovered;
               const groups = new Map(); // prefix -> { seqs:Set, items:[] }
-              for (const pl of licences) {
+              for (const pl of tableLicences) {
                 const prefix = prefixOf(pl.licence_number);
                 if (!prefix) continue;
                 if (!groups.has(prefix)) {
@@ -514,7 +522,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
               return (
             <div style={{ marginBottom: '12px' }}>
               <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>
-                Pallet Licences ({licences.length})
+                Pallet Licences ({tableLicences.length})
                 {missingCount > 0 && (
                   <span style={{ marginLeft: '8px', background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>
                     {missingCount} missing
@@ -751,7 +759,7 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                             {isShipped ? (
                               <span style={{ background: '#dcfce7', color: '#166534', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>
-                                {fr.pallet_notes?.[pl.id] || '🚚 Shipped'}
+                                {fr.pallet_notes?.[pl.id] || pl.note || '🚚 Shipped'}
                               </span>
                             ) : isEmptied ? (
                               <span style={{ background: '#f3f4f6', color: '#374151', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: 600 }}>Emptied (0 cases)</span>
@@ -1008,3 +1016,37 @@ const ForkliftTab = ({ pendingForkliftRequests, productLookup, rowLookup, lineLo
 };
 
 export default ForkliftTab;
+
+
+// Produced / shipped / still-in-warehouse for one request. A run that went
+// straight onto the Moyel shuttle used to read "1 pallet" in the row summary.
+export function ProductionSummary({ summary }) {
+  if (!summary || !summary.produced || summary.produced.pallets === 0) return null;
+  const line = { display: 'grid', gridTemplateColumns: '1fr auto auto', columnGap: '16px', fontSize: '13px', padding: '2px 0' };
+  return (
+    <div style={{ marginBottom: '12px', background: '#f9fafb', borderRadius: '8px', padding: '12px 16px' }}>
+      <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', fontWeight: 600 }}>
+        Produced {summary.produced.pallets} pallets · {summary.produced.cases} cases
+      </h4>
+      {(summary.shipped || []).map((g, i) => (
+        <div key={`${g.kind}-${g.ref}-${i}`}>
+          <div style={line}>
+            <span>🚚 {g.kind === 'shuttle' ? `Moyel shuttle · trailer ${g.ref}` : `Shipped on ${g.ref}`}</span>
+            <span style={{ textAlign: 'right' }}>{g.pallets} pallets</span>
+            <span style={{ textAlign: 'right' }}>{g.cases} cs</span>
+          </div>
+          {g.added && g.added.length > 0 && (
+            <div style={{ fontSize: '12px', color: '#92400e', margin: '0 0 4px 22px' }}>
+              {g.added.length} added on shuttle (not scanned by forklift): {g.added.map((l) => `#${l.slice(l.lastIndexOf('-') + 1)}`).join(', ')}
+            </div>
+          )}
+        </div>
+      ))}
+      <div style={line}>
+        <span>🏭 Still in warehouse</span>
+        <span style={{ textAlign: 'right' }}>{summary.in_warehouse.pallets} pallets</span>
+        <span style={{ textAlign: 'right' }}>{summary.in_warehouse.cases} cs</span>
+      </div>
+    </div>
+  );
+}

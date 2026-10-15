@@ -149,6 +149,8 @@ def _attach_covered_sequences(db: Session, frs: list[ForkliftRequest]) -> None:
             fr.missing_after_last_scan = scanner_service.missing_after_last_scan(db, fr)
             fr.closing_status = scanner_service.closing_status_by_lot(fr)
             fr.pallet_notes = _pallet_notes(db, fr)
+            fr.shuttle_added = scanner_service.shuttle_added_pallets(db, fr)
+            fr.production_summary = scanner_service.production_summary(db, fr, fr.shuttle_added)
 
 
 router = APIRouter()

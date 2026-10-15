@@ -1217,6 +1217,99 @@ def record_closing_scan(
     return {"status": "recorded", "lot_number": lot, **entry}
 
 
+def _adoptable_orphans(db: Session, lot_number: Optional[str], product_id: Optional[str]) -> list:
+    """Pallets of this lot created as shipped with no session — a missing
+    number the clerk ticked on the Moyel shuttle. The lot's next approval
+    adopts them; the review card lists them so its counts match."""
+    if not lot_number or not product_id:
+        return []
+    return db.query(PalletLicence).filter(
+        PalletLicence.lot_number == lot_number,
+        PalletLicence.product_id == product_id,
+        PalletLicence.forklift_request_id.is_(None),
+        PalletLicence.receipt_id.is_(None),
+        PalletLicence.status == PalletStatus.SHIPPED,
+        PalletLicence.is_deleted == False,  # noqa: E712
+    ).order_by(PalletLicence.sequence).all()
+
+
+def _session_lots(fr: ForkliftRequest) -> list:
+    lots = {
+        pl.lot_number for pl in (fr.pallet_licences or [])
+        if pl.lot_number and pl.status != PalletStatus.CANCELLED
+    }
+    if fr.lot_number:
+        lots.add(fr.lot_number)
+    return sorted(lots)
+
+
+def shuttle_added_pallets(db: Session, fr: ForkliftRequest) -> list:
+    """The shuttle-added pallets for every lot on this session, shaped like
+    the session's own pallet licences for the review card."""
+    out = []
+    for lot in _session_lots(fr):
+        for o in _adoptable_orphans(db, lot, fr.product_id):
+            out.append({
+                "id": o.id,
+                "licence_number": o.licence_number,
+                "lot_number": o.lot_number,
+                "sequence": o.sequence,
+                "cases": o.cases,
+                "is_partial": bool(o.is_partial),
+                "status": o.status,
+                "storage_row_id": None,
+                "note": f"{plc.shipped_label(db, o)} · added on shuttle (not scanned)",
+            })
+    return out
+
+
+# Statuses that are production for the review card's summary. Cancelled (removed
+# in review) and not_produced (a skipped number) are not.
+_SUMMARY_PRODUCED = (
+    PalletStatus.PENDING, PalletStatus.MISSING_STICKER, PalletStatus.IN_STOCK,
+    PalletStatus.SHIPPED, PalletStatus.MISSING, PalletStatus.EMPTIED,
+)
+_SUMMARY_IN_WAREHOUSE = (PalletStatus.PENDING, PalletStatus.MISSING_STICKER, PalletStatus.IN_STOCK)
+
+
+def production_summary(db: Session, fr: ForkliftRequest, shuttle_added: list) -> dict:
+    """What this session produced and where it is now — the review card used
+    to count only the driver's scans and only pallets still on a rack, so a
+    run that went straight onto the Moyel shuttle read "1 pallet"."""
+    added_ids = {a["id"] for a in shuttle_added}
+    pallets = [pl for pl in (fr.pallet_licences or []) if pl.status in _SUMMARY_PRODUCED]
+    if added_ids:
+        pallets += db.query(PalletLicence).filter(PalletLicence.id.in_(added_ids)).all()
+
+    produced = {"pallets": 0, "cases": 0}
+    in_warehouse = {"pallets": 0, "cases": 0}
+    shipped: dict = {}
+    for pl in pallets:
+        cases = int(pl.cases or 0)
+        produced["pallets"] += 1
+        produced["cases"] += cases
+        if pl.status in _SUMMARY_IN_WAREHOUSE:
+            in_warehouse["pallets"] += 1
+            in_warehouse["cases"] += cases
+        elif pl.status == PalletStatus.SHIPPED:
+            info = plc.shipped_info(db, pl)
+            key = info["transfer_id"] or "unknown"
+            g = shipped.setdefault(key, {
+                "kind": "shuttle" if info["is_shuttle"] else "order",
+                "ref": (info["trailer_number"] if info["is_shuttle"] else info["order_number"]) or "?",
+                "pallets": 0, "cases": 0, "added": [],
+            })
+            g["pallets"] += 1
+            g["cases"] += cases
+            if pl.id in added_ids:
+                g["added"].append(pl.licence_number)
+    return {
+        "produced": produced,
+        "in_warehouse": in_warehouse,
+        "shipped": sorted(shipped.values(), key=lambda g: (g["kind"], str(g["ref"]))),
+    }
+
+
 def approve_forklift_request(
     db: Session,
     request_id: str,
@@ -1284,14 +1377,7 @@ def approve_forklift_request(
     # A missing number ticked on the Moyel shuttle was created as a shipped
     # pallet with no session at all. Its lot's next approval adopts it.
     for key in list(lot_groups.keys()):
-        orphans = db.query(PalletLicence).filter(
-            PalletLicence.lot_number == key,
-            PalletLicence.product_id == fr.product_id,
-            PalletLicence.forklift_request_id.is_(None),
-            PalletLicence.receipt_id.is_(None),
-            PalletLicence.status == PalletStatus.SHIPPED,
-            PalletLicence.is_deleted == False,  # noqa: E712
-        ).all()
+        orphans = _adoptable_orphans(db, key, fr.product_id)
         known = {p.id for p in shipped_groups.get(key, [])}
         for o in orphans:
             if o.id not in known:

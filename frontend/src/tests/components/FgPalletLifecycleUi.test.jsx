@@ -63,6 +63,30 @@ describe('forklift review', () => {
     expect(screen.getAllByRole('button', { name: 'Fix' })).toHaveLength(1);
   });
 
+  it('lists shuttle-added pallets and counts everything produced', () => {
+    const added = {
+      id: 'pl-3', licence_number: `${LOT}-MANGO-003`, sequence: 3, status: 'shipped', cases: 40,
+      is_partial: false, storage_row_id: null, lot_number: LOT,
+      note: '🚚 Moyel shuttle · trailer 0123 · added on shuttle (not scanned)',
+    };
+    renderTab(request({
+      missing_after_last_scan: {},
+      shuttle_added: [added],
+      production_summary: {
+        produced: { pallets: 4, cases: 160 },
+        in_warehouse: { pallets: 2, cases: 80 },
+        shipped: [{ kind: 'shuttle', ref: '0123', pallets: 2, cases: 80, added: [`${LOT}-MANGO-003`] }],
+      },
+    }));
+    expect(screen.getByText('Pallet Licences (4)')).toBeInTheDocument();
+    expect(screen.getByText('🚚 Moyel shuttle · trailer 0123 · added on shuttle (not scanned)')).toBeInTheDocument();
+    expect(screen.getByText('Produced 4 pallets · 160 cases')).toBeInTheDocument();
+    expect(screen.getByText(/1 added on shuttle \(not scanned by forklift\): #003/)).toBeInTheDocument();
+    expect(screen.getByText('🏭 Still in warehouse')).toBeInTheDocument();
+    // #003 is covered by the shuttle-added pallet, so it is not offered as missing.
+    expect(screen.queryByText('Skip — Not Produced')).not.toBeInTheDocument();
+  });
+
   it('lists numbers after the last scan, labelled', () => {
     renderTab(request());
     expect(screen.getByText(/MANGO-005/)).toBeInTheDocument();
