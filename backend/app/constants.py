@@ -73,6 +73,18 @@ CYCLE_CHECK_CONFIRM_OVER = 5
 # way: same person, same day, no gap longer than this.
 CYCLE_CHECK_SESSION_IDLE_MINUTES = 60
 
+# Count sheet by rack row (web Cycle Counting page). An open sheet is a
+# CycleCount with summary.kind = count_sheet and status open → submitted.
+COUNT_SHEET_KIND = "count_sheet"
+COUNT_SHEET_STATUS_OPEN = "open"
+COUNT_SHEET_STATUS_SUBMITTED = "submitted"
+COUNT_SHEET_TYPE_FG = "fg"
+COUNT_SHEET_TYPE_RM = "rm"          # raw material + ingredients
+COUNT_SHEET_TYPE_PACKAGING = "packaging"
+COUNT_SHEET_TYPES = (COUNT_SHEET_TYPE_FG, COUNT_SHEET_TYPE_RM, COUNT_SHEET_TYPE_PACKAGING)
+# Written on the CycleCount summary of a gun row check made from a sheet.
+CYCLE_CHECK_SOURCE_SHEET = "sheet"
+
 # ─── Pallet swap source markers ───────────────────────────────────────────────
 SWAP_SOURCE_FORKLIFT = "forklift"
 SWAP_SOURCE_WAREHOUSE_EDIT = "warehouse_edit"

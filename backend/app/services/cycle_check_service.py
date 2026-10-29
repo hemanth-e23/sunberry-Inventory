@@ -73,24 +73,42 @@ def _other_warehouse(pl: Optional[PalletLicence], warehouse_id: Optional[str]) -
     return bool(pl is not None and warehouse_id and pl.warehouse_id and pl.warehouse_id != warehouse_id)
 
 
-def list_rows(db: Session, warehouse_id: Optional[str]) -> list:
-    """Every active row in the warehouse — including floor and dock rows,
-    which the receipt picker hides (it only lists rows with a capacity)."""
+def row_index(db: Session, warehouse_id: Optional[str], active_only: bool = True) -> dict:
+    """{row id: row info} for the warehouse. A row hangs off a storage area
+    (racks) or straight off a room (Cage, staging, … default rows); either
+    way area_name is the parent's name and sub_location_id is the room."""
     locs = {
         l.id: l.warehouse_id for l in db.query(Location).all()
     }
-    areas = {a.id: (a.name, a.location_id) for a in db.query(StorageArea).all()}
+    areas = {a.id: (a.name, a.location_id, a.sub_location_id) for a in db.query(StorageArea).all()}
     subs = {s.id: (s.name, s.location_id) for s in db.query(SubLocation).all()}
-    out = []
-    for r in db.query(StorageRow).filter(StorageRow.is_active == True).all():  # noqa: E712
-        parent_name, loc_id = (None, None)
+    q = db.query(StorageRow)
+    if active_only:
+        q = q.filter(StorageRow.is_active == True)  # noqa: E712
+    out = {}
+    for r in q.all():
+        parent_name, loc_id, room_id = (None, None, r.sub_location_id)
         if r.storage_area_id in areas:
-            parent_name, loc_id = areas[r.storage_area_id]
+            parent_name, loc_id, area_room = areas[r.storage_area_id]
+            room_id = room_id or area_room
         elif r.sub_location_id in subs:
             parent_name, loc_id = subs[r.sub_location_id]
         if warehouse_id and locs.get(loc_id) != warehouse_id:
             continue
-        out.append({"id": r.id, "name": r.name, "area_name": parent_name or "", "barcode": r.barcode})
+        out[r.id] = {
+            "id": r.id, "name": r.name, "area_name": parent_name or "", "barcode": r.barcode,
+            "sub_location_id": room_id, "storage_area_id": r.storage_area_id,
+        }
+    return out
+
+
+def list_rows(db: Session, warehouse_id: Optional[str]) -> list:
+    """Every active row in the warehouse — including floor and dock rows,
+    which the receipt picker hides (it only lists rows with a capacity)."""
+    out = [
+        {"id": r["id"], "name": r["name"], "area_name": r["area_name"], "barcode": r["barcode"]}
+        for r in row_index(db, warehouse_id).values()
+    ]
     out.sort(key=lambda x: (x["area_name"], x["name"]))
     return out
 
@@ -109,19 +127,9 @@ def _get_row(db: Session, row_id: str, warehouse_id: Optional[str] = None) -> St
     return row
 
 
-def row_contents(db: Session, row_id: str, warehouse_id: Optional[str] = None) -> dict:
-    """What the system says is in a row, grouped by product + lot."""
-    row = _get_row(db, row_id, warehouse_id)
-    pallets = (
-        db.query(PalletLicence)
-        .filter(
-            PalletLicence.storage_row_id == row.id,
-            PalletLicence.status == PalletStatus.IN_STOCK.value,
-            PalletLicence.is_deleted == False,  # noqa: E712
-        )
-        .order_by(PalletLicence.lot_number, PalletLicence.sequence)
-        .all()
-    )
+def group_pallets(db: Session, pallets: list) -> list:
+    """In-stock pallets grouped by product + lot, sorted by product then lot.
+    Pallets keep the order they come in (callers sort by lot + sequence)."""
     pids = {p.product_id for p in pallets}
     products = {p.id: p for p in db.query(Product).filter(Product.id.in_(pids)).all()} if pids else {}
     groups: dict = {}
@@ -142,9 +150,25 @@ def row_contents(db: Session, row_id: str, warehouse_id: Optional[str] = None) -
             "id": p.id, "licence_number": p.licence_number, "sequence": p.sequence,
             "cases": p.cases, "is_held": bool(p.is_held),
         })
+    return sorted(groups.values(), key=lambda g: (g["product_name"] or "", g["lot_number"] or ""))
+
+
+def row_contents(db: Session, row_id: str, warehouse_id: Optional[str] = None) -> dict:
+    """What the system says is in a row, grouped by product + lot."""
+    row = _get_row(db, row_id, warehouse_id)
+    pallets = (
+        db.query(PalletLicence)
+        .filter(
+            PalletLicence.storage_row_id == row.id,
+            PalletLicence.status == PalletStatus.IN_STOCK.value,
+            PalletLicence.is_deleted == False,  # noqa: E712
+        )
+        .order_by(PalletLicence.lot_number, PalletLicence.sequence)
+        .all()
+    )
     return {
         "row": {"id": row.id, "name": row.name},
-        "groups": sorted(groups.values(), key=lambda g: (g["product_name"] or "", g["lot_number"] or "")),
+        "groups": group_pallets(db, pallets),
         "total_pallets": len(pallets),
     }
 
@@ -400,7 +424,10 @@ def session_rollup(records: list) -> dict:
 def submit_row_check(
     db: Session, *, row_id: str, scanned: Iterable[str], not_here_pallet_ids: Iterable[str],
     confirmed: bool, user, warehouse_id: Optional[str], session_id: Optional[str] = None,
+    source: Optional[str] = None, sheet_no: Optional[str] = None,
 ) -> dict:
+    """`source` / `sheet_no` are set when a count sheet submits the row
+    (count_sheet_service), so history shows where the check came from."""
     row = _get_row(db, row_id, warehouse_id)
     before = row_contents(db, row.id, warehouse_id)
     expected_by_id = {p["id"]: g for g in before["groups"] for p in g["pallets"]}
@@ -485,6 +512,10 @@ def submit_row_check(
         "overages": sum(1 for i in items if i["status"] == "overage"),
         "scans": results,
     }
+    if source:
+        summary["source"] = source
+    if sheet_no:
+        summary["sheet_no"] = sheet_no
     cc = CycleCount(
         id=cc_id,
         location_id=_row_location_id(db, row),

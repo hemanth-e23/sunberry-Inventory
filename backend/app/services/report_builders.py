@@ -21,7 +21,7 @@ from app.enums import (
     ShipOutLifecycle,
 )
 from app.constants import (
-    CATEGORY_FINISHED, SHIP_OUT_LIKE_TRANSFER_TYPES, SHIP_OUT_REASONS, TRANSFER_TYPE_MOYEL_SHUTTLE,
+    CATEGORY_FINISHED, COUNT_SHEET_KIND, SHIP_OUT_LIKE_TRANSFER_TYPES, SHIP_OUT_REASONS, TRANSFER_TYPE_MOYEL_SHUTTLE,
     pluralize_unit,
 )
 from app.services.availability import container_qty_for_product
@@ -2567,6 +2567,11 @@ def build_cycle_count_report(
         location = db.query(Location).filter(Location.id == c.location_id).first() if c.location_id else None
         items = c.items if isinstance(c.items, list) else []
         summary = c.summary if isinstance(c.summary, dict) else {}
+        # A count sheet is reported through what it applied: its FG rows are
+        # gun row-check records of their own, its RM lines are `counted`
+        # placement events. Listing the sheet too would count them twice.
+        if summary.get("kind") == COUNT_SHEET_KIND:
+            continue
         is_gun = summary.get("kind") == "gun_row_check"
         for item in items:
             pid = item.get("productId") or item.get("product_id")
