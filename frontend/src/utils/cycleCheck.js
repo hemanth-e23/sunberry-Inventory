@@ -1,6 +1,6 @@
 // Gun cycle check helpers (FG pallet lifecycle §4.1) and the web count sheet
 // by rack row.
-import { COUNT_SHEET, COUNT_SHEET_TYPE_LABELS } from '../constants';
+import { COUNT_SHEET, COUNT_SHEET_TYPE_LABELS, PALLET_STATUS } from '../constants';
 import { escapeHtml, formatDateKey, formatDateTime } from './dateUtils';
 
 // Same matching as ScannerReceiptFlow.handleRowScan: the row name with or
@@ -176,16 +176,55 @@ export const groupCountHistory = (counts = [], idleMinutes = 60) => {
   const others = counts
     .filter((c) => c.summary?.kind !== GUN_KIND)
     .filter((c) => !isSheet(c) || c.summary.status === COUNT_SHEET.STATUS_SUBMITTED)
-    .map((c) => ({
-      type: 'count',
-      key: c.id,
-      count: c,
-      sheetNo: isSheet(c) ? c.summary.sheet_no || null : null,
-      // A sheet is dated by its submit, not by when it was printed.
-      sortAt: ts(isSheet(c) ? c.summary.submitted_at : null) || ts(c.createdAt) || ts(c.countDate),
-    }));
+    .map((c) => {
+      // A sheet is dated and timed by its submit, not by when it was printed.
+      const at = (isSheet(c) && c.summary.submitted_at) || c.createdAt || null;
+      return {
+        type: 'count',
+        key: c.id,
+        count: c,
+        sheetNo: isSheet(c) ? c.summary.sheet_no || null : null,
+        at,
+        sortAt: ts(at) || ts(c.countDate),
+        ...countItemStats(c.items),
+        warnings: (c.summary?.warnings || []).length,
+      };
+    });
   return [...sessions, ...others].sort((a, b) => b.sortAt - a.sortAt);
 };
+
+/**
+ * History totals of one count record from its items. A skipped line was not
+ * applied, so it is neither OK nor a difference; "recorded only" lines
+ * (legacy receipts, notes on empty rows) are not OK either. Not here / found /
+ * moved / created come from an FG row's pallet lists.
+ */
+export const countItemStats = (items = []) => {
+  const list = Array.isArray(items) ? items : [];
+  const arrived = list.flatMap((i) => i.arrived || []);
+  const by = (r) => arrived.filter((a) => a.result === r).length;
+  return {
+    total: list.length,
+    ok: list.filter((i) => i.status === 'ok').length,
+    differences: list.filter((i) => i.status === 'shortage' || i.status === 'overage').length,
+    skipped: list.filter((i) => i.status === 'skipped').length,
+    recorded: list.filter((i) => i.status === 'recorded').length,
+    notHere: list.reduce((n, i) => n + (i.notHere?.length || 0), 0),
+    found: by('found'),
+    movedIn: by('moved'),
+    created: by('created'),
+  };
+};
+
+// Row names read with their numbers as numbers: AA31 before AA101,
+// ROW 2 before ROW 10.
+export const naturalCompare = (a, b) => String(a ?? '').localeCompare(String(b ?? ''), undefined, {
+  numeric: true, sensitivity: 'base',
+});
+
+/** History items in walk order: row (natural), then product, then lot. */
+export const sortCountItems = (items = []) => [...items].sort((a, b) => naturalCompare(a.location, b.location)
+  || naturalCompare(a.productName, b.productName) || naturalCompare(a.lotNo, b.lotNo));
 
 // ─── Count sheet by rack row (web Cycle Counting page) ───────────────────────
 
@@ -229,27 +268,47 @@ export const parseCount = (v) => {
 };
 
 const isFgSheet = (sheet) => sheet?.summary?.sheet_type === COUNT_SHEET.TYPE_FG;
-const sheetSnapshot = (sheet) => sheet?.summary?.sheet || { rows: [], legacy: [] };
+
+// Rows in walk order: area, then row name, numbers read as numbers. The
+// server already sends them so; sheets made before that are re-sorted here.
+export const sheetRowsInOrder = (rows = []) => [...rows].sort(
+  (a, b) => naturalCompare(a.area_label || a.area_name, b.area_label || b.area_name)
+    || naturalCompare(a.row_name, b.row_name),
+);
+
+const sheetSnapshot = (sheet) => {
+  const snap = sheet?.summary?.sheet || { rows: [], legacy: [] };
+  return { ...snap, rows: sheetRowsInOrder(snap.rows || []) };
+};
 
 /** The submit body for an open sheet. Only rows marked "Row counted" go. */
 export const sheetSubmitPayload = (sheet, draft) => {
   const snap = sheetSnapshot(sheet);
   const fg = isFgSheet(sheet);
   const notHere = new Set(draft.notHere || []);
-  const rows = (snap.rows || []).filter((r) => draft.rowCounted?.[r.row_id]).map((r) => (fg
-    ? {
-      row_id: r.row_id,
-      counted: true,
-      not_here_pallet_ids: r.lines.flatMap((g) => g.pallets).filter((p) => notHere.has(p.id)).map((p) => p.id),
-      extra_licences: parseLicences(draft.extras?.[r.row_id]),
+  const rows = (snap.rows || []).filter((r) => draft.rowCounted?.[r.row_id]).map((r) => {
+    if (fg) {
+      return {
+        row_id: r.row_id,
+        counted: true,
+        not_here_pallet_ids: r.lines.flatMap((g) => g.pallets).filter((p) => notHere.has(p.id)).map((p) => p.id),
+        extra_licences: parseLicences(draft.extras?.[r.row_id]),
+      };
     }
-    : {
+    // Raw / packaging row the system had as empty: "counted" = confirmed
+    // empty; anything found there is a note, recorded only.
+    if (r.empty) {
+      const note = String(draft.extras?.[r.row_id] || '').trim();
+      return { row_id: r.row_id, counted: true, lines: [], ...(note ? { found_note: note } : {}) };
+    }
+    return {
       row_id: r.row_id,
       counted: true,
       lines: r.lines
         .map((l) => ({ placement_id: l.placement_id, counted_units: parseCount(draft.counts?.[l.placement_id]) }))
         .filter((l) => l.counted_units !== null),
-    }));
+    };
+  });
   const legacy = (snap.legacy || [])
     .map((r) => ({ receipt_id: r.receipt_id, counted: parseCount(draft.legacy?.[r.receipt_id]) }))
     .filter((r) => r.counted !== null);
@@ -272,7 +331,64 @@ export const sheetDraftStats = (sheet, draft) => {
       }
     }
   }
-  return { rowsTotal: rows.length, rowsCounted: counted.length, blankLines, badLines };
+  return {
+    rowsTotal: rows.length,
+    rowsCounted: counted.length,
+    emptyConfirmed: counted.filter((r) => r.empty).length,
+    blankLines,
+    badLines,
+  };
+};
+
+/**
+ * What an extra licence will do on submit, from the Find Pallet lookup
+ * (GET /scanner/cycle-check/find). Mirrors cycle_check_service._apply_scan:
+ * each licence is that one pallet only — never a range.
+ *   moved | found | created | here | unchanged | invalid
+ */
+export const classifyExtra = (find, rowId) => {
+  if (!find) return 'unchanged';
+  if (find.status === 'other_warehouse') return 'unchanged';
+  if (!find.exists) {
+    const kind = find.explanation?.kind;
+    return kind === 'not_a_sticker' || kind === 'unknown_product' || kind === 'number_taken' ? 'invalid' : 'created';
+  }
+  if (find.status === PALLET_STATUS.IN_STOCK) return find.storage_row_id === rowId ? 'here' : 'moved';
+  if ([PALLET_STATUS.MISSING, PALLET_STATUS.NOT_PRODUCED, PALLET_STATUS.CANCELLED].includes(find.status)) return 'found';
+  return 'unchanged';
+};
+
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The submit confirm, as lines. `extras` = [{ licence, row_name, outcome,
+ * message }] from classifyExtra, or null when the lookup failed.
+ */
+export const submitConfirmLines = ({ stats, payload, extras, fg }) => {
+  const lines = [`${stats.rowsCounted} of ${stats.rowsTotal} rows marked counted. Rows not marked are left as they are.`];
+  if (stats.emptyConfirmed) lines.push(`${plural(stats.emptyConfirmed, 'empty row')} confirmed empty.`);
+  const notHere = payload.rows.reduce((n, r) => n + (r.not_here_pallet_ids?.length || 0), 0);
+  if (notHere) lines.push(`${plural(notHere, 'pallet')} ticked ✗ will be marked MISSING.`);
+  if (fg) {
+    const typed = payload.rows.reduce((n, r) => n + (r.extra_licences?.length || 0), 0);
+    if (typed && !extras) {
+      lines.push(`${plural(typed, 'extra licence')} will each be moved here, found or created from its sticker — that one pallet only.`);
+    } else if (typed) {
+      const pick = (o) => extras.filter((x) => x.outcome === o);
+      const list = (xs) => xs.map((x) => `${x.licence} (${x.row_name})`).join(', ');
+      const moved = pick('moved');
+      const found = pick('found');
+      const created = pick('created');
+      const unchanged = pick('unchanged');
+      if (moved.length) lines.push(`Moved here from another row: ${list(moved)}.`);
+      if (found.length) lines.push(`Found — back in stock here: ${list(found)}.`);
+      if (created.length) lines.push(`Created from the sticker (never in the system): ${list(created)}. Only that pallet is created, not a range.`);
+      if (unchanged.length) lines.push(`Not changed: ${unchanged.map((x) => `${x.licence} — ${x.message || 'cannot be put here'}`).join('; ')}.`);
+    }
+  }
+  if (stats.blankLines) lines.push(`${plural(stats.blankLines, 'line')} in counted rows are blank and will be skipped.`);
+  lines.push('There is no approval step — changes apply immediately.');
+  return lines;
 };
 
 const seqLabel = (p) => (p.sequence != null ? String(p.sequence).padStart(3, '0') : p.licence_number);
@@ -291,13 +407,17 @@ export const sheetPrintHtml = (sheet) => {
   const box = '<span class="box"></span>';
   const rowsHtml = (snap.rows || []).map((r) => {
     let body;
-    if (fg) {
+    if (r.empty) {
+      body = `<div class="empty-row">Empty — system shows nothing here.
+        <span class="empty-tick">${box} Confirmed empty</span></div>
+        <div class="extra">Found here (${fg ? 'licence #' : 'product · lot · count'}): <span class="line"></span></div>`;
+    } else if (fg) {
       body = `<table><thead><tr><th style="width:22%">Product</th><th style="width:13%">Lot</th>
         <th class="num" style="width:7%">System</th><th>Pallets — ✓ seen · ✗ not here</th>
         <th style="width:11%">Pallets counted</th></tr></thead><tbody>${r.lines.map((g) => `<tr>
         <td><b>${e(g.product_name)}</b></td><td class="mono">${e(g.lot_number || '—')}</td>
         <td class="num">${g.count}</td>
-        <td>${g.pallets.map((p) => `<span class="lic">${box}${e(seqLabel(p))}${p.is_held ? ' <b>HELD</b>' : ''}</span>`).join('')}</td>
+        <td>${g.pallets.map((p) => `<span class="lic${p.is_held ? ' held' : ''}">${box}${e(seqLabel(p))}${p.is_held ? ' <b class="held-tag">ON HOLD</b>' : ''}</span>`).join('')}</td>
         <td><span class="count-box"></span></td></tr>`).join('')}</tbody></table>
         <div class="extra">Extra found (licence #): <span class="line"></span></div>`;
     } else {
@@ -308,7 +428,7 @@ export const sheetPrintHtml = (sheet) => {
         <td><b>${e(l.product_name)}</b></td><td class="mono">${e(l.vendor_lot_number || l.lot_code || '—')}</td>
         <td>${l.bbd ? e(formatDateKey(l.bbd)) : '—'}</td>
         <td class="num"><b>${l.full_units}</b> ${e(l.unit_label)}</td>
-        <td>${l.open_units ? `${l.open_units} open` : ''}${l.open_units && (l.held_units || l.lot_is_held) ? ' · ' : ''}${l.held_units ? `<b>${l.held_units} held</b>` : (l.lot_is_held ? '<b>lot held</b>' : '')}${!l.open_units && !l.held_units && !l.lot_is_held ? '—' : ''}</td>
+        <td>${l.open_units ? `${l.open_units} open` : ''}${l.open_units && (l.held_units || l.lot_is_held) ? ' · ' : ''}${l.held_units ? `<b class="held-tag">${l.held_units} ON HOLD</b>` : ''}${l.lot_is_held ? `${l.held_units ? ' ' : ''}<b class="held-tag">LOT ON HOLD</b>` : ''}${!l.open_units && !l.held_units && !l.lot_is_held ? '—' : ''}</td>
         <td><span class="count-box"></span></td><td></td></tr>`).join('')}</tbody></table>
         <div class="extra">Extra found (product · lot · count): <span class="line"></span></div>`;
     }
@@ -324,12 +444,12 @@ export const sheetPrintHtml = (sheet) => {
       <div class="row-done"><span class="sheet-tag">${e(sm.sheet_no)}</span></div></div>
       <table><thead><tr><th style="width:30%">Product</th><th style="width:16%">Lot</th><th class="num" style="width:16%">System</th>
       <th style="width:14%">Counted</th><th>Notes</th></tr></thead><tbody>${legacy.map((r) => `<tr>
-      <td><b>${e(r.product_name)}</b>${r.is_held ? ' <b>HELD</b>' : ''}</td><td class="mono">${e(r.lot_number || '—')}</td>
+      <td><b>${e(r.product_name)}</b>${r.is_held ? ' <b class="held-tag">ON HOLD</b>' : ''}</td><td class="mono">${e(r.lot_number || '—')}</td>
       <td class="num">${Number(r.quantity || 0).toLocaleString()} ${e(r.unit || '')}${r.container_count ? ` (${r.container_count} ${e(r.container_unit || '')})` : ''}</td>
       <td><span class="count-box"></span></td><td></td></tr>`).join('')}</tbody></table></section>` : '';
   const how = fg
-    ? 'Walk each row. Tick ✓ every pallet you see; cross ✗ the ones that are not there. Write any other licence you find under "Extra found". Tick "Row counted" when done.'
-    : 'Walk each row. Write the number of SEALED units you count. Open and held units are for information. Tick "Row counted" when done.';
+    ? 'Walk each row. Tick ✓ every pallet you see; cross ✗ the ones that are not there. Write any other licence you find under "Extra found". Tick "Row counted" when done. ON HOLD pallets are counted like any other. On an empty row tick "Confirmed empty" or write what you found.'
+    : 'Walk each row. Write the number of SEALED units you count. Open and held units are for information; ON HOLD stock is counted like any other. Tick "Row counted" when done. On an empty row tick "Confirmed empty" or write what you found.';
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -363,6 +483,10 @@ export const sheetPrintHtml = (sheet) => {
     .count-box { display: inline-block; width: 24mm; height: 9mm; border: 1.5px solid #000; }
     .extra { padding: 2.5mm 3mm; border-top: 1px solid #aaa; font-size: 10pt; display: flex; gap: 2mm; }
     .extra .line { flex: 1; border-bottom: 1px solid #000; }
+    .held-tag { border: 1.5px solid #000; padding: 0 1mm; font-size: 9pt; letter-spacing: 0.03em; }
+    .lic.held { border: 1.5px dashed #000; padding: 0 1mm; }
+    .empty-row { padding: 2.5mm 3mm; font-style: italic; display: flex; justify-content: space-between; gap: 6mm; }
+    .empty-tick { font-style: normal; font-weight: 700; white-space: nowrap; }
     @media print { body { padding: 0; } @page { size: A4 landscape; margin: 8mm; } }
   </style>
 </head>

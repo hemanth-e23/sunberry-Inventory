@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { getDashboardPath } from '../App';
 import { formatDate, formatDateKey, formatTime } from '../utils/dateUtils';
 import { ROLES, CATEGORY_TYPES, CYCLE_CHECK_SESSION_IDLE_MINUTES, isWeighedMaterialType } from '../constants';
-import { groupCountHistory } from '../utils/cycleCheck';
+import { groupCountHistory, sortCountItems } from '../utils/cycleCheck';
 import CountSheetPanel from './CountSheetPanel';
 import './Shared.css';
 import './CycleCountingPage.css';
@@ -23,8 +23,6 @@ const CycleCountingPage = () => {
   const {
     productCategories,
     categoryGroups,
-    locations,
-    storageAreas,
     cycleCounts,
     refreshCycleCounts,
     locationLookup,
@@ -43,15 +41,6 @@ const CycleCountingPage = () => {
     );
     return categoryGroups.filter(g => groupsWithInventory.has(g.id));
   }, [categoryGroups, productCategories]);
-
-  // Sheet scope: a room (sub-location — its racks and its default rows like
-  // Cage or staging) or a rack area.
-  const roomOptions = useMemo(() => (locations || [])
-    .flatMap(l => (l.subLocations || []).map(s => ({ id: s.id, label: `${l.name} / ${s.name}` })))
-    .sort((a, b) => a.label.localeCompare(b.label)), [locations]);
-  const areaOptions = useMemo(() => (storageAreas || [])
-    .map(a => ({ id: a.id, label: `${locationLookup?.[a.locationId]?.name || '—'} / ${a.name}` }))
-    .sort((a, b) => a.label.localeCompare(b.label)), [storageAreas, locationLookup]);
 
   // ─── History filter ────────────────────────────────────────────────────────
 
@@ -93,8 +82,6 @@ const CycleCountingPage = () => {
 
         <CountSheetPanel
           clientGroups={clientGroups}
-          roomOptions={roomOptions}
-          areaOptions={areaOptions}
           onSubmitted={refreshCycleCounts}
         />
 
@@ -215,8 +202,14 @@ const CycleCountingPage = () => {
                       );
                     }
                     const count = entry.count;
-                    const variances = count.summary?.variancesCount ?? 0;
-                    const total = count.summary?.totalItems ?? 0;
+                    // Skipped lines were not applied: neither OK nor a difference.
+                    const clean = entry.differences === 0 && entry.skipped === 0 && entry.warnings === 0
+                      && entry.notHere + entry.found + entry.movedIn + entry.created === 0;
+                    const status = clean ? '✓ OK' : [
+                      entry.differences ? `⚠ ${entry.differences} difference${entry.differences === 1 ? '' : 's'}` : null,
+                      entry.skipped ? `${entry.skipped} skipped` : null,
+                      entry.warnings ? `${entry.warnings} to look for` : null,
+                    ].filter(Boolean).join(' · ') || '⚠ Pallets changed';
                     return (
                       <tr
                         key={entry.key}
@@ -226,18 +219,19 @@ const CycleCountingPage = () => {
                         <td>{formatDate(count.countDate)}</td>
                         <td>{entry.sheetNo ? <>Count sheet <span className="cs-sheet-no">{entry.sheetNo}</span></> : 'Count sheet'} · {countWhere(count)}</td>
                         <td>{count.performedBy || '—'}</td>
-                        <td>{count.createdAt ? formatTime(count.createdAt) : '—'}</td>
-                        <td className="text-right">{total} item{total === 1 ? '' : 's'}</td>
-                        <td className="text-right">{Math.max(0, total - variances)}</td>
-                        <td className={`text-right ${variances !== 0 ? 'variance-shortage' : 'variance-ok'}`}>{variances}</td>
-                        <td className="text-right">—</td>
-                        <td className="text-right">—</td>
-                        <td className="text-right">—</td>
-                        <td className="text-right">—</td>
+                        <td title={entry.sheetNo ? 'When the sheet was submitted' : undefined}>{entry.at ? formatTime(entry.at) : '—'}</td>
+                        <td className="text-right">{entry.total} item{entry.total === 1 ? '' : 's'}</td>
+                        <td className="text-right">{entry.ok}</td>
+                        <td className={`text-right ${entry.differences !== 0 ? 'variance-shortage' : 'variance-ok'}`}>
+                          {entry.differences}
+                          {entry.skipped > 0 && <div className="cc-skipped-note">{entry.skipped} skipped</div>}
+                        </td>
+                        <td className="text-right">{entry.notHere}</td>
+                        <td className="text-right">{entry.found}</td>
+                        <td className="text-right">{entry.movedIn}</td>
+                        <td className="text-right">{entry.created}</td>
                         <td>
-                          <span className={variances === 0 ? 'status-ok' : 'status-warning'}>
-                            {variances === 0 ? '✓ OK' : '⚠ Variance'}
-                          </span>
+                          <span className={clean ? 'status-ok' : 'status-warning'}>{status}</span>
                         </td>
                       </tr>
                     );
@@ -298,6 +292,17 @@ const CycleCountingPage = () => {
                   </div>
                 </div>
 
+                {selectedCycleCount.summary?.warnings?.length > 0 && (
+                  <div className="detail-section cs-warnings">
+                    <h3>Look for these pallets</h3>
+                    <ul>
+                      {selectedCycleCount.summary.warnings.map((w, i) => (
+                        <li key={i}><b>{w.product_name}</b> · lot <span className="cs-mono">{w.lot}</span> · {w.row_name}: {w.message}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 {selectedCycleCount.summary?.skipped?.some(s => s.licence_number) && (
                   <div className="detail-section">
                     <h3>Pallets not applied</h3>
@@ -326,7 +331,7 @@ const CycleCountingPage = () => {
                           </tr>
                         </thead>
                         <tbody>
-                          {selectedCycleCount.items.map((item, idx) => (
+                          {sortCountItems(selectedCycleCount.items).map((item, idx) => (
                             <React.Fragment key={idx}>
                             <tr>
                               <td>{item.productName}</td>
@@ -346,10 +351,11 @@ const CycleCountingPage = () => {
                             </tr>
                             {/* Gun row check: the pallet numbers behind the difference.
                                 Count sheet: why a line was not applied. */}
-                            {(item.notHere?.length > 0 || item.arrived?.length > 0 || item.skipReason) && (
+                            {(item.notHere?.length > 0 || item.arrived?.length > 0 || item.skipReason || item.foundNote) && (
                               <tr>
                                 <td colSpan={8} style={{ fontSize: '12px', color: '#6b7280' }}>
                                   {item.skipReason && <>Not applied: {item.skipReason}. </>}
+                                  {item.foundNote && <>Found here (recorded only): {item.foundNote}. </>}
                                   {item.notHere?.length > 0 && <>Not here (now missing): {item.notHere.join(', ')}. </>}
                                   {item.arrived?.length > 0 && <>Found here: {item.arrived.map((a) => `${a.licence_number} (${a.result})`).join(', ')}.</>}
                                 </td>

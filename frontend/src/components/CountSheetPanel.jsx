@@ -6,8 +6,8 @@ import { useToast } from '../context/ToastContext';
 import { formatDateKey, formatDateTime } from '../utils/dateUtils';
 import { COUNT_SHEET, COUNT_SHEET_TYPE_LABELS } from '../constants';
 import {
-  loadSheetDraft, parseCount, parseLicences, saveSheetDraft, sheetDraftStats, sheetPrintHtml,
-  sheetSubmitPayload,
+  classifyExtra, loadSheetDraft, parseCount, parseLicences, saveSheetDraft, sheetDraftStats, sheetPrintHtml,
+  sheetRowsInOrder, sheetSubmitPayload, submitConfirmLines,
 } from '../utils/cycleCheck';
 
 // Count sheet by rack row: generate from live data → (print and walk) → fill
@@ -20,7 +20,12 @@ const apiError = (err, fallback) => {
   return typeof d === 'string' ? d : fallback;
 };
 
-const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }) => {
+// Held stock is counted like any other — it is just marked, clearly.
+const HeldBadge = ({ children = 'ON HOLD', title }) => (
+  <span className="cs-held-badge" title={title || 'On hold — count it like any other'}>{children}</span>
+);
+
+const CountSheetPanel = ({ clientGroups, onSubmitted }) => {
   const { confirm } = useConfirm();
   const { addToast } = useToast();
 
@@ -32,6 +37,26 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
   const [draft, setDraft] = useState(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
+  // Rooms / rack areas holding stock of the chosen type (and client).
+  const [scopes, setScopes] = useState({ rooms: [], areas: [] });
+
+  useEffect(() => {
+    let live = true;
+    apiClient.get('/scanner/cycle-check/sheet-scopes', { params: { kind, client_id: client || undefined } })
+      .then((resp) => {
+        if (!live) return;
+        const next = { rooms: resp.data?.rooms || [], areas: resp.data?.areas || [] };
+        setScopes(next);
+        // A room / area that holds none of this type is no longer offered.
+        setWhere((w) => {
+          if (!w) return w;
+          const [sc, id] = w.split(':');
+          return (sc === 'sub' ? next.rooms : next.areas).some((o) => o.id === id) ? w : '';
+        });
+      })
+      .catch(() => { if (live) setScopes({ rooms: [], areas: [] }); });
+    return () => { live = false; };
+  }, [kind, client]);
 
   const loadOpenSheets = useCallback(async () => {
     try {
@@ -87,6 +112,26 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
     }
   };
 
+  const handleDiscard = async (s) => {
+    const ok = await confirm(
+      `Throw away ${s.summary.sheet_no} (${s.summary.scope})? Nothing on it is applied, and anything typed into it is lost.`,
+      { title: `Discard ${s.summary.sheet_no}`, confirmLabel: 'Discard sheet' },
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await apiClient.post(`/scanner/cycle-check/sheets/${s.id}/discard`);
+      saveSheetDraft(s.id, null);
+      if (sheet?.id === s.id) { setSheet(null); setDraft(null); }
+      addToast(`${s.summary.sheet_no} discarded.`, 'success');
+    } catch (err) {
+      addToast(apiError(err, 'Could not discard that sheet.'), 'error');
+    } finally {
+      setBusy(false);
+      loadOpenSheets();
+    }
+  };
+
   const handlePrint = () => {
     const win = window.open('', '_blank');
     if (!win) {
@@ -123,6 +168,13 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
 
   // ─── Submit ────────────────────────────────────────────────────────────────
 
+  const fg = sheet?.summary?.sheet_type === COUNT_SHEET.TYPE_FG;
+  const snap = useMemo(() => {
+    const sn = sheet?.summary?.sheet || { rows: [], legacy: [] };
+    return { ...sn, rows: sheetRowsInOrder(sn.rows || []) };
+  }, [sheet]);
+  const snapRowName = useMemo(() => Object.fromEntries(snap.rows.map((r) => [r.row_id, r.row_name])), [snap]);
+
   const stats = useMemo(() => (sheet && draft ? sheetDraftStats(sheet, draft) : null), [sheet, draft]);
   const notHereSet = useMemo(() => new Set(draft?.notHere || []), [draft]);
   const payload = useMemo(() => (sheet && draft ? sheetSubmitPayload(sheet, draft) : null), [sheet, draft]);
@@ -137,12 +189,38 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
       addToast(`${stats.badLines} count(s) are not whole numbers — fix them first.`, 'error');
       return;
     }
-    const notHere = payload.rows.reduce((n, r) => n + (r.not_here_pallet_ids?.length || 0), 0);
-    const parts = [`${stats.rowsCounted} of ${stats.rowsTotal} rows marked counted. Rows not marked are left as they are.`];
-    if (notHere) parts.push(`${notHere} pallet(s) ticked ✗ will be marked MISSING.`);
-    if (stats.blankLines) parts.push(`${stats.blankLines} line(s) in counted rows are blank and will be skipped.`);
-    parts.push('Changes apply immediately.');
-    const ok = await confirm(parts.join(' '), { title: `Submit ${sheet.summary.sheet_no}`, confirmLabel: 'Submit and apply' });
+    // What each extra licence will do (moved / found / created), from the
+    // same lookup as Find Pallet. A lookup failure only makes the confirm
+    // less specific.
+    let extras = null;
+    if (fg) {
+      const typed = payload.rows.flatMap((r) => (r.extra_licences || []).map((licence) => ({
+        licence, row_id: r.row_id, row_name: snapRowName[r.row_id] || r.row_id,
+      })));
+      if (typed.length) {
+        setBusy(true);
+        try {
+          extras = await Promise.all(typed.map(async (x) => {
+            const resp = await apiClient.get('/scanner/cycle-check/find', { params: { licence_number: x.licence } });
+            return { ...x, outcome: classifyExtra(resp.data, x.row_id), message: resp.data?.message };
+          }));
+        } catch {
+          extras = null;
+        } finally {
+          setBusy(false);
+        }
+        const bad = (extras || []).filter((x) => x.outcome === 'invalid');
+        if (bad.length) {
+          addToast(`Check these licences first: ${bad.map((x) => `${x.licence} (${x.row_name}) — ${x.message}`).join(' · ')}`, 'error');
+          return;
+        }
+      }
+    }
+    const lines = submitConfirmLines({ stats, payload, extras, fg });
+    const ok = await confirm(
+      <div className="cs-confirm">{lines.map((l, i) => <p key={i}>{l}</p>)}</div>,
+      { title: `Submit ${sheet.summary.sheet_no}`, confirmLabel: 'Submit and apply' },
+    );
     if (!ok) return;
     setBusy(true);
     try {
@@ -186,8 +264,6 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
-  const fg = sheet?.summary?.sheet_type === COUNT_SHEET.TYPE_FG;
-  const snap = sheet?.summary?.sheet || { rows: [], legacy: [] };
 
   return (
     <>
@@ -197,7 +273,7 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
         <div className="form-grid">
           <label>
             <span>Type</span>
-            <select value={kind} onChange={(e) => setKind(e.target.value)}>
+            <select value={kind} onChange={(e) => { setKind(e.target.value); setWhere(''); }}>
               {Object.entries(COUNT_SHEET_TYPE_LABELS).map(([k, label]) => (
                 <option key={k} value={k}>{label}</option>
               ))}
@@ -214,14 +290,14 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
             <span>Room or rack area (optional)</span>
             <select value={where} onChange={(e) => setWhere(e.target.value)}>
               <option value="">Whole warehouse</option>
-              {roomOptions.length > 0 && (
+              {scopes.rooms.length > 0 && (
                 <optgroup label="Rooms">
-                  {roomOptions.map((o) => <option key={o.id} value={`sub:${o.id}`}>{o.label}</option>)}
+                  {scopes.rooms.map((o) => <option key={o.id} value={`sub:${o.id}`}>{o.label}</option>)}
                 </optgroup>
               )}
-              {areaOptions.length > 0 && (
+              {scopes.areas.length > 0 && (
                 <optgroup label="Rack areas">
-                  {areaOptions.map((o) => <option key={o.id} value={`area:${o.id}`}>{o.label}</option>)}
+                  {scopes.areas.map((o) => <option key={o.id} value={`area:${o.id}`}>{o.label}</option>)}
                 </optgroup>
               )}
             </select>
@@ -236,7 +312,7 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
             <h3>Open sheets</h3>
             <ul>
               {openSheets.map((s) => (
-                <li key={s.id}>
+                <li key={s.id} className="cs-open-sheet-item">
                   <button
                     type="button"
                     className={`cs-open-sheet${sheet?.id === s.id ? ' active' : ''}`}
@@ -248,6 +324,15 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
                     <span className="cs-muted">
                       {s.summary.rows_total} rows · {formatDateTime(s.summary.generated_at)} · {s.summary.generated_by || s.performed_by}
                     </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button cs-discard"
+                    onClick={() => handleDiscard(s)}
+                    disabled={busy}
+                    aria-label={`Discard ${s.summary.sheet_no}`}
+                  >
+                    Discard
                   </button>
                 </li>
               ))}
@@ -275,6 +360,18 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
               <div className={`stat-value ${result.skipped.length ? 'variance-negative' : ''}`}>{result.skipped.length}</div>
             </div>
           </div>
+          {result.warnings?.length > 0 && (
+            <div className="cs-warnings" role="alert">
+              <h3>Look for these pallets</h3>
+              <ul>
+                {result.warnings.map((w, i) => (
+                  <li key={i}>
+                    <b>{w.product_name}</b> · lot <span className="cs-mono">{w.lot}</span> · {w.row_name}: {w.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {result.skipped.length > 0 && (
             <>
               <h3>Skipped — not applied</h3>
@@ -285,7 +382,7 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
                     {result.skipped.map((s, i) => (
                       <tr key={i}>
                         <td>{s.row_name}</td>
-                        <td>{s.product_name}</td>
+                        <td>{s.product_name || '—'}</td>
                         <td className="cs-mono">{s.licence_number || s.lot || '—'}</td>
                         <td className="variance-shortage">{s.reason}</td>
                       </tr>
@@ -344,13 +441,14 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
             </div>
             <div className="cs-actions">
               <button className="secondary-button" onClick={handlePrint}>🖨 Print</button>
+              <button className="secondary-button" onClick={() => handleDiscard(sheet)} disabled={busy}>Discard</button>
               <button className="secondary-button" onClick={() => { setSheet(null); setDraft(null); }}>Close</button>
             </div>
           </div>
           <p className="cs-help">
             {fg
-              ? 'Every pallet is taken as seen. Tap a pallet that is not there (✗). Type or scan any other licence found in the row. Rows not marked "Row counted" are left alone.'
-              : 'Enter the sealed units counted. Open and held units are shown for information. A blank line is not counted. Rows not marked "Row counted" are left alone.'}
+              ? 'Every pallet is taken as seen. Tap a pallet that is not there (✗). Type or scan any other licence found in the row — each one is that one pallet only. ON HOLD pallets are counted like any other. Rows not marked "Row counted" are left alone.'
+              : 'Enter the sealed units counted. Open and held units are shown for information; ON HOLD stock is counted like any other. A blank line is not counted. Rows not marked "Row counted" are left alone.'}
           </p>
 
           {snap.rows.length === 0 && <div className="empty-state">Nothing on a rack for this selection.</div>}
@@ -358,22 +456,40 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
           {snap.rows.map((r) => {
             const counted = !!draft.rowCounted[r.row_id];
             return (
-              <section key={r.row_id} className={`cs-row${counted ? ' counted' : ''}`}>
+              <section key={r.row_id} className={`cs-row${counted ? ' counted' : ''}${r.empty ? ' empty' : ''}`}>
                 <div className="cs-row-bar">
                   <div>
                     <span className="cs-row-name">{r.row_name}</span>
-                    <span className="cs-row-area">{r.area_name}</span>
+                    <span className="cs-row-area">{r.area_label || r.area_name}</span>
                   </div>
                   <label className="cs-row-toggle">
                     <input type="checkbox" checked={counted} onChange={() => toggleRowCounted(r.row_id)} />
-                    Row counted
+                    {r.empty ? 'Confirmed empty' : 'Row counted'}
                   </label>
                 </div>
 
-                {fg ? (
+                {r.empty ? (
+                  <>
+                    <div className="cs-empty-note">Empty — system shows nothing here.</div>
+                    <label className="cs-extra">
+                      <span>Found here {fg ? '(licence #)' : '(recorded only — nothing is changed)'}</span>
+                      <input
+                        type="text"
+                        value={draft.extras[r.row_id] || ''}
+                        onChange={(e) => setExtra(r.row_id, e.target.value)}
+                        placeholder={fg ? 'Scan or type licence numbers, separated by spaces' : 'Product, lot and count of what you found'}
+                        maxLength={fg ? undefined : 500}
+                      />
+                      {fg && parseLicences(draft.extras[r.row_id]).length > 0 && (
+                        <span className="cs-muted">{parseLicences(draft.extras[r.row_id]).length} to add to this row — each that one pallet only</span>
+                      )}
+                    </label>
+                  </>
+                ) : fg ? (
                   <>
                     {r.lines.map((g) => {
                       const gone = g.pallets.filter((p) => notHereSet.has(p.id)).length;
+                      const held = g.pallets.filter((p) => p.is_held).length;
                       return (
                         <div key={g.key} className="cs-line">
                           <div className="cs-line-head">
@@ -382,6 +498,7 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
                             <span className="cs-muted">
                               {g.count - gone} of {g.count} pallets{gone ? ` · ${gone} not here` : ''}
                             </span>
+                            {held > 0 && <HeldBadge>{held === g.count ? 'ALL ON HOLD' : `${held} ON HOLD`}</HeldBadge>}
                           </div>
                           <div className="cs-licences">
                             {g.pallets.map((p) => {
@@ -392,11 +509,12 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
                                   type="button"
                                   className={`cs-lic${off ? ' off' : ''}${p.is_held ? ' held' : ''}`}
                                   onClick={() => togglePallet(r.row_id, p.id)}
-                                  title={`${p.licence_number}${p.is_held ? ' (held)' : ''} — tap if not here`}
+                                  title={`${p.licence_number}${p.is_held ? ' — ON HOLD (count it like any other)' : ''} — tap if not here`}
                                   aria-pressed={off}
+                                  aria-label={`${p.licence_number}${p.is_held ? ', on hold' : ''}, ${off ? 'not here' : 'seen'}`}
                                 >
                                   {off ? '✗' : '✓'} {p.sequence != null ? String(p.sequence).padStart(3, '0') : p.licence_number}
-                                  {p.is_held && <span className="cs-held-tag">H</span>}
+                                  {p.is_held && <span className="cs-held-tag">HOLD</span>}
                                 </button>
                               );
                             })}
@@ -432,8 +550,8 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
                           <span>
                             System <b>{l.full_units}</b> {l.unit_label}
                             {l.open_units > 0 && <span className="cs-muted"> · {l.open_units} open</span>}
-                            {l.held_units > 0 && <span className="hold-badge">{l.held_units} held</span>}
-                            {l.lot_is_held && !l.held_units && <span className="hold-badge">lot held</span>}
+                            {l.held_units > 0 && <HeldBadge title="Held on this rack — count them like any other">{l.held_units} ON HOLD</HeldBadge>}
+                            {l.lot_is_held && <HeldBadge title="The whole lot is on hold — count it like any other">LOT ON HOLD</HeldBadge>}
                           </span>
                         </div>
                         <div className="cs-rm-count">
@@ -481,7 +599,7 @@ const CountSheetPanel = ({ clientGroups, roomOptions, areaOptions, onSubmitted }
                     <span>
                       System <b>{Number(rc.quantity || 0).toLocaleString()}</b> {rc.unit}
                       {rc.container_count ? <span className="cs-muted"> ({rc.container_count} {rc.container_unit})</span> : null}
-                      {rc.is_held && <span className="hold-badge">HOLD</span>}
+                      {rc.is_held && <HeldBadge />}
                     </span>
                   </div>
                   <div className="cs-rm-count">

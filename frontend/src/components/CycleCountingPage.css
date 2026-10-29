@@ -414,8 +414,8 @@
 
 /* Hold badge */
 .hold-badge {
-  background: var(--error-100);
-  color: var(--error-700);
+  background: var(--color-danger-soft);
+  color: var(--color-danger-dark);
   padding: 2px 8px;
   border-radius: 12px;
   font-size: 11px;
@@ -613,7 +613,7 @@
 .cycle-counting-page .status-badge-shortage,
 .cycle-counting-page .status-badge-overage,
 .cycle-counting-page .status-warning {
-    color: var(--error-500);
+    color: var(--color-danger);
     font-weight: 700;
 }
 
@@ -652,11 +652,15 @@
     font-weight: 800;
 }
 
+/* Plain colour, not a gradient clipped to the text: --error-500 was never
+   defined, so the clipped gradient was transparent and the Skipped number
+   vanished. */
 .cycle-counting-page .stat-value.variance-negative {
-    background: linear-gradient(135deg, var(--error-500) 0%, var(--error-100, #f87171) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    background: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    -webkit-text-fill-color: var(--color-danger);
+    color: var(--color-danger);
 }
 
 /* Enhanced Modal */
@@ -758,13 +762,13 @@
   border: 1.5px solid var(--color-border-strong); border-radius: 10px; margin-bottom: 12px;
   overflow: hidden; background: var(--color-surface);
 }
-.cs-row.counted { border-color: var(--success-600, #059669); }
+.cs-row.counted { border-color: var(--color-success-dark); }
 .cs-row-bar {
   display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 10px 14px; background: var(--color-bg-subtle, #f8fafc);
   border-bottom: 1px solid var(--color-border); color: var(--color-text);
 }
-.cs-row.counted .cs-row-bar { background: var(--success-50, #f0fdf4); }
+.cs-row.counted .cs-row-bar { background: var(--color-success-soft); }
 .cs-row-name { font-size: 18px; font-weight: 700; }
 .cs-row-area { margin-left: 10px; color: var(--color-text-muted); font-size: 13px; }
 .cs-row-toggle { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; cursor: pointer; }
@@ -777,17 +781,44 @@
 .cs-licences { display: flex; flex-wrap: wrap; gap: 6px; }
 .cs-lic {
   min-width: 64px; padding: 8px 10px; border-radius: 8px; font-family: monospace; font-size: 15px; font-weight: 600;
-  border: 1.5px solid var(--success-600, #059669); background: var(--success-50, #f0fdf4);
-  color: var(--success-700, #166534); cursor: pointer;
+  border: 1.5px solid var(--color-success-dark); background: var(--color-success-soft);
+  color: var(--color-success-dark); cursor: pointer;
 }
 .cs-lic.off {
-  border-color: var(--color-danger); background: var(--error-50, #fff7f7); color: var(--color-danger);
+  border-color: var(--color-danger); background: var(--color-danger-soft); color: var(--color-danger);
   text-decoration: line-through;
 }
+/* Held stock: counted like any other, but impossible to miss. Amber + a
+   dashed border (not colour alone) so it reads in print and for colour-blind
+   users; the ✓ / ✗ state keeps its own green / red. */
+.cs-lic.held { border-style: dashed; border-width: 2px; border-color: var(--color-warning-dark); }
 .cs-held-tag {
-  margin-left: 4px; padding: 0 4px; border-radius: 4px; font-size: 11px;
-  background: var(--error-100); color: var(--error-700);
+  margin-left: 6px; padding: 1px 5px; border-radius: 4px; font-size: 11px; font-weight: 800;
+  letter-spacing: 0.04em; vertical-align: 1px; text-decoration: none; display: inline-block;
+  background: var(--color-warning-dark); color: #1f1300;
 }
+.cs-held-badge {
+  display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px;
+  font-size: 12px; font-weight: 800; letter-spacing: 0.04em; white-space: nowrap;
+  background: var(--color-warning-dark); color: #1f1300; border: 1px solid #b45309;
+}
+
+.cs-row.empty { border-style: dashed; }
+.cs-empty-note { padding: 10px 14px; color: var(--color-text-muted); font-style: italic; }
+
+.cs-open-sheet-item { display: flex; gap: 6px; align-items: stretch; }
+.cs-open-sheet-item .cs-open-sheet { flex: 1; }
+.cs-discard { white-space: nowrap; }
+
+.cs-warnings {
+  margin: 12px 0; padding: 10px 14px; border-radius: 8px;
+  background: var(--color-warning-soft); border: 1.5px solid var(--color-warning-dark); color: var(--color-text);
+}
+.cs-warnings h3 { margin: 0 0 6px; font-size: 15px; color: #92400e; }
+.cs-warnings ul { margin: 0; padding-left: 18px; }
+.cs-warnings li { margin: 4px 0; }
+.cs-confirm p { margin: 0 0 8px; }
+.cc-skipped-note { font-size: 11px; font-weight: 600; color: var(--color-warning-dark); }
 .cs-extra { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; border-top: 1px dashed var(--color-border); font-size: 13px; }
 .cs-extra input {
   padding: 10px 12px; border: 1px solid var(--color-border-strong); border-radius: 6px; font-size: 14px;

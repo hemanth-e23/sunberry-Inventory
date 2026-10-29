@@ -153,6 +153,7 @@ export const COUNT_SHEET = {
   KIND: 'count_sheet',
   STATUS_OPEN: 'open',
   STATUS_SUBMITTED: 'submitted',
+  STATUS_DISCARDED: 'discarded',
   TYPE_FG: 'fg',
   TYPE_RM: 'rm',
   TYPE_PACKAGING: 'packaging',
