@@ -1,429 +1,57 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import ExcelJS from 'exceljs';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
-import { useConfirm } from '../context/ConfirmContext';
-import { useToast } from '../context/ToastContext';
 import { getDashboardPath } from '../App';
-import { formatDate, formatDateKey, formatTime, getTodayDateKey, toDateKey, escapeHtml } from '../utils/dateUtils';
-import { ROLES, RECEIPT_STATUS, CATEGORY_TYPES, CYCLE_CHECK_SESSION_IDLE_MINUTES } from '../constants';
+import { formatDate, formatDateKey, formatTime } from '../utils/dateUtils';
+import { ROLES, CATEGORY_TYPES, CYCLE_CHECK_SESSION_IDLE_MINUTES, isWeighedMaterialType } from '../constants';
 import { groupCountHistory } from '../utils/cycleCheck';
+import CountSheetPanel from './CountSheetPanel';
 import './Shared.css';
 import './CycleCountingPage.css';
 
-// ─── Module-level constants ────────────────────────────────────────────────
-
-// Category types that should appear on count sheets
-const COUNTABLE_TYPES = new Set([
-  CATEGORY_TYPES.FINISHED,
-  CATEGORY_TYPES.RAW_MATERIAL,
-  CATEGORY_TYPES.INGREDIENT,
-  CATEGORY_TYPES.PACKAGING,
-  'raw', // pre-existing DB inconsistency — same as raw-material
-]);
-
-// Used for the "Ingredients" category filter
-const INGREDIENT_TYPES = new Set([
-  CATEGORY_TYPES.INGREDIENT,
-  CATEGORY_TYPES.RAW_MATERIAL,
-  'raw',
-]);
-
-const TYPE_ORDER = {
-  [CATEGORY_TYPES.FINISHED]: 0,
-  [CATEGORY_TYPES.INGREDIENT]: 1,
-  [CATEGORY_TYPES.RAW_MATERIAL]: 1,
-  raw: 1,
-  [CATEGORY_TYPES.PACKAGING]: 2,
-};
-
-const SECTION_DEFS = [
-  {
-    key: 'finished',
-    label: 'Finished Goods',
-    types: new Set([CATEGORY_TYPES.FINISHED]),
-  },
-  {
-    key: 'ingredient',
-    label: 'Ingredients',
-    types: new Set([CATEGORY_TYPES.INGREDIENT, CATEGORY_TYPES.RAW_MATERIAL, 'raw']),
-  },
-  {
-    key: 'packaging',
-    label: 'Packaging',
-    types: new Set([CATEGORY_TYPES.PACKAGING]),
-  },
-];
+// Category types that can be on a count sheet (clients without any are not
+// offered in the Client filter).
+const isCountableType = (type) =>
+  type === CATEGORY_TYPES.FINISHED || type === CATEGORY_TYPES.PACKAGING || isWeighedMaterialType(type);
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CycleCountingPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { confirm } = useConfirm();
-  const { addToast } = useToast();
   const {
-    receipts,
-    products,
     productCategories,
     categoryGroups,
     locations,
+    storageAreas,
     cycleCounts,
-    saveCycleCount,
-    subLocationUnifiedLookup,
+    refreshCycleCounts,
     locationLookup,
   } = useAppData();
 
-  const [selectedClient, setSelectedClient] = useState(''); // category group ID (Sunberry, Arizona, etc.)
-  const [selectedLocation, setSelectedLocation] = useState('');
-  const [countDate, setCountDate] = useState(getTodayDateKey());
-  const [selectedCategoryFilter, setSelectedCategoryFilter] = useState('all'); // 'all' | 'finished' | 'ingredient' | 'packaging'
-  const [countGenerated, setCountGenerated] = useState(false);
-  const [physicalCounts, setPhysicalCounts] = useState({});
-  const [countSearch, setCountSearch] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  const [submittedVariances, setSubmittedVariances] = useState([]);
   const [selectedCycleCount, setSelectedCycleCount] = useState(null);
   const [openSession, setOpenSession] = useState(null);
 
-  // ─── Lookups ───────────────────────────────────────────────────────────────
-
-  const productLookup = useMemo(() => {
-    const map = {};
-    products.forEach(p => { map[p.id] = p; });
-    return map;
-  }, [products]);
-
-  const categoryLookup = useMemo(() => {
-    const map = {};
-    productCategories.forEach(c => { map[c.id] = c; });
-    return map;
-  }, [productCategories]);
-
-  // Category groups = clients (Sunberry, Arizona, etc.) — filter to only groups
-  // that have at least one active category with countable type
+  // Category groups = clients (Sunberry, Arizona, etc.) — only groups that
+  // have at least one category of a countable type.
   const clientGroups = useMemo(() => {
     const groupsWithInventory = new Set(
       productCategories
-        .filter(c => COUNTABLE_TYPES.has(c.type) && c.parentId)
+        .filter(c => isCountableType(c.type) && c.parentId)
         .map(c => c.parentId)
     );
     return categoryGroups.filter(g => groupsWithInventory.has(g.id));
   }, [categoryGroups, productCategories]);
 
-  // ─── Inventory items ───────────────────────────────────────────────────────
-
-  const inventoryItems = useMemo(() => {
-    return receipts
-      .filter(r => {
-        if (r.status !== RECEIPT_STATUS.APPROVED && r.hold !== true) return false;
-        const cat = categoryLookup[r.categoryId];
-        if (!cat || !COUNTABLE_TYPES.has(cat.type)) return false;
-        if (selectedCategoryFilter === 'finished' && cat.type !== CATEGORY_TYPES.FINISHED) return false;
-        if (selectedCategoryFilter === 'ingredient' && !INGREDIENT_TYPES.has(cat.type)) return false;
-        if (selectedCategoryFilter === 'packaging' && cat.type !== CATEGORY_TYPES.PACKAGING) return false;
-        if (selectedClient && cat.parentId !== selectedClient) return false;
-        if (selectedLocation && r.location !== selectedLocation) return false;
-        return true;
-      })
-      .map(r => ({
-        ...r,
-        product: productLookup[r.productId] || null,
-        category: categoryLookup[r.categoryId] || null,
-      }))
-      .sort((a, b) => {
-        const aOrder = TYPE_ORDER[a.category?.type] ?? 9;
-        const bOrder = TYPE_ORDER[b.category?.type] ?? 9;
-        if (aOrder !== bOrder) return aOrder - bOrder;
-        const aName = a.product?.name || '';
-        const bName = b.product?.name || '';
-        if (aName !== bName) return aName.localeCompare(bName);
-        return (a.lotNo || '').localeCompare(b.lotNo || '');
-      });
-  }, [receipts, productLookup, categoryLookup, selectedClient, selectedLocation, selectedCategoryFilter]);
-
-  // Items grouped into labeled sections for display
-  const groupedInventoryItems = useMemo(() => {
-    return SECTION_DEFS
-      .map(def => ({
-        ...def,
-        items: inventoryItems.filter(i => def.types.has(i.category?.type)),
-      }))
-      .filter(g => g.items.length > 0);
-  }, [inventoryItems]);
-
-  // Search-filtered view — only affects display, never the underlying physicalCounts data
-  const displayedGroupedItems = useMemo(() => {
-    if (!countSearch.trim()) return groupedInventoryItems;
-    const q = countSearch.toLowerCase();
-    return groupedInventoryItems
-      .map(group => ({
-        ...group,
-        items: group.items.filter(item =>
-          (item.product?.name || '').toLowerCase().includes(q) ||
-          (item.lotNo || '').toLowerCase().includes(q)
-        ),
-      }))
-      .filter(g => g.items.length > 0);
-  }, [groupedInventoryItems, countSearch]);
-
-  // ─── Helpers ──────────────────────────────────────────────────────────────
-
-  const getLocationLabel = (item) => {
-    if (!item) return '—';
-    const loc = locationLookup?.[item.location];
-    const locName = loc?.name || '—';
-    if (item.subLocation) {
-      const sub = subLocationUnifiedLookup?.[item.subLocation];
-      return `${locName} / ${sub?.name || item.subLocation}`;
-    }
-    return locName;
-  };
-
-  const isFinished = (item) => item.category?.type === CATEGORY_TYPES.FINISHED;
-
-  // Returns { sysLabel, expectedCount } — expectedCount is what variance is calculated against
-  const getQtyInfo = (item) => {
-    if (isFinished(item)) {
-      const pallets = item.pallets ?? item.fullPallets ?? 0;
-      const cases = Number(item.quantity) || 0;
-      return {
-        sysLabel: `${pallets} pal / ${cases.toLocaleString()} cs`,
-        expectedCount: Number(pallets) || 0,
-        unit: 'pallets',
-      };
-    }
-    // Raw materials/ingredients are stored as a weight total (e.g. 19,000 lbs)
-    // but counted physically in containers (e.g. 38 barrels). Convert to the
-    // container count so the operator counts the same unit the system expects,
-    // instead of recording a 99% "shortage" by counting barrels against lbs.
-    const qty = Number(item.quantity) || 0;
-    const wpc = Number(item.weightPerContainer || 0);
-    if (wpc > 0) {
-      const containers = qty / wpc;
-      const cu = item.containerUnit || 'containers';
-      return {
-        sysLabel: `${containers.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${cu}`,
-        expectedCount: Number(containers.toFixed(2)),
-        unit: cu,
-      };
-    }
-    const u = item.quantityUnits || 'units';
-    return {
-      sysLabel: `${qty.toLocaleString()} ${u}`,
-      expectedCount: qty,
-      unit: u,
-    };
-  };
-
-  const getVarianceInfo = (item) => {
-    const raw = physicalCounts[item.id];
-    if (raw === undefined || raw === '') return null;
-    const actual = Number(raw);
-    // Non-numeric input means "not counted", not zero — coercing garbage to 0
-    // recorded a phantom 100% shortage.
-    if (Number.isNaN(actual)) return null;
-    const { expectedCount } = getQtyInfo(item);
-    const variance = actual - expectedCount;
-    return {
-      actual,
-      variance,
-      status: Math.abs(variance) < 1 ? 'ok' : variance < 0 ? 'shortage' : 'overage',
-    };
-  };
-
-  // ─── Actions ──────────────────────────────────────────────────────────────
-
-  const handleReset = () => {
-    setCountGenerated(false);
-    setPhysicalCounts({});
-    setCountSearch('');
-    setSubmitted(false);
-    setSubmittedVariances([]);
-  };
-
-  const handleGenerate = () => {
-    setPhysicalCounts({});
-    setCountSearch('');
-    setSubmitted(false);
-    setSubmittedVariances([]);
-    setCountGenerated(true);
-  };
-
-  const handleClearCounts = () => {
-    setPhysicalCounts({});
-  };
-
-  const handleSubmit = async () => {
-    // Warn on partial submissions
-    if (countedCount < inventoryItems.length) {
-      const ok = await confirm(
-        `You have entered counts for ${countedCount} of ${inventoryItems.length} items. The ${inventoryItems.length - countedCount} uncounted item(s) will not be included. Continue?`,
-        { title: 'Partial Count', confirmLabel: 'Submit Anyway' }
-      );
-      if (!ok) return;
-    }
-
-    setSubmitting(true);
-    const items = [];
-    inventoryItems.forEach(item => {
-      const info = getVarianceInfo(item);
-      if (info === null) return;
-      const { expectedCount, unit } = getQtyInfo(item);
-      const vPct = expectedCount > 0
-        ? ((info.variance / expectedCount) * 100).toFixed(2)
-        : '0';
-      items.push({
-        receiptId: item.id,
-        productName: item.product?.name || 'Unknown',
-        lotNo: item.lotNo || '—',
-        expiryDate: item.expiryDate || null,
-        location: getLocationLabel(item),
-        expectedQuantity: expectedCount,
-        actualQuantity: info.actual,
-        unit,
-        variance: info.variance,
-        variancePercent: vPct,
-        status: info.status,
-      });
-    });
-
-    // Items span pallets / barrels / unit counts, so summing quantities across
-    // them is meaningless. Summarize by item-level variance counts instead.
-    const variancesCount = items.filter(i => i.status !== 'ok').length;
-    const shortages = items.filter(i => i.status === 'shortage').length;
-    const overages = items.filter(i => i.status === 'overage').length;
-
-    const summary = {
-      totalItems: items.length,
-      variancesCount,
-      shortages,
-      overages,
-    };
-
-    const result = await saveCycleCount({
-      location: selectedLocation || null,
-      category: null,
-      countDate,
-      items,
-      summary,
-      performedBy: user?.name || user?.username || 'Unknown',
-      performedById: user?.id || 'unknown',
-    });
-
-    if (!result?.success) {
-      // Keep the form editable so the operator's counts aren't lost.
-      addToast(result?.error || 'Failed to save the count. Please try again.', 'error');
-      setSubmitting(false);
-      return;
-    }
-
-    setSubmittedVariances(items);
-    setSubmitted(true);
-    setSubmitting(false);
-  };
-
-  // ─── Excel export ──────────────────────────────────────────────────────────
-
-  const exportVariances = async () => {
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet('Variance Summary');
-    ws.addRow(['Product', 'Lot #', 'Expires', 'Location', 'System Qty', 'Physical Qty', 'Variance', 'Variance %', 'Status']);
-    submittedVariances.forEach(v => {
-      ws.addRow([
-        v.productName,
-        v.lotNo,
-        v.expiryDate ? formatDateKey(v.expiryDate) : '—',
-        v.location,
-        v.expectedQuantity,
-        v.actualQuantity,
-        v.variance,
-        `${v.variancePercent}%`,
-        v.status,
-      ]);
-    });
-    const buffer = await wb.xlsx.writeBuffer();
-    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `cycle-count-${countDate}.xlsx`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  // ─── Print ────────────────────────────────────────────────────────────────
-
-  const printCountSheet = () => {
-    const vendorName = clientGroups.find(g => g.id === selectedClient)?.name || 'All Clients';
-    const locationName = selectedLocation
-      ? (locationLookup?.[selectedLocation]?.name || 'Selected Location')
-      : 'All Locations';
-    const today = countDate || getTodayDateKey();
-
-    let html = `<!DOCTYPE html>
-<html>
-<head>
-  <title>Count Sheet — ${escapeHtml(vendorName)}</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: Arial, sans-serif; font-size: 10pt; padding: 10mm; }
-    h1 { font-size: 12pt; margin-bottom: 1mm; }
-    .info { font-size: 9pt; color: #333; margin-bottom: 5mm; }
-    table { width: 100%; border-collapse: collapse; font-size: 9pt; }
-    th { background: #eee; border: 1px solid #000; padding: 2mm; text-align: center; font-size: 8pt; font-weight: bold; }
-    td { border: 1px solid #000; padding: 2mm; }
-    .num { text-align: right; }
-    .mono { font-family: monospace; }
-    .count-col { width: 22mm; }
-    .notes-col { width: 35mm; }
-    .section-hdr { background: #333; color: #fff; font-weight: bold; font-size: 9pt; padding: 2mm 3mm; border: 1px solid #000; }
-    @media print { body { padding: 0; } @page { size: A4 landscape; margin: 8mm; } }
-  </style>
-</head>
-<body>
-  <h1>Physical Count Sheet — ${escapeHtml(vendorName)}</h1>
-  <div class="info">Date: ${today} &nbsp;|&nbsp; Location: ${escapeHtml(locationName)} &nbsp;|&nbsp; Items: ${inventoryItems.length}</div>
-  <table>
-    <tr>
-      <th>Product</th>
-      <th>Lot #</th>
-      <th>Expires</th>
-      <th>Location</th>
-      <th>Sys Qty</th>
-      <th class="count-col">Physical Count</th>
-      <th class="notes-col">Notes</th>
-    </tr>
-`;
-    groupedInventoryItems.forEach(group => {
-      html += `    <tr><td colspan="7" class="section-hdr">${escapeHtml(group.label)} (${group.items.length})</td></tr>\n`;
-      group.items.forEach(item => {
-        const { sysLabel } = getQtyInfo(item);
-        html += `    <tr>
-      <td>${escapeHtml(item.product?.name) || '—'}</td>
-      <td class="mono">${escapeHtml(item.lotNo) || '—'}</td>
-      <td>${item.expiryDate ? formatDateKey(item.expiryDate) : '—'}</td>
-      <td>${escapeHtml(getLocationLabel(item))}</td>
-      <td class="num">${sysLabel}</td>
-      <td class="count-col"></td>
-      <td class="notes-col"></td>
-    </tr>\n`;
-      });
-    });
-    html += `  </table>
-</body>
-</html>`;
-
-    const win = window.open('', '_blank');
-    win.document.write(html);
-    win.document.close();
-    win.focus();
-    setTimeout(() => win.print(), 250);
-  };
+  // Sheet scope: a room (sub-location — its racks and its default rows like
+  // Cage or staging) or a rack area.
+  const roomOptions = useMemo(() => (locations || [])
+    .flatMap(l => (l.subLocations || []).map(s => ({ id: s.id, label: `${l.name} / ${s.name}` })))
+    .sort((a, b) => a.label.localeCompare(b.label)), [locations]);
+  const areaOptions = useMemo(() => (storageAreas || [])
+    .map(a => ({ id: a.id, label: `${locationLookup?.[a.locationId]?.name || '—'} / ${a.name}` }))
+    .sort((a, b) => a.label.localeCompare(b.label)), [storageAreas, locationLookup]);
 
   // ─── History filter ────────────────────────────────────────────────────────
 
@@ -441,97 +69,11 @@ const CycleCountingPage = () => {
     [filteredCycleCounts],
   );
 
-  // ─── Derived ──────────────────────────────────────────────────────────────
-
-  const countedCount = Object.keys(physicalCounts).filter(
-    k => physicalCounts[k] !== '' && physicalCounts[k] !== undefined
-  ).length;
-
-  // ─── Variance summary panel (computed before render) ──────────────────────
-
-  const varianceSummary = (() => {
-    if (!submitted || submittedVariances.length === 0) return null;
-    const varianceItems = submittedVariances.filter(v => v.status !== 'ok');
-    const shortages = submittedVariances.filter(v => v.status === 'shortage').length;
-    const overages = submittedVariances.filter(v => v.status === 'overage').length;
-    return (
-      <div className="variance-summary-panel">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h2 style={{ margin: 0 }}>Variance Summary</h2>
-          <button className="secondary-button" onClick={exportVariances}>
-            Export Excel
-          </button>
-        </div>
-        <div className="variance-stats">
-          <div className="stat-item">
-            <div className="stat-label">Items Counted</div>
-            <div className="stat-value">{submittedVariances.length}</div>
-          </div>
-          {/* Counts, not summed quantities — items span pallets, barrels and
-              unit counts, so a single total would mix incompatible units. */}
-          <div className="stat-item">
-            <div className="stat-label">Items with Variance</div>
-            <div className={`stat-value ${varianceItems.length > 0 ? 'variance-negative' : ''}`}>
-              {varianceItems.length}
-            </div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-label">Shortages</div>
-            <div className="stat-value">{shortages}</div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-label">Overages</div>
-            <div className="stat-value">{overages}</div>
-          </div>
-        </div>
-        {varianceItems.length > 0 && (
-          <>
-            <h3>Items with Variance</h3>
-            <div className="table-wrapper">
-              <table className="variance-table">
-                <thead>
-                  <tr>
-                    <th>Product</th>
-                    <th>Lot #</th>
-                    <th>Expires</th>
-                    <th>Location</th>
-                    <th className="text-right">System</th>
-                    <th className="text-right">Physical</th>
-                    <th className="text-right">Variance</th>
-                    <th className="text-right">%</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {varianceItems.map((v, idx) => (
-                    <tr key={idx}>
-                      <td>{v.productName}</td>
-                      <td style={{ fontFamily: 'monospace', fontWeight: 600 }}>{v.lotNo}</td>
-                      <td>{v.expiryDate ? formatDateKey(v.expiryDate) : '—'}</td>
-                      <td>{v.location}</td>
-                      <td className="text-right">{v.expectedQuantity.toLocaleString()}{v.unit ? ` ${v.unit}` : ''}</td>
-                      <td className="text-right">{v.actualQuantity.toLocaleString()}{v.unit ? ` ${v.unit}` : ''}</td>
-                      <td className={`text-right variance-${v.status}`}>
-                        {v.variance > 0 ? '+' : ''}{v.variance.toLocaleString()}
-                      </td>
-                      <td className={`text-right variance-${v.status}`}>
-                        {v.variancePercent}%
-                      </td>
-                      <td>
-                        <span className={`status-badge-${v.status}`}>
-                          {v.status === 'shortage' ? '⚠ Shortage' : '⚠ Overage'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-      </div>
-    );
-  })();
+  // A count's "where": a submitted sheet's scope, else its location.
+  const countWhere = (count) => (count.summary?.scope
+    || locationLookup?.[count.location]?.name
+    || count.location
+    || 'All Locations');
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
@@ -546,293 +88,15 @@ const CycleCountingPage = () => {
       <div className="page-content">
         <h1>Cycle Counting / Physical Inventory</h1>
         <p className="page-description">
-          Generate a count sheet for all inventory, fill in physical counts, then submit to record variances.
+          Make a count sheet by rack row, walk it (on screen or printed), and submit — changes apply immediately, like the gun.
         </p>
 
-        {/* ── Setup panel ─────────────────────────────────────────────────── */}
-        <div className="count-setup-panel">
-          <h2>Setup</h2>
-          <div className="form-grid">
-            <label>
-              <span>Client</span>
-              <select
-                value={selectedClient}
-                onChange={e => { setSelectedClient(e.target.value); handleReset(); }}
-              >
-                <option value="">All Clients</option>
-                {clientGroups.map(g => (
-                  <option key={g.id} value={g.id}>{g.name}</option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              <span>Category Type</span>
-              <select
-                value={selectedCategoryFilter}
-                onChange={e => { setSelectedCategoryFilter(e.target.value); handleReset(); }}
-              >
-                <option value="all">All (FG + Ingredients + Packaging)</option>
-                <option value="finished">Finished Goods only</option>
-                <option value="ingredient">Ingredients only</option>
-                <option value="packaging">Packaging only</option>
-              </select>
-            </label>
-
-            <label>
-              <span>Location (optional)</span>
-              <select
-                value={selectedLocation}
-                onChange={e => { setSelectedLocation(e.target.value); handleReset(); }}
-              >
-                <option value="">All Locations</option>
-                {locations.map(l => (
-                  <option key={l.id} value={l.id}>{l.name}</option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              <span>Count Date</span>
-              <input
-                type="date"
-                value={countDate}
-                onChange={e => setCountDate(e.target.value)}
-              />
-            </label>
-          </div>
-
-          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
-            <button className="primary-button" onClick={handleGenerate}>
-              Generate Count Sheet ({inventoryItems.length} items)
-            </button>
-            {countGenerated && inventoryItems.length > 0 && (
-              <button className="secondary-button" onClick={printCountSheet}>
-                🖨 Print Sheet
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* ── Count sheet ─────────────────────────────────────────────────── */}
-        {countGenerated && inventoryItems.length > 0 && (
-          <div className="count-sheet-panel">
-            <div className="panel-header">
-              <h2>
-                Count Sheet
-                {submitted && <span style={{ color: '#16a34a', marginLeft: '8px', fontSize: '14px' }}>✓ Submitted</span>}
-              </h2>
-              <span style={{ fontSize: '14px', color: '#6b7280' }}>
-                {countedCount} / {inventoryItems.length} counted
-              </span>
-            </div>
-
-            {/* Search bar */}
-            <div style={{ marginBottom: '12px' }}>
-              <input
-                type="text"
-                placeholder="Search by product name or lot #…"
-                value={countSearch}
-                onChange={e => setCountSearch(e.target.value)}
-                style={{
-                  padding: '8px 12px',
-                  border: '1px solid #d1d5db',
-                  borderRadius: '6px',
-                  fontSize: '14px',
-                  width: '100%',
-                  maxWidth: '360px',
-                }}
-              />
-              {countSearch && (
-                <span style={{ marginLeft: '8px', fontSize: '13px', color: '#6b7280' }}>
-                  Showing {displayedGroupedItems.reduce((s, g) => s + g.items.length, 0)} of {inventoryItems.length}
-                </span>
-              )}
-            </div>
-
-            {/* Desktop table */}
-            <div className="cc-table-view">
-              <div className="table-wrapper">
-                <table className="count-sheet-table">
-                  <thead>
-                    <tr>
-                      <th>Product</th>
-                      <th>Lot #</th>
-                      <th>Expires</th>
-                      <th>Location</th>
-                      <th className="text-right">System Qty</th>
-                      <th>Physical Count</th>
-                      {submitted && <th className="text-right">Variance</th>}
-                      <th>Hold</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {displayedGroupedItems.map(group => (
-                      <React.Fragment key={group.key}>
-                        <tr className="cc-section-header-row">
-                          <td colSpan={submitted ? 8 : 7} className="cc-section-header-cell">
-                            {group.label}
-                            <span className="cc-section-count">{group.items.length} items</span>
-                          </td>
-                        </tr>
-                        {group.items.map(item => {
-                          const { sysLabel } = getQtyInfo(item);
-                          const submittedItem = submitted
-                            ? submittedVariances.find(v => v.receiptId === item.id)
-                            : null;
-                          const isExpired = item.expiryDate && toDateKey(item.expiryDate) < getTodayDateKey();
-                          return (
-                            <tr key={item.id} className={item.hold ? 'cc-row-hold' : ''}>
-                              <td>{item.product?.name || '—'}</td>
-                              <td style={{ fontFamily: 'monospace', fontWeight: 600 }}>
-                                {item.lotNo || '—'}
-                              </td>
-                              <td className={isExpired ? 'cc-expired' : ''}>
-                                {item.expiryDate ? formatDateKey(item.expiryDate) : '—'}
-                              </td>
-                              <td>{getLocationLabel(item)}</td>
-                              <td className="text-right">{sysLabel}</td>
-                              <td>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="1"
-                                  value={physicalCounts[item.id] ?? ''}
-                                  onChange={e => setPhysicalCounts(prev => ({
-                                    ...prev,
-                                    [item.id]: e.target.value,
-                                  }))}
-                                  className="count-input"
-                                  disabled={submitted}
-                                  placeholder="—"
-                                />
-                              </td>
-                              {submitted && (
-                                <td className={`text-right ${submittedItem ? `variance-${submittedItem.status}` : ''}`}>
-                                  {submittedItem
-                                    ? `${submittedItem.variance > 0 ? '+' : ''}${submittedItem.variance}`
-                                    : '—'}
-                                </td>
-                              )}
-                              <td>
-                                {item.hold
-                                  ? <span className="hold-badge">HOLD</span>
-                                  : <span style={{ color: '#9ca3af' }}>—</span>}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </React.Fragment>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* Mobile card view */}
-            <div className="cc-card-view">
-              {displayedGroupedItems.map(group => (
-                <div key={group.key}>
-                  <div className="cc-section-header-mobile">
-                    {group.label}
-                    <span className="cc-section-count">{group.items.length} items</span>
-                  </div>
-                  {group.items.map(item => {
-                    const { sysLabel } = getQtyInfo(item);
-                    const submittedItem = submitted
-                      ? submittedVariances.find(v => v.receiptId === item.id)
-                      : null;
-                    const isExpired = item.expiryDate && toDateKey(item.expiryDate) < getTodayDateKey();
-                    return (
-                      <div key={item.id} className={`cc-card${item.hold ? ' cc-card-hold' : ''}`}>
-                        <div className="cc-card-header">
-                          <span className="cc-card-product">{item.product?.name || '—'}</span>
-                          {item.hold && <span className="hold-badge">HOLD</span>}
-                        </div>
-                        <div className="cc-card-meta">
-                          <div className="cc-card-meta-row">
-                            <span className="cc-card-label">Lot #</span>
-                            <span className="cc-card-value cc-mono">{item.lotNo || '—'}</span>
-                          </div>
-                          <div className="cc-card-meta-row">
-                            <span className="cc-card-label">Expires</span>
-                            <span className={`cc-card-value ${isExpired ? 'cc-expired' : ''}`}>
-                              {item.expiryDate ? formatDateKey(item.expiryDate) : '—'}
-                            </span>
-                          </div>
-                          <div className="cc-card-meta-row">
-                            <span className="cc-card-label">Location</span>
-                            <span className="cc-card-value">{getLocationLabel(item)}</span>
-                          </div>
-                          <div className="cc-card-meta-row">
-                            <span className="cc-card-label">System Qty</span>
-                            <span className="cc-card-value cc-bold">{sysLabel}</span>
-                          </div>
-                        </div>
-                        <div className="cc-card-count-row">
-                          <label className="cc-card-count-label">Physical Count</label>
-                          <input
-                            type="number"
-                            min="0"
-                            step="1"
-                            value={physicalCounts[item.id] ?? ''}
-                            onChange={e => setPhysicalCounts(prev => ({
-                              ...prev,
-                              [item.id]: e.target.value,
-                            }))}
-                            className="cc-count-input-large"
-                            disabled={submitted}
-                            placeholder="Enter count"
-                          />
-                          {submitted && submittedItem && (
-                            <span className={`cc-card-variance variance-${submittedItem.status}`}>
-                              {submittedItem.variance > 0 ? '+' : ''}{submittedItem.variance}
-                              {' '}({submittedItem.variancePercent}%)
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-
-            {!submitted && (
-              <div className="count-actions">
-                {countedCount > 0 && (
-                  <button className="secondary-button" onClick={handleClearCounts}>
-                    Clear Counts
-                  </button>
-                )}
-                <button
-                  className="primary-button"
-                  onClick={handleSubmit}
-                  disabled={submitting || countedCount === 0}
-                >
-                  {submitting
-                    ? 'Submitting…'
-                    : `Submit Count (${countedCount} of ${inventoryItems.length} entered)`}
-                </button>
-              </div>
-            )}
-
-            {submitted && submittedVariances.length > 0 && (
-              <div className="count-submitted-banner">
-                <strong>✓ Count submitted.</strong> {submittedVariances.filter(v => v.status !== 'ok').length} variance(s) recorded.
-              </div>
-            )}
-          </div>
-        )}
-
-        {countGenerated && inventoryItems.length === 0 && (
-          <div className="empty-state">
-            No active inventory found for the selected filters.
-          </div>
-        )}
-
-        {/* ── Variance summary ─────────────────────────────────────────────── */}
-        {varianceSummary}
+        <CountSheetPanel
+          clientGroups={clientGroups}
+          roomOptions={roomOptions}
+          areaOptions={areaOptions}
+          onSubmitted={refreshCycleCounts}
+        />
 
         {/* ── Count history ────────────────────────────────────────────────── */}
         <div className="count-history-panel">
@@ -951,7 +215,6 @@ const CycleCountingPage = () => {
                       );
                     }
                     const count = entry.count;
-                    const loc = locationLookup?.[count.location];
                     const variances = count.summary?.variancesCount ?? 0;
                     const total = count.summary?.totalItems ?? 0;
                     return (
@@ -961,7 +224,7 @@ const CycleCountingPage = () => {
                         style={{ cursor: 'pointer' }}
                       >
                         <td>{formatDate(count.countDate)}</td>
-                        <td>Count sheet · {loc?.name || (count.location ? count.location : 'All Locations')}</td>
+                        <td>{entry.sheetNo ? <>Count sheet <span className="cs-sheet-no">{entry.sheetNo}</span></> : 'Count sheet'} · {countWhere(count)}</td>
                         <td>{count.performedBy || '—'}</td>
                         <td>{count.createdAt ? formatTime(count.createdAt) : '—'}</td>
                         <td className="text-right">{total} item{total === 1 ? '' : 's'}</td>
@@ -992,7 +255,10 @@ const CycleCountingPage = () => {
           <div className="modal-overlay" onClick={() => setSelectedCycleCount(null)}>
             <div className="modal-content" onClick={e => e.stopPropagation()}>
               <div className="modal-header">
-                <h2>Count Details — {formatDate(selectedCycleCount.countDate)}</h2>
+                <h2>
+                  {selectedCycleCount.summary?.sheet_no ? `${selectedCycleCount.summary.sheet_no} — ` : 'Count Details — '}
+                  {formatDate(selectedCycleCount.countDate)}
+                </h2>
                 <button className="close-button" onClick={() => setSelectedCycleCount(null)}>×</button>
               </div>
               <div className="modal-body">
@@ -1005,9 +271,7 @@ const CycleCountingPage = () => {
                     </div>
                     <div className="detail-item">
                       <span className="detail-label">Location</span>
-                      <span className="detail-value">
-                        {locationLookup?.[selectedCycleCount.location]?.name || 'All Locations'}
-                      </span>
+                      <span className="detail-value">{countWhere(selectedCycleCount)}</span>
                     </div>
                     <div className="detail-item">
                       <span className="detail-label">Performed By</span>
@@ -1033,6 +297,16 @@ const CycleCountingPage = () => {
                     </div>
                   </div>
                 </div>
+
+                {selectedCycleCount.summary?.skipped?.some(s => s.licence_number) && (
+                  <div className="detail-section">
+                    <h3>Pallets not applied</h3>
+                    <p className="cs-muted">
+                      {selectedCycleCount.summary.skipped.filter(s => s.licence_number)
+                        .map(s => `${s.licence_number} (${s.row_name}): ${s.reason}`).join(' · ')}
+                    </p>
+                  </div>
+                )}
 
                 {selectedCycleCount.items?.length > 0 && (
                   <div className="detail-section">
@@ -1066,14 +340,16 @@ const CycleCountingPage = () => {
                               </td>
                               <td>
                                 <span className={`status-badge-${item.status}`}>
-                                  {item.status === 'ok' ? '✓' : '⚠'}
+                                  {item.status === 'ok' ? '✓' : item.status === 'skipped' ? 'Skipped' : item.status === 'recorded' ? 'Recorded only' : '⚠'}
                                 </span>
                               </td>
                             </tr>
-                            {/* Gun row check: the pallet numbers behind the difference. */}
-                            {(item.notHere?.length > 0 || item.arrived?.length > 0) && (
+                            {/* Gun row check: the pallet numbers behind the difference.
+                                Count sheet: why a line was not applied. */}
+                            {(item.notHere?.length > 0 || item.arrived?.length > 0 || item.skipReason) && (
                               <tr>
                                 <td colSpan={8} style={{ fontSize: '12px', color: '#6b7280' }}>
+                                  {item.skipReason && <>Not applied: {item.skipReason}. </>}
                                   {item.notHere?.length > 0 && <>Not here (now missing): {item.notHere.join(', ')}. </>}
                                   {item.arrived?.length > 0 && <>Found here: {item.arrived.map((a) => `${a.licence_number} (${a.result})`).join(', ')}.</>}
                                 </td>

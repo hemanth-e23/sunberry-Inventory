@@ -145,6 +145,7 @@ export const AppDataProvider = ({ children }) => {
     approveAdjustment: inventory.approveAdjustment,
     rejectAdjustment: inventory.rejectAdjustment,
     cycleCounts: inventory.cycleCounts,
+    refreshCycleCounts: inventory.refreshCycleCounts,
     saveCycleCount: inventory.saveCycleCount,
 
     // Reporting

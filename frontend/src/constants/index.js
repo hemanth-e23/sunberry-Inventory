@@ -147,6 +147,24 @@ export const CYCLE_CHECK_CONFIRM_OVER = 5;
 // Mirrors backend constants.CYCLE_CHECK_SESSION_IDLE_MINUTES.
 export const CYCLE_CHECK_SESSION_IDLE_MINUTES = 60;
 
+// Count sheet by rack row (Cycle Counting page). Mirrors backend
+// constants.COUNT_SHEET_* / CYCLE_CHECK_SOURCE_SHEET.
+export const COUNT_SHEET = {
+  KIND: 'count_sheet',
+  STATUS_OPEN: 'open',
+  STATUS_SUBMITTED: 'submitted',
+  TYPE_FG: 'fg',
+  TYPE_RM: 'rm',
+  TYPE_PACKAGING: 'packaging',
+  // summary.source on a gun row check written by a sheet submit
+  SOURCE_SHEET: 'sheet',
+};
+export const COUNT_SHEET_TYPE_LABELS = {
+  fg: 'Finished goods',
+  rm: 'Raw + ingredients',
+  packaging: 'Packaging',
+};
+
 // The closing scan's Skip button appears after this many seconds (§3.3).
 export const CLOSING_SCAN_SKIP_SECONDS = 10;
 

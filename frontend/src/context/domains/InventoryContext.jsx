@@ -193,30 +193,32 @@ export const InventoryProvider = ({ children }) => {
 
   // ─── Fetch cycle counts ─────────────────────────────────────────────────────
 
+  // Also called by the Cycle Counting page after a count sheet is submitted:
+  // the server writes those records, so the list has to be re-read.
+  const refreshCycleCounts = useCallback(async () => {
+    try {
+      const response = await apiClient.get('/inventory/cycle-counts');
+      const counts = response.data.map((count) => ({
+        id: count.id,
+        location: count.location_id,
+        category: count.category_id,
+        countDate: count.count_date,
+        items: count.items,
+        summary: count.summary,
+        performedBy: count.performed_by,
+        performedById: count.performed_by_id,
+        createdAt: count.created_at,
+      }));
+      setCycleCounts(counts);
+    } catch (error) {
+      console.error('Error fetching cycle counts:', error);
+    }
+  }, []);
+
   useEffect(() => {
     if (authLoading || !isAuthenticated) return;
-
-    const fetchCycleCounts = async () => {
-      try {
-        const response = await apiClient.get('/inventory/cycle-counts');
-        const counts = response.data.map((count) => ({
-          id: count.id,
-          location: count.location_id,
-          category: count.category_id,
-          countDate: count.count_date,
-          items: count.items,
-          summary: count.summary,
-          performedBy: count.performed_by,
-          performedById: count.performed_by_id,
-          createdAt: count.created_at,
-        }));
-        setCycleCounts(counts);
-      } catch (error) {
-        console.error('Error fetching cycle counts:', error);
-      }
-    };
-    fetchCycleCounts();
-  }, [authLoading, isAuthenticated, selectedWarehouse]);
+    refreshCycleCounts();
+  }, [authLoading, isAuthenticated, selectedWarehouse, refreshCycleCounts]);
 
   // ─── Fetch forklift requests ────────────────────────────────────────────────
 
@@ -1158,6 +1160,7 @@ export const InventoryProvider = ({ children }) => {
     inventoryHoldActions,
     inventoryAdjustments,
     cycleCounts,
+    refreshCycleCounts,
     forkliftRequests,
     submitTransfer,
     updateTransfer,
