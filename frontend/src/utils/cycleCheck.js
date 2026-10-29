@@ -179,6 +179,7 @@ export const groupCountHistory = (counts = [], idleMinutes = 60) => {
     .map((c) => {
       // A sheet is dated and timed by its submit, not by when it was printed.
       const at = (isSheet(c) && c.summary.submitted_at) || c.createdAt || null;
+      const stats = countItemStats(c.items);
       return {
         type: 'count',
         key: c.id,
@@ -186,7 +187,10 @@ export const groupCountHistory = (counts = [], idleMinutes = 60) => {
         sheetNo: isSheet(c) ? c.summary.sheet_no || null : null,
         at,
         sortAt: ts(at) || ts(c.countDate),
-        ...countItemStats(c.items),
+        ...stats,
+        // FG licence skips (shipped, other warehouse, …) live only in the
+        // sheet summary, not as items; RM skips are in both.
+        skipped: Math.max(stats.skipped, (c.summary?.skipped || []).length),
         warnings: (c.summary?.warnings || []).length,
       };
     });
@@ -334,7 +338,9 @@ export const sheetDraftStats = (sheet, draft) => {
   return {
     rowsTotal: rows.length,
     rowsCounted: counted.length,
-    emptyConfirmed: counted.filter((r) => r.empty).length,
+    // An empty row with something written under "Found here" was not empty.
+    emptyConfirmed: counted.filter((r) => r.empty && !String(draft.extras?.[r.row_id] || '').trim()).length,
+    emptyWithFinds: counted.filter((r) => r.empty && String(draft.extras?.[r.row_id] || '').trim()).length,
     blankLines,
     badLines,
   };
@@ -367,6 +373,11 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 export const submitConfirmLines = ({ stats, payload, extras, fg }) => {
   const lines = [`${stats.rowsCounted} of ${stats.rowsTotal} rows marked counted. Rows not marked are left as they are.`];
   if (stats.emptyConfirmed) lines.push(`${plural(stats.emptyConfirmed, 'empty row')} confirmed empty.`);
+  if (stats.emptyWithFinds) {
+    lines.push(fg
+      ? `${plural(stats.emptyWithFinds, 'row')} the system had as empty had pallets found in it.`
+      : `${plural(stats.emptyWithFinds, 'row')} the system had as empty had something found — recorded as a note only, stock is not changed.`);
+  }
   const notHere = payload.rows.reduce((n, r) => n + (r.not_here_pallet_ids?.length || 0), 0);
   if (notHere) lines.push(`${plural(notHere, 'pallet')} ticked ✗ will be marked MISSING.`);
   if (fg) {

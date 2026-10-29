@@ -87,7 +87,7 @@ describe('count sheet payload', () => {
       legacy: [{ receipt_id: 'rc-1', counted: 480 }],
     });
     expect(sheetDraftStats(rmSheet, draft)).toEqual({
-      rowsTotal: 1, rowsCounted: 1, emptyConfirmed: 0, blankLines: 1, badLines: 0,
+      rowsTotal: 1, rowsCounted: 1, emptyConfirmed: 0, emptyWithFinds: 0, blankLines: 1, badLines: 0,
     });
     expect(sheetDraftStats(rmSheet, { ...draft, counts: { 'lp-1': '8', 'lp-2': '1.5' } }).badLines).toBe(1);
   });
@@ -138,7 +138,16 @@ describe('empty rows', () => {
     const r = { rowCounted: { 'r-c': true }, notHere: [], extras: { 'r-c': ' 2 drums MG-9 ' }, counts: {}, legacy: {} };
     expect(sheetSubmitPayload(rmE, r).rows).toEqual([{ row_id: 'r-c', counted: true, lines: [], found_note: '2 drums MG-9' }]);
     expect(sheetSubmitPayload(rmE, { ...r, extras: {} }).rows).toEqual([{ row_id: 'r-c', counted: true, lines: [] }]);
-    expect(sheetDraftStats(rmE, r).emptyConfirmed).toBe(1);
+    // Something written under "Found here" means the row was not empty.
+    expect(sheetDraftStats(rmE, r)).toMatchObject({ emptyConfirmed: 0, emptyWithFinds: 1 });
+    expect(sheetDraftStats(rmE, { ...r, extras: {} })).toMatchObject({ emptyConfirmed: 1, emptyWithFinds: 0 });
+  });
+
+  it('the submit confirm does not call a row with finds "confirmed empty"', () => {
+    const d = { rowCounted: { 'dock-1': true }, notHere: [], extras: { 'dock-1': 'l1-mango-015' }, counts: {}, legacy: {} };
+    const lines = submitConfirmLines({ stats: sheetDraftStats(fgE, d), payload: sheetSubmitPayload(fgE, d), extras: [], fg: true });
+    expect(lines.join(' ')).not.toContain('confirmed empty');
+    expect(lines.join(' ')).toContain('had pallets found in it');
   });
 
   it('prints "Empty — system shows nothing here" with a Confirmed empty box and a Found here line', () => {
@@ -193,6 +202,15 @@ describe('history of a submitted sheet', () => {
     }]);
     expect(e.at).toBe('2026-10-29T15:30:00+00:00');
     expect(e).toMatchObject({ ok: 1, skipped: 1, notHere: 2, found: 1, movedIn: 1, created: 1, warnings: 1 });
+  });
+
+  it('FG licence skips kept only in the summary still count as skipped, so the sheet is not OK', () => {
+    const [e] = groupCountHistory([{
+      id: 'f', performedById: 'c', countDate: '2026-10-29', createdAt: at(0), items: [{ status: 'ok', notHere: [], arrived: [] }],
+      summary: { kind: 'count_sheet', status: 'submitted', sheet_no: 'CC-3', submitted_at: '2026-10-29T15:30:00+00:00',
+        skipped: [{ row_name: 'AA111', licence_number: 'L-008', reason: 'shipped' }] },
+    }]);
+    expect(e.skipped).toBe(1);
   });
 
   it('a discarded sheet never shows', () => {

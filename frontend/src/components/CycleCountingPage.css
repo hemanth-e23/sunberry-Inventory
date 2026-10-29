@@ -617,6 +617,14 @@
     font-weight: 700;
 }
 
+/* The global .status-warning (index.css) paints an amber pill; here the
+   status is plain text. */
+.cycle-counting-page .status-ok,
+.cycle-counting-page .status-warning {
+    background: none;
+    white-space: nowrap;
+}
+
 /* Enhanced Variance Stats */
 .cycle-counting-page .variance-stats {
     background: linear-gradient(135deg, rgba(255, 107, 53, 0.02) 0%, rgba(255, 210, 63, 0.02) 100%);
