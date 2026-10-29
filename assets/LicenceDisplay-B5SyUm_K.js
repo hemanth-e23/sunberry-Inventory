@@ -1,0 +1,1 @@
+import{aU as l,j as s}from"./index-Ds99f64_.js";const p=({licence:i,className:a=""})=>{const{prefix:c,suffix:e}=l(i);return s.jsxs("span",{className:`licence-display ${a}`.trim(),children:[s.jsx("span",{className:"licence-display-prefix",children:c}),e&&s.jsx("span",{className:"licence-display-suffix",children:e})]})};export{p as L};
