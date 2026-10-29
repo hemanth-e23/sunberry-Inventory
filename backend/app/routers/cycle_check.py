@@ -77,6 +77,9 @@ class SheetRowCount(BaseSchema):
     not_here_pallet_ids: List[str] = Field(default_factory=list, max_length=2000)
     extra_licences: List[str] = Field(default_factory=list, max_length=500)
     lines: List[SheetLineCount] = Field(default_factory=list, max_length=2000)
+    # A raw / packaging row the system had as empty: what was found there,
+    # in the counter's words. Recorded only.
+    found_note: Optional[str] = Field(None, max_length=500)
 
 
 class SheetLegacyCount(BaseSchema):
@@ -172,6 +175,19 @@ def count_sheet_preview(
         _http(e)
 
 
+@router.get("/cycle-check/sheet-scopes")
+def count_sheet_scopes(
+    kind: str = Query(..., max_length=20),
+    client_id: Optional[str] = Query(None, max_length=50),
+    db: Session = Depends(get_db), current_user=Depends(_require_checker),
+):
+    """Rooms and rack areas holding stock of that type (the sheet's filter)."""
+    try:
+        return sheets.sheet_scopes(db, _write_warehouse(current_user), kind, client_id)
+    except Exception as e:  # noqa: BLE001
+        _http(e)
+
+
 @router.post("/cycle-check/sheets")
 def count_sheet_create(data: SheetCreate, db: Session = Depends(get_db), current_user=Depends(_require_checker)):
     try:
@@ -211,6 +227,18 @@ def count_sheet_submit(
         out = sheets.submit_sheet(
             db, sheet_id, data.model_dump(), current_user, _write_warehouse(current_user),
         )
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        _http(e)
+    db.commit()
+    return out
+
+
+@router.post("/cycle-check/sheets/{sheet_id}/discard")
+def count_sheet_discard(sheet_id: str, db: Session = Depends(get_db), current_user=Depends(_require_checker)):
+    """Throw away an open sheet. Nothing is applied."""
+    try:
+        out = sheets.discard_sheet(db, sheet_id, current_user, _write_warehouse(current_user))
     except Exception as e:  # noqa: BLE001
         db.rollback()
         _http(e)

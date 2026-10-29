@@ -95,11 +95,31 @@ def row_index(db: Session, warehouse_id: Optional[str], active_only: bool = True
             parent_name, loc_id = subs[r.sub_location_id]
         if warehouse_id and locs.get(loc_id) != warehouse_id:
             continue
+        room_name = subs[room_id][0] if room_id in subs else None
+        # Two rack areas can share a name ("FG" in two rooms): the label
+        # carries the room too.
+        label = parent_name or ""
+        if r.storage_area_id in areas and room_name and room_name != parent_name:
+            label = f"{room_name} / {parent_name}"
         out[r.id] = {
-            "id": r.id, "name": r.name, "area_name": parent_name or "", "barcode": r.barcode,
+            "id": r.id, "name": r.name, "area_name": parent_name or "", "area_label": label,
+            "room_name": room_name, "barcode": r.barcode,
             "sub_location_id": room_id, "storage_area_id": r.storage_area_id,
+            "is_active": bool(r.is_active),
         }
     return out
+
+
+_NUM_RE = re.compile(r"(\d+)")
+
+
+def natural_key(s: Optional[str]) -> tuple:
+    """Sort key that reads numbers as numbers: AA31 before AA101, ROW 2
+    before ROW 10. Case-insensitive."""
+    return tuple(
+        (0, int(part), "") if part.isdigit() else (1, 0, part.lower())
+        for part in _NUM_RE.split(s or "") if part
+    )
 
 
 def list_rows(db: Session, warehouse_id: Optional[str]) -> list:
@@ -109,7 +129,7 @@ def list_rows(db: Session, warehouse_id: Optional[str]) -> list:
         {"id": r["id"], "name": r["name"], "area_name": r["area_name"], "barcode": r["barcode"]}
         for r in row_index(db, warehouse_id).values()
     ]
-    out.sort(key=lambda x: (x["area_name"], x["name"]))
+    out.sort(key=lambda x: (natural_key(x["area_name"]), natural_key(x["name"])))
     return out
 
 
@@ -561,6 +581,33 @@ def _lot_sequences(db: Session, lot: str, product_id: str, warehouse_id: Optiona
     if warehouse_id:
         q = q.filter(or_(PalletLicence.warehouse_id == warehouse_id, PalletLicence.warehouse_id.is_(None)))
     return sorted({int(s) for (s,) in q.all()})
+
+
+def lot_gap_warning(
+    db: Session, product_id: str, lot: str, new: List[tuple], warehouse_id: Optional[str],
+) -> Optional[str]:
+    """`new` = [(sequence, "created" | "found")] of pallets of one lot +
+    product a count just put in stock. When lower numbers of that lot have
+    never been in the system at all, say so — they may be standing somewhere
+    unscanned. Only a warning: nothing is created for them."""
+    if not new:
+        return None
+    recorded = set(_lot_sequences(db, lot, product_id, warehouse_id))
+    top = max(s for s, _ in new)
+    gaps = [n for n in range(1, top) if n not in recorded]
+    if not gaps:
+        return None
+    parts = []
+    for verb in ("created", "found"):
+        nums = sorted({s for s, v in new if v == verb})
+        if nums:
+            parts.append(f"{'pallet' if len(nums) == 1 else 'pallets'} {', '.join(str(n) for n in nums)} {verb}")
+    head = ", ".join(parts)
+    head = head[0].upper() + head[1:]
+    which = _seq_ranges(gaps)[1:]   # without the leading '#'
+    have = "has" if len(gaps) == 1 else "have"
+    return (f"{head} — {'pallet' if len(gaps) == 1 else 'pallets'} {which} of this lot "
+            f"{have} never been in the system. Look for them.")
 
 
 def _parse_sticker(db: Session, licence: str):

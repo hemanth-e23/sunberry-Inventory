@@ -18,8 +18,10 @@ import pytest
 
 from app.enums import PalletStatus
 from app.models import (
-    CycleCount, LotPlacement, LotPlacementEvent, PalletLicence, Receipt, User, Warehouse,
+    Category, CategoryGroup, CycleCount, LotPlacement, LotPlacementEvent, PalletLicence, Product,
+    Receipt, StorageArea, StorageRow, SubLocation, User, Warehouse,
 )
+from app.services import cycle_check_service as ccs
 from app.services import count_sheet_service as sheets
 from app.services import lot_placement_service as lps
 from app.services.report_builders import build_cycle_count_report
@@ -58,14 +60,17 @@ def test_fg_sheet_groups_by_row_then_product_lot_with_licences(db_session, fg):
     db = db_session
     _fg_stock(db)
     sheet = sheets.build_sheet(db, "wh-a", "fg")
-    assert [r["row_name"] for r in sheet["rows"]] == ["FG-01", "FG-02"]
-    row1 = sheet["rows"][0]
+    stocked = [r for r in sheet["rows"] if not r["empty"]]
+    assert [r["row_name"] for r in stocked] == ["FG-01", "FG-02"]
+    row1 = stocked[0]
     assert row1["area_name"] == "FG"
+    # The area label names its room: two areas called "FG" can be told apart.
+    assert row1["area_label"] == "Sub / FG"
     assert [(g["lot_number"], g["count"]) for g in row1["lines"]] == [(LOT, 2), (LOT_2, 2)]
     assert [p["licence_number"] for p in row1["lines"][0]["pallets"]] == [
         f"{LOT}-MANGO-001", f"{LOT}-MANGO-002",
     ]
-    # Empty rows (dock, partials) are not on the sheet; RM sheets see no FG.
+    # RM sheets see no FG — and no empty FG racks either.
     assert sheets.build_sheet(db, "wh-a", "rm")["rows"] == []
 
 
@@ -234,7 +239,8 @@ def test_api_open_to_submitted_and_other_warehouse_reads_404(client, db_session,
     db.commit()
 
     preview = client.get("/api/scanner/cycle-check/sheet?kind=fg", headers=_h("clerk"))
-    assert preview.status_code == 200 and len(preview.json()["rows"]) == 2
+    assert preview.status_code == 200
+    assert [r["row_name"] for r in preview.json()["rows"] if not r["empty"]] == ["FG-01", "FG-02"]
     assert client.get("/api/scanner/cycle-check/sheet?kind=nope", headers=_h("clerk")).status_code == 400
 
     made = client.post("/api/scanner/cycle-check/sheets", headers=_h("clerk"), json={"kind": "fg"})
@@ -260,3 +266,180 @@ def test_api_open_to_submitted_and_other_warehouse_reads_404(client, db_session,
     again = client.post(f"/api/scanner/cycle-check/sheets/{sid}/submit", headers=_h("clerk"),
                         json={"rows": []})
     assert again.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Round 2 (2026-10-29): empty rows, discard, sequence-gap warning, scopes
+# ---------------------------------------------------------------------------
+
+def _other_area(db, rows=(("x-1", "X-01"),), area="area-2", sub="sub-2", room="Cold room", area_name="FG"):
+    db.add(SubLocation(id=sub, name=room, location_id="loc-1"))
+    db.add(StorageArea(id=area, name=area_name, location_id="loc-1", sub_location_id=sub))
+    for rid, name in rows:
+        db.add(StorageRow(id=rid, name=name, sub_location_id=sub, storage_area_id=area,
+                          pallet_capacity=30, occupied_pallets=0, occupied_cases=0, is_active=True))
+
+
+def test_fg_empty_rows_only_from_areas_holding_fg_and_only_truly_empty(db_session, fg):
+    db = db_session
+    _fg_stock(db)
+    # Another rack area with no FG at all: none of its rows are listed.
+    _other_area(db)
+    # Same area: a switched-off empty row (left out), a row holding another
+    # client's pallet (not "empty"), and number-named rows to sort.
+    db.add(StorageRow(id="row-off", name="FG-99", sub_location_id="sub-1", storage_area_id="area-1",
+                      pallet_capacity=30, is_active=False))
+    for rid, name in (("row-10", "ROW 10"), ("row-2b", "ROW 2")):
+        db.add(StorageRow(id=rid, name=name, sub_location_id="sub-1", storage_area_id="area-1",
+                          pallet_capacity=30, is_active=True))
+    db.add(CategoryGroup(id="grp-a", name="Sunberry"))
+    db.add(CategoryGroup(id="grp-b", name="Arizona"))
+    db.query(Category).get("cat-fg").parent_id = "grp-a"
+    db.add(Category(id="cat-fg-b", name="FG B", type="finished", parent_id="grp-b"))
+    db.add(Product(id="p-guava", name="Guava", category_id="cat-fg-b", short_code="GUAVA",
+                   is_active=True, default_cases_per_pallet=40))
+    db.add(PalletLicence(id="pl-g-1", licence_number="MP1-GUAVA-001", product_id="p-guava",
+                         lot_number="MP1", sequence=1, cases=40, status=PalletStatus.IN_STOCK.value,
+                         storage_row_id="row-10", storage_area_id="area-1", warehouse_id="wh-a",
+                         is_held=False, is_deleted=False))
+    db.commit()
+
+    sheet = sheets.build_sheet(db, "wh-a", "fg", client_id="grp-a")
+    names = [(r["row_name"], r["empty"]) for r in sheet["rows"]]
+    # Natural order (ROW 2 before ROW 10 is moot: ROW 10 holds Arizona stock,
+    # so it is neither a line nor "empty").
+    assert names == [("DOCK 1", True), ("FG-01", False), ("FG-02", False),
+                     ("PARTIALS", True), ("ROW 2", True)]
+    assert all(r["lines"] == [] for r in sheet["rows"] if r["empty"])
+
+    # Without the client filter ROW 10 is a stocked row, sorted after ROW 2.
+    allc = [r["row_name"] for r in sheets.build_sheet(db, "wh-a", "fg")["rows"]]
+    assert allc.index("ROW 2") < allc.index("ROW 10")
+    assert "X-01" not in allc and "FG-99" not in allc
+
+    made = sheets.create_open_sheet(db, user=fg["clerk"], warehouse_id="wh-a", kind="fg", client_id="grp-a")
+    assert made["summary"]["empty_rows"] == 3
+
+
+def test_found_licence_in_empty_fg_row_moves_or_creates_that_one_pallet_and_warns_of_gap(db_session, fg):
+    db = db_session
+    _fg_stock(db)
+    _pallet(db, 9, status=PalletStatus.SHIPPED, row=None)
+    db.commit()
+    sheet = sheets.create_open_sheet(db, user=fg["clerk"], warehouse_id="wh-a", kind="fg")
+    db.commit()
+    assert _sheet_row(sheet, "DOCK 1")["empty"] is True
+    out = sheets.submit_sheet(db, sheet["id"], {"rows": [
+        # #3 (system: FG-02) is moved; #12 never existed → created alone;
+        # #9 was shipped → not changed, reported.
+        {"row_id": "dock-1", "counted": True,
+         "extra_licences": [f"{LOT}-MANGO-003", f"{LOT}-MANGO-012", f"{LOT}-MANGO-009"]},
+        # Confirmed empty, nothing found.
+        {"row_id": "row-part", "counted": True},
+    ]}, fg["clerk"], "wh-a")
+    db.commit()
+
+    assert db.query(PalletLicence).get(f"pl-{LOT}-3").storage_row_id == "dock-1"
+    created = db.query(PalletLicence).filter_by(licence_number=f"{LOT}-MANGO-012").one()
+    assert created.status == PalletStatus.IN_STOCK.value and created.storage_row_id == "dock-1"
+    # Only that one pallet: nothing made for 4–8 or 10–11.
+    assert sorted(p.sequence for p in db.query(PalletLicence).filter_by(lot_number=LOT).all()) == [1, 2, 3, 9, 12]
+    assert out["applied"] == 2
+
+    assert [(s["licence_number"], s["row_name"]) for s in out["skipped"]] == [(f"{LOT}-MANGO-009", "DOCK 1")]
+    assert out["warnings"] == [{
+        "product_name": "Mango", "lot": LOT, "row_name": "DOCK 1",
+        "licence_numbers": [f"{LOT}-MANGO-012"],
+        "message": "Pallet 12 created — pallets 4–8, 10–11 of this lot have never been in the system. Look for them.",
+    }]
+    cc = db.query(CycleCount).get(sheet["id"])
+    assert cc.summary["warnings"] == out["warnings"]
+    part = [i for i in cc.items if i["location"] == "PARTIALS"]
+    assert [(i["productName"], i["status"]) for i in part] == [(sheets.EMPTY_CONFIRMED, "ok")]
+
+
+def test_found_missing_pallet_warns_only_when_lower_numbers_never_existed(db_session, fg):
+    db = db_session
+    _fg_stock(db)
+    _pallet(db, 4, status=PalletStatus.MISSING, row=None)
+    db.commit()
+    sheet = sheets.create_open_sheet(db, user=fg["clerk"], warehouse_id="wh-a", kind="fg")
+    db.commit()
+    out = sheets.submit_sheet(db, sheet["id"], {"rows": [
+        {"row_id": "dock-1", "counted": True, "extra_licences": [f"{LOT}-MANGO-004"]},
+    ]}, fg["clerk"], "wh-a")
+    db.commit()
+    assert db.query(PalletLicence).get(f"pl-{LOT}-4").status == PalletStatus.IN_STOCK.value
+    assert out["warnings"] == []      # 1–3 all exist
+    # The helper itself: one gap, "found" wording.
+    assert ccs.lot_gap_warning(db, "p-mango", LOT, [(6, "found")], "wh-a") == (
+        "Pallet 6 found — pallet 5 of this lot has never been in the system. Look for them.")
+    assert ccs.lot_gap_warning(db, "p-mango", LOT, [(5, "created")], "wh-a") is None
+
+
+def test_rm_empty_row_found_note_is_recorded_only(db_session, rm):
+    db = db_session
+    db.add(StorageRow(id="row-drum-3", name="A-03", sub_location_id="sub-drums",
+                      storage_area_id="area-1", pallet_capacity=0, is_active=True))
+    db.add(StorageArea(id="area-far", name="Far", location_id="loc-1"))
+    db.add(StorageRow(id="row-far", name="F-01", sub_location_id="sub-drums",
+                      storage_area_id="area-far", pallet_capacity=0, is_active=True))
+    db.commit()
+    sheet = sheets.create_open_sheet(db, user=rm["user"], warehouse_id=WH, kind="rm")
+    db.commit()
+    assert [(r["row_name"], r["empty"]) for r in sheet["summary"]["sheet"]["rows"]] == [
+        ("A-01", False), ("A-02", False), ("A-03", True),
+    ]
+    before = db.query(LotPlacement).count()
+    out = sheets.submit_sheet(db, sheet["id"], {"rows": [
+        {"row_id": "row-drum-3", "counted": True, "found_note": "2 drums Mango MG-9999"},
+    ]}, rm["user"], WH)
+    db.commit()
+    assert db.query(LotPlacement).count() == before
+    assert db.query(LotPlacement).filter_by(storage_row_id="row-drum-3").count() == 0
+    assert out["applied"] == 0
+    [item] = out["items"]
+    assert (item["status"], item["foundNote"], item["location"]) == ("recorded", "2 drums Mango MG-9999", "A-03")
+
+
+def test_api_discard_open_sheet(client, db_session, fg):
+    db = db_session
+    _fg_stock(db)
+    db.add(Warehouse(id="wh-b", name="Plant B", code="PB", type="owned", is_active=True))
+    db.add(User(id="clerk-b", username="clerk-b", name="B", email="b@p.com",
+                hashed_password=get_password_hash("pw"), role="warehouse", is_active=True,
+                warehouse_id="wh-b"))
+    db.commit()
+    sid = client.post("/api/scanner/cycle-check/sheets", headers=_h("clerk"), json={"kind": "fg"}).json()["id"]
+
+    # Another plant's sheet reads as not found.
+    assert client.post(f"/api/scanner/cycle-check/sheets/{sid}/discard", headers=_h("clerk-b")).status_code == 404
+    assert client.post("/api/scanner/cycle-check/sheets/nope/discard", headers=_h("clerk")).status_code == 404
+
+    r = client.post(f"/api/scanner/cycle-check/sheets/{sid}/discard", headers=_h("clerk"))
+    assert r.status_code == 200 and r.json()["status"] == "discarded"
+    assert client.get("/api/scanner/cycle-check/sheets?status=open", headers=_h("clerk")).json() == []
+    # Not open any more: neither discard nor submit.
+    again = client.post(f"/api/scanner/cycle-check/sheets/{sid}/discard", headers=_h("clerk"))
+    assert again.status_code == 400 and "discarded" in again.json()["detail"]
+    assert client.post(f"/api/scanner/cycle-check/sheets/{sid}/submit", headers=_h("clerk"),
+                       json={"rows": []}).status_code == 400
+    # A submitted sheet cannot be discarded either; nothing it applied is undone.
+    sid2 = client.post("/api/scanner/cycle-check/sheets", headers=_h("clerk"), json={"kind": "fg"}).json()["id"]
+    client.post(f"/api/scanner/cycle-check/sheets/{sid2}/submit", headers=_h("clerk"),
+                json={"rows": [{"row_id": "row-1", "counted": True, "not_here_pallet_ids": [f"pl-{LOT}-1"]}]})
+    assert client.post(f"/api/scanner/cycle-check/sheets/{sid2}/discard", headers=_h("clerk")).status_code == 400
+    assert db.query(PalletLicence).get(f"pl-{LOT}-1").status == PalletStatus.MISSING.value
+
+
+def test_api_scopes_only_rooms_and_areas_with_that_type(client, db_session, fg):
+    db = db_session
+    _fg_stock(db)
+    _other_area(db)                     # "Cold room / FG", no stock
+    db.commit()
+    fgs = client.get("/api/scanner/cycle-check/sheet-scopes?kind=fg", headers=_h("clerk")).json()
+    assert fgs["rooms"] == [{"id": "sub-1", "label": "Main / Sub"}]
+    assert fgs["areas"] == [{"id": "area-1", "label": "Main / Sub / FG"}]
+    rms = client.get("/api/scanner/cycle-check/sheet-scopes?kind=rm", headers=_h("clerk")).json()
+    assert rms["rooms"] == [] and rms["areas"] == []
+    assert client.get("/api/scanner/cycle-check/sheet-scopes?kind=x", headers=_h("clerk")).status_code == 400

@@ -74,10 +74,12 @@ CYCLE_CHECK_CONFIRM_OVER = 5
 CYCLE_CHECK_SESSION_IDLE_MINUTES = 60
 
 # Count sheet by rack row (web Cycle Counting page). An open sheet is a
-# CycleCount with summary.kind = count_sheet and status open → submitted.
+# CycleCount with summary.kind = count_sheet and status open → submitted
+# (or open → discarded, when it is thrown away unused).
 COUNT_SHEET_KIND = "count_sheet"
 COUNT_SHEET_STATUS_OPEN = "open"
 COUNT_SHEET_STATUS_SUBMITTED = "submitted"
+COUNT_SHEET_STATUS_DISCARDED = "discarded"
 COUNT_SHEET_TYPE_FG = "fg"
 COUNT_SHEET_TYPE_RM = "rm"          # raw material + ingredients
 COUNT_SHEET_TYPE_PACKAGING = "packaging"
