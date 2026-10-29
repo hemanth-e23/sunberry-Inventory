@@ -586,6 +586,11 @@ def scan_pallet(
         PalletLicence.licence_number == licence_number,
         PalletLicence.forklift_request_id == request_id
     ).first()
+    # Removed from this session earlier but scanned again: it's real, so fall
+    # through and revive the row below. Treating it as "already scanned" left
+    # it cancelled while the gun reported "Moved to new location".
+    if existing_in_this and existing_in_this.status == PalletStatus.CANCELLED:
+        existing_in_this = None
     if existing_in_this:
         if existing_in_this.status == PalletStatus.SHIPPED:
             # Live-loaded or shuttled while the session was open — moving it
@@ -606,8 +611,10 @@ def scan_pallet(
         # NULL-safe: pallets with no session (Log Receipt, shuttle-created,
         # cycle-check-created) were invisible here, and the insert below then
         # hit the unique licence_number constraint.
+        # A cancelled row from THIS session is picked up too (see above).
         or_(PalletLicence.forklift_request_id.is_(None),
-            PalletLicence.forklift_request_id != request_id),
+            PalletLicence.forklift_request_id != request_id,
+            PalletLicence.status == PalletStatus.CANCELLED),
     ).first()
     if existing_other:
         if existing_other.status in (PalletStatus.PENDING, PalletStatus.MISSING_STICKER):
@@ -1725,20 +1732,24 @@ def add_pallet_to_request(
     existing = db.query(PalletLicence).filter(
         PalletLicence.licence_number == licence_number
     ).first()
+    reused: Optional[PalletLicence] = None
     if existing:
-        if existing.forklift_request_id == request_id:
-            raise ValidationError("This pallet is already in this request")
-        if existing.status == PalletStatus.IN_STOCK:
-            raise ValidationError("This pallet is already received and in stock")
-        if existing.status in (PalletStatus.PENDING, PalletStatus.MISSING_STICKER):
-            raise ValidationError("This pallet is in another pending request")
-        if existing.status == PalletStatus.SHIPPED:
-            raise ValidationError(plc.shipped_detail(db, existing))
-        if existing.status == PalletStatus.EMPTIED:
-            raise ValidationError(plc.emptied_detail(db, existing))
+        # Cancelled first: a pallet removed from THIS session (e.g. by mistake)
+        # still carries this request id, so the "already in this request"
+        # check below refused to put it back and the gap could only be skipped.
         if existing.status == PalletStatus.CANCELLED:
-            db.delete(existing)
-            db.flush()
+            # Re-use the row (deleting it would also delete its history).
+            reused = existing
+        elif existing.forklift_request_id == request_id:
+            raise ValidationError("This pallet is already in this request")
+        elif existing.status == PalletStatus.IN_STOCK:
+            raise ValidationError("This pallet is already received and in stock")
+        elif existing.status in (PalletStatus.PENDING, PalletStatus.MISSING_STICKER):
+            raise ValidationError("This pallet is in another pending request")
+        elif existing.status == PalletStatus.SHIPPED:
+            raise ValidationError(plc.shipped_detail(db, existing))
+        elif existing.status == PalletStatus.EMPTIED:
+            raise ValidationError(plc.emptied_detail(db, existing))
         else:
             raise ValidationError(f"Licence already exists (status: {existing.status})")
 
@@ -1748,25 +1759,45 @@ def add_pallet_to_request(
     if is_partial and partial_cases is not None:
         cases = partial_cases
 
-    pl_id = f"pl-{uuid.uuid4().hex[:12]}"
-    pl = PalletLicence(
-        id=pl_id,
-        licence_number=licence_number,
-        receipt_id=None,
-        forklift_request_id=request_id,
-        product_id=fr.product_id,
-        lot_number=lot_number,
-        storage_area_id=row.storage_area_id,
-        storage_row_id=storage_row_id,
-        cases=cases,
-        is_partial=is_partial,
-        sequence=sequence if sequence else 999,
-        status=PalletStatus.PENDING,
-        scanned_by=str(current_user.id),
-        scanned_at=datetime.now(timezone.utc),
-        warehouse_id=fr.warehouse_id,
-    )
-    db.add(pl)
+    if reused is not None:
+        pl = reused
+        pl.receipt_id = None
+        pl.forklift_request_id = request_id
+        pl.product_id = fr.product_id
+        pl.lot_number = lot_number
+        pl.storage_area_id = row.storage_area_id
+        pl.storage_row_id = storage_row_id
+        pl.cases = cases
+        pl.is_partial = is_partial
+        pl.sequence = sequence if sequence else 999
+        pl.status = PalletStatus.PENDING
+        pl.transfer_id = None
+        pl.scanned_by = str(current_user.id)
+        pl.scanned_at = datetime.now(timezone.utc)
+        pl.warehouse_id = fr.warehouse_id
+        pl.is_deleted = False
+        pl.deleted_at = None
+        pl.deleted_by_id = None
+    else:
+        pl_id = f"pl-{uuid.uuid4().hex[:12]}"
+        pl = PalletLicence(
+            id=pl_id,
+            licence_number=licence_number,
+            receipt_id=None,
+            forklift_request_id=request_id,
+            product_id=fr.product_id,
+            lot_number=lot_number,
+            storage_area_id=row.storage_area_id,
+            storage_row_id=storage_row_id,
+            cases=cases,
+            is_partial=is_partial,
+            sequence=sequence if sequence else 999,
+            status=PalletStatus.PENDING,
+            scanned_by=str(current_user.id),
+            scanned_at=datetime.now(timezone.utc),
+            warehouse_id=fr.warehouse_id,
+        )
+        db.add(pl)
 
     if is_partial:
         fr.total_partial_pallets = (fr.total_partial_pallets or 0) + 1
